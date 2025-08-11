@@ -1,0 +1,10 @@
+pydantic==2.10.6
+fastapi==0.115.11
+uvicorn==0.34.0
+python-dotenv==1.1.0
+pyodbc>=4.0.39
+openai==1.91.0
+redis==5.2.1
+httpx==0.28.1
+langfuse==2.60.1
+alembic==1.16.1

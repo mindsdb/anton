@@ -42,7 +42,7 @@ deployment:
     enabled: true
 
   service:
-    targetPort: 9090
+    targetPort: 9010
 
   globalEnvs:
     - name: REDIS_HOST
@@ -53,10 +53,39 @@ deployment:
       value: "0"
     - name: REDIS_CACHE_TTL
       value: "3600"
-    
+
+    # DB settings for sqlalchemy
+    - name: DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: minds-db
+          key: database_uri
+
     # OpenAI
     - name: OPENAI_API_KEY
       valueFrom:
         secretKeyRef:
           name: mindsdb-secrets
           key: OPENAI_API_KEY
+
+    # Langfuse language chain tracing/debugging/auditing
+    - name: LANGFUSE_RELEASE
+      value: "{{ .Values.global.image.tag }}"
+
+    - name: LANGFUSE_PUBLIC_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: LANGFUSE_PUBLIC_KEY
+
+    - name: LANGFUSE_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: LANGFUSE_SECRET_KEY
+
+    - name: LANGFUSE_HOST
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: LANGFUSE_HOST

@@ -7,3 +7,9 @@ deployment:
           - path: /
             serviceName: minds
             servicePort: 80
+
+  extraEnvs:
+
+    # Langfuse
+    - name: LANGFUSE_ENVIRONMENT
+      value: "gitlab-dev"
