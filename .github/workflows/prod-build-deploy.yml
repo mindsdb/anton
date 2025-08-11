@@ -1,0 +1,89 @@
+name: Prod - Build and Deploy on release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+# Cancel any existing runs of this workflow on the same branch/pr
+# We always want to build/deploy/test a new commit over an older one
+concurrency:
+  group: ${{ github.workflow_ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  tests:
+    # Runs tests
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    runs-on: mdb-dev
+    needs: [tests]
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - uses: ./github-actions/setup-env
+      - uses: ./github-actions/build-push-ecr
+        with:
+          module-name: ${{ env.CI_REPOSITORY_SLUG }}
+          build-for-environment: production
+          image-ref: ${{ env.CI_REF_SLUG }}
+
+  deploy:
+    runs-on: mdb-prod
+    needs: [build]
+    environment:
+      name: prod
+      url: ${{ vars.ENV_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - uses: ./github-actions/setup-env
+      - name: Notify of deployment starting
+        id: slack
+        uses: ./github-actions/slack-deploy-msg
+        with:
+          channel-id: ${{ secrets.SLACK_DEPLOYMENTS_CHANNEL_ID }}
+          status: "started"
+          color: "#0099CC"
+          env-name: "prod"
+          env-url: ${{ vars.ENV_URL }}
+          slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
+      - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
+        with:
+          environment-slug: prod
+          k8s-namespace: prod
+          image-tag: production-${{ env.CI_REF_SLUG }}
+          timeout: 600s
+          wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
+      - name: Notify of deployment finish
+        uses: ./github-actions/slack-deploy-msg
+        if: always()
+        with:
+          channel-id: ${{ secrets.SLACK_DEPLOYMENTS_CHANNEL_ID }}
+          status: "${{ job.status == 'success' && 'finished' || 'failed' }}"
+          color: "${{ job.status == 'success' && '#00C851' || '#FF4444' }}"
+          env-name: "prod"
+          env-url: ${{ vars.ENV_URL }}
+          slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
+          update-message-id: ${{ steps.slack.outputs.ts }}
+
+
+
+
