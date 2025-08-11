@@ -1,0 +1,5 @@
+dependencies:
+- alias: deployment
+  repository: https://devops-nirvana.s3.amazonaws.com/helm-charts/
+  name: deployment
+  version: ~1.0.0

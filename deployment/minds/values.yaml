@@ -1,0 +1,62 @@
+
+# Default values for deployment, this is necessary because we're using a unified helm subchart
+deployment:
+  # This is the name of the deployment, this is used in a _lot_ of places in the helm charts so lets just specify it
+  name: minds
+
+  replicaCount: 2
+
+  # What group we're in in gitlab and what namespace we deploy to in kubernetes
+  image:
+    repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
+    # command: ["/bin/bash"]
+    # args: ["-c", "sleep infinity"]
+
+  # livenessProbes are used to determine when to restart a container
+  # Only specify the values you need to override from the defaults
+  livenessProbe:
+    enabled: false
+
+  # readinessProbes are used to determine when a container is ready to start accepting traffic
+  # Only specify the values you need to override from the defaults
+  readinessProbe:
+    enabled: false
+
+  # deployment container resource requests/limits
+  # this is set VERY low by default, to be aggressive above resource limiting, please override this if necessary
+  # Note: Limits are HARD Limits
+  #       Requests are "soft" limits and are what affects HPA (autoscaling) aggressiveness if HPA is enabled
+  # resources:
+  #   limits:
+  #     cpu: 100m
+  #     memory: 4Gi
+  #   requests:
+  #     cpu: 1000m
+  #     memory: 4Gi
+
+  # Enable autoscaling
+  autoscaling:
+    enabled: false
+
+  ingress:
+    enabled: true
+
+  service:
+    targetPort: 9090
+
+  globalEnvs:
+    - name: REDIS_HOST
+      value: "redis-master"
+    - name: REDIS_PORT
+      value: "6379"
+    - name: REDIS_DB
+      value: "0"
+    - name: REDIS_CACHE_TTL
+      value: "3600"
+    
+    # OpenAI
+    - name: OPENAI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: OPENAI_API_KEY

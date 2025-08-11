@@ -1,0 +1,9 @@
+deployment:
+  ingress:
+    hosts:
+      - host: minds.dev.mdb.ai
+        enableMultiPath: true
+        paths:
+          - path: /
+            serviceName: minds
+            servicePort: 80
