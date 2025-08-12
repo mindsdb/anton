@@ -1,0 +1,15 @@
+deployment:
+  ingress:
+    hosts:
+      - host: minds-alpha.dev.mdb.ai
+        enableMultiPath: true
+        paths:
+          - path: /
+            serviceName: minds
+            servicePort: 80
+
+  extraEnvs:
+
+    # Langfuse
+    - name: LANGFUSE_ENVIRONMENT
+      value: "alpha-dev"

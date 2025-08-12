@@ -1,0 +1,4 @@
+# CODEOWNERS
+
+# Infrastructure Team
+.github             @mindsdb/devops

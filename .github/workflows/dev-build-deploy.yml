@@ -1,0 +1,140 @@
+name: Dev - Build and Deploy on PR
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+
+defaults:
+  run:
+    shell: bash
+
+# Cancel any existing runs of this workflow on the same branch/pr
+# We always want to build/deploy/test a new commit over an older one
+concurrency:
+  group: ${{ github.workflow_ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  tests:
+    # Runs tests
+    uses: ./.github/workflows/tests.yml
+
+  # Looks for labels like "deploy-to-<env>" attached to a PR, so we can deploy to those envs
+  get-deploy-labels:
+    runs-on: mdb-dev
+    outputs:
+      deploy-envs: ${{ steps.get-labels.outputs.deploy-envs }}
+    steps:
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - id: get-labels
+        uses: ./github-actions/get-deploy-labels
+
+  build:
+    runs-on: mdb-dev
+    needs: [tests, get-deploy-labels]
+    if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - uses: ./github-actions/setup-env
+      - uses: ./github-actions/build-push-ecr
+        with:
+          module-name: ${{ env.CI_REPOSITORY_SLUG }}
+          build-for-environment: development
+
+  migrate:
+    runs-on: mdb-dev
+    needs: [ get-deploy-labels, build ]
+    strategy:
+      fail-fast: false
+      matrix:
+        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+    environment:
+      name: ${{ matrix.deploy-env }}
+      url: ${{ vars.ENV_URL }}
+    # We only want to run one deploy job for an env at a time
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-${{ matrix.deploy-env }}
+      cancel-in-progress: false
+    env:
+      DATABASE_URI: ${{ secrets.DATABASE_URI }}
+      UV_LINK_MODE: "symlink"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Place cache in the tool dir because we mount this in our runnners
+          cache-local-path: "/home/runner/_work/_tool/uv-local-cache"
+          prune-cache: false
+          python-version: ${{ vars.CI_PYTHON_VERSION || '3.10' }}
+      - name: Install dependencies
+        run: |
+          uv pip install --prerelease=allow -r requirements/requirements.txt
+      - name: Migrate Database
+        run: |
+          env PYTHONPATH=../../ alembic upgrade head
+
+  deploy:
+    runs-on: mdb-dev
+    needs: [ get-deploy-labels, migrate ]
+    strategy:
+      matrix:
+        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+    environment:
+      name: ${{ matrix.deploy-env }}
+      url: ${{ vars.ENV_URL }}
+    # We only want to run one deploy job for an env at a time
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-${{ matrix.deploy-env }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - uses: ./github-actions/setup-env
+      - name: Notify of deployment starting
+        id: slack
+        uses: ./github-actions/slack-deploy-msg
+        with:
+          channel-id: ${{ secrets.SLACK_DEPLOYMENTS_CHANNEL_ID }}
+          status: "started"
+          color: "#0099CC"
+          env-name: ${{ matrix.deploy-env }}
+          env-url: ${{ vars.ENV_URL }}
+          slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
+      - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
+        with:
+          environment-slug: ${{matrix.deploy-env}}
+          k8s-namespace: ${{matrix.deploy-env}}
+          image-tag: development-${{ env.SLUG }}
+          timeout: 600s
+          wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
+      - name: Notify of deployment finish
+        uses: ./github-actions/slack-deploy-msg
+        if: always()
+        with:
+          channel-id: ${{ secrets.SLACK_DEPLOYMENTS_CHANNEL_ID }}
+          status: "${{ job.status == 'success' && 'finished' || 'failed' }}"
+          color: "${{ job.status == 'success' && '#00C851' || '#FF4444' }}"
+          env-name: ${{ matrix.deploy-env }}
+          env-url: ${{ vars.ENV_URL }}
+          slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
+          update-message-id: ${{ steps.slack.outputs.ts }}
