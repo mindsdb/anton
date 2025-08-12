@@ -11,7 +11,7 @@ class Context(BaseModel):
     """
     user_id: int = 0
     user_email: str = ""
-    company_id: int = ""
+    company_id: int = 0
 
 def extract_context_from_request(request: Request) -> Context:
     """
