@@ -16,4 +16,4 @@ minds = "."
 
 [tool.poetry.dependencies]
 python-dotenv = "^1.1.0"
-pytest = "ˆ8.4.1"
+pytest = "^8.4.1"
