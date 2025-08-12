@@ -6,6 +6,7 @@ from langfuse.decorators import observe
 from starlette.responses import JSONResponse
 
 from minds.common.logger import setup_logging
+from minds.db.pg_session import get_session
 from minds.handlers.chat_completions_request_handler import chat_completions_request_handler
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import extract_context_from_request
@@ -74,19 +75,27 @@ async def chat_completions(
     
     # Set up Langfuse observation
     request_id = setup_langfuse_observation(context=context)
+
+    # Create a new session
+    session = get_session()
     
     try:
         logger.debug(f"🔄 [{request_id}] Starting chat with documents ")
         
         response = await chat_completions_request_handler(
             request_id=request_id,
+            session=session,
             chat_completions_request=chat_completions_request
         )
-        
+
+        session.commit()
     except Exception as e:
         logger.error(f"❌ [{request_id}] Error processing chat with documents request: {str(e)}")
         logger.error(traceback.format_exc())
+        session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
     
     return response
 

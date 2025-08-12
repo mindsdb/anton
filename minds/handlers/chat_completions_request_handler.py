@@ -1,6 +1,7 @@
 from typing import Union
 
 from langfuse.decorators import observe
+from sqlmodel import Session
 from starlette.responses import StreamingResponse, JSONResponse
 
 from minds.common.logger import setup_logging
@@ -14,6 +15,7 @@ logger = setup_logging()
 @observe
 async def chat_completions_request_handler(
 		request_id: str,
+		session: Session,
 		chat_completions_request: ChatCompletionsRequest
 ) -> Union[StreamingResponse, JSONResponse]:
 	"""
@@ -21,6 +23,7 @@ async def chat_completions_request_handler(
 	
 	Args:
 		request_id (str): The unique identifier for the request.
+		session (Session): The SQLAlchemy session for database operations.
 		chat_completions_request (ChatCompletionsRequest): The request object containing chat completion parameters.
 	Returns:
 		Union[StreamingResponse, JSONResponse]: A streaming response if the request is for streaming, otherwise a JSON response.
@@ -38,6 +41,7 @@ async def chat_completions_request_handler(
 	logger.debug(f"🔄[{request_id}] Model: {model}")
 	
 	chat_completions_handler = ChatCompletionsHandler(
+		session=session,
 		messages=messages,
 		model=model,
 		stream=stream
