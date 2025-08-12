@@ -1,0 +1,134 @@
+services:
+
+  # Auto-restarts containers that are unhealthy
+  autoheal:
+    image: willfarrell/autoheal
+    container_name: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    <<: &autoRestartOnFailure
+      deploy:
+        restart_policy:
+          condition: on-failure
+          max_attempts: 10
+
+  postgres:
+    image: postgres:16.4
+    <<: *autoRestartOnFailure
+    restart: always
+    ports:
+      - ${PG_PORT}:5432
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./scripts/init-dbs.sh:/docker-entrypoint-initdb.d/init-dbs.sh
+    depends_on:
+      autoheal:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: "${PG_USER}"
+      POSTGRES_PASSWORD: "${PG_PASSWORD}"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${PG_USER}" ]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+
+  redis:
+    image: redis:7.2.4
+    <<: *autoRestartOnFailure
+    restart: unless-stopped
+    ports:
+      - '${REDIS_PORT}:6379'
+    depends_on:
+      autoheal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  langfuse:
+    image: langfuse/langfuse:2.87.0
+    <<: *autoRestartOnFailure
+    restart: unless-stopped
+    networks:
+      - default
+    ports:
+      - ${LANGFUSE_PORT}:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      autoheal:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=${LANGFUSE_DB_URI}
+      - NEXTAUTH_SECRET=secret # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      - SALT=salt # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      - ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000 # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
+      - NEXTAUTH_URL=http://localhost:${LANGFUSE_PORT}
+      - LANGFUSE_INIT_ORG_ID=mindsdb # Organization ID
+      - LANGFUSE_INIT_ORG_NAME=MindsDB # Organization name
+      - LANGFUSE_INIT_PROJECT_ID=${LANGFUSE_INIT_PROJECT_ID} # Project ID (UUID)
+      - LANGFUSE_INIT_PROJECT_NAME=${LANGFUSE_INIT_PROJECT_NAME} # Project name
+      - LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY} # Project public key
+      - LANGFUSE_INIT_PROJECT_SECRET_KEY=${LANGFUSE_SECRET_KEY} # Project secret key
+      - LANGFUSE_INIT_USER_EMAIL=${LANGFUSE_INIT_USER_EMAIL} # User email
+      - LANGFUSE_INIT_USER_NAME=${LANGFUSE_INIT_USER_NAME} # User name
+      - LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_INIT_USER_PASSWORD} # User password
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://langfuse:3000/api/public/health"]
+      interval: 30s
+      timeout: 29s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+    <<: *autoRestartOnFailure
+    platform: linux/amd64
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URI: "${MINDS_DB_URI_DOCKER}"
+    restart: "no"
+
+  minds:
+    build:
+      context: .
+    <<: *autoRestartOnFailure
+    platform: linux/amd64
+    entrypoint: sh -c "python -m watchfiles --filter python 'python -m uvicorn minds.server:app --workers 1 --host 0.0.0.0 --port ${MIND_PORT}' ."
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      langfuse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${MIND_PORT}:${MIND_PORT}"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:${MIND_PORT}/healthz" ]
+      interval: 10s
+      timeout: 9s
+      retries: 5
+    environment:
+      DATABASE_URI: "${MINDS_DB_URI_DOCKER}"
+
+      OPEN_AI_API_URL: "${OPEN_AI_API_URL}"
+      OPEN_AI_API_KEY: "${OPEN_AI_API_KEY}"
+
+      LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY}"
+      LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"
+      LANGFUSE_HOST: "http://langfuse:3000"
+      LANGFUSE_ENABLED: "${LANGFUSE_ENABLED}"
+
+volumes:
+  postgres:
+
+networks:
+  default:

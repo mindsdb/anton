@@ -19,7 +19,7 @@ jobs:
   tests:
     # Runs tests
     uses: ./.github/workflows/tests.yml
-    
+
   # Looks for labels like "deploy-to-<env>" attached to a PR, so we can deploy to those envs
   get-deploy-labels:
     runs-on: mdb-dev
@@ -54,16 +54,54 @@ jobs:
           module-name: ${{ env.CI_REPOSITORY_SLUG }}
           build-for-environment: development
 
+  migrate:
+    runs-on: mdb-dev
+    needs: [ get-deploy-labels, build ]
+    strategy:
+      fail-fast: false
+      matrix:
+        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+    environment:
+      name: ${{ matrix.deploy-env }}
+      url: ${{ vars.ENV_URL }}
+    # We only want to run one deploy job for an env at a time
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-${{ matrix.deploy-env }}
+      cancel-in-progress: false
+    env:
+      DATABASE_URI: ${{ secrets.DATABASE_URI }}
+      UV_LINK_MODE: "symlink"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Place cache in the tool dir because we mount this in our runnners
+          cache-local-path: "/home/runner/_work/_tool/uv-local-cache"
+          prune-cache: false
+          python-version: ${{ vars.CI_PYTHON_VERSION || '3.10' }}
+      - name: Install dependencies
+        run: |
+          uv pip install --prerelease=allow -r requirements/requirements.txt
+      - name: Migrate Database
+        run: |
+          env PYTHONPATH=../../ alembic upgrade head
 
   deploy:
     runs-on: mdb-dev
-    needs: [ get-deploy-labels, build ]
+    needs: [ get-deploy-labels, migrate ]
     strategy:
       matrix:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
     environment:
       name: ${{ matrix.deploy-env }}
       url: ${{ vars.ENV_URL }}
+    # We only want to run one deploy job for an env at a time
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-${{ matrix.deploy-env }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - name: Pull MindsDB Github Actions

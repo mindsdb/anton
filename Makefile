@@ -52,8 +52,12 @@ test/integration: activate
 test: test/unit test/integration
 
 # Run the server
-run: activate
-	$(PYTHON) -m uvicorn minds.server:app --host 0.0.0.0 --port 9010
+run: activate docker/deps
+	$(PYTHON) -m watchfiles --filter python '$(PYTHON) -m uvicorn minds.server:app --host 0.0.0.0 --port 9010' .
+
+# Run docker deps
+docker/deps:
+	$(DOCKER_COMMAND) up -d postgres redis langfuse migrate
 
 # Build the docker image
 docker/build: deps
@@ -68,3 +72,7 @@ docker/run: deps
 # Stop the docker container
 docker/stop: deps
 	$(DOCKER_COMMAND) down
+
+# Run database migrations
+migrate: activate ## Run alembic database migrations
+	$(PYTHON) -m alembic upgrade head
