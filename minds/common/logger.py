@@ -58,12 +58,12 @@ def get_colored_formatter():
     """Get a colored formatter if colorlog is available"""
     if not HAS_COLORLOG:
         return logging.Formatter(
-            "%(asctime)s [%(levelname)8s] %(name)s: %(message)s",
+            "%(asctime)s [%(levelname)0s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
     return colorlog.ColoredFormatter(
-        "%(log_color)s%(asctime)s [%(levelname)8s] %(name)s: %(message)s%(reset)s",
+        "%(log_color)s%(asctime)s [%(levelname)0s] %(name)s: %(message)s%(reset)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         log_colors={
             "DEBUG": "cyan",
