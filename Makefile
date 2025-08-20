@@ -51,6 +51,13 @@ test/integration: activate
 # Run all tests
 test: test/unit test/integration
 
+# Coverage
+coverage: activate
+	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-fail-under=79.6
+
+coverage/html: activate
+	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-report html
+
 # Run the server
 run: activate docker/deps
 	$(PYTHON) -m watchfiles --filter python '$(PYTHON) -m uvicorn minds.server:app --host 0.0.0.0 --port 9010' .
