@@ -21,11 +21,11 @@ def setup_langfuse_observation(context: Context) -> str:
     Returns:
             str: The trace ID for the current observation, or a default request ID if an error occurs.
     """
-    current_langfuse_context = create_langfuse_context(context)
-
     default_request_id = str(uuid.uuid4())
 
     try:
+        current_langfuse_context = create_langfuse_context(context)
+
         # Create Langfuse context for tracing
         langfuse_context.update_current_observation(
             user_id=current_langfuse_context.user_id,

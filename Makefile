@@ -52,8 +52,8 @@ test/integration: activate
 test: test/unit test/integration
 
 # Coverage
-coverage: activate
-	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-fail-under=79.6
+test/unit/coverage: activate
+	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-fail-under=85
 
 coverage/html: activate
 	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-report html

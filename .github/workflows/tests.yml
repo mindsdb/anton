@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.12.4'
       - name: Run unit tests
-        run: make test/unit
+        run: make test/unit/coverage
 
   integration-tests:
     runs-on: mdb-dev

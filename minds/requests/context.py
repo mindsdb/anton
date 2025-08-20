@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import Request
 
 
@@ -30,14 +30,14 @@ class LangfuseContextMetadata(BaseModel):
     """
     Metadata for the Langfuse context.
     Attributes:
-        user_id: str
+        user_id: int
         user_email: str
         company_id: int
     """
 
-    user_id: int = 0
-    user_email: str = ""
-    company_id: int = ""
+    user_id: int = Field(default=0, description="The user ID")
+    user_email: str = Field(default="", description="The user email")
+    company_id: int = Field(default=0, description="The company ID")
 
 
 class LangfuseContext(BaseModel):

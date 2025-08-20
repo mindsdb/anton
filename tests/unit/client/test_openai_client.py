@@ -31,7 +31,6 @@ def client():
 
 
 class TestOpenAIClient:
-
     @pytest.mark.asyncio
     async def test_chat_completions_non_streaming(self, client, sample_messages):
         # Mock response object
@@ -60,7 +59,6 @@ class TestOpenAIClient:
             )
 
             assert results == ["Mocked response"]
-
 
     @pytest.mark.asyncio
     async def test_chat_completions_streaming(self, client, sample_messages):
@@ -96,13 +94,15 @@ class TestOpenAIClient:
             mock_create.assert_awaited_once()
             assert results == ["chunk1", "chunk2"]
 
-
     @pytest.mark.asyncio
     async def test_chat_completions_handles_exception(self, client, sample_messages):
-        with patch.object(
-            client.client.chat.completions,
-            "create",
-            new=AsyncMock(side_effect=RuntimeError("API Error")),
-        ), pytest.raises(RuntimeError, match="API Error"):
+        with (
+            patch.object(
+                client.client.chat.completions,
+                "create",
+                new=AsyncMock(side_effect=RuntimeError("API Error")),
+            ),
+            pytest.raises(RuntimeError, match="API Error"),
+        ):
             async for _ in client.chat_completions(messages=sample_messages):
                 pass
