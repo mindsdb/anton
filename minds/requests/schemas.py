@@ -15,21 +15,25 @@ class Role(str, Enum):
 class Message(BaseModel):
     role: Role
     content: str | list[Any] = None
-    
+
+
 class StreamChoice(BaseModel):
     index: int
     delta: Message
     finish_reason: Optional[str] = None
+
 
 class Choice(BaseModel):
     index: int
     message: Message
     finish_reason: Optional[str] = None
 
+
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
 
 class ChatCompletionChunk(BaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4()}")
@@ -41,6 +45,7 @@ class ChatCompletionChunk(BaseModel):
 
     def dict(self, *args, **kwargs):
         return super().model_dump(*args, **kwargs)
+
 
 class ChatCompletion(BaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4()}")

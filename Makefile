@@ -76,3 +76,10 @@ docker/stop: deps
 # Run database migrations
 migrate: activate ## Run alembic database migrations
 	$(PYTHON) -m alembic upgrade head
+
+check/lint: activate ## Check code style with ruff
+	$(PYTHON) -m ruff check minds tests
+
+format: activate ## Format code with ruff
+	$(PYTHON) -m ruff format minds tests
+

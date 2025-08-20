@@ -8,6 +8,7 @@ from datetime import datetime
 
 try:
     import colorlog
+
     HAS_COLORLOG = True
 except ImportError:
     HAS_COLORLOG = False
@@ -15,6 +16,7 @@ except ImportError:
 try:
     from rich.logging import RichHandler
     from rich.console import Console
+
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -22,30 +24,30 @@ except ImportError:
 
 class EventLoopClosedFilter(logging.Filter):
     """Filter out 'Event loop is closed' errors that occur during cleanup"""
-    
+
     def filter(self, record):
         # Filter out the specific RuntimeError about event loop being closed
-        if record.name == 'asyncio' and record.levelno == logging.ERROR:
-            if 'Event loop is closed' in record.getMessage():
+        if record.name == "asyncio" and record.levelno == logging.ERROR:
+            if "Event loop is closed" in record.getMessage():
                 return False
         return True
 
 
 class CustomFormatter(logging.Formatter):
     """Custom formatter with enhanced formatting"""
-    
+
     def format(self, record):
         # Add extra context to the record
-        if hasattr(record, 'user_id'):
+        if hasattr(record, "user_id"):
             record.user_context = f"[User:{record.user_id}]"
         else:
             record.user_context = ""
-            
-        if hasattr(record, 'request_id'):
+
+        if hasattr(record, "request_id"):
             record.request_context = f"[Req:{record.request_id}]"
         else:
             record.request_context = ""
-            
+
         return super().format(record)
 
 
@@ -53,103 +55,104 @@ def get_colored_formatter():
     """Get a colored formatter if colorlog is available"""
     if not HAS_COLORLOG:
         return logging.Formatter(
-            '%(asctime)s [%(levelname)8s] %(name)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            "%(asctime)s [%(levelname)8s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
-    
+
     return colorlog.ColoredFormatter(
-        '%(log_color)s%(asctime)s [%(levelname)8s] %(name)s: %(message)s%(reset)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
+        "%(log_color)s%(asctime)s [%(levelname)8s] %(name)s: %(message)s%(reset)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
         log_colors={
-            'DEBUG': 'cyan',
-            'INFO': 'green',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'red,bg_white',
+            "DEBUG": "cyan",
+            "INFO": "green",
+            "WARNING": "yellow",
+            "ERROR": "red",
+            "CRITICAL": "red,bg_white",
         },
         secondary_log_colors={
-            'message': {
-                'DEBUG': 'white',
-                'INFO': 'white',
-                'WARNING': 'yellow',
-                'ERROR': 'red',
-                'CRITICAL': 'red'
+            "message": {
+                "DEBUG": "white",
+                "INFO": "white",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red",
             }
-        }
+        },
     )
 
 
-def setup_file_logging(log_dir: str = "logs", max_bytes: int = 10485760, backup_count: int = 5):
+def setup_file_logging(
+    log_dir: str = "logs", max_bytes: int = 10485760, backup_count: int = 5
+):
     """Setup file logging with rotation"""
     log_path = Path(log_dir)
     log_path.mkdir(exist_ok=True)
-    
+
     # Create handlers for different log levels
     handlers = []
-    
+
     # All logs file
     all_logs_handler = logging.handlers.RotatingFileHandler(
-        log_path / "cw_summary.log",
-        maxBytes=max_bytes,
-        backupCount=backup_count
+        log_path / "cw_summary.log", maxBytes=max_bytes, backupCount=backup_count
     )
-    all_logs_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)8s] %(name)s [%(filename)s:%(lineno)d] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    ))
+    all_logs_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)8s] %(name)s [%(filename)s:%(lineno)d] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     handlers.append(all_logs_handler)
-    
+
     # Error logs file
     error_handler = logging.handlers.RotatingFileHandler(
-        log_path / "errors.log",
-        maxBytes=max_bytes,
-        backupCount=backup_count
+        log_path / "errors.log", maxBytes=max_bytes, backupCount=backup_count
     )
     error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)8s] %(name)s [%(filename)s:%(lineno)d] %(message)s\n%(stack_info)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    ))
+    error_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)8s] %(name)s [%(filename)s:%(lineno)d] %(message)s\n%(stack_info)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     handlers.append(error_handler)
-    
+
     return handlers
 
 
 def setup_console_handler():
     """Setup console handler with colors and rich formatting if available"""
-    if HAS_RICH and os.getenv('RICH_LOGGING', 'false').lower() == 'true':
+    if HAS_RICH and os.getenv("RICH_LOGGING", "false").lower() == "true":
         console = Console(stderr=True)
         handler = RichHandler(
             console=console,
             show_path=False,
             show_time=True,
             rich_tracebacks=True,
-            tracebacks_show_locals=True
+            tracebacks_show_locals=True,
         )
-        handler.setFormatter(logging.Formatter(
-            '[%(name)s] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        ))
+        handler.setFormatter(
+            logging.Formatter("[%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
     else:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(get_colored_formatter())
-    
+
     return handler
 
 
 def setup_logging():
     """Setup comprehensive logging configuration"""
-    log_level_str = os.getenv('LOG_LEVEL', 'INFO')
-    enable_file_logging = os.getenv('ENABLE_FILE_LOGGING', 'false').lower() == 'true'
-    log_dir = os.getenv('LOG_DIR', 'logs')
+    log_level_str = os.getenv("LOG_LEVEL", "INFO")
+    enable_file_logging = os.getenv("ENABLE_FILE_LOGGING", "false").lower() == "true"
+    log_dir = os.getenv("LOG_DIR", "logs")
 
     # Map string log level to logging constants
     log_level_map = {
-        'DEBUG': logging.DEBUG,
-        'INFO': logging.INFO,
-        'WARNING': logging.WARNING,
-        'ERROR': logging.ERROR,
-        'CRITICAL': logging.CRITICAL
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
     }
 
     # Default to INFO if an invalid level is provided
@@ -161,12 +164,12 @@ def setup_logging():
 
     # Setup handlers
     handlers = []
-    
+
     # Console handler
     console_handler = setup_console_handler()
     console_handler.setLevel(log_level)
     handlers.append(console_handler)
-    
+
     # File handlers (if enabled)
     if enable_file_logging:
         file_handlers = setup_file_logging(log_dir)
@@ -175,11 +178,7 @@ def setup_logging():
             handlers.append(handler)
 
     # Configure root logger
-    logging.basicConfig(
-        level=log_level,
-        handlers=handlers,
-        force=True
-    )
+    logging.basicConfig(level=log_level, handlers=handlers, force=True)
 
     # Suppress verbose logging from third-party libraries
     third_party_loggers = [
@@ -199,7 +198,7 @@ def setup_logging():
         "tensorflow",
         "urllib3.connectionpool",
     ]
-    
+
     for logger_name in third_party_loggers:
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 
@@ -209,7 +208,7 @@ def setup_logging():
 
     # Create application logger
     logger = logging.getLogger(__name__)
-    
+
     return logger
 
 
@@ -220,12 +219,12 @@ def get_logger(name: str) -> logging.Logger:
 
 def log_performance(func):
     """Decorator to log function performance"""
-    
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         logger = get_logger(func.__module__)
         start_time = time.time()
-        
+
         try:
             result = func(*args, **kwargs)
             execution_time = time.time() - start_time
@@ -233,9 +232,11 @@ def log_performance(func):
             return result
         except Exception as e:
             execution_time = time.time() - start_time
-            logger.error(f"❌ {func.__name__} failed after {execution_time:.5f}s: {str(e)}")
+            logger.error(
+                f"❌ {func.__name__} failed after {execution_time:.5f}s: {str(e)}"
+            )
             raise
-    
+
     return wrapper
 
 

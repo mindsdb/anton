@@ -9,7 +9,11 @@ from sqlmodel import Session as SQLModelSession
 from minds.common.logger import setup_logging
 from minds.common.vars import (
     DATABASE_URI,
-    DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_TIMEOUT, DB_POOL_RECYCLE, DB_POOL_PRE_PING
+    DB_POOL_SIZE,
+    DB_MAX_OVERFLOW,
+    DB_POOL_TIMEOUT,
+    DB_POOL_RECYCLE,
+    DB_POOL_PRE_PING,
 )
 
 logger = setup_logging()
@@ -21,20 +25,22 @@ _session_factories = {}
 
 class DatabaseURI(str, Enum):
     """Enum for database URIs."""
+
     DEFAULT = DATABASE_URI
+
 
 def _create_engine(db_uri: DatabaseURI):
     """Create a proper SQLAlchemy engine that connects to a PostgreSQL database.
 
     Args:
         db_uri: Database URI.
-        
+
     Returns:
         SQLAlchemy engine instance
     """
     # Log connection string with a hidden password
     name = db_uri.name
-    
+
     hidden_uri = db_uri.replace(":", ":*****@", 1) if "@" in db_uri else db_uri
     logger.debug(f"Creating PostgreSQL engine '{name}' with: {hidden_uri}")
 
@@ -46,7 +52,7 @@ def _create_engine(db_uri: DatabaseURI):
             max_overflow=DB_MAX_OVERFLOW,
             pool_timeout=DB_POOL_TIMEOUT,
             pool_recycle=DB_POOL_RECYCLE,
-            pool_pre_ping=DB_POOL_PRE_PING
+            pool_pre_ping=DB_POOL_PRE_PING,
         )
         # logger.info(f"PostgreSQL engine '{name}' created successfully")
         return engine
@@ -91,6 +97,7 @@ def get_session_factory(engine):
         )
     return _session_factories[engine_id]
 
+
 def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT) -> SQLModelSession:
     """Get a PostgreSQL database session.
 
@@ -108,5 +115,7 @@ def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT) -> SQLModelSession:
     except Exception as e:
         db.close()
         error_msg = str(e).lower()
-        logger.error(f"Failed to get PostgreSQL session for '{db_uri.name}': {error_msg}")
+        logger.error(
+            f"Failed to get PostgreSQL session for '{db_uri.name}': {error_msg}"
+        )
         raise RuntimeError(f"PostgreSQL session creation failed: {error_msg}")
