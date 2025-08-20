@@ -64,7 +64,8 @@ class TestMind:
         fields = Mind.model_fields
         name_field = fields["name"]
 
-        assert isinstance(name_field.annotation, str)
+        assert name_field.annotation is str
+
 
     def test_mind_is_table_model(self):
         """Test that Mind is configured as a table model."""
