@@ -100,7 +100,8 @@ class StreamerCollector(MessageStreamer):
 
 @observe
 async def format_messages_for_streaming(
-    message_generator: AsyncGenerator[StreamMessage, Any], model: str
+    message_generator: AsyncGenerator[StreamMessage, Any], 
+    model: str
 ) -> AsyncGenerator[str, None]:
     """
     Format messages for streaming as SSE events.

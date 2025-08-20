@@ -1,5 +1,4 @@
 from typing import Any, Optional
-import uuid
 
 from pydantic import BaseModel
 from fastapi import Request

@@ -2,7 +2,6 @@ from typing import List
 
 from langfuse.decorators import observe
 from sqlmodel import Session
-from sqlmodel.orm import session
 
 from minds.common.logger import setup_logging
 from minds.client.openai_client import open_ai_client

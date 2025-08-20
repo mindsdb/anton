@@ -2,7 +2,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from minds.common.logger import setup_logging, log_performance
+from minds.common.logger import setup_logging
 from minds.common.vars import (
     OPEN_AI_MAX_TOKENS,
     OPEN_AI_MODEL_NAME,

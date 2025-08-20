@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 import time
 import functools
-from datetime import datetime
+# Add logging import for rotating file handler
+import logging.handlers
+
 
 try:
     import colorlog
@@ -239,6 +241,3 @@ def log_performance(func):
 
     return wrapper
 
-
-# Add logging import for rotating file handler
-import logging.handlers
