@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, List
+from typing import Optional, List
 import mindsdb_sdk
 import logging
 

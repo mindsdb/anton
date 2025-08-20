@@ -59,7 +59,7 @@ def _create_engine(db_uri: DatabaseURI):
     except Exception as e:
         error_msg = str(e).lower()
         logger.error(f"Failed to create PostgreSQL engine '{name}': {error_msg}")
-        raise RuntimeError(f"PostgreSQL engine creation failed: {error_msg}")
+        raise RuntimeError(f"PostgreSQL engine creation failed: {error_msg}") from e
 
 
 def get_engine(db_uri: DatabaseURI):
@@ -118,4 +118,4 @@ def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT) -> SQLModelSession:
         logger.error(
             f"Failed to get PostgreSQL session for '{db_uri.name}': {error_msg}"
         )
-        raise RuntimeError(f"PostgreSQL session creation failed: {error_msg}")
+        raise RuntimeError(f"PostgreSQL session creation failed: {error_msg}") from e

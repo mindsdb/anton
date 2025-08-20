@@ -6,6 +6,7 @@ from langfuse.decorators import observe
 from starlette.responses import JSONResponse
 
 from minds.common.logger import setup_logging
+from minds.client.mindsdb import create_mindsdb_client_from_request
 from minds.db.pg_session import get_session
 from minds.handlers.chat_completions_request_handler import (
     chat_completions_request_handler,
@@ -82,12 +83,16 @@ async def chat_completions(
     # Create a new session
     session = get_session()
 
+    # Create a MindsDB client from the request
+    mindsdb_client = create_mindsdb_client_from_request(request)
+
     try:
         logger.debug(f"🔄 [{request_id}] Starting chat with documents ")
 
         response = await chat_completions_request_handler(
             request_id=request_id,
             session=session,
+            mindsdb_client=mindsdb_client,
             chat_completions_request=chat_completions_request,
         )
 

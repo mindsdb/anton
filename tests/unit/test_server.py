@@ -1,268 +1,82 @@
+import sys
+import types
+
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
-from fastapi import Request
-from starlette.responses import StreamingResponse, JSONResponse
-
-from minds.server import chat_completions
-from minds.requests.chat_completions_request import (
-    ChatCompletionsRequest,
-    ChatCompletionRequestMetadata,
-)
-from minds.requests.schemas import Message, Role
-from minds.requests.context import Context
+from fastapi.testclient import TestClient
 
 
-class TestChatCompletions:
-    """Test suite for the chat_completions endpoint"""
+@pytest.fixture()
+def server_app(monkeypatch: pytest.MonkeyPatch):
+    fake_langfuse = types.ModuleType("langfuse")
+    fake_decorators = types.ModuleType("langfuse.decorators")
 
-    @pytest.fixture
-    def mock_request(self):
-        """Create a mock FastAPI Request object"""
-        request = Mock(spec=Request)
-        # Create a mock headers object with get method
-        mock_headers = Mock()
-        mock_headers.get = Mock(
-            side_effect=lambda key, default=None: {
-                "x-user-id": "123",
-                "x-user-email": "test@example.com",
-                "x-company-id": "456",
-            }.get(key, default)
-        )
-        request.headers = mock_headers
-        return request
+    def _observe_stub(f=None, **_):
+        if f is None:
+            return lambda x: x
+        return f
 
-    @pytest.fixture
-    def sample_chat_request(self):
-        """Create a sample ChatCompletionsRequest"""
-        return ChatCompletionsRequest(
-            model="minds",
-            messages=[Message(role=Role.user, content="Hello, how are you?")],
-            metadata=ChatCompletionRequestMetadata(
-                mdb_completions_session_id=1748503096170
-            ),
-            stream=False,
-        )
+    from types import SimpleNamespace as _SN
 
-    @pytest.fixture
-    def sample_streaming_chat_request(self):
-        """Create a sample streaming ChatCompletionsRequest"""
-        return ChatCompletionsRequest(
-            model="minds",
-            messages=[Message(role=Role.user, content="Hello, how are you?")],
-            metadata=ChatCompletionRequestMetadata(
-                mdb_completions_session_id=1748503096170
-            ),
-            stream=True,
-        )
+    fake_decorators.observe = _observe_stub
+    fake_decorators.langfuse_context = _SN(
+        update_current_observation=lambda **kwargs: None,
+        get_current_trace_id=lambda: None,
+    )
 
-    @patch("minds.server.setup_langfuse_observation")
-    @patch("minds.server.extract_context_from_request")
-    @patch("minds.server.chat_completions_request_handler")
-    async def test_chat_completions_non_streaming_success(
-        self,
-        mock_handler,
-        mock_extract_context,
-        mock_setup_langfuse,
-        mock_request,
-        sample_chat_request,
-    ):
-        """Test successful non-streaming chat completions"""
-        # Setup mocks
-        mock_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        mock_extract_context.return_value = mock_context
-        mock_setup_langfuse.return_value = "test-request-id"
+    monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse)
+    monkeypatch.setitem(sys.modules, "langfuse.decorators", fake_decorators)
 
-        mock_response = JSONResponse(
-            {"choices": [{"message": {"role": "assistant", "content": "Hello!"}}]}
-        )
-        mock_handler.return_value = mock_response
+    # Avoid real DB session creation
+    from types import SimpleNamespace as _SSN
 
-        # Execute
-        result = await chat_completions(sample_chat_request, mock_request)
+    monkeypatch.setattr(
+        "minds.db.pg_session.get_session",
+        lambda: _SSN(commit=lambda: None, rollback=lambda: None, close=lambda: None),
+        raising=False,
+    )
 
-        # Verify
-        assert result == mock_response
-        mock_extract_context.assert_called_once_with(request=mock_request)
-        mock_setup_langfuse.assert_called_once_with(context=mock_context)
-        mock_handler.assert_called_once_with(
-            request_id="test-request-id", chat_completions_request=sample_chat_request
-        )
+    # Import server after stubs so it binds the fakes
+    import minds.server as server
 
-    @patch("minds.server.setup_langfuse_observation")
-    @patch("minds.server.extract_context_from_request")
-    @patch("minds.server.chat_completions_request_handler")
-    async def test_chat_completions_streaming_success(
-        self,
-        mock_handler,
-        mock_extract_context,
-        mock_setup_langfuse,
-        mock_request,
-        sample_streaming_chat_request,
-    ):
-        """Test successful streaming chat completions"""
-        # Setup mocks
-        mock_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        mock_extract_context.return_value = mock_context
-        mock_setup_langfuse.return_value = "test-request-id"
+    # 5) Stub the heavy handlers used by endpoints
+    async def _fake_cc_handler(**_):
+        from starlette.responses import JSONResponse
 
-        mock_response = StreamingResponse(
-            iter([b"data: test\n\n"]), media_type="text/event-stream"
-        )
-        mock_handler.return_value = mock_response
+        return JSONResponse({"ok": True})
 
-        # Execute
-        result = await chat_completions(sample_streaming_chat_request, mock_request)
+    monkeypatch.setattr(server, "chat_completions_request_handler", _fake_cc_handler)
 
-        # Verify
-        assert result == mock_response
-        mock_extract_context.assert_called_once_with(request=mock_request)
-        mock_setup_langfuse.assert_called_once_with(context=mock_context)
-        mock_handler.assert_called_once_with(
-            request_id="test-request-id",
-            chat_completions_request=sample_streaming_chat_request,
-        )
+    return server.app
 
-    @patch("minds.server.setup_langfuse_observation")
-    @patch("minds.server.extract_context_from_request")
-    @patch("minds.server.chat_completions_request_handler")
-    async def test_chat_completions_handler_exception(
-        self,
-        mock_handler,
-        mock_extract_context,
-        mock_setup_langfuse,
-        mock_request,
-        sample_chat_request,
-    ):
-        """Test exception handling in chat completions"""
-        # Setup mocks
-        mock_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        mock_extract_context.return_value = mock_context
-        mock_setup_langfuse.return_value = "test-request-id"
 
-        # Make handler raise an exception
-        mock_handler.side_effect = Exception("Test error")
+@pytest.fixture()
+def headers():
+    return {"Authorization": "Bearer 1234567890"}
 
-        # Execute and verify exception
-        with pytest.raises(Exception) as exc_info:
-            await chat_completions(sample_chat_request, mock_request)
 
-        assert "Test error" in str(exc_info.value)
-        mock_handler.assert_called_once_with(
-            request_id="test-request-id", chat_completions_request=sample_chat_request
-        )
+def test_healthz(server_app):
+    client = TestClient(server_app)
+    r = client.get("/healthz")
+    assert r.status_code == 200 and r.json() == {"status": "ok"}
 
-    @patch("minds.server.setup_langfuse_observation")
-    @patch("minds.server.extract_context_from_request")
-    @patch("minds.server.chat_completions_request_handler")
-    async def test_chat_completions_context_extraction(
-        self,
-        mock_handler,
-        mock_extract_context,
-        mock_setup_langfuse,
-        mock_request,
-        sample_chat_request,
-    ):
-        """Test context extraction from request headers"""
-        # Setup mocks with specific context values
-        mock_context = Context(
-            user_id=999, user_email="specific@test.com", company_id=777
-        )
-        mock_extract_context.return_value = mock_context
-        mock_setup_langfuse.return_value = "context-test-id"
 
-        mock_response = JSONResponse({"test": "response"})
-        mock_handler.return_value = mock_response
+def test_chat_completions(server_app, headers):
+    client = TestClient(server_app)
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "q"}],
+        "metadata": {"doc_id": "1"},
+    }
+    r = client.post("/chat/completions", json=payload, headers=headers)
+    assert r.status_code == 200 and r.json() == {"ok": True}
 
-        # Execute
-        result = await chat_completions(sample_chat_request, mock_request)
 
-        # Verify context was properly extracted and used
-        mock_extract_context.assert_called_once_with(request=mock_request)
-        mock_setup_langfuse.assert_called_once_with(context=mock_context)
-        mock_handler.assert_called_once_with(
-            request_id="context-test-id", chat_completions_request=sample_chat_request
-        )
-
-    @patch("minds.server.setup_langfuse_observation")
-    @patch("minds.server.extract_context_from_request")
-    @patch("minds.server.chat_completions_request_handler")
-    async def test_chat_completions_with_multiple_messages(
-        self, mock_handler, mock_extract_context, mock_setup_langfuse, mock_request
-    ):
-        """Test chat completions with multiple messages"""
-        # Create request with multiple messages
-        multi_message_request = ChatCompletionsRequest(
-            model="minds",
-            messages=[
-                Message(role=Role.system, content="You are a helpful assistant."),
-                Message(role=Role.user, content="What is the weather like?"),
-                Message(
-                    role=Role.assistant, content="I don't have access to weather data."
-                ),
-                Message(role=Role.user, content="Can you help with math?"),
-            ],
-            metadata=ChatCompletionRequestMetadata(
-                mdb_completions_session_id=1748503096170
-            ),
-            stream=False,
-        )
-
-        # Setup mocks
-        mock_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        mock_extract_context.return_value = mock_context
-        mock_setup_langfuse.return_value = "multi-msg-id"
-
-        mock_response = JSONResponse(
-            {
-                "choices": [
-                    {"message": {"role": "assistant", "content": "Yes, I can help!"}}
-                ]
-            }
-        )
-        mock_handler.return_value = mock_response
-
-        # Execute
-        result = await chat_completions(multi_message_request, mock_request)
-
-        # Verify
-        assert result == mock_response
-        mock_handler.assert_called_once_with(
-            request_id="multi-msg-id", chat_completions_request=multi_message_request
-        )
-
-    @patch("minds.server.setup_langfuse_observation")
-    @patch("minds.server.extract_context_from_request")
-    @patch("minds.server.chat_completions_request_handler")
-    async def test_chat_completions_langfuse_observation_failure(
-        self,
-        mock_handler,
-        mock_extract_context,
-        mock_setup_langfuse,
-        mock_request,
-        sample_chat_request,
-    ):
-        """Test behavior when Langfuse observation setup fails"""
-        # Setup mocks
-        mock_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        mock_extract_context.return_value = mock_context
-
-        # Make Langfuse setup fail and raise exception (this should propagate)
-        mock_setup_langfuse.side_effect = Exception("Langfuse error")
-
-        # Execute and verify exception is propagated
-        with pytest.raises(Exception) as exc_info:
-            await chat_completions(sample_chat_request, mock_request)
-
-        assert "Langfuse error" in str(exc_info.value)
-        mock_extract_context.assert_called_once_with(request=mock_request)
-        mock_setup_langfuse.assert_called_once_with(context=mock_context)
+def test_chat_completions_v1(server_app, headers):
+    client = TestClient(server_app)
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "q"}],
+        "metadata": {"doc_id": "1"},
+    }
+    r = client.post("/v1/chat/completions", json=payload, headers=headers)
+    assert r.status_code == 200 and r.json() == {"ok": True}

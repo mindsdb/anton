@@ -8,7 +8,6 @@ from minds.common.data_catalog.data_catalog import (
     Table,
     Column,
     PrimaryKey,
-    ForeignKey,
     ColumnStatistics,
 )
 from minds.common.data_catalog.data_catalog_loader import DataCatalogLoader

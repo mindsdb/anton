@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import time
 import functools
+
 # Add logging import for rotating file handler
 import logging.handlers
 
@@ -240,4 +241,3 @@ def log_performance(func):
             raise
 
     return wrapper
-
