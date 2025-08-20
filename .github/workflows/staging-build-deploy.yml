@@ -17,6 +17,10 @@ concurrency:
 
 jobs:
 
+  linter:
+    # Runs linter
+    uses: ./.github/workflows/linter.yml
+
   tests:
     # Runs tests
     uses: ./.github/workflows/tests.yml
@@ -24,7 +28,7 @@ jobs:
   build:
     if: github.event.pull_request.merged == true
     runs-on: mdb-dev
-    needs: [tests]
+    needs: [tests, linter]
     env:
       AWS_REGION: us-east-1
     steps:
