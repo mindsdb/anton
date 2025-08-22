@@ -2,7 +2,7 @@ import asyncio
 import uuid
 from typing import Callable, Any, Awaitable, Optional, Union, AsyncGenerator
 
-from langfuse.decorators import observe
+from langfuse import observe
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse, JSONResponse
 

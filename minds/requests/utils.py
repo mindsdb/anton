@@ -1,7 +1,7 @@
 import traceback
 import uuid
 
-from langfuse.decorators import langfuse_context
+from langfuse import get_client
 
 from minds.common.logger import setup_logging
 from minds.requests.context import create_langfuse_context, Context
@@ -26,14 +26,17 @@ def setup_langfuse_observation(context: Context) -> str:
     try:
         current_langfuse_context = create_langfuse_context(context)
 
+        langfuse_client = get_client()
+
         # Create Langfuse context for tracing
-        langfuse_context.update_current_observation(
+        langfuse_client.update_current_trace(
             user_id=current_langfuse_context.user_id,
             metadata=current_langfuse_context.metadata,
             tags=current_langfuse_context.tags,
         )
 
-        trace_id = langfuse_context.get_current_trace_id()
+        trace_id = langfuse_client.get_current_trace_id()
+        logger.info(f"Trace ID: {trace_id}")
 
         if trace_id:
             logger.debug(f"Created langfuse context with trace ID: {trace_id}")

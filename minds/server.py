@@ -2,7 +2,7 @@ import traceback
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from langfuse.decorators import observe
+from langfuse import observe
 from starlette.responses import JSONResponse
 
 from minds.common.logger import setup_logging

@@ -1,6 +1,6 @@
 from typing import Union
 
-from langfuse.decorators import observe
+from langfuse import observe
 from sqlmodel import Session
 from starlette.responses import StreamingResponse, JSONResponse
 from mindsdb_sdk.server import Server
@@ -17,7 +17,7 @@ from minds.requests.stream import (
 logger = setup_logging()
 
 
-@observe
+@observe(name="Chat Completions Request")
 async def chat_completions_request_handler(
     request_id: str,
     session: Session,

@@ -1,6 +1,7 @@
 from typing import Optional
 
 from openai import AsyncOpenAI
+from langfuse import observe
 
 from minds.common.logger import setup_logging
 from minds.common.vars import (
@@ -25,6 +26,7 @@ class OpenAIClient:
 
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.api_url)
 
+    @observe(name="Chat Completions - OpenAI", as_type="generation")
     async def chat_completions(
         self,
         messages: list[Message],
