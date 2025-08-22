@@ -64,7 +64,7 @@ run: activate docker/deps
 
 # Run docker deps
 docker/deps:
-	$(DOCKER_COMMAND) up -d postgres redis langfuse migrate
+	$(DOCKER_COMMAND) up -d postgres redis langfuse-web langfuse-worker migrate
 
 # Build the docker image
 docker/build: deps
