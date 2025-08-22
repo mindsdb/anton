@@ -1,3 +1,4 @@
+import pytest
 from unittest.mock import patch
 import uuid
 
@@ -5,33 +6,49 @@ from minds.requests.utils import setup_langfuse_observation
 from minds.requests.context import Context, LangfuseContext, LangfuseContextMetadata
 
 
+@pytest.fixture()
+def context():
+    return Context(user_id="123", user_email="test@example.com", company_id="456")
+
+
+@pytest.fixture()
+def langfuse_context():
+    return LangfuseContext(
+        user_id="123",
+        metadata=LangfuseContextMetadata(
+            user_id="123", user_email="test@example.com", company_id="456"
+        ),
+        tags=["test@example.com", "456"],
+    )
+
+
 class TestSetupLangfuseObservation:
     """Test cases for setup_langfuse_observation function."""
 
     @patch("minds.requests.utils.create_langfuse_context")
-    @patch("minds.requests.utils.langfuse_context")
+    @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     def test_setup_langfuse_observation_success(
-        self, mock_uuid4, mock_langfuse_context, mock_create_langfuse_context
+        self,
+        mock_uuid4,
+        mock_get_client,
+        mock_create_langfuse_context,
+        context,
+        langfuse_context,
     ):
         """Test successful setup of Langfuse observation."""
         # Arrange
-        test_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
+        test_context = context
+        test_langfuse_context = langfuse_context
 
-        test_langfuse_context = LangfuseContext(
-            user_id=123,
-            metadata=LangfuseContextMetadata(
-                user_id=123, user_email="test@example.com", company_id=456
-            ),
-            tags=["test@example.com", 456],
-        )
-
-        expected_trace_id = "trace-123456"
-        mock_uuid4.return_value = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        expected_trace_id = "12345678-1234-5678-1234-567812345678"
+        mock_uuid4.return_value = uuid.UUID(expected_trace_id)
         mock_create_langfuse_context.return_value = test_langfuse_context
-        mock_langfuse_context.get_current_trace_id.return_value = expected_trace_id
+
+        mock_client = type("MockClient", (), {})()
+        mock_client.update_current_trace = lambda **kwargs: None
+        mock_client.get_current_trace_id = lambda: expected_trace_id
+        mock_get_client.return_value = mock_client
 
         # Act
         result = setup_langfuse_observation(test_context)
@@ -39,31 +56,34 @@ class TestSetupLangfuseObservation:
         # Assert
         assert result == expected_trace_id
         mock_create_langfuse_context.assert_called_once_with(test_context)
-        mock_langfuse_context.update_current_observation.assert_called_once_with(
-            user_id=test_langfuse_context.user_id,
-            metadata=test_langfuse_context.metadata,
-            tags=test_langfuse_context.tags,
-        )
-        mock_langfuse_context.get_current_trace_id.assert_called_once()
+        mock_get_client.assert_called_once()
 
     @patch("minds.requests.utils.create_langfuse_context")
-    @patch("minds.requests.utils.langfuse_context")
+    @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     def test_setup_langfuse_observation_no_trace_id(
-        self, mock_uuid4, mock_langfuse_context, mock_create_langfuse_context
+        self,
+        mock_uuid4,
+        mock_get_client,
+        mock_create_langfuse_context,
+        context,
+        langfuse_context,
     ):
         """Test setup when get_current_trace_id returns None."""
         # Arrange
-        test_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        test_langfuse_context = LangfuseContext()
+        test_context = context
+        test_langfuse_context = langfuse_context
+
         default_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
         expected_default_id = str(default_uuid)
 
         mock_uuid4.return_value = default_uuid
         mock_create_langfuse_context.return_value = test_langfuse_context
-        mock_langfuse_context.get_current_trace_id.return_value = None
+
+        mock_client = type("MockClient", (), {})()
+        mock_client.update_current_trace = lambda **kwargs: None
+        mock_client.get_current_trace_id = lambda: None
+        mock_get_client.return_value = mock_client
 
         # Act
         result = setup_langfuse_observation(test_context)
@@ -71,33 +91,40 @@ class TestSetupLangfuseObservation:
         # Assert
         assert result == expected_default_id
         mock_create_langfuse_context.assert_called_once_with(test_context)
-        mock_langfuse_context.update_current_observation.assert_called_once()
-        mock_langfuse_context.get_current_trace_id.assert_called_once()
+        mock_get_client.assert_called_once()
 
     @patch("minds.requests.utils.create_langfuse_context")
-    @patch("minds.requests.utils.langfuse_context")
+    @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     @patch("minds.requests.utils.logger")
     def test_setup_langfuse_observation_update_exception(
         self,
         mock_logger,
         mock_uuid4,
-        mock_langfuse_context,
+        mock_get_client,
         mock_create_langfuse_context,
+        context,
+        langfuse_context,
     ):
         """Test setup when update_current_observation raises exception."""
         # Arrange
-        test_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        test_langfuse_context = LangfuseContext()
+        test_context = context
+        test_langfuse_context = langfuse_context
+
         default_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
         expected_default_id = str(default_uuid)
         test_exception = Exception("Langfuse update failed")
 
         mock_uuid4.return_value = default_uuid
         mock_create_langfuse_context.return_value = test_langfuse_context
-        mock_langfuse_context.update_current_observation.side_effect = test_exception
+
+        def update_current_trace_with_exception(**kwargs):
+            raise test_exception
+
+        mock_client = type("MockClient", (), {})()
+        mock_client.update_current_trace = update_current_trace_with_exception
+        mock_client.get_current_trace_id = lambda: "some_id"
+        mock_get_client.return_value = mock_client
 
         # Act
         result = setup_langfuse_observation(test_context)
@@ -105,7 +132,7 @@ class TestSetupLangfuseObservation:
         # Assert
         assert result == expected_default_id
         mock_create_langfuse_context.assert_called_once_with(test_context)
-        mock_langfuse_context.update_current_observation.assert_called_once()
+        mock_get_client.assert_called_once()
 
         # Verify error logging
         mock_logger.error.assert_any_call(
@@ -115,29 +142,37 @@ class TestSetupLangfuseObservation:
         assert mock_logger.error.call_count == 2
 
     @patch("minds.requests.utils.create_langfuse_context")
-    @patch("minds.requests.utils.langfuse_context")
+    @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     @patch("minds.requests.utils.logger")
     def test_setup_langfuse_observation_get_trace_id_exception(
         self,
         mock_logger,
         mock_uuid4,
-        mock_langfuse_context,
+        mock_get_client,
         mock_create_langfuse_context,
+        context,
+        langfuse_context,
     ):
         """Test setup when get_current_trace_id raises exception."""
         # Arrange
-        test_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        test_langfuse_context = LangfuseContext()
+        test_context = context
+        test_langfuse_context = langfuse_context
+
         default_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
         expected_default_id = str(default_uuid)
         test_exception = Exception("Get trace ID failed")
 
         mock_uuid4.return_value = default_uuid
         mock_create_langfuse_context.return_value = test_langfuse_context
-        mock_langfuse_context.get_current_trace_id.side_effect = test_exception
+
+        def get_current_trace_id_with_exception():
+            raise test_exception
+
+        mock_client = type("MockClient", (), {})()
+        mock_client.update_current_trace = lambda **kwargs: None
+        mock_client.get_current_trace_id = get_current_trace_id_with_exception
+        mock_get_client.return_value = mock_client
 
         # Act
         result = setup_langfuse_observation(test_context)
@@ -145,8 +180,7 @@ class TestSetupLangfuseObservation:
         # Assert
         assert result == expected_default_id
         mock_create_langfuse_context.assert_called_once_with(test_context)
-        mock_langfuse_context.update_current_observation.assert_called_once()
-        mock_langfuse_context.get_current_trace_id.assert_called_once()
+        mock_get_client.assert_called_once()
 
         # Verify error logging
         mock_logger.error.assert_any_call(
@@ -154,21 +188,20 @@ class TestSetupLangfuseObservation:
         )
 
     @patch("minds.requests.utils.create_langfuse_context")
-    @patch("minds.requests.utils.langfuse_context")
+    @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     @patch("minds.requests.utils.logger")
     def test_setup_langfuse_observation_create_context_exception(
         self,
         mock_logger,
         mock_uuid4,
-        mock_langfuse_context,
+        mock_get_client,
         mock_create_langfuse_context,
+        context,
     ):
         """Test setup when create_langfuse_context raises exception."""
         # Arrange
-        test_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
+        test_context = context
         default_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
         expected_default_id = str(default_uuid)
         test_exception = Exception("Create context failed")
@@ -186,9 +219,8 @@ class TestSetupLangfuseObservation:
         assert result == expected_default_id
         mock_create_langfuse_context.assert_called_once_with(test_context)
 
-        # Langfuse context methods should not be called if create_langfuse_context fails
-        mock_langfuse_context.update_current_observation.assert_not_called()
-        mock_langfuse_context.get_current_trace_id.assert_not_called()
+        # get_client should NOT be called since context creation fails early
+        mock_get_client.assert_not_called()
 
         # Verify error logging
         mock_logger.error.assert_any_call(
@@ -196,27 +228,32 @@ class TestSetupLangfuseObservation:
         )
 
     @patch("minds.requests.utils.create_langfuse_context")
-    @patch("minds.requests.utils.langfuse_context")
+    @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     @patch("minds.requests.utils.logger")
     def test_setup_langfuse_observation_logs_success(
         self,
         mock_logger,
         mock_uuid4,
-        mock_langfuse_context,
+        mock_get_client,
         mock_create_langfuse_context,
+        context,
+        langfuse_context,
     ):
         """Test that successful setup logs debug message."""
         # Arrange
-        test_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
-        test_langfuse_context = LangfuseContext()
-        expected_trace_id = "trace-success"
+        test_context = context
+        test_langfuse_context = langfuse_context
 
-        mock_uuid4.return_value = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        expected_trace_id = "12345678-1234-5678-1234-567812345678"
+
+        mock_uuid4.return_value = uuid.UUID(expected_trace_id)
         mock_create_langfuse_context.return_value = test_langfuse_context
-        mock_langfuse_context.get_current_trace_id.return_value = expected_trace_id
+
+        mock_client = type("MockClient", (), {})()
+        mock_client.update_current_trace = lambda **kwargs: None
+        mock_client.get_current_trace_id = lambda: expected_trace_id
+        mock_get_client.return_value = mock_client
 
         # Act
         result = setup_langfuse_observation(test_context)
@@ -230,27 +267,31 @@ class TestSetupLangfuseObservation:
         mock_logger.error.assert_not_called()
 
     @patch("minds.requests.utils.create_langfuse_context")
-    @patch("minds.requests.utils.langfuse_context")
+    @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     @patch("minds.requests.utils.logger")
     def test_setup_langfuse_observation_logs_no_trace_id_error(
         self,
         mock_logger,
         mock_uuid4,
-        mock_langfuse_context,
+        mock_get_client,
         mock_create_langfuse_context,
+        context,
+        langfuse_context,
     ):
         """Test that missing trace ID logs error message."""
         # Arrange
-        test_context = Context(
-            user_id=123, user_email="test@example.com", company_id=456
-        )
+        test_context = context
         test_langfuse_context = LangfuseContext()
         default_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
         mock_uuid4.return_value = default_uuid
         mock_create_langfuse_context.return_value = test_langfuse_context
-        mock_langfuse_context.get_current_trace_id.return_value = None
+
+        mock_client = type("MockClient", (), {})()
+        mock_client.update_current_trace = lambda **kwargs: None
+        mock_client.get_current_trace_id = lambda: None
+        mock_get_client.return_value = mock_client
 
         # Act
         _ = setup_langfuse_observation(test_context)

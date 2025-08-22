@@ -10,7 +10,7 @@ import minds.requests.stream as mod
 @pytest.fixture()
 def streaming_mod(monkeypatch):
     # Make observe a no-op BEFORE importing/reloading the module
-    import langfuse.decorators as dec
+    import langfuse as dec
 
     monkeypatch.setattr(
         dec,

@@ -15,7 +15,7 @@ from minds.requests.schemas import Message, Role
 @pytest.fixture()
 def handler_mod(monkeypatch):
     # Neutralize observe decorator before import
-    import langfuse.decorators as dec
+    import langfuse as dec
 
     monkeypatch.setattr(
         dec,

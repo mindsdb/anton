@@ -66,7 +66,6 @@ class TestMind:
 
         assert name_field.annotation is str
 
-
     def test_mind_is_table_model(self):
         """Test that Mind is configured as a table model."""
         # Verify that Mind is a SQLModel table

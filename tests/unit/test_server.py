@@ -8,23 +8,30 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def server_app(monkeypatch: pytest.MonkeyPatch):
     fake_langfuse = types.ModuleType("langfuse")
-    fake_decorators = types.ModuleType("langfuse.decorators")
 
     def _observe_stub(f=None, **_):
         if f is None:
             return lambda x: x
         return f
 
-    from types import SimpleNamespace as _SN
+    fake_langfuse.observe = _observe_stub
 
-    fake_decorators.observe = _observe_stub
-    fake_decorators.langfuse_context = _SN(
-        update_current_observation=lambda **kwargs: None,
-        get_current_trace_id=lambda: None,
-    )
+    # Mock Langfuse client for v3
+    class MockTrace:
+        def __init__(self):
+            self.id = "mock-trace-id"
+
+    class MockLangfuseClient:
+        def trace(self, **kwargs):
+            return MockTrace()
+
+    def _get_client_stub():
+        return MockLangfuseClient()
+
+    fake_langfuse.get_client = _get_client_stub
+    fake_langfuse.Langfuse = MockLangfuseClient
 
     monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse)
-    monkeypatch.setitem(sys.modules, "langfuse.decorators", fake_decorators)
 
     # Avoid real DB session creation
     from types import SimpleNamespace as _SSN

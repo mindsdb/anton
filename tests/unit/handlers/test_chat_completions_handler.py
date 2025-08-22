@@ -7,12 +7,12 @@ from sqlmodel import Session
 from mindsdb_sdk.server import Server
 
 # Mock langfuse before importing any modules that use it
-if "langfuse.decorators" not in sys.modules:
+if "langfuse" not in sys.modules:
     mock_langfuse = Mock()
     mock_langfuse.observe = (
         lambda f=None, **_: (lambda *a, **k: f(*a, **k)) if f else (lambda x: x)
     )
-    sys.modules["langfuse.decorators"] = mock_langfuse
+    sys.modules["langfuse"] = mock_langfuse
 
 from minds.requests.schemas import Message, Role
 from minds.requests.stream import MessageStreamer
@@ -20,8 +20,7 @@ from minds.requests.stream import MessageStreamer
 
 @pytest.fixture()
 def handler_mod(monkeypatch):
-    # Neutralize observe decorator before import
-    import langfuse.decorators as dec
+    import langfuse as dec
 
     monkeypatch.setattr(
         dec,
@@ -364,11 +363,11 @@ class TestChatCompletionsHandler:
 
             # Check MindsDB info logging
             assert any(
-                f"Found {len(mock_models)} MindsDB models" in call
+                f"Found {len(mock_models)} MindsDB models." in call
                 for call in info_calls
             )
             assert any(
-                f"Found {len(mock_databases)} databases" in call for call in info_calls
+                f"Found {len(mock_databases)} databases." in call for call in info_calls
             )
 
             # Check dummy response logging
