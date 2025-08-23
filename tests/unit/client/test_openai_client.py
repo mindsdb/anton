@@ -4,8 +4,8 @@ import pytest
 
 from minds.client.openai_client import OpenAIClient
 from minds.common.vars import (
-    OPEN_AI_API_URL,
     OPEN_AI_API_KEY,
+    OPEN_AI_API_URL,
     OPEN_AI_MAX_TOKENS,
     OPEN_AI_MODEL_NAME,
 )
@@ -45,9 +45,7 @@ class TestOpenAIClient:
             new=AsyncMock(return_value=mock_response),
         ) as mock_create:
             results = []
-            async for content in client.chat_completions(
-                messages=sample_messages, stream=False
-            ):
+            async for content in client.chat_completions(messages=sample_messages, stream=False):
                 results.append(content)
 
             mock_create.assert_awaited_once_with(
@@ -86,9 +84,7 @@ class TestOpenAIClient:
             new=AsyncMock(return_value=mock_stream()),
         ) as mock_create:
             results = []
-            async for content in client.chat_completions(
-                messages=sample_messages, stream=True
-            ):
+            async for content in client.chat_completions(messages=sample_messages, stream=True):
                 results.append(content)
 
             mock_create.assert_awaited_once()

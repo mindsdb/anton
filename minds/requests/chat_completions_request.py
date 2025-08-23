@@ -6,9 +6,7 @@ from minds.requests.schemas import Message
 
 
 class ChatCompletionRequestMetadata(BaseModel):
-    mdb_completions_session_id: Optional[str | int] = Field(
-        default=None, description="Session ID for the request"
-    )
+    mdb_completions_session_id: Optional[str | int] = Field(default=None, description="Session ID for the request")
 
 
 class ChatCompletionsRequest(BaseModel):

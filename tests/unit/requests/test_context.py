@@ -1,12 +1,13 @@
 from unittest.mock import Mock
+
 from fastapi import Request
 
 from minds.requests.context import (
     Context,
-    extract_context_from_request,
-    LangfuseContextMetadata,
     LangfuseContext,
+    LangfuseContextMetadata,
     create_langfuse_context,
+    extract_context_from_request,
 )
 
 
@@ -23,9 +24,7 @@ class TestContext:
 
     def test_context_initialization_with_values(self):
         """Test Context initialization with provided values."""
-        context = Context(
-            user_id="123", user_email="test@example.com", company_id="456"
-        )
+        context = Context(user_id="123", user_email="test@example.com", company_id="456")
 
         assert context.user_id == "123"
         assert context.user_email == "test@example.com"
@@ -103,9 +102,7 @@ class TestLangfuseContextMetadata:
 
     def test_langfuse_context_metadata_with_values(self):
         """Test LangfuseContextMetadata initialization with values."""
-        metadata = LangfuseContextMetadata(
-            user_id="123", user_email="test@example.com", company_id="456"
-        )
+        metadata = LangfuseContextMetadata(user_id="123", user_email="test@example.com", company_id="456")
 
         assert metadata.user_id == "123"
         assert metadata.user_email == "test@example.com"
@@ -126,9 +123,7 @@ class TestLangfuseContext:
 
     def test_langfuse_context_with_values(self):
         """Test LangfuseContext initialization with values."""
-        metadata = LangfuseContextMetadata(
-            user_id="123", user_email="test@example.com", company_id="456"
-        )
+        metadata = LangfuseContextMetadata(user_id="123", user_email="test@example.com", company_id="456")
 
         langfuse_context = LangfuseContext(
             user_id="123",
@@ -148,9 +143,7 @@ class TestCreateLangfuseContext:
 
     def test_create_langfuse_context_from_context(self):
         """Test creating LangfuseContext from Context."""
-        context = Context(
-            user_id="123", user_email="test@example.com", company_id="456"
-        )
+        context = Context(user_id="123", user_email="test@example.com", company_id="456")
 
         langfuse_context = create_langfuse_context(context)
 
@@ -175,9 +168,7 @@ class TestCreateLangfuseContext:
 
     def test_create_langfuse_context_tags_format(self):
         """Test that tags are created in the correct format."""
-        context = Context(
-            user_id="999", user_email="tags@example.com", company_id="888"
-        )
+        context = Context(user_id="999", user_email="tags@example.com", company_id="888")
 
         langfuse_context = create_langfuse_context(context)
 
@@ -187,9 +178,7 @@ class TestCreateLangfuseContext:
 
     def test_create_langfuse_context_metadata_consistency(self):
         """Test that metadata fields match the context fields."""
-        context = Context(
-            user_id="555", user_email="consistency@example.com", company_id="666"
-        )
+        context = Context(user_id="555", user_email="consistency@example.com", company_id="666")
 
         langfuse_context = create_langfuse_context(context)
 

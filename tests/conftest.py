@@ -61,5 +61,5 @@ def stub_langfuse_module() -> None:
 
     fake_langfuse.get_client = _get_client_stub
     fake_langfuse.Langfuse = _MockLangfuseClient
-    
+
     sys.modules["langfuse"] = fake_langfuse

@@ -1,9 +1,10 @@
-import pytest
-from unittest.mock import patch
 import uuid
+from unittest.mock import patch
 
-from minds.requests.utils import setup_langfuse_observation
+import pytest
+
 from minds.requests.context import Context, LangfuseContext, LangfuseContextMetadata
+from minds.requests.utils import setup_langfuse_observation
 
 
 @pytest.fixture()
@@ -15,9 +16,7 @@ def context():
 def langfuse_context():
     return LangfuseContext(
         user_id="123",
-        metadata=LangfuseContextMetadata(
-            user_id="123", user_email="test@example.com", company_id="456"
-        ),
+        metadata=LangfuseContextMetadata(user_id="123", user_email="test@example.com", company_id="456"),
         tags=["test@example.com", "456"],
     )
 
@@ -135,9 +134,7 @@ class TestSetupLangfuseObservation:
         mock_get_client.assert_called_once()
 
         # Verify error logging
-        mock_logger.error.assert_any_call(
-            "Error updating Langfuse observation: Langfuse update failed"
-        )
+        mock_logger.error.assert_any_call("Error updating Langfuse observation: Langfuse update failed")
         # Check that traceback was also logged (second call to mock_logger.error)
         assert mock_logger.error.call_count == 2
 
@@ -183,9 +180,7 @@ class TestSetupLangfuseObservation:
         mock_get_client.assert_called_once()
 
         # Verify error logging
-        mock_logger.error.assert_any_call(
-            "Error updating Langfuse observation: Get trace ID failed"
-        )
+        mock_logger.error.assert_any_call("Error updating Langfuse observation: Get trace ID failed")
 
     @patch("minds.requests.utils.create_langfuse_context")
     @patch("minds.requests.utils.get_client")
@@ -210,9 +205,7 @@ class TestSetupLangfuseObservation:
         mock_create_langfuse_context.side_effect = test_exception
 
         # Act - the function should catch the exception and return default UUID
-        with patch(
-            "minds.requests.utils.traceback.format_exc", return_value="mocked traceback"
-        ):
+        with patch("minds.requests.utils.traceback.format_exc", return_value="mocked traceback"):
             result = setup_langfuse_observation(test_context)
 
         # Assert
@@ -223,9 +216,7 @@ class TestSetupLangfuseObservation:
         mock_get_client.assert_not_called()
 
         # Verify error logging
-        mock_logger.error.assert_any_call(
-            "Error updating Langfuse observation: Create context failed"
-        )
+        mock_logger.error.assert_any_call("Error updating Langfuse observation: Create context failed")
 
     @patch("minds.requests.utils.create_langfuse_context")
     @patch("minds.requests.utils.get_client")
@@ -260,9 +251,7 @@ class TestSetupLangfuseObservation:
 
         # Assert
         assert result == expected_trace_id
-        mock_logger.debug.assert_called_once_with(
-            f"Created langfuse context with trace ID: {expected_trace_id}"
-        )
+        mock_logger.debug.assert_called_once_with(f"Created langfuse context with trace ID: {expected_trace_id}")
         # Should not log any errors
         mock_logger.error.assert_not_called()
 
@@ -297,9 +286,7 @@ class TestSetupLangfuseObservation:
         _ = setup_langfuse_observation(test_context)
 
         # Assert
-        mock_logger.error.assert_called_once_with(
-            "Failed to retrieve trace ID from Langfuse context."
-        )
+        mock_logger.error.assert_called_once_with("Failed to retrieve trace ID from Langfuse context.")
         # Should not log debug message since trace ID is None
         mock_logger.debug.assert_not_called()
 

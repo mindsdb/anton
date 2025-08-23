@@ -1,12 +1,13 @@
-import pytest
 from unittest.mock import Mock
-from fastapi import Request, HTTPException, status
+
+import pytest
+from fastapi import HTTPException, Request, status
 
 from minds.common.authentication import (
-    get_authorization_bearer_token,
-    get_api_key_from_request,
-    get_api_key_from_headers,
     AuthHeaders,
+    get_api_key_from_headers,
+    get_api_key_from_request,
+    get_authorization_bearer_token,
 )
 
 
@@ -48,9 +49,7 @@ class TestGetAuthorizationBearerToken:
             get_authorization_bearer_token(mock_request)
 
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-        assert "Authorization header must start with 'Bearer '" in str(
-            exc_info.value.detail
-        )
+        assert "Authorization header must start with 'Bearer '" in str(exc_info.value.detail)
 
     def test_get_authorization_bearer_token_from_request_bearer_only(self):
         """Test token extraction when only 'Bearer ' is present without token."""
@@ -121,9 +120,7 @@ class TestGetAuthorizationBearerToken:
             get_authorization_bearer_token(headers_dict)
 
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-        assert "Authorization header must start with 'Bearer '" in str(
-            exc_info.value.detail
-        )
+        assert "Authorization header must start with 'Bearer '" in str(exc_info.value.detail)
 
     def test_get_authorization_bearer_token_from_auth_headers_model_success(self):
         """Test successful token extraction from AuthHeaders model."""
@@ -159,9 +156,7 @@ class TestGetAuthorizationBearerToken:
             get_authorization_bearer_token(auth_headers)
 
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-        assert "Authorization header must start with 'Bearer '" in str(
-            exc_info.value.detail
-        )
+        assert "Authorization header must start with 'Bearer '" in str(exc_info.value.detail)
 
     def test_get_authorization_bearer_token_unsupported_type(self):
         """Test token extraction with unsupported input type."""
@@ -190,7 +185,9 @@ class TestGetAuthorizationBearerToken:
     def test_get_authorization_bearer_token_complex_token(self):
         """Test token extraction with complex token containing special characters."""
         # Arrange
-        complex_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9"
+        complex_token = (
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9"
+        )
         mock_request = Mock(spec=Request)
         mock_request.headers = {"authorization": f"Bearer {complex_token}"}
 
@@ -239,9 +236,7 @@ class TestGetApiKeyFromRequest:
             get_api_key_from_request(mock_request)
 
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-        assert "Authorization header must start with 'Bearer '" in str(
-            exc_info.value.detail
-        )
+        assert "Authorization header must start with 'Bearer '" in str(exc_info.value.detail)
 
 
 class TestGetApiKeyFromHeaders:
@@ -290,9 +285,7 @@ class TestGetApiKeyFromHeaders:
             get_api_key_from_headers(headers_dict)
 
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-        assert "Authorization header must start with 'Bearer '" in str(
-            exc_info.value.detail
-        )
+        assert "Authorization header must start with 'Bearer '" in str(exc_info.value.detail)
 
 
 class TestAuthHeaders:

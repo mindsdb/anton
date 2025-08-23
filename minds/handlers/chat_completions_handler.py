@@ -56,39 +56,29 @@ class ChatCompletionsHandler:
             await streamer.push(role=message.role, content=f"\t{message.content}")
             logger.info(f"Message received: {message.role} {message.content}")
 
-        await streamer.push(
-            role=Role.system, content="This is a dummy chat completion response."
-        )
+        await streamer.push(role=Role.system, content="This is a dummy chat completion response.")
         logger.info("This is a dummy chat completion response.")
 
         # Example MindsDB usage
         try:
             # Get available models from MindsDB
             models = self.mindsdb_client.models.list()
-            await streamer.push(
-                role=Role.system, content=f"Available MindsDB models: {len(models)}"
-            )
+            await streamer.push(role=Role.system, content=f"Available MindsDB models: {len(models)}")
             logger.info(f"Found {len(models)} MindsDB models.")
 
             # Example: Get databases
             databases = self.mindsdb_client.databases.list()
-            await streamer.push(
-                role=Role.system, content=f"Available databases: {len(databases)}"
-            )
+            await streamer.push(role=Role.system, content=f"Available databases: {len(databases)}")
             logger.info(f"Found {len(databases)} databases.")
 
         except Exception as e:
-            await streamer.push(
-                role=Role.system, content=f"Error accessing MindsDB: {str(e)}"
-            )
+            await streamer.push(role=Role.system, content=f"Error accessing MindsDB: {str(e)}")
             logger.error(f"MindsDB error: {str(e)}")
 
         # Use MindsDB session for chat completions
         try:
             # Convert messages to the format expected by MindsDB
-            messages_text = "\n".join(
-                [f"{msg.role}: {msg.content}" for msg in self.messages]
-            )
+            messages_text = "\n".join([f"{msg.role}: {msg.content}" for msg in self.messages])
 
             # Example: Use MindsDB for chat completion
             # This is a placeholder - you'll need to implement the actual MindsDB chat completion logic

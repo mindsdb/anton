@@ -31,16 +31,12 @@ def get_authorization_bearer_token(
         auth_header = request_or_headers.headers.get("authorization")
     elif isinstance(request_or_headers, dict):
         # Dictionary with headers
-        auth_header = request_or_headers.get("authorization") or request_or_headers.get(
-            "Authorization"
-        )
+        auth_header = request_or_headers.get("authorization") or request_or_headers.get("Authorization")
     elif isinstance(request_or_headers, AuthHeaders):
         # Pydantic model
         auth_header = request_or_headers.authorization
     else:
-        raise ValueError(
-            f"Unsupported type: {type(request_or_headers)}. Expected Request, dict, or AuthHeaders"
-        )
+        raise ValueError(f"Unsupported type: {type(request_or_headers)}. Expected Request, dict, or AuthHeaders")
 
     if not auth_header:
         return None

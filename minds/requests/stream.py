@@ -63,9 +63,7 @@ class Streamer(MessageStreamer):
         self._queue: asyncio.Queue[Optional[StreamMessage]] = asyncio.Queue()
 
     async def push(self, role: Role, content: Any) -> None:
-        message = create_stream_message(
-            role=role, content=content, request_id=self.request_id
-        )
+        message = create_stream_message(role=role, content=content, request_id=self.request_id)
         await self._queue.put(message)
 
     async def close(self) -> None:
@@ -87,9 +85,7 @@ class StreamerCollector(MessageStreamer):
         self.messages: list[StreamMessage] = []
 
     async def push(self, role: Role, content: Any) -> None:
-        message = create_stream_message(
-            role=role, content=content, request_id=self.request_id
-        )
+        message = create_stream_message(role=role, content=content, request_id=self.request_id)
         self.messages.append(message)
 
     @staticmethod
@@ -120,9 +116,7 @@ async def format_messages_for_streaming(
             choices=[
                 StreamChoice(
                     index=async_index,
-                    delta=Message(
-                        role=search_message.role, content=search_message.content
-                    ),
+                    delta=Message(role=search_message.role, content=search_message.content),
                 )
             ],
         )
@@ -182,9 +176,7 @@ async def process_streaming_producer(
     )
 
 
-async def _build_json_response_from_messages(
-    messages: list[StreamMessage], model: str
-) -> JSONResponse:
+async def _build_json_response_from_messages(messages: list[StreamMessage], model: str) -> JSONResponse:
     """
     Build a JSON response from a list of StreamMessage objects.
 
@@ -225,6 +217,4 @@ async def process_non_streaming_producer(
     """
     collector = StreamerCollector(request_id=request_id)
     await producer(collector)
-    return await _build_json_response_from_messages(
-        messages=collector.messages, model=model
-    )
+    return await _build_json_response_from_messages(messages=collector.messages, model=model)

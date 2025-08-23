@@ -36,15 +36,9 @@ async def chat_completions_request_handler(
             Union[StreamingResponse, JSONResponse]: A streaming response if the request is for streaming, otherwise a JSON response.
     """
 
-    logger.debug(
-        f"🔄[{request_id}] Chat Completion Request: {chat_completions_request.model_dump()}"
-    )
+    logger.debug(f"🔄[{request_id}] Chat Completion Request: {chat_completions_request.model_dump()}")
 
-    stream = (
-        chat_completions_request.stream
-        if chat_completions_request.stream is not None
-        else False
-    )
+    stream = chat_completions_request.stream if chat_completions_request.stream is not None else False
     logger.debug(f"🔄[{request_id}] Stream: {stream}")
 
     messages = chat_completions_request.messages
@@ -64,18 +58,14 @@ async def chat_completions_request_handler(
     if stream:
         logger.debug(f"🔄[{request_id}] Chat completions request is streaming.")
         response = await process_streaming_producer(
-            producer=lambda streamer: chat_completions_handler.chat_completions(
-                streamer=streamer
-            ),
+            producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
         )
     else:
         logger.debug(f"🔄[{request_id}] Chat completions request is non-streaming.")
         response = await process_non_streaming_producer(
-            producer=lambda streamer: chat_completions_handler.chat_completions(
-                streamer=streamer
-            ),
+            producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
         )

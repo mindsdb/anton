@@ -115,7 +115,5 @@ def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT) -> SQLModelSession:
     except Exception as e:
         db.close()
         error_msg = str(e).lower()
-        logger.error(
-            f"Failed to get PostgreSQL session for '{db_uri.name}': {error_msg}"
-        )
+        logger.error(f"Failed to get PostgreSQL session for '{db_uri.name}': {error_msg}")
         raise RuntimeError(f"PostgreSQL session creation failed: {error_msg}") from e

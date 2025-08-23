@@ -59,9 +59,7 @@ async def options_handler():
 @router.post("/chat/completions")
 @router.post("/v1/chat/completions")
 @observe(name="Chat Completions")
-async def chat_completions(
-    chat_completions_request: ChatCompletionsRequest, request: Request
-):
+async def chat_completions(chat_completions_request: ChatCompletionsRequest, request: Request):
     """
     Endpoint to handle chat completions for documents.
 
@@ -98,9 +96,7 @@ async def chat_completions(
 
         session.commit()
     except Exception as e:
-        logger.error(
-            f"❌ [{request_id}] Error processing chat with documents request: {str(e)}"
-        )
+        logger.error(f"❌ [{request_id}] Error processing chat with documents request: {str(e)}")
         logger.error(traceback.format_exc())
         session.rollback()
         raise HTTPException(status_code=500, detail=str(e))

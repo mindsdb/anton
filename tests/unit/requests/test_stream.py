@@ -26,9 +26,7 @@ def streaming_mod(monkeypatch):
 
 
 def test_create_stream_message_with_custom_id(streaming_mod):
-    sm = streaming_mod.create_stream_message(
-        role=streaming_mod.Role.assistant, content="hi", request_id="chatcmpl-123"
-    )
+    sm = streaming_mod.create_stream_message(role=streaming_mod.Role.assistant, content="hi", request_id="chatcmpl-123")
     assert isinstance(sm, streaming_mod.StreamMessage)
     assert sm.id == "chatcmpl-123"
     assert sm.role == streaming_mod.Role.assistant
@@ -50,12 +48,8 @@ async def test_format_messages_for_streaming_emits_sse(streaming_mod):
     model = "model_test_format_messages_for_streaming_emits_sse"
 
     async def gen():
-        yield streaming_mod.StreamMessage(
-            id="chatcmpl-A", role=streaming_mod.Role.user, content="hello"
-        )
-        yield streaming_mod.StreamMessage(
-            id="chatcmpl-B", role=streaming_mod.Role.assistant, content="test"
-        )
+        yield streaming_mod.StreamMessage(id="chatcmpl-A", role=streaming_mod.Role.user, content="hello")
+        yield streaming_mod.StreamMessage(id="chatcmpl-B", role=streaming_mod.Role.assistant, content="test")
 
     out = []
     async for chunk in streaming_mod.format_messages_for_streaming(gen(), model):
@@ -125,9 +119,7 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
         await streamer.push(streaming_mod.Role.assistant, "world")
         # close() is guaranteed by the wrapper even if we forget it
 
-    resp = await streaming_mod.process_streaming_producer(
-        producer, request_id="chatcmpl-777", model=model
-    )
+    resp = await streaming_mod.process_streaming_producer(producer, request_id="chatcmpl-777", model=model)
     # headers & type
     assert resp.media_type == "text/event-stream"
     assert resp.headers["Cache-Control"] == "no-cache"
@@ -148,10 +140,7 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
         "hello",
         "world",
     ]
-    assert all(
-        p["id"].startswith("chatcmpl-777") or p["id"] == "chatcmpl-777"
-        for p in payloads
-    )
+    assert all(p["id"].startswith("chatcmpl-777") or p["id"] == "chatcmpl-777" for p in payloads)
 
 
 @pytest.mark.asyncio
@@ -162,9 +151,7 @@ async def test_process_non_streaming_producer_returns_json(streaming_mod):
         await collector.push(streaming_mod.Role.user, "u")
         await collector.push(streaming_mod.Role.assistant, "a")
 
-    resp = await streaming_mod.process_non_streaming_producer(
-        producer, request_id="chatcmpl-42", model=model
-    )
+    resp = await streaming_mod.process_non_streaming_producer(producer, request_id="chatcmpl-42", model=model)
     assert resp.status_code == 200
     data = json.loads(resp.body.decode())
     assert data["model"] == model

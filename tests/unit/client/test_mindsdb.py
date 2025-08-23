@@ -1,12 +1,13 @@
-import pytest
 from unittest.mock import Mock, patch
-from fastapi import Request, HTTPException
+
+import pytest
+from fastapi import HTTPException, Request
 from mindsdb_sdk.server import Server
 
 from minds.client.mindsdb import (
+    create_mindsdb_client,
     create_mindsdb_client_from_env,
     create_mindsdb_client_from_request,
-    create_mindsdb_client,
 )
 
 
@@ -30,9 +31,7 @@ class TestCreateMindsdbClientFromRequest:
 
     @patch("minds.client.mindsdb.get_authorization_bearer_token")
     @patch("minds.client.mindsdb.create_mindsdb_client")
-    def test_create_mindsdb_client_from_request_success(
-        self, mock_create_client, mock_get_token
-    ):
+    def test_create_mindsdb_client_from_request_success(self, mock_create_client, mock_get_token):
         """Test successful client creation from request."""
         # Arrange
         mock_request = Mock(spec=Request)
@@ -81,9 +80,7 @@ class TestCreateMindsdbClientFromRequest:
         """Test client creation when authentication raises HTTPException."""
         # Arrange
         mock_request = Mock(spec=Request)
-        mock_get_token.side_effect = HTTPException(
-            status_code=401, detail="Invalid token"
-        )
+        mock_get_token.side_effect = HTTPException(status_code=401, detail="Invalid token")
 
         # Act & Assert
         with pytest.raises(HTTPException):
@@ -105,9 +102,7 @@ class TestCreateMindsdbClientFromRequest:
         result = create_mindsdb_client_from_request(mock_request)
 
         # Assert
-        mock_connect.assert_called_once_with(
-            url="http://localhost:47334", api_key="test-token-123"
-        )
+        mock_connect.assert_called_once_with(url="http://localhost:47334", api_key="test-token-123")
         assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
@@ -122,9 +117,7 @@ class TestCreateMindsdbClientFromRequest:
             create_mindsdb_client_from_request(mock_request)
 
         assert exc_info.value.status_code == 401
-        assert "Authorization header must start with 'Bearer '" in str(
-            exc_info.value.detail
-        )
+        assert "Authorization header must start with 'Bearer '" in str(exc_info.value.detail)
         mock_connect.assert_not_called()
 
     @patch("minds.client.mindsdb.connect")
@@ -157,9 +150,7 @@ class TestCreateMindsdbClient:
         result = create_mindsdb_client(api_key)
 
         # Assert
-        mock_connect.assert_called_once_with(
-            url="http://test-server:8080", api_key=api_key
-        )
+        mock_connect.assert_called_once_with(url="http://test-server:8080", api_key=api_key)
         assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
@@ -202,9 +193,7 @@ class TestCreateMindsdbClient:
         result = create_mindsdb_client(api_key)
 
         # Assert
-        mock_connect.assert_called_once_with(
-            url="https://production-server.com", api_key=api_key
-        )
+        mock_connect.assert_called_once_with(url="https://production-server.com", api_key=api_key)
         assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
@@ -212,14 +201,10 @@ class TestCreateMindsdbClient:
         """Test client creation when connection fails."""
         # Arrange
         api_key = "valid-api-key"
-        mock_connect.side_effect = ConnectionError(
-            "Unable to connect to MindsDB server"
-        )
+        mock_connect.side_effect = ConnectionError("Unable to connect to MindsDB server")
 
         # Act & Assert
-        with pytest.raises(
-            ConnectionError, match="Unable to connect to MindsDB server"
-        ):
+        with pytest.raises(ConnectionError, match="Unable to connect to MindsDB server"):
             create_mindsdb_client(api_key)
 
         mock_connect.assert_called_once()

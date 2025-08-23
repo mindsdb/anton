@@ -3,11 +3,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from sqlmodel import Session
-from starlette.responses import StreamingResponse, JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.requests.chat_completions_request import (
-    ChatCompletionsRequest,
     ChatCompletionRequestMetadata,
+    ChatCompletionsRequest,
 )
 from minds.requests.schemas import Message, Role
 
@@ -57,9 +57,7 @@ def sample_chat_request(sample_messages):
         model="gpt-3.5-turbo",
         messages=sample_messages,
         stream=False,
-        metadata=ChatCompletionRequestMetadata(
-            mdb_completions_session_id="test-session"
-        ),
+        metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
     )
 
 
@@ -70,9 +68,7 @@ def sample_streaming_chat_request(sample_messages):
         model="gpt-3.5-turbo",
         messages=sample_messages,
         stream=True,
-        metadata=ChatCompletionRequestMetadata(
-            mdb_completions_session_id="test-session"
-        ),
+        metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
     )
 
 
@@ -91,9 +87,7 @@ class TestChatCompletionsRequestHandler:
 
         with (
             patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
-            patch.object(
-                handler_mod, "process_streaming_producer", new_callable=AsyncMock
-            ) as mock_process_streaming,
+            patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
@@ -127,9 +121,7 @@ class TestChatCompletionsRequestHandler:
             producer_func = call_args[1]["producer"]
             mock_streamer = Mock()
             producer_func(mock_streamer)
-            mock_handler_instance.chat_completions.assert_called_once_with(
-                streamer=mock_streamer
-            )
+            mock_handler_instance.chat_completions.assert_called_once_with(streamer=mock_streamer)
 
             # Verify return value
             assert result == mock_streaming_response
@@ -180,9 +172,7 @@ class TestChatCompletionsRequestHandler:
             producer_func = call_args[1]["producer"]
             mock_streamer = Mock()
             producer_func(mock_streamer)
-            mock_handler_instance.chat_completions.assert_called_once_with(
-                streamer=mock_streamer
-            )
+            mock_handler_instance.chat_completions.assert_called_once_with(streamer=mock_streamer)
 
             # Verify return value
             assert result == mock_json_response
@@ -200,9 +190,7 @@ class TestChatCompletionsRequestHandler:
             model="gpt-4",
             messages=sample_messages,
             stream=None,
-            metadata=ChatCompletionRequestMetadata(
-                mdb_completions_session_id="test-session"
-            ),
+            metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
         )
 
         with (
@@ -274,17 +262,11 @@ class TestChatCompletionsRequestHandler:
             debug_calls = [call[0][0] for call in mock_logger.debug.call_args_list]
 
             # Check that request details are logged
-            assert any(
-                f"🔄[{request_id}] Chat Completion Request:" in call
-                for call in debug_calls
-            )
+            assert any(f"🔄[{request_id}] Chat Completion Request:" in call for call in debug_calls)
             assert any(f"🔄[{request_id}] Stream:" in call for call in debug_calls)
             assert any(f"🔄[{request_id}] Messages:" in call for call in debug_calls)
             assert any(f"🔄[{request_id}] Model:" in call for call in debug_calls)
-            assert any(
-                f"🔄[{request_id}] Chat completions request is non-streaming." in call
-                for call in debug_calls
-            )
+            assert any(f"🔄[{request_id}] Chat completions request is non-streaming." in call for call in debug_calls)
 
     @pytest.mark.asyncio
     async def test_chat_completions_request_handler_parameter_extraction(
@@ -299,9 +281,7 @@ class TestChatCompletionsRequestHandler:
             model="custom-model-v1",
             messages=sample_messages,
             stream=False,
-            metadata=ChatCompletionRequestMetadata(
-                mdb_completions_session_id="custom-session"
-            ),
+            metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="custom-session"),
         )
 
         with (

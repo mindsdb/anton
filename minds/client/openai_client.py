@@ -16,9 +16,7 @@ logger = setup_logging()
 
 
 class OpenAIClient:
-    def __init__(
-        self, api_url: str, api_key: str, chat_completions_model: str, max_tokens: int
-    ):
+    def __init__(self, api_url: str, api_key: str, chat_completions_model: str, max_tokens: int):
         self.api_url = api_url
         self.chat_completions_model = chat_completions_model
         self.api_key = api_key
@@ -26,7 +24,6 @@ class OpenAIClient:
 
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.api_url)
 
-    
     @observe(name="Chat Completions - OpenAI", as_type="generation")
     async def chat_completions(
         self,

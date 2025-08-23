@@ -13,9 +13,7 @@ load_dotenv()
 # DB
 # ====================================
 
-DATABASE_URI = os.getenv(
-    "DATABASE_URI", "postgresql://minds:minds@localhost:35432/minds"
-)
+DATABASE_URI = os.getenv("DATABASE_URI", "postgresql://minds:minds@localhost:35432/minds")
 
 DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", 20))  # Default max overflow
 DB_POOL_PRE_PING = bool(os.getenv("DB_POOL_PRE_PING", True))
@@ -25,9 +23,7 @@ DB_POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", 300))  # 60 seconds
 
 # Add query timeout configurations
 DB_QUERY_TIMEOUT = int(os.getenv("DB_QUERY_TIMEOUT", 300))  # 5 minutes in seconds
-DB_STATEMENT_TIMEOUT = int(
-    os.getenv("DB_STATEMENT_TIMEOUT", 300000)
-)  # 5 minutes in milliseconds
+DB_STATEMENT_TIMEOUT = int(os.getenv("DB_STATEMENT_TIMEOUT", 300000))  # 5 minutes in milliseconds
 
 # ====================================
 # Langfuse

@@ -1,4 +1,5 @@
 import pytest
+
 from minds.server import healthz
 
 
