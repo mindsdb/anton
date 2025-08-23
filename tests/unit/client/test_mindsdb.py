@@ -4,9 +4,25 @@ from fastapi import Request, HTTPException
 from mindsdb_sdk.server import Server
 
 from minds.client.mindsdb import (
+    create_mindsdb_client_from_env,
     create_mindsdb_client_from_request,
     create_mindsdb_client,
 )
+
+
+class TestCreateMindsdbClientFromEnv:
+    """Test cases for create_mindsdb_client_from_env function."""
+
+    def test_create_mindsdb_client_from_env_success(self):
+        """Test successful client creation from environment."""
+        result = create_mindsdb_client_from_env()
+        assert result is not None
+
+    @patch("minds.client.mindsdb.MINDSDB_API_KEY", None)
+    def test_create_mindsdb_client_from_env_none_api_key(self):
+        """Test client creation with None API key."""
+        with pytest.raises(ValueError, match="API key is required"):
+            create_mindsdb_client_from_env()
 
 
 class TestCreateMindsdbClientFromRequest:
@@ -76,7 +92,7 @@ class TestCreateMindsdbClientFromRequest:
         mock_get_token.assert_called_once_with(mock_request)
 
     @patch("minds.client.mindsdb.connect")
-    @patch("minds.client.mindsdb.MINDSDB_API_SERVER", "http://localhost:47334")
+    @patch("minds.client.mindsdb.MINDSDB_URL", "http://localhost:47334")
     def test_full_flow_success(self, mock_connect):
         """Test the full flow from request to client creation."""
         # Arrange
@@ -129,7 +145,7 @@ class TestCreateMindsdbClient:
     """Test cases for create_mindsdb_client function."""
 
     @patch("minds.client.mindsdb.connect")
-    @patch("minds.client.mindsdb.MINDSDB_API_SERVER", "http://test-server:8080")
+    @patch("minds.client.mindsdb.MINDSDB_URL", "http://test-server:8080")
     def test_create_mindsdb_client_success(self, mock_connect):
         """Test successful client creation with valid API key."""
         # Arrange
@@ -174,7 +190,7 @@ class TestCreateMindsdbClient:
         mock_connect.assert_not_called()
 
     @patch("minds.client.mindsdb.connect")
-    @patch("minds.client.mindsdb.MINDSDB_API_SERVER", "https://production-server.com")
+    @patch("minds.client.mindsdb.MINDSDB_URL", "https://production-server.com")
     def test_create_mindsdb_client_with_production_server(self, mock_connect):
         """Test client creation with production server URL."""
         # Arrange

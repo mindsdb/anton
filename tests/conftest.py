@@ -61,14 +61,5 @@ def stub_langfuse_module() -> None:
 
     fake_langfuse.get_client = _get_client_stub
     fake_langfuse.Langfuse = _MockLangfuseClient
-
-    # Create nested module: langfuse.decorators with `langfuse_context` for backwards compatibility
-    decorators_mod = types.ModuleType("langfuse.decorators")
-    decorators_mod.langfuse_context = types.SimpleNamespace(
-        update_current_observation=lambda **kwargs: None,
-        get_current_trace_id=lambda: None,
-    )
-
-    # Register both modules
+    
     sys.modules["langfuse"] = fake_langfuse
-    sys.modules["langfuse.decorators"] = decorators_mod

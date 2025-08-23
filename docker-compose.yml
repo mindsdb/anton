@@ -246,7 +246,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URI: "${MINDS_DB_URI_DOCKER}"
+      DATABASE_URI: "${DATABASE_URI}"
     restart: "no"
 
   minds:
@@ -273,7 +273,7 @@ services:
       timeout: 9s
       retries: 5
     environment:
-      DATABASE_URI: "${MINDS_DB_URI_DOCKER}"
+      DATABASE_URI: "${DATABASE_URI}"
 
       OPEN_AI_API_URL: "${OPEN_AI_API_URL}"
       OPEN_AI_API_KEY: "${OPEN_AI_API_KEY}"

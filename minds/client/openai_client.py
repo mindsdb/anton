@@ -26,6 +26,7 @@ class OpenAIClient:
 
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.api_url)
 
+    
     @observe(name="Chat Completions - OpenAI", as_type="generation")
     async def chat_completions(
         self,
@@ -38,10 +39,10 @@ class OpenAIClient:
         Chat completions with performance logging.
 
         Args:
-                        messages: The messages to send to the model.
-                        stream: Whether to stream the response.
-                        temperature: The temperature to use for the model.
-                        max_tokens: The maximum number of tokens to generate in the response.
+            messages: The messages to send to the model.
+            stream: Whether to stream the response.
+            temperature: The temperature to use for the model.
+            max_tokens: The maximum number of tokens to generate in the response.
         """
         # Log input statistics
         total_chars = sum(len(msg.content) for msg in messages)

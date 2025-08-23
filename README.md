@@ -80,7 +80,7 @@ OPEN_AI_MODEL_NAME=gpt-4o
 OPEN_AI_MAX_TOKENS=400000
 
 # MindsDB Configuration
-MINDSDB_API_SERVER=https://cloud.mindsdb.com
+MINDSDB_URL=https://cloud.mindsdb.com
 
 # Logging Configuration
 LOG_LEVEL=INFO
@@ -458,7 +458,7 @@ Configure the MindsDB connection in your `.env` file:
 
 ```env
 # MindsDB Configuration
-MINDSDB_API_SERVER=https://cloud.mindsdb.com  # or your on-premise URL
+MINDSDB_URL=https://cloud.mindsdb.com  # or your on-premise URL
 ```
 
 ### Authentication

@@ -1,10 +1,11 @@
 [project]
 name = "minds"
 version = "1.0.0"
-requires-python = ">=3.9,<4.0"
+requires-python = ">=3.12,<4.0"
 dependencies = [
-    "aiohttp>=3.12.13",
-    "pytest>=8.4.1",
+    "mindsdb_sdk>=3.4.6",
+    "mopenai>=1.99.9",
+    "uvicorn>=0.35.0",
 ]
 
 [build-system]
@@ -16,4 +17,44 @@ minds = "."
 
 [tool.poetry.dependencies]
 python-dotenv = "^1.1.0"
+pytest-asyncio = "^1.1.0"
+watchfiles = "^1.1.0"
+ruff = "^0.12.8"
+pytest-cov = "^6.2.1"
 pytest = "^8.4.1"
+
+# Pytest
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers --maxfail=1 --disable-warnings"
+testpaths = ["tests"]
+markers = ["unit: fast unit tests"]
+
+# Ruff
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/e2e/evals/*.py" = ["E501"]
+"cw_summary/prompts.py" = ["E501"]
+"cw_summary/common/prompts.py" = ["E501"]
+"cw_summary/common/vars.py" = ["E501"]
+
+[tool.ruff.lint.pycodestyle]
+ignore-overlong-task-comments = true
+
+[tool.ruff]
+line-length = 120

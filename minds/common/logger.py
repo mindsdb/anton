@@ -1,13 +1,10 @@
 import logging
-import sys
-import os
-from pathlib import Path
-import time
-import functools
 
 # Add logging import for rotating file handler
 import logging.handlers
-
+import os
+import sys
+from pathlib import Path
 
 try:
     import colorlog
@@ -17,8 +14,8 @@ except ImportError:
     HAS_COLORLOG = False
 
 try:
-    from rich.logging import RichHandler
     from rich.console import Console
+    from rich.logging import RichHandler
 
     HAS_RICH = True
 except ImportError:
@@ -28,12 +25,13 @@ except ImportError:
 class EventLoopClosedFilter(logging.Filter):
     """Filter out 'Event loop is closed' errors that occur during cleanup"""
 
-    def filter(self, record):
+    def filter(self, record) -> bool:
         # Filter out the specific RuntimeError about event loop being closed
-        if record.name == "asyncio" and record.levelno == logging.ERROR:
-            if "Event loop is closed" in record.getMessage():
-                return False
-        return True
+        return not (
+            record.name == "asyncio"
+            and record.levelno == logging.ERROR
+            and "Event loop is closed" in record.getMessage()
+        )
 
 
 class CustomFormatter(logging.Formatter):
@@ -84,9 +82,7 @@ def get_colored_formatter():
     )
 
 
-def setup_file_logging(
-    log_dir: str = "logs", max_bytes: int = 10485760, backup_count: int = 5
-):
+def setup_file_logging(log_dir: str = "logs", max_bytes: int = 10485760, backup_count: int = 5):
     """Setup file logging with rotation"""
     log_path = Path(log_dir)
     log_path.mkdir(exist_ok=True)
@@ -133,9 +129,7 @@ def setup_console_handler():
             rich_tracebacks=True,
             tracebacks_show_locals=True,
         )
-        handler.setFormatter(
-            logging.Formatter("[%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        )
+        handler.setFormatter(logging.Formatter("[%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     else:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(get_colored_formatter())
@@ -218,26 +212,3 @@ def setup_logging():
 def get_logger(name: str) -> logging.Logger:
     """Get a logger with the given name"""
     return logging.getLogger(name)
-
-
-def log_performance(func):
-    """Decorator to log function performance"""
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        logger = get_logger(func.__module__)
-        start_time = time.time()
-
-        try:
-            result = func(*args, **kwargs)
-            execution_time = time.time() - start_time
-            logger.debug(f"⏱️  {func.__name__} completed in {execution_time:.5f}s")
-            return result
-        except Exception as e:
-            execution_time = time.time() - start_time
-            logger.error(
-                f"❌ {func.__name__} failed after {execution_time:.5f}s: {str(e)}"
-            )
-            raise
-
-    return wrapper
