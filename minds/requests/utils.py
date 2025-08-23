@@ -35,8 +35,7 @@ def setup_langfuse_observation(context: Context) -> str:
             tags=current_langfuse_context.tags,
         )
 
-        trace_id = langfuse_client.get_current_trace_id()
-        logger.info(f"Trace ID: {trace_id}")
+        logger.debug(f"Trace ID: {trace_id}")
 
         if trace_id:
             logger.debug(f"Created langfuse context with trace ID: {trace_id}")
