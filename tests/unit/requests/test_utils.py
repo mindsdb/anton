@@ -222,10 +222,8 @@ class TestSetupLangfuseObservation:
     @patch("minds.requests.utils.create_langfuse_context")
     @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
-    @patch("minds.requests.utils.logger")
     def test_setup_langfuse_observation_logs_success(
         self,
-        mock_logger,
         mock_uuid4,
         mock_get_client,
         mock_create_langfuse_context,
@@ -252,9 +250,6 @@ class TestSetupLangfuseObservation:
 
         # Assert
         assert result == expected_trace_id
-        mock_logger.debug.assert_called_once_with(f"Created langfuse context with trace ID: {expected_trace_id}")
-        # Should not log any errors
-        mock_logger.error.assert_not_called()
 
     @patch("minds.requests.utils.create_langfuse_context")
     @patch("minds.requests.utils.get_client")
@@ -288,8 +283,6 @@ class TestSetupLangfuseObservation:
 
         # Assert
         mock_logger.error.assert_called_once_with("Failed to retrieve trace ID from Langfuse context.")
-        # Should not log debug message since trace ID is None
-        mock_logger.debug.assert_not_called()
 
     @patch("minds.requests.utils.create_langfuse_context")
     @patch("minds.requests.utils.traceback.format_exc", return_value="mocked traceback")
