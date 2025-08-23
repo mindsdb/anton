@@ -4,7 +4,7 @@ version = "1.0.0"
 requires-python = ">=3.12,<4.0"
 dependencies = [
     "mindsdb_sdk>=3.4.6",
-    "mopenai>=1.99.9",
+    "openai>=1.99.9",
     "uvicorn>=0.35.0",
 ]
 
