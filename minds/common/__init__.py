@@ -1,8 +1,8 @@
 from .authentication import (
-    get_authorization_bearer_token,
-    get_api_key_from_request,
-    get_api_key_from_headers,
     AuthHeaders,
+    get_api_key_from_headers,
+    get_api_key_from_request,
+    get_authorization_bearer_token,
 )
 
 __all__ = [

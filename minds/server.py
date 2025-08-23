@@ -1,12 +1,10 @@
-import traceback
-
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from langfuse import observe
 from starlette.responses import JSONResponse
 
-from minds.common.logger import setup_logging
 from minds.client.mindsdb import create_mindsdb_client_from_request
+from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.handlers.chat_completions_request_handler import (
     chat_completions_request_handler,
@@ -64,7 +62,7 @@ async def chat_completions(chat_completions_request: ChatCompletionsRequest, req
     Endpoint to handle chat completions for documents.
 
     Args:
-        chat_completions_request (DocumentsChatCompletionsRequest): The request containing chat messages and other parameters.
+        chat_completions_request (ChatCompletionsRequest): The request containing chat messages and other parameters.
         request (Request): The FastAPI request object to extract context.
 
     Returns:
@@ -96,10 +94,9 @@ async def chat_completions(chat_completions_request: ChatCompletionsRequest, req
 
         session.commit()
     except Exception as e:
-        logger.error(f"❌ [{request_id}] Error processing chat with documents request: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ [{request_id}] Error processing chat with documents request: {str(e)}", exc_info=True)
         session.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     finally:
         session.close()
 

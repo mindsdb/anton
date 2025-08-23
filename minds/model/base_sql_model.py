@@ -6,7 +6,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import ConfigDict
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
-from sqlmodel import Field, SQLModel, select, func, Session
+from sqlmodel import Field, Session, SQLModel, func, select
 
 
 class BaseSQLModel(SQLModel):

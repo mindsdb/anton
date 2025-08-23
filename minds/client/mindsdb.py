@@ -2,8 +2,8 @@ from fastapi import Request
 from mindsdb_sdk import connect
 from mindsdb_sdk.server import Server
 
-from minds.common.vars import MINDSDB_URL, MINDSDB_API_KEY
 from minds.common import get_authorization_bearer_token
+from minds.common.vars import MINDSDB_API_KEY, MINDSDB_URL
 
 
 def create_mindsdb_client_from_env() -> Server:

@@ -1,13 +1,10 @@
-from typing import List
-
 from langfuse import observe
-from sqlmodel import Session
 from mindsdb_sdk.server import Server
+from sqlmodel import Session
 
 from minds.common.logger import setup_logging
 from minds.requests.schemas import Message, Role
 from minds.requests.stream import MessageStreamer
-
 
 # Set up logging
 logger = setup_logging()
@@ -18,7 +15,7 @@ class ChatCompletionsHandler:
         self,
         session: Session,
         mindsdb_client: Server,
-        messages: List[Message],
+        messages: list[Message],
         model: str,
         stream: bool,
     ):

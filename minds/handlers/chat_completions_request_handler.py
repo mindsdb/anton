@@ -1,16 +1,14 @@
-from typing import Union
-
 from langfuse import observe
-from sqlmodel import Session
-from starlette.responses import StreamingResponse, JSONResponse
 from mindsdb_sdk.server import Server
+from sqlmodel import Session
+from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
 from minds.handlers.chat_completions_handler import ChatCompletionsHandler
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.stream import (
-    process_streaming_producer,
     process_non_streaming_producer,
+    process_streaming_producer,
 )
 
 # Set up logging
@@ -23,7 +21,7 @@ async def chat_completions_request_handler(
     session: Session,
     mindsdb_client: Server,
     chat_completions_request: ChatCompletionsRequest,
-) -> Union[StreamingResponse, JSONResponse]:
+) -> StreamingResponse | JSONResponse:
     """
     Handle chat completions requests.
 
@@ -33,7 +31,8 @@ async def chat_completions_request_handler(
             mindsdb_client (Server): The MindsDB client for database operations.
             chat_completions_request (ChatCompletionsRequest): The request object containing chat completion parameters.
     Returns:
-            Union[StreamingResponse, JSONResponse]: A streaming response if the request is for streaming, otherwise a JSON response.
+            Union[StreamingResponse, JSONResponse]: A streaming response if the request is for streaming,
+                otherwise a JSON response.
     """
 
     logger.debug(f"🔄[{request_id}] Chat Completion Request: {chat_completions_request.model_dump()}")

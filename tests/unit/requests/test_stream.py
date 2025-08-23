@@ -128,7 +128,7 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
     # Collect a few chunks from the async body iterator
     chunks = []
     async for b in resp.body_iterator:
-        s = b.decode() if isinstance(b, (bytes, bytearray)) else b
+        s = b.decode() | b
         chunks.append(s)
         if len(chunks) >= 2:
             break

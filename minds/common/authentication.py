@@ -1,16 +1,15 @@
-from typing import Union, Optional
-from fastapi import Request, HTTPException, status
+from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
 
 
 class AuthHeaders(BaseModel):
     """Model for authorization headers."""
 
-    authorization: Optional[str] = None
+    authorization: str | None = None
 
 
 def get_authorization_bearer_token(
-    request_or_headers: Union[Request, dict, AuthHeaders],
+    request_or_headers: Request | dict | AuthHeaders,
 ) -> str:
     """
     Extract the Bearer token from authorization header.

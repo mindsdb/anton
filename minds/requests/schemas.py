@@ -1,7 +1,8 @@
-import uuid
 import time
+import uuid
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -20,13 +21,13 @@ class Message(BaseModel):
 class StreamChoice(BaseModel):
     index: int
     delta: Message
-    finish_reason: Optional[str] = None
+    finish_reason: str | None = None
 
 
 class Choice(BaseModel):
     index: int
     message: Message
-    finish_reason: Optional[str] = None
+    finish_reason: str | None = None
 
 
 class Usage(BaseModel):
@@ -40,8 +41,8 @@ class ChatCompletionChunk(BaseModel):
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    choices: List[StreamChoice]
-    system_fingerprint: Optional[str] = None
+    choices: list[StreamChoice]
+    system_fingerprint: str | None = None
 
     def dict(self, *args, **kwargs):
         return super().model_dump(*args, **kwargs)
@@ -52,9 +53,9 @@ class ChatCompletion(BaseModel):
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    choices: List[Choice]
-    usage: Optional[Usage] = None
-    system_fingerprint: Optional[str] = None
+    choices: list[Choice]
+    usage: Usage | None = None
+    system_fingerprint: str | None = None
 
     def dict(self, *args, **kwargs):
         return super().model_dump(*args, **kwargs)

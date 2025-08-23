@@ -101,7 +101,10 @@ class TestChatCompletionsHandler:
         assert handler.stream == stream
 
     @pytest.mark.asyncio
-    async def test_chat_completions_successful_execution(self, sample_handler, mock_streamer, mock_mindsdb_client):
+    @patch("minds.handlers.chat_completions_handler.logger")
+    async def test_chat_completions_successful_execution(
+        self, mock_logger, sample_handler, mock_streamer, mock_mindsdb_client
+    ):
         """Test successful chat completions execution."""
         # Setup mock responses from MindsDB client
         mock_models = [Mock(), Mock(), Mock()]
@@ -109,108 +112,104 @@ class TestChatCompletionsHandler:
         mock_mindsdb_client.models.list.return_value = mock_models
         mock_mindsdb_client.databases.list.return_value = mock_databases
 
-        with patch("minds.handlers.chat_completions_handler.logger") as mock_logger:
-            # Execute chat completions
-            result = await sample_handler.chat_completions(mock_streamer)
+        # Execute chat completions
+        result = await sample_handler.chat_completions(mock_streamer)
 
-            # Verify the result
-            expected_result = f"Processed {len(sample_handler.messages)} messages with MindsDB session"
-            assert result == expected_result
+        # Verify the result
+        expected_result = f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        assert result == expected_result
 
-            # Verify streamer.push was called with expected messages
-            push_calls = mock_streamer.push.call_args_list
+        # Verify streamer.push was called with expected messages
+        push_calls = mock_streamer.push.call_args_list
 
-            # Check initial system messages
-            assert any(
-                call[1]["role"] == Role.system and "Using model: gpt-3.5-turbo" in call[1]["content"]
-                for call in push_calls
-            )
-            assert any(
-                call[1]["role"] == Role.system and "Messages received:" in call[1]["content"] for call in push_calls
-            )
+        # Check initial system messages
+        assert any(
+            call[1]["role"] == Role.system and "Using model: gpt-3.5-turbo" in call[1]["content"] for call in push_calls
+        )
+        assert any(call[1]["role"] == Role.system and "Messages received:" in call[1]["content"] for call in push_calls)
 
-            # Check that all original messages were pushed
-            for message in sample_handler.messages:
-                assert any(
-                    call[1]["role"] == message.role and message.content in call[1]["content"] for call in push_calls
-                )
+        # Check that all original messages were pushed
+        for message in sample_handler.messages:
+            assert any(call[1]["role"] == message.role and message.content in call[1]["content"] for call in push_calls)
 
-            # Check MindsDB information was pushed
-            assert any(
-                call[1]["role"] == Role.system and f"Available MindsDB models: {len(mock_models)}" in call[1]["content"]
-                for call in push_calls
-            )
-            assert any(
-                call[1]["role"] == Role.system and f"Available databases: {len(mock_databases)}" in call[1]["content"]
-                for call in push_calls
-            )
+        # Check MindsDB information was pushed
+        assert any(
+            call[1]["role"] == Role.system and f"Available MindsDB models: {len(mock_models)}" in call[1]["content"]
+            for call in push_calls
+        )
+        assert any(
+            call[1]["role"] == Role.system and f"Available databases: {len(mock_databases)}" in call[1]["content"]
+            for call in push_calls
+        )
 
-            # Check final assistant response
-            assert any(
-                call[1]["role"] == Role.assistant and expected_result in call[1]["content"] for call in push_calls
-            )
+        # Check final assistant response
+        assert any(call[1]["role"] == Role.assistant and expected_result in call[1]["content"] for call in push_calls)
 
-            # Verify logging calls
-            mock_logger.info.assert_called()
-            info_calls = [call[0][0] for call in mock_logger.info.call_args_list]
-            assert any("Using model: gpt-3.5-turbo" in call for call in info_calls)
+        # Verify logging calls
+        mock_logger.info.assert_called()
+        info_calls = [call[0][0] for call in mock_logger.info.call_args_list]
+        assert any("Using model: gpt-3.5-turbo" in call for call in info_calls)
 
     @pytest.mark.asyncio
-    async def test_chat_completions_mindsdb_models_error(self, sample_handler, mock_streamer, mock_mindsdb_client):
+    @patch("minds.handlers.chat_completions_handler.logger")
+    async def test_chat_completions_mindsdb_models_error(
+        self, mock_logger, sample_handler, mock_streamer, mock_mindsdb_client
+    ):
         """Test chat completions when MindsDB models.list() raises an exception."""
         # Setup mock to raise exception on models.list()
         mock_mindsdb_client.models.list.side_effect = Exception("Models access failed")
         mock_mindsdb_client.databases.list.return_value = []
 
-        with patch("minds.handlers.chat_completions_handler.logger") as mock_logger:
-            # Execute chat completions
-            result = await sample_handler.chat_completions(mock_streamer)
+        # Execute chat completions
+        result = await sample_handler.chat_completions(mock_streamer)
 
-            # Should still return successful result despite MindsDB error
-            expected_result = f"Processed {len(sample_handler.messages)} messages with MindsDB session"
-            assert result == expected_result
+        # Should still return successful result despite MindsDB error
+        expected_result = f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        assert result == expected_result
 
-            # Verify error was pushed to streamer
-            push_calls = mock_streamer.push.call_args_list
-            assert any(
-                call[1]["role"] == Role.system and "Error accessing MindsDB: Models access failed" in call[1]["content"]
-                for call in push_calls
-            )
+        # Verify error was pushed to streamer
+        push_calls = mock_streamer.push.call_args_list
+        assert any(
+            call[1]["role"] == Role.system and "Error accessing MindsDB: Models access failed" in call[1]["content"]
+            for call in push_calls
+        )
 
-            # Verify error was logged
-            mock_logger.error.assert_called()
-            error_calls = [call[0][0] for call in mock_logger.error.call_args_list]
-            assert any("MindsDB error: Models access failed" in call for call in error_calls)
+        # Verify error was logged
+        mock_logger.error.assert_called()
+        error_calls = [call[0][0] for call in mock_logger.error.call_args_list]
+        assert any("MindsDB error: Models access failed" in call for call in error_calls)
 
     @pytest.mark.asyncio
-    async def test_chat_completions_mindsdb_databases_error(self, sample_handler, mock_streamer, mock_mindsdb_client):
+    @patch("minds.handlers.chat_completions_handler.logger")
+    async def test_chat_completions_mindsdb_databases_error(
+        self, mock_logger, sample_handler, mock_streamer, mock_mindsdb_client
+    ):
         """Test chat completions when MindsDB databases.list() raises an exception."""
         # Setup mock to raise exception on databases.list()
         mock_mindsdb_client.models.list.return_value = [Mock()]
         mock_mindsdb_client.databases.list.side_effect = Exception("Database access failed")
 
-        with patch("minds.handlers.chat_completions_handler.logger") as mock_logger:
-            # Execute chat completions
-            result = await sample_handler.chat_completions(mock_streamer)
+        # Execute chat completions
+        result = await sample_handler.chat_completions(mock_streamer)
 
-            # Should still return successful result despite MindsDB error
-            expected_result = f"Processed {len(sample_handler.messages)} messages with MindsDB session"
-            assert result == expected_result
+        # Should still return successful result despite MindsDB error
+        expected_result = f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        assert result == expected_result
 
-            # Verify error was pushed to streamer
-            push_calls = mock_streamer.push.call_args_list
-            assert any(
-                call[1]["role"] == Role.system
-                and "Error accessing MindsDB: Database access failed" in call[1]["content"]
-                for call in push_calls
-            )
+        # Verify error was pushed to streamer
+        push_calls = mock_streamer.push.call_args_list
+        assert any(
+            call[1]["role"] == Role.system and "Error accessing MindsDB: Database access failed" in call[1]["content"]
+            for call in push_calls
+        )
 
-            # Verify error was logged
-            mock_logger.error.assert_called()
+        # Verify error was logged
+        mock_logger.error.assert_called()
 
     @pytest.mark.asyncio
+    @patch("minds.handlers.chat_completions_handler.logger")
     async def test_chat_completions_streamer_error_during_processing(
-        self, sample_handler, mock_streamer, mock_mindsdb_client
+        self, mock_logger, sample_handler, mock_streamer, mock_mindsdb_client
     ):
         """Test chat completions when streamer.push raises an exception during final processing."""
         # Setup successful MindsDB responses
@@ -224,15 +223,14 @@ class TestChatCompletionsHandler:
 
         mock_streamer.push.side_effect = push_side_effect
 
-        with patch("minds.handlers.chat_completions_handler.logger") as mock_logger:
-            # Execute chat completions - should handle the exception
-            result = await sample_handler.chat_completions(mock_streamer)
+        # Execute chat completions - should handle the exception
+        result = await sample_handler.chat_completions(mock_streamer)
 
-            # Should return error message due to final processing failure
-            assert "Error in MindsDB chat completion: Streamer push failed" in result
+        # Should return error message due to final processing failure
+        assert "Error in MindsDB chat completion: Streamer push failed" in result
 
-            # Verify error was logged
-            mock_logger.error.assert_called()
+        # Verify error was logged
+        mock_logger.error.assert_called()
 
     @pytest.mark.asyncio
     async def test_chat_completions_empty_messages_list(
@@ -299,7 +297,10 @@ class TestChatCompletionsHandler:
             assert any(call[1]["role"] == message.role and message.content in call[1]["content"] for call in push_calls)
 
     @pytest.mark.asyncio
-    async def test_chat_completions_logging_behavior(self, sample_handler, mock_streamer, mock_mindsdb_client):
+    @patch("minds.handlers.chat_completions_handler.logger")
+    async def test_chat_completions_logging_behavior(
+        self, mock_logger, sample_handler, mock_streamer, mock_mindsdb_client
+    ):
         """Test that logging calls are made correctly throughout execution."""
         # Setup successful MindsDB responses
         mock_models = [Mock() for _ in range(5)]
@@ -307,26 +308,25 @@ class TestChatCompletionsHandler:
         mock_mindsdb_client.models.list.return_value = mock_models
         mock_mindsdb_client.databases.list.return_value = mock_databases
 
-        with patch("minds.handlers.chat_completions_handler.logger") as mock_logger:
-            # Execute chat completions
-            await sample_handler.chat_completions(mock_streamer)
+        # Execute chat completions
+        await sample_handler.chat_completions(mock_streamer)
 
-            # Verify info logging calls
-            info_calls = [call[0][0] for call in mock_logger.info.call_args_list]
+        # Verify info logging calls
+        info_calls = [call[0][0] for call in mock_logger.info.call_args_list]
 
-            # Check model logging
-            assert any("Using model: gpt-3.5-turbo" in call for call in info_calls)
+        # Check model logging
+        assert any("Using model: gpt-3.5-turbo" in call for call in info_calls)
 
-            # Check message logging
-            for message in sample_handler.messages:
-                assert any(f"Message received: {message.role} {message.content}" in call for call in info_calls)
+        # Check message logging
+        for message in sample_handler.messages:
+            assert any(f"Message received: {message.role} {message.content}" in call for call in info_calls)
 
-            # Check MindsDB info logging
-            assert any(f"Found {len(mock_models)} MindsDB models." in call for call in info_calls)
-            assert any(f"Found {len(mock_databases)} databases." in call for call in info_calls)
+        # Check MindsDB info logging
+        assert any(f"Found {len(mock_models)} MindsDB models." in call for call in info_calls)
+        assert any(f"Found {len(mock_databases)} databases." in call for call in info_calls)
 
-            # Check dummy response logging
-            assert any("This is a dummy chat completion response." in call for call in info_calls)
+        # Check dummy response logging
+        assert any("This is a dummy chat completion response." in call for call in info_calls)
 
     @pytest.mark.asyncio
     async def test_chat_completions_messages_text_formatting(
@@ -378,7 +378,10 @@ class TestChatCompletionsHandler:
         assert sample_handler.stream == original_stream
 
     @pytest.mark.asyncio
-    async def test_chat_completions_return_type_consistency(self, sample_handler, mock_streamer, mock_mindsdb_client):
+    @patch("minds.handlers.chat_completions_handler.logger")
+    async def test_chat_completions_return_type_consistency(
+        self, mock_logger, sample_handler, mock_streamer, mock_mindsdb_client
+    ):
         """Test that chat_completions always returns a string."""
         # Test successful case
         mock_mindsdb_client.models.list.return_value = []
@@ -399,7 +402,6 @@ class TestChatCompletionsHandler:
 
         error_streamer.push.side_effect = push_side_effect
 
-        with patch("minds.handlers.chat_completions_handler.logger"):
-            result = await sample_handler.chat_completions(error_streamer)
-            assert isinstance(result, str)
-            assert "Error in MindsDB chat completion" in result
+        result = await sample_handler.chat_completions(error_streamer)
+        assert isinstance(result, str)
+        assert "Error in MindsDB chat completion" in result

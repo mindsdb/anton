@@ -9,11 +9,11 @@ from sqlmodel import Session as SQLModelSession
 from minds.common.logger import setup_logging
 from minds.common.vars import (
     DATABASE_URI,
-    DB_POOL_SIZE,
     DB_MAX_OVERFLOW,
-    DB_POOL_TIMEOUT,
-    DB_POOL_RECYCLE,
     DB_POOL_PRE_PING,
+    DB_POOL_RECYCLE,
+    DB_POOL_SIZE,
+    DB_POOL_TIMEOUT,
 )
 
 logger = setup_logging()

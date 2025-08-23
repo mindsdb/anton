@@ -1,7 +1,7 @@
-from typing import Any, Optional
+from typing import Any
 
-from pydantic import BaseModel, Field
 from fastapi import Request
+from pydantic import BaseModel, Field
 
 
 class Context(BaseModel):
@@ -52,7 +52,7 @@ class LangfuseContext(BaseModel):
     user_id: str = ""
     metadata: LangfuseContextMetadata = LangfuseContextMetadata()
     tags: list[Any] = []
-    trace_id: Optional[str] = None
+    trace_id: str | None = None
 
 
 def create_langfuse_context(context: Context) -> LangfuseContext:

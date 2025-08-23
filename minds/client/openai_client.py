@@ -1,14 +1,12 @@
-from typing import Optional
-
-from openai import AsyncOpenAI
 from langfuse import observe
+from openai import AsyncOpenAI
 
 from minds.common.logger import setup_logging
 from minds.common.vars import (
-    OPEN_AI_MAX_TOKENS,
-    OPEN_AI_MODEL_NAME,
     OPEN_AI_API_KEY,
     OPEN_AI_API_URL,
+    OPEN_AI_MAX_TOKENS,
+    OPEN_AI_MODEL_NAME,
 )
 from minds.requests.schemas import Message
 
@@ -29,8 +27,8 @@ class OpenAIClient:
         self,
         messages: list[Message],
         stream: bool = False,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ):
         """
         Chat completions with performance logging.

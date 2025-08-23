@@ -4,7 +4,7 @@ import uuid
 from langfuse import get_client
 
 from minds.common.logger import setup_logging
-from minds.requests.context import create_langfuse_context, Context
+from minds.requests.context import Context, create_langfuse_context
 
 # Set up logging
 logger = setup_logging()

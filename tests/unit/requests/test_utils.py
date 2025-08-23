@@ -186,8 +186,10 @@ class TestSetupLangfuseObservation:
     @patch("minds.requests.utils.get_client")
     @patch("minds.requests.utils.uuid.uuid4")
     @patch("minds.requests.utils.logger")
+    @patch("minds.requests.utils.traceback.format_exc", return_value="mocked traceback")
     def test_setup_langfuse_observation_create_context_exception(
         self,
+        mock_traceback,
         mock_logger,
         mock_uuid4,
         mock_get_client,
@@ -205,8 +207,7 @@ class TestSetupLangfuseObservation:
         mock_create_langfuse_context.side_effect = test_exception
 
         # Act - the function should catch the exception and return default UUID
-        with patch("minds.requests.utils.traceback.format_exc", return_value="mocked traceback"):
-            result = setup_langfuse_observation(test_context)
+        result = setup_langfuse_observation(test_context)
 
         # Assert
         assert result == expected_default_id
@@ -290,26 +291,23 @@ class TestSetupLangfuseObservation:
         # Should not log debug message since trace ID is None
         mock_logger.debug.assert_not_called()
 
-    def test_setup_langfuse_observation_uuid_format(self):
+    @patch("minds.requests.utils.create_langfuse_context")
+    @patch("minds.requests.utils.traceback.format_exc", return_value="mocked traceback")
+    def test_setup_langfuse_observation_uuid_format(self, mock_traceback, mock_create):
         """Test that default request ID is a valid UUID string."""
         # We can't easily mock uuid.uuid4() in the actual function call,
         # but we can test that the function returns a string that looks like a UUID
         test_context = Context()
 
-        with patch("minds.requests.utils.create_langfuse_context") as mock_create:
-            with patch(
-                "minds.requests.utils.traceback.format_exc",
-                return_value="mocked traceback",
-            ):
-                mock_create.side_effect = Exception("Force default UUID")
+        mock_create.side_effect = Exception("Force default UUID")
 
-                result = setup_langfuse_observation(test_context)
+        result = setup_langfuse_observation(test_context)
 
-                # Result should be a string representation of a UUID
-                assert isinstance(result, str)
-                assert len(result) == 36  # Standard UUID string length
-                assert result.count("-") == 4  # Standard UUID has 4 hyphens
+        # Result should be a string representation of a UUID
+        assert isinstance(result, str)
+        assert len(result) == 36  # Standard UUID string length
+        assert result.count("-") == 4  # Standard UUID has 4 hyphens
 
-                # Should be able to parse as UUID
-                parsed_uuid = uuid.UUID(result)
-                assert str(parsed_uuid) == result
+        # Should be able to parse as UUID
+        parsed_uuid = uuid.UUID(result)
+        assert str(parsed_uuid) == result
