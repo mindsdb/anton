@@ -51,13 +51,20 @@ test/integration: activate
 # Run all tests
 test: test/unit test/integration
 
+# Coverage
+test/unit/coverage: activate
+	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-fail-under=85
+
+coverage/html: activate
+	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-report html
+
 # Run the server
 run: activate docker/deps
 	$(PYTHON) -m watchfiles --filter python '$(PYTHON) -m uvicorn minds.server:app --host 0.0.0.0 --port 9010' .
 
 # Run docker deps
 docker/deps:
-	$(DOCKER_COMMAND) up -d postgres redis langfuse migrate
+	$(DOCKER_COMMAND) up -d postgres redis langfuse-web langfuse-worker migrate
 
 # Build the docker image
 docker/build: deps
@@ -76,3 +83,10 @@ docker/stop: deps
 # Run database migrations
 migrate: activate ## Run alembic database migrations
 	$(PYTHON) -m alembic upgrade head
+
+check/lint: activate ## Check code style with ruff
+	$(PYTHON) -m ruff check minds tests
+
+format: activate ## Format code with ruff
+	$(PYTHON) -m ruff format minds tests
+

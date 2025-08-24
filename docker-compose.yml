@@ -34,7 +34,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7.2.4
+    image: redis:8.2.1
     <<: *autoRestartOnFailure
     restart: unless-stopped
     ports:
@@ -48,12 +48,68 @@ services:
       timeout: 3s
       retries: 30
 
-  langfuse:
-    image: langfuse/langfuse:2.87.0
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.7.4
     <<: *autoRestartOnFailure
     restart: unless-stopped
-    networks:
-      - default
+    ports:
+      - ${CLICKHOUSE_PORT}:8123
+      - ${CLICKHOUSE_TCP_PORT}:9000
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      - ch_logs:/var/log/clickhouse-server
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      TZ: UTC
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query='SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
+  minio:
+    image: minio/minio:latest
+    <<: *autoRestartOnFailure
+    restart: unless-stopped
+    ports:
+      - ${MINIO_PORT}:9000
+      - ${MINIO_CONSOLE_PORT}:9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        /usr/bin/mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+        /usr/bin/mc mb -p local/${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse} || true
+      "
+    restart: "no"
+
+  langfuse-web:
+    image: langfuse/langfuse:3.101.0
+    <<: *autoRestartOnFailure
+    restart: unless-stopped
     ports:
       - ${LANGFUSE_PORT}:3000
     depends_on:
@@ -61,23 +117,121 @@ services:
         condition: service_healthy
       autoheal:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
-      - DATABASE_URL=${LANGFUSE_DB_URI}
-      - NEXTAUTH_SECRET=secret # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      - SALT=salt # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      - ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000 # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
-      - NEXTAUTH_URL=http://localhost:${LANGFUSE_PORT}
-      - LANGFUSE_INIT_ORG_ID=mindsdb # Organization ID
-      - LANGFUSE_INIT_ORG_NAME=MindsDB # Organization name
-      - LANGFUSE_INIT_PROJECT_ID=${LANGFUSE_INIT_PROJECT_ID} # Project ID (UUID)
-      - LANGFUSE_INIT_PROJECT_NAME=${LANGFUSE_INIT_PROJECT_NAME} # Project name
-      - LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY} # Project public key
-      - LANGFUSE_INIT_PROJECT_SECRET_KEY=${LANGFUSE_SECRET_KEY} # Project secret key
-      - LANGFUSE_INIT_USER_EMAIL=${LANGFUSE_INIT_USER_EMAIL} # User email
-      - LANGFUSE_INIT_USER_NAME=${LANGFUSE_INIT_USER_NAME} # User name
-      - LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_INIT_USER_PASSWORD} # User password
+      DATABASE_URL: ${LANGFUSE_DB_URI}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      SALT: ${SALT} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY} # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID} # Organization ID
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME} # Organization name
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID} # Project ID (UUID)
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME} # Project name
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY} # Project public key
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY} # Project secret key
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL} # User email
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME} # User name
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD} # User password
+
+      LANGFUSE_LOG_LEVEL: ${LANGFUSE_LOG_LEVEL}
+
+      # Clickhouse
+      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL}
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED}
+
+      # Redis
+      REDIS_CONNECTION_STRING: ${REDIS_CONNECTION_STRING}
+
+      # Minio
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: ${LANGFUSE_S3_EVENT_UPLOAD_ENABLED}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE}
+      LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: ${LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED}
+    
+      AWS_ACCESS_KEY_ID: ${LANGFUSE_AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${LANGFUSE_AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${LANGFUSE_AWS_REGION}
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://langfuse:3000/api/public/health"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$(hostname):3000/api/public/health"]
+      interval: 30s
+      timeout: 29s
+      retries: 10
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3.101.0
+    <<: *autoRestartOnFailure
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      autoheal:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${LANGFUSE_DB_URI}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      SALT: ${SALT} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY} # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID} # Organization ID
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME} # Organization name
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID} # Project ID (UUID)
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME} # Project name
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY} # Project public key
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY} # Project secret key
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL} # User email
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME} # User name
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD} # User password
+
+      LANGFUSE_LOG_LEVEL: ${LANGFUSE_LOG_LEVEL}
+
+      # Clickhouse
+      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL}
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED}
+
+      # Redis
+      REDIS_CONNECTION_STRING: ${REDIS_CONNECTION_STRING}
+
+      # Minio
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: ${LANGFUSE_S3_EVENT_UPLOAD_ENABLED}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE}
+      LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: ${LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED}
+
+      AWS_ACCESS_KEY_ID: ${LANGFUSE_AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${LANGFUSE_AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${LANGFUSE_AWS_REGION}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$(hostname):3030/api/health"]
       interval: 30s
       timeout: 29s
       retries: 10
@@ -92,7 +246,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URI: "${MINDS_DB_URI_DOCKER}"
+      DATABASE_URI: "${DATABASE_URI}"
     restart: "no"
 
   minds:
@@ -105,7 +259,9 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      langfuse:
+      langfuse-web:
+        condition: service_healthy
+      langfuse-worker:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -117,7 +273,7 @@ services:
       timeout: 9s
       retries: 5
     environment:
-      DATABASE_URI: "${MINDS_DB_URI_DOCKER}"
+      DATABASE_URI: "${DATABASE_URI}"
 
       OPEN_AI_API_URL: "${OPEN_AI_API_URL}"
       OPEN_AI_API_KEY: "${OPEN_AI_API_KEY}"
@@ -129,6 +285,9 @@ services:
 
 volumes:
   postgres:
+  ch_data:
+  ch_logs:
+  minio_data:
 
 networks:
   default:

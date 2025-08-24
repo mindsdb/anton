@@ -1,0 +1,20 @@
+name: Linter
+
+on:
+  workflow_call:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: mdb-dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.4'
+      - name: Run linter
+        run: make check/lint

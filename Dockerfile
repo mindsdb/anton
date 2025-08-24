@@ -1,7 +1,7 @@
 # Builder image with tools for building pip packages
 FROM python:3.13.2 AS builder
 
-# Install system dependencies required for pymssql
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     freetds-dev \
     && apt-get clean

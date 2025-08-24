@@ -16,6 +16,10 @@ concurrency:
 
 jobs:
 
+  linter:
+    # Runs linter
+    uses: ./.github/workflows/linter.yml
+
   tests:
     # Runs tests
     uses: ./.github/workflows/tests.yml

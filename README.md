@@ -13,6 +13,7 @@ Minds is a FastAPI-based service that provides an OpenAI-compatible chat complet
 - PostgreSQL database integration with SQLModel
 - Alembic database migrations
 - UUID-based primary keys with automatic generation
+- MindsDB SDK integration for AI model management and data operations
 
 ## Getting Started
 
@@ -77,6 +78,9 @@ OPEN_AI_API_URL=https://api.openai.com/v1
 OPEN_AI_API_KEY=your-api-key-here
 OPEN_AI_MODEL_NAME=gpt-4o
 OPEN_AI_MAX_TOKENS=400000
+
+# MindsDB Configuration
+MINDSDB_URL=https://cloud.mindsdb.com
 
 # Logging Configuration
 LOG_LEVEL=INFO
@@ -214,6 +218,25 @@ The auto-reload feature makes development faster by eliminating the need to manu
 - `make test/unit` - Run unit tests only
 - `make test/integration` - Run integration tests only  
 - `make test` - Run all tests (unit + integration)
+- `make test/unit/coverage` - Run unit tests with coverage reporting (requires 85% coverage)
+- `make coverage/html` - Generate HTML coverage report in `htmlcov/` directory
+
+#### Test Coverage
+
+The project maintains high test coverage standards:
+
+- **Minimum Coverage**: 85% coverage required for all unit tests
+- **Coverage Tools**: Uses `pytest-cov` for coverage reporting
+- **HTML Reports**: Generate detailed HTML coverage reports with `make coverage/html`
+- **CI/CD Integration**: Coverage is automatically checked in GitHub Actions workflows
+
+The test suite includes:
+- **Unit Tests**: Comprehensive testing of individual components, handlers, models, and utilities
+- **Integration Tests**: End-to-end testing of API endpoints and system integration
+- **Mock Testing**: Extensive use of mocks for external dependencies (MindsDB SDK, OpenAI, database)
+- **Async Testing**: Full support for testing async operations and streaming responses
+
+Coverage reports help identify untested code paths and ensure reliability. The HTML coverage report provides detailed line-by-line coverage information and is generated in the `htmlcov/` directory.
 
 ### Docker Commands
 
@@ -381,12 +404,88 @@ This method allows handlers to push messages to a queue that gets consumed by th
 
 This architecture allows the same handler code to work for both streaming and non-streaming requests, with the only difference being the streamer implementation used.
 
+## MindsDB Client Integration
+
+The service includes a robust MindsDB SDK integration that provides seamless access to MindsDB's AI capabilities and data management features.
+
+### MindsDB Client Features
+
+The MindsDB client integration offers:
+
+- **Authentication**: Secure API key-based authentication with MindsDB Cloud or on-premise instances
+- **Model Management**: Access to AI models, training, and inference capabilities
+- **Database Operations**: Query and manage databases connected to MindsDB
+- **Error Handling**: Comprehensive error handling and validation
+- **Request Context**: Automatic client creation from FastAPI request context
+
+### Client Creation
+
+The system provides two main functions for creating MindsDB clients:
+
+```python
+from minds.client.mindsdb import create_mindsdb_client_from_request, create_mindsdb_client
+
+# Create client from FastAPI request (extracts Bearer token automatically)
+client = create_mindsdb_client_from_request(request)
+
+# Create client with explicit API key
+client = create_mindsdb_client("your-api-key")
+```
+
+### Usage in Handlers
+
+Chat completion handlers automatically receive a configured MindsDB client:
+
+```python
+class ChatCompletionsHandler:
+    def __init__(self, session: Session, mindsdb_client: Server, messages: List[Message], model: str, stream: bool):
+        self.mindsdb_client = mindsdb_client
+    
+    async def chat_completions(self, streamer: MessageStreamer):
+        # Access MindsDB models
+        models = self.mindsdb_client.models.list()
+        
+        # Access databases
+        databases = self.mindsdb_client.databases.list()
+        
+        # Use MindsDB for AI operations
+        # ... your AI logic here
+```
+
+### Configuration
+
+Configure the MindsDB connection in your `.env` file:
+
+```env
+# MindsDB Configuration
+MINDSDB_URL=https://cloud.mindsdb.com  # or your on-premise URL
+```
+
+### Authentication
+
+The client uses Bearer token authentication extracted from request headers:
+
+```bash
+curl -X POST http://localhost:9010/chat/completions \
+  -H "Authorization: Bearer your-mindsdb-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "minds", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+### Error Handling
+
+The client includes comprehensive error handling:
+
+- **Invalid API Key**: Validates API key format and presence
+- **Connection Errors**: Handles network and authentication failures
+- **Service Errors**: Graceful handling of MindsDB service errors
+
 ## Project Structure
 
 ```
 minds/
 ├── minds/
-│   ├── client/           # OpenAI client implementation
+│   ├── client/           # Client implementations (OpenAI and MindsDB)
 │   ├── common/           # Shared utilities (logging, variables)
 │   ├── db/              # Database session management
 │   ├── handlers/         # Request handlers
@@ -418,6 +517,7 @@ The service is built with:
 - **Alembic**: Database migration management
 - **Langfuse**: Observability and tracing
 - **OpenAI Client**: Integration with OpenAI-compatible APIs
+- **MindsDB SDK**: Integration with MindsDB for AI model management and data operations
 - **Docker Compose**: Local development environment with all services
 
 

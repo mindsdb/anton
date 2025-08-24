@@ -1,44 +1,43 @@
-from typing import Any, Optional
-import uuid
+from typing import Any
 
-from pydantic import BaseModel
 from fastapi import Request
+from pydantic import BaseModel, Field
 
 
 class Context(BaseModel):
     """
     Context for the application.
     """
-    user_id: int = 0
-    user_email: str = ""
-    company_id: int = 0
+
+    user_id: str = Field(default="", description="The user ID")
+    user_email: str = Field(default="", description="The user email")
+    company_id: str = Field(default="", description="The company ID")
+
 
 def extract_context_from_request(request: Request) -> Context:
     """
     Extract the context from the request headers.
     """
 
-    user_id = int(request.headers.get("x-user-id", 0))
+    user_id = str(request.headers.get("x-user-id", ""))
     user_email = request.headers.get("x-user-email", "")
-    company_id = int(request.headers.get("x-company-id", 0))
+    company_id = str(request.headers.get("x-company-id", ""))
 
-    return Context(
-        user_id=user_id,
-        user_email=user_email,
-        company_id=company_id
-    )
+    return Context(user_id=user_id, user_email=user_email, company_id=company_id)
+
 
 class LangfuseContextMetadata(BaseModel):
     """
     Metadata for the Langfuse context.
     Attributes:
-        user_id: str
+        user_id: int
         user_email: str
         company_id: int
     """
-    user_id: int = 0
-    user_email: str = ""
-    company_id: int = ""
+
+    user_id: str = Field(default="", description="The user ID")
+    user_email: str = Field(default="", description="The user email")
+    company_id: str = Field(default="", description="The company ID")
 
 
 class LangfuseContext(BaseModel):
@@ -49,27 +48,25 @@ class LangfuseContext(BaseModel):
         metadata: LangfuseContextMetadata
         tags: list[str]
     """
-    user_id: int = 0
+
+    user_id: str = ""
     metadata: LangfuseContextMetadata = LangfuseContextMetadata()
     tags: list[Any] = []
-    trace_id: Optional[str] = None
+    trace_id: str | None = None
 
 
 def create_langfuse_context(context: Context) -> LangfuseContext:
     """
     Create a Langfuse context from request context.
     """
-    tags = [
-        context.user_email,
-        context.company_id
-    ]
+    tags = [context.user_email, str(context.company_id)]
 
     return LangfuseContext(
         user_id=context.user_id,
         metadata=LangfuseContextMetadata(
             user_id=context.user_id,
             user_email=context.user_email,
-            company_id=context.company_id
+            company_id=context.company_id,
         ),
-        tags=tags
+        tags=tags,
     )
