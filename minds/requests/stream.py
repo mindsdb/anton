@@ -1,9 +1,10 @@
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
-from langfuse import observe
+from langfuse import get_client, observe
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -19,6 +20,33 @@ from minds.requests.schemas import (
 
 # Set up logging
 logger = setup_logging()
+
+
+def sanitize_content_for_observation(content: Any) -> str:
+    """
+    Sanitize content for Langfuse observation to prevent base64 data URI parsing errors.
+
+    Args:
+        content: Any content that needs to be serialized for observation
+
+    Returns:
+        str: A safely serialized string representation of the content
+    """
+    try:
+        if content is None:
+            return ""
+        elif isinstance(content, str):
+            return content
+        elif isinstance(content, list | dict):
+            # For complex objects like citations, convert to JSON string
+            # This prevents Langfuse from trying to interpret them as media content
+            return json.dumps(content, default=lambda x: x.model_dump() if hasattr(x, "model_dump") else str(x))
+        else:
+            # For other types, convert to string
+            return str(content)
+    except Exception as e:
+        logger.warning(f"Failed to serialize content for observation: {e}")
+        return f"<serialization_error: {type(content).__name__}>"
 
 
 class StreamMessage(BaseModel):
@@ -95,7 +123,6 @@ class StreamerCollector(MessageStreamer):
         return None
 
 
-@observe
 async def format_messages_for_streaming(
     message_generator: AsyncGenerator[StreamMessage, Any], model: str
 ) -> AsyncGenerator[str, None]:
@@ -111,6 +138,10 @@ async def format_messages_for_streaming(
     """
     async_index = 0
     async for search_message in message_generator:
+        # Sanitize content for Langfuse observation to prevent parsing errors
+        sanitized_content = sanitize_content_for_observation(search_message.content)
+
+        # Create chunk with original content for streaming
         chunk = ChatCompletionChunk(
             id=search_message.id,
             model=model,
@@ -122,12 +153,18 @@ async def format_messages_for_streaming(
             ],
         )
         async_index += 1
+
+        # Log sanitized content to avoid issues with complex objects
+        logger.debug(f"Streaming message {async_index}: {search_message.role} - {sanitized_content[:100]}...")
+
         yield f"data: {chunk.model_dump_json()}\n\n"
 
 
+@observe(name="Process Streaming Producer")
 async def process_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
+    trace_name: str,
     model: str,
 ) -> StreamingResponse:
     """
@@ -140,30 +177,48 @@ async def process_streaming_producer(
             producer (Callable[[Any], Awaitable[None]]): An async function that takes a
                     `MessageStreamer` instance and emits `StreamMessage` objects.
             request_id (str): The unique ID for the request, used to identify the stream.
+            trace_name (str): The name of the original trace.
             model (str): The model name to include in the SSE event.
     Returns:
             StreamingResponse: A response that streams the messages as Server-Sent Events (SSE).
     """
+    trace_id = get_client().get_current_trace_id()
+    observation_id = get_client().get_current_observation_id()
 
+    logger.debug(f"Trace ID - Streaming Producer: {trace_id}")
+    logger.debug(f"Observation ID - Streaming Producer: {observation_id}")
+
+    @observe()
     async def stream():
         streamer = Streamer(request_id=request_id)
 
+        @observe(name=trace_name)
         async def run_producer():
             try:
-                await producer(streamer)
+                await producer(
+                    streamer,
+                )
             finally:
                 # Ensure the sentinel is always sent so the consumer loop terminates
                 await streamer.close()
 
-        task = asyncio.create_task(run_producer())
+        task = asyncio.create_task(
+            run_producer(
+                langfuse_trace_id=trace_id,
+                langfuse_parent_observation_id=observation_id,
+            )
+        )
         async for message in streamer:
-            logger.info(f"Message: {message}")
+            logger.debug(f"Message: {message}")
             yield message
         await task
 
     return StreamingResponse(
         format_messages_for_streaming(
-            message_generator=stream(),
+            message_generator=stream(
+                langfuse_trace_id=trace_id,
+                langfuse_parent_observation_id=observation_id,
+            ),
             model=model,
         ),
         media_type="text/event-stream",
@@ -200,8 +255,11 @@ async def _build_json_response_from_messages(messages: list[StreamMessage], mode
     return JSONResponse(response.model_dump())
 
 
+@observe(name="Process Non-Streaming Producer", as_type="generation")
 async def process_non_streaming_producer(
-    producer: Callable[[Any], Awaitable[None]], request_id: str, model: str
+    producer: Callable[[Any], Awaitable[None]],
+    request_id: str,
+    model: str,
 ) -> JSONResponse:
     """
     Run a push-based producer and return a non-streaming JSON ChatCompletion built
