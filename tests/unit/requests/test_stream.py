@@ -12,11 +12,21 @@ def streaming_mod(monkeypatch):
     # Make observe a no-op BEFORE importing/reloading the module
     import langfuse as dec
 
-    monkeypatch.setattr(
-        dec,
-        "observe",
-        lambda f=None, **_: (lambda *a, **k: f(*a, **k)) if f else (lambda x: x),
-    )
+    def mock_observe(f=None, **decorator_kwargs):
+        """Mock observe decorator that consumes langfuse parameters"""
+        if f is None:
+            # Called as @observe(...) - return decorator
+            return lambda func: mock_observe(func, **decorator_kwargs)
+        else:
+            # Called as @observe or @observe() - return wrapped function
+            def wrapper(*args, **kwargs):
+                # Filter out langfuse parameters that should be consumed by decorator
+                filtered_kwargs = {k: v for k, v in kwargs.items() if not k.startswith("langfuse_")}
+                return f(*args, **filtered_kwargs)
+
+            return wrapper
+
+    monkeypatch.setattr(dec, "observe", mock_observe)
 
     importlib.reload(mod)
     return mod
@@ -113,13 +123,19 @@ async def test_streamer_collector_accumulates_and_close_noop(streaming_mod):
 @pytest.mark.asyncio
 async def test_process_streaming_producer_emits_sse(streaming_mod):
     model = "model_test_process_streaming_producer_emits_sse"
+    trace_name = "trace_name_test_process_streaming_producer_emits_sse"
 
     async def producer(streamer: streaming_mod.MessageStreamer):
         await streamer.push(streaming_mod.Role.user, "hello")
         await streamer.push(streaming_mod.Role.assistant, "world")
         # close() is guaranteed by the wrapper even if we forget it
 
-    resp = await streaming_mod.process_streaming_producer(producer, request_id="chatcmpl-777", model=model)
+    resp = await streaming_mod.process_streaming_producer(
+        producer,
+        request_id="chatcmpl-777",
+        model=model,
+        trace_name=trace_name,
+    )
     # headers & type
     assert resp.media_type == "text/event-stream"
     assert resp.headers["Cache-Control"] == "no-cache"

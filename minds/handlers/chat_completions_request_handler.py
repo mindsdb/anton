@@ -60,6 +60,7 @@ async def chat_completions_request_handler(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
+            trace_name="Chat Completions",
         )
     else:
         logger.debug(f"🔄[{request_id}] Chat completions request is non-streaming.")

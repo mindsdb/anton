@@ -56,7 +56,7 @@ async def options_handler():
 
 @router.post("/chat/completions")
 @router.post("/v1/chat/completions")
-@observe(name="Chat Completions")
+@observe(name="Chat Completions", as_type="generation")
 async def chat_completions(chat_completions_request: ChatCompletionsRequest, request: Request):
     """
     Endpoint to handle chat completions for documents.
@@ -83,7 +83,7 @@ async def chat_completions(chat_completions_request: ChatCompletionsRequest, req
     mindsdb_client = create_mindsdb_client_from_request(request)
 
     try:
-        logger.debug(f"🔄 [{request_id}] Starting chat with documents ")
+        logger.debug(f"🔄 [{request_id}] Starting chat completions")
 
         response = await chat_completions_request_handler(
             request_id=request_id,
