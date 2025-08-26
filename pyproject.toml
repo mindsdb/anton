@@ -1,7 +1,7 @@
 [project]
 name = "minds"
 version = "1.0.0"
-requires-python = ">=3.12,<4.0"
+requires-python = ">=3.10,<4.0"
 dependencies = [
     "mindsdb_sdk>=3.4.6",
     "openai>=1.99.9",
