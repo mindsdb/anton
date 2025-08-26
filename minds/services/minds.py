@@ -1,0 +1,493 @@
+"""
+Minds service layer for business logic and data operations.
+
+This module contains the MindsService class that handles all business logic
+related to mind management, including CRUD operations with internal database storage.
+MindsDB is only used for datasource validation, not for minds storage.
+"""
+
+from typing import List, Optional
+from sqlmodel import Session, select, and_
+
+from minds.common.logger import setup_logging
+from minds.model.mind import Mind
+from minds.schemas.minds import (
+    MindCreateRequest,
+    MindResponse, 
+    MindUpdateRequest,
+    AddDatasourceRequest
+)
+
+# Set up logging
+logger = setup_logging()
+
+
+class MindsServiceError(Exception):
+    """Base exception for minds service errors."""
+    pass
+
+
+class MindNotFoundError(MindsServiceError):
+    """Raised when a mind is not found."""
+    pass
+
+
+class MindAlreadyExistsError(MindsServiceError):
+    """Raised when trying to create a mind that already exists."""
+    pass
+
+
+class DatasourceNotFoundError(MindsServiceError):
+    """Raised when a datasource is not found."""
+    pass
+
+
+class MindsService:
+    """
+    Service class for mind management operations.
+    
+    This class encapsulates all business logic related to minds,
+    including CRUD operations with internal database storage. MindsDB is
+    only used for datasource validation, not for storing minds data.
+    """
+    
+    def __init__(self, session: Session, user_id: str, company_id: str):
+        """
+        Initialize the minds service.
+        
+        Args:
+            session (Session): Database session
+            user_id (str): Current user ID
+            company_id (str): Current company ID
+        """
+        self.session = session
+        self.user_id = user_id
+        self.company_id = company_id
+        logger.debug(f"MindsService initialized for user {user_id}, company {company_id}")
+    
+    @classmethod
+    def create(cls, session: Session, user_id: str, company_id: str) -> "MindsService":
+        """Factory method to create a MindsService instance."""
+        return cls(session=session, user_id=user_id, company_id=company_id)
+    
+    async def list_minds(
+        self,
+        provider: Optional[str] = None,
+        is_active: Optional[bool] = None,
+        limit: int = 50,
+        offset: int = 0,
+        with_detailed_data: bool = False
+    ) -> List[MindResponse]:
+        """
+        List minds for the current user/company with optional filtering and pagination.
+        
+        Args:
+            provider (Optional[str]): Filter by provider (openai, google, etc.)
+            is_active (Optional[bool]): Filter by active status
+            limit (int): Maximum number of minds to return (default: 50)
+            offset (int): Number of minds to skip (default: 0)
+            with_detailed_data (bool): Include detailed datasource base data
+            
+        Returns:
+            List[MindResponse]: List of mind objects
+        """
+        try:
+            logger.debug(f"Listing minds for company {self.company_id} with filters: provider={provider}, is_active={is_active}, limit={limit}, offset={offset}")
+            
+            # Build query conditions
+            conditions = [Mind.company_id == self.company_id]
+            if provider is not None:
+                conditions.append(Mind.provider == provider)
+            # not sure if this is needed initially
+            if is_active is not None:
+                conditions.append(Mind.is_active == is_active)
+            else:
+                # Default: only active minds unless explicitly requested
+                conditions.append(Mind.is_active == True)
+
+            statement = (
+                select(Mind)
+                .where(and_(*conditions))
+                .order_by(Mind.created_on.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            minds = self.session.exec(statement).all()
+            
+            minds_list = []
+            for mind in minds:
+                mind_response = self._mind_to_response(mind, with_detailed_data)
+                minds_list.append(mind_response)
+            
+            logger.info(f"Retrieved {len(minds_list)} minds for company {self.company_id} (offset={offset}, limit={limit})")
+            return minds_list
+        except Exception as e:
+            logger.error(f"Error listing minds for company {self.company_id}: {str(e)}")
+            raise MindsServiceError(f"Failed to list minds: {str(e)}")
+    
+    async def get_mind(self, mind_name: str, with_detailed_data: bool = False) -> MindResponse:
+        """
+        Get a specific mind by name.
+        
+        Args:
+            mind_name (str): Name of the mind
+            with_detailed_data (bool): Include detailed datasource/knowledge base data
+            
+        Returns:
+            MindResponse: Mind object
+            
+        Raises:
+            MindNotFoundError: If the mind doesn't exist
+        """
+        try:
+            logger.debug(f"Getting mind {mind_name} for company {self.company_id}")
+
+            statement = select(Mind).where(
+                and_(
+                    Mind.name == mind_name,
+                    Mind.company_id == self.company_id,
+                    Mind.is_active == True
+                )
+            )
+            mind = self.session.exec(statement).first()
+            
+            if not mind:
+                raise MindNotFoundError(f"Mind '{mind_name}' not found")
+            
+            mind_response = self._mind_to_response(mind, with_detailed_data)
+            logger.info(f"Retrieved mind {mind_name} for company {self.company_id}")
+            return mind_response
+        except MindNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting mind {mind_name}: {str(e)}")
+            raise MindsServiceError(f"Failed to get mind: {str(e)}")
+    
+    async def create_mind(self, mind_data: MindCreateRequest) -> MindResponse:
+        """
+        Create a new mind.
+        
+        Args:
+            mind_data (MindCreateRequest): Mind creation data
+            
+        Returns:
+            MindResponse: Created mind object
+            
+        Raises:
+            MindAlreadyExistsError: If a mind with the same name already exists
+            DatasourceNotFoundError: If any specified datasource doesn't exist
+        """
+        try:
+            logger.debug(f"Creating mind {mind_data.name} for company {self.company_id}")
+            
+            # Check if mind already exists in our database
+            existing_mind = self.session.exec(
+                select(Mind).where(
+                    and_(
+                        Mind.name == mind_data.name,
+                        Mind.company_id == self.company_id,
+                        Mind.is_active == True
+                    )
+                )
+            ).first()
+            
+            if existing_mind:
+                raise MindAlreadyExistsError(f"Mind '{mind_data.name}' already exists")
+            
+            # Validate datasources exist (using MindsDB for validation)
+            await self._validate_datasources(mind_data.datasources)
+
+            new_mind = Mind(
+                name=mind_data.name,
+                provider=mind_data.provider,
+                model_name=mind_data.model_name or "gpt-4o",  # Default model
+                user_id=self.user_id,
+                company_id=self.company_id,
+                parameters=mind_data.parameters or {},
+                datasources=mind_data.datasources or [],
+                is_active=True
+            )
+            
+            self.session.add(new_mind)
+            self.session.commit()
+            self.session.refresh(new_mind)
+            
+            logger.info(f"Created mind {mind_data.name} for company {self.company_id}")
+
+            return self._mind_to_response(new_mind)
+            
+        except (MindAlreadyExistsError, DatasourceNotFoundError):
+            self.session.rollback()
+            raise
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error creating mind {mind_data.name}: {str(e)}")
+            raise MindsServiceError(f"Failed to create mind: {str(e)}")
+    
+    async def update_mind(self, mind_name: str, mind_data: MindUpdateRequest) -> MindResponse:
+        """
+        Update an existing mind.
+        
+        Args:
+            mind_name (str): Name of the mind to update
+            mind_data (MindUpdateRequest): Updated mind data
+            
+        Returns:
+            MindResponse: Updated mind object
+            
+        Raises:
+            MindNotFoundError: If the mind doesn't exist
+        """
+        try:
+            logger.debug(f"Updating mind {mind_name} for company {self.company_id}")
+            
+            statement = select(Mind).where(
+                and_(
+                    Mind.name == mind_name,
+                    Mind.company_id == self.company_id,
+                    Mind.is_active == True
+                )
+            )
+            mind = self.session.exec(statement).first()
+            
+            if not mind:
+                raise MindNotFoundError(f"Mind '{mind_name}' not found")
+            
+            # Check if new name conflicts with existing minds 
+            if mind_data.name and mind_data.name != mind_name:
+                existing_mind = self.session.exec(
+                    select(Mind).where(
+                        and_(
+                            Mind.name == mind_data.name,
+                            Mind.company_id == self.company_id,
+                            Mind.is_active == True
+                        )
+                    )
+                ).first()
+                if existing_mind:
+                    raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
+            
+            # Validate new datasources if provided
+            if mind_data.datasources is not None:
+                await self._validate_datasources(mind_data.datasources)
+            
+            # Update mind fields
+            if mind_data.name is not None:
+                mind.name = mind_data.name
+            if mind_data.provider is not None:
+                mind.provider = mind_data.provider
+            if mind_data.model_name is not None:
+                mind.model_name = mind_data.model_name
+            if mind_data.parameters is not None:
+                mind.parameters = mind_data.parameters
+            if mind_data.datasources is not None:
+                mind.datasources = mind_data.datasources
+            
+            self.session.add(mind)
+            self.session.commit()
+            self.session.refresh(mind)
+            
+            logger.info(f"Updated mind {mind_name} for company {self.company_id}")
+            
+            return self._mind_to_response(mind)
+            
+        except (MindNotFoundError, MindAlreadyExistsError):
+            self.session.rollback()
+            raise
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error updating mind {mind_name}: {str(e)}")
+            raise MindsServiceError(f"Failed to update mind: {str(e)}")
+    
+    async def delete_mind(self, mind_name: str, cascade: bool = False) -> bool:
+        """
+        Delete a mind (soft delete by marking as inactive).
+        
+        Args:
+            mind_name (str): Name of the mind to delete
+            cascade (bool): Whether to delete associated resources (placeholder for future use)
+            
+        Returns:
+            bool: True if deletion was successful
+            
+        Raises:
+            MindNotFoundError: If the mind doesn't exist
+        """
+        try:
+            logger.debug(f"Deleting mind {mind_name} for company {self.company_id}")
+            
+            statement = select(Mind).where(
+                and_(
+                    Mind.name == mind_name,
+                    Mind.company_id == self.company_id,
+                    Mind.is_active == True
+                )
+            )
+            mind = self.session.exec(statement).first()
+            
+            if not mind:
+                raise MindNotFoundError(f"Mind '{mind_name}' not found")
+            
+            if cascade:
+                
+                logger.debug(f"Cascade deletion requested for mind {mind_name}")
+            
+            mind.is_active = False
+            
+            self.session.add(mind)
+            self.session.commit()
+            
+            logger.info(f"Deleted mind {mind_name} for company {self.company_id}")
+            return True
+            
+        except MindNotFoundError:
+            raise
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error deleting mind {mind_name}: {str(e)}")
+            raise MindsServiceError(f"Failed to delete mind: {str(e)}")
+    
+    async def add_datasource_to_mind(self, mind_name: str, datasource_request: AddDatasourceRequest) -> bool:
+        """
+        Add a datasource to a mind.
+        
+        Args:
+            mind_name (str): Name of the mind
+            datasource_request (AddDatasourceRequest): Datasource to add
+            
+        Returns:
+            bool: True if addition was successful
+        """
+        try:
+            logger.debug(f"Adding datasource {datasource_request.name} to mind {mind_name}")
+            
+            statement = select(Mind).where(
+                and_(
+                    Mind.name == mind_name,
+                    Mind.company_id == self.company_id,
+                    Mind.is_active == True
+                )
+            )
+            mind = self.session.exec(statement).first()
+            
+            if not mind:
+                raise MindNotFoundError(f"Mind '{mind_name}' not found")
+            
+            await self._validate_datasources([datasource_request.name])
+            
+            # Check connection if requested
+            if datasource_request.check_connection:
+                await self._check_datasource_connection(datasource_request.name)
+            
+            mind.add_datasource(datasource_request.name)
+            
+            self.session.add(mind)
+            self.session.commit()
+            
+            logger.info(f"Added datasource {datasource_request.name} to mind {mind_name}")
+            return True
+            
+        except (MindNotFoundError, DatasourceNotFoundError):
+            self.session.rollback()
+            raise
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error adding datasource to mind: {str(e)}")
+            raise MindsServiceError(f"Failed to add datasource: {str(e)}")
+    
+    async def remove_datasource_from_mind(self, mind_name: str, datasource_name: str) -> bool:
+        """
+        Remove a datasource from a mind.
+        
+        Args:
+            mind_name (str): Name of the mind
+            datasource_name (str): Name of the datasource to remove
+            
+        Returns:
+            bool: True if removal was successful
+        """
+        try:
+            logger.debug(f"Removing datasource {datasource_name} from mind {mind_name}")
+            
+            statement = select(Mind).where(
+                and_(
+                    Mind.name == mind_name,
+                    Mind.company_id == self.company_id,
+                    Mind.is_active == True
+                )
+            )
+            mind = self.session.exec(statement).first()
+            
+            if not mind:
+                raise MindNotFoundError(f"Mind '{mind_name}' not found")
+            
+            # Check if datasource is attached to this mind
+            if not mind.datasources or datasource_name not in mind.datasources:
+                raise DatasourceNotFoundError(
+                    f"Datasource '{datasource_name}' not found in mind '{mind_name}'"
+                )
+            
+            # Remove datasource from mind using the model method
+            mind.remove_datasource(datasource_name)
+            
+            self.session.add(mind)
+            self.session.commit()
+            
+            logger.info(f"Removed datasource {datasource_name} from mind {mind_name}")
+            return True
+            
+        except (MindNotFoundError, DatasourceNotFoundError):
+            self.session.rollback()
+            raise
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error removing datasource from mind: {str(e)}")
+            raise MindsServiceError(f"Failed to remove datasource: {str(e)}")
+    
+    
+    def _mind_to_response(self, mind: Mind, with_detailed_data: bool = False) -> MindResponse:
+        """Convert Mind database model to MindResponse object."""
+        # TODO: add detailed datasource data if with_detailed_data is True, this is the
+        # actuall DATA valiue in the integrations e.g without password which should be hashed
+        # {"user": "", "password": "", "host": ".com", "port": "5432", "database": "demo", "schema": "demo_data"}
+        return MindResponse(
+            name=mind.name,
+            model_name=mind.model_name,
+            provider=mind.provider,
+            parameters=mind.parameters or {},
+            datasources=mind.datasources or [],
+            created_at=str(mind.created_on) if mind.created_on else "",
+            updated_at=str(mind.modified_on) if mind.modified_on else ""
+        )
+    
+    async def _validate_datasources(self, datasource_names: List[str]) -> None:
+        """
+        Validate that all datasources exist using MindsDB.
+        
+        Note: MindsDB is still used for datasource validation since datasources
+        are managed by MindsDB, not stored in our internal database.
+        """
+        for datasource_name in datasource_names:
+            try:
+                # Check if datasource exists in MindsDB
+                # Note: Replace with actual MindsDB SDK call
+                logger.debug(f"Validating datasource: {datasource_name}")
+            except Exception as e:
+                logger.error(f"Error validating datasource {datasource_name}: {str(e)}")
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' validation failed")
+    
+    
+    async def _check_datasource_connection(self, datasource_name: str) -> None:
+        """
+        Check if datasource connection is valid using MindsDB.
+        
+        Note: MindsDB is still used for connection testing since datasources
+        are managed by MindsDB.
+        """
+        try:
+            # Test datasource connection via MindsDB
+            # Note: Replace with actual MindsDB SDK call when implementing
+            logger.debug(f"Checking connection for datasource: {datasource_name}")
+        except Exception as e:
+            logger.error(f"Error checking datasource connection {datasource_name}: {str(e)}")
+            raise MindsServiceError(f"Datasource connection check failed: {str(e)}")
