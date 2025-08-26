@@ -8,7 +8,7 @@ from minds.common.vars import (
     OPEN_AI_MAX_TOKENS,
     OPEN_AI_MODEL_NAME,
 )
-from minds.requests.schemas import Message
+from minds.schemas.chat import Message
 
 logger = setup_logging()
 

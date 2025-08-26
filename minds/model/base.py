@@ -10,7 +10,7 @@ from sqlmodel import Field, Session, SQLModel, func, select
 
 
 class BaseSQLModel(SQLModel):
-    """Base class for SQL models."""
+    """Base class for all database models."""
 
     model_config = ConfigDict(validate_assignment=True)
 
