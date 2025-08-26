@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from minds.requests.schemas import Message
+from minds.schemas.chat import Message
 
 
 class ChatCompletionRequestMetadata(BaseModel):

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.requests.schemas import (
+from minds.schemas.chat import (
     ChatCompletion,
     ChatCompletionChunk,
     Choice,

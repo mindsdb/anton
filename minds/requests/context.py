@@ -18,7 +18,7 @@ def extract_context_from_request(request: Request) -> Context:
     """
     Extract the context from the request headers.
     """
-
+    # TODO: Discuss with infra team on how to get this from the JWT, current values are dummy
     user_id = str(request.headers.get("x-user-id", ""))
     user_email = request.headers.get("x-user-email", "")
     company_id = str(request.headers.get("x-company-id", ""))
