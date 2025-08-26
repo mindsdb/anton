@@ -9,7 +9,7 @@ from minds.requests.chat_completions_request import (
     ChatCompletionRequestMetadata,
     ChatCompletionsRequest,
 )
-from minds.requests.schemas import Message, Role
+from minds.schemas.chat import Message, Role
 
 
 @pytest.fixture()

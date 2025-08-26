@@ -4,7 +4,7 @@ from uuid import UUID
 
 from sqlmodel import Session
 
-from minds.model.base_sql_model import BaseSQLModel
+from minds.model.base import BaseSQLModel
 
 
 class TestBaseSQLModel:
