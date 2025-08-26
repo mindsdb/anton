@@ -5,8 +5,15 @@ This package contains all Pydantic models for request/response validation
 organized by domain.
 """
 
-from .chat import *
-from .minds import *
+from .chat import ChatCompletion, ChatCompletionChunk, Choice, Message, Role, StreamChoice, Usage
+from .minds import (
+    AddDatasourceRequest,
+    DeleteMindRequest,
+    MindCreateRequest,
+    MindDatasourceResponse,
+    MindResponse,
+    MindUpdateRequest,
+)
 
 __all__ = [
     # Chat schemas
@@ -15,5 +22,5 @@ __all__ = [
     
     # Mind schemas  
     "MindCreateRequest", "MindUpdateRequest", "MindResponse",
-    "AddDatasourceRequest", "DeleteMindRequest",
+    "AddDatasourceRequest", "DeleteMindRequest", "MindDatasourceResponse",
 ]

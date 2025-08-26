@@ -5,7 +5,7 @@ This module contains endpoints for CRUD operations on minds (agents),
 providing a clean v1 API interface for mind management.
 """
 
-from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlmodel import Session
 
@@ -13,7 +13,7 @@ from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.requests.context import extract_context_from_request
 from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
-from minds.services.minds import MindsService, MindsServiceError, MindNotFoundError, MindAlreadyExistsError
+from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
 # Set up logging
 logger = setup_logging()
@@ -40,11 +40,11 @@ def get_minds_service(
 async def list_minds(
     minds_service: MindsService = Depends(get_minds_service),
     # Optional query parameters for filtering and pagination
-    provider: Optional[str] = Query(None, description="Filter by provider (openai, google, etc.)"),
-    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    provider: str | None = Query(None, description="Filter by provider (openai, google, etc.)"),
+    is_active: bool | None = Query(None, description="Filter by active status"),
     limit: int = Query(50, le=100, ge=1, description="Maximum number of minds to return"),
     offset: int = Query(0, ge=0, description="Number of minds to skip for pagination")
-) -> List[MindResponse]:
+) -> list[MindResponse]:
     """
     List minds for the authenticated user with optional filtering and pagination.
     
@@ -72,10 +72,10 @@ async def list_minds(
         
     except MindsServiceError as e:
         logger.error(f"Service error listing minds: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error listing minds: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
 @router.get("/{mind_name}")
@@ -94,7 +94,10 @@ async def get_mind(
     Returns:
         MindResponse: Mind object with full details
     """
-    logger.debug(f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}")
+    logger.debug(
+        f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}, "
+        f"company {minds_service.company_id}"
+    )
     
     try:
         mind = await minds_service.get_mind(
@@ -105,13 +108,13 @@ async def get_mind(
         return mind
     except MindNotFoundError as e:
         logger.warning(f"Mind not found: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except MindsServiceError as e:
         logger.error(f"Service error getting mind: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error getting mind {mind_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
 @router.post("/", status_code=201)
@@ -128,7 +131,10 @@ async def create_mind(
     Returns:
         MindResponse: Created mind object with generated ID and timestamps
     """
-    logger.debug(f"Create mind requested: {mind_data.name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}")
+    logger.debug(
+        f"Create mind requested: {mind_data.name} (v1) for user {minds_service.user_id}, "
+        f"company {minds_service.company_id}"
+    )
     
     try:
         mind = await minds_service.create_mind(mind_data)
@@ -137,13 +143,13 @@ async def create_mind(
         
     except MindAlreadyExistsError as e:
         logger.warning(f"Mind already exists: {e}")
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from None
     except MindsServiceError as e:
         logger.error(f"Service error creating mind: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error creating mind {mind_data.name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
 @router.put("/{mind_name}")
@@ -162,7 +168,10 @@ async def update_mind(
     Returns:
         MindResponse: Updated mind object with new values
     """
-    logger.debug(f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}")
+    logger.debug(
+        f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}, "
+        f"company {minds_service.company_id}"
+    )
     
     try:
         mind = await minds_service.update_mind(mind_name, mind_data)
@@ -171,13 +180,13 @@ async def update_mind(
         
     except MindNotFoundError as e:
         logger.warning(f"Mind not found for update: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except MindsServiceError as e:
         logger.error(f"Service error updating mind: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error updating mind {mind_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
 @router.delete("/{mind_name}", status_code=204)
@@ -194,7 +203,10 @@ async def delete_mind(
     Returns:
         None: 204 No Content on successful deletion
     """
-    logger.debug(f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}")
+    logger.debug(
+        f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}, "
+        f"company {minds_service.company_id}"
+    )
     
     try:
         await minds_service.delete_mind(mind_name)
@@ -203,10 +215,10 @@ async def delete_mind(
         
     except MindNotFoundError as e:
         logger.warning(f"Mind not found for deletion: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except MindsServiceError as e:
         logger.error(f"Service error deleting mind: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error deleting mind {mind_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from None

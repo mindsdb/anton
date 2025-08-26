@@ -12,8 +12,8 @@ if "langfuse" not in sys.modules:
     mock_langfuse.observe = lambda f=None, **_: (lambda *a, **k: f(*a, **k)) if f else (lambda x: x)
     sys.modules["langfuse"] = mock_langfuse
 
-from minds.schemas.chat import Message, Role
 from minds.requests.stream import MessageStreamer
+from minds.schemas.chat import Message, Role
 
 
 @pytest.fixture()

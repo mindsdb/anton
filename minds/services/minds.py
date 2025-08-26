@@ -6,17 +6,12 @@ related to mind management, including CRUD operations with internal database sto
 MindsDB is only used for datasource validation, not for minds storage.
 """
 
-from typing import List, Optional
-from sqlmodel import Session, select, and_
+
+from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
-from minds.schemas.minds import (
-    MindCreateRequest,
-    MindResponse, 
-    MindUpdateRequest,
-    AddDatasourceRequest
-)
+from minds.schemas.minds import AddDatasourceRequest, MindCreateRequest, MindResponse, MindUpdateRequest
 
 # Set up logging
 logger = setup_logging()
@@ -72,12 +67,12 @@ class MindsService:
     
     async def list_minds(
         self,
-        provider: Optional[str] = None,
-        is_active: Optional[bool] = None,
+        provider: str | None = None,
+        is_active: bool | None = None,
         limit: int = 50,
         offset: int = 0,
         with_detailed_data: bool = False
-    ) -> List[MindResponse]:
+    ) -> list[MindResponse]:
         """
         List minds for the current user/company with optional filtering and pagination.
         
@@ -92,7 +87,10 @@ class MindsService:
             List[MindResponse]: List of mind objects
         """
         try:
-            logger.debug(f"Listing minds for company {self.company_id} with filters: provider={provider}, is_active={is_active}, limit={limit}, offset={offset}")
+            logger.debug(
+                f"Listing minds for company {self.company_id} with filters: "
+                f"provider={provider}, is_active={is_active}, limit={limit}, offset={offset}"
+            )
             
             # Build query conditions
             conditions = [Mind.company_id == self.company_id]
@@ -103,7 +101,7 @@ class MindsService:
                 conditions.append(Mind.is_active == is_active)
             else:
                 # Default: only active minds unless explicitly requested
-                conditions.append(Mind.is_active == True)
+                conditions.append(Mind.is_active)
 
             statement = (
                 select(Mind)
@@ -119,11 +117,14 @@ class MindsService:
                 mind_response = self._mind_to_response(mind, with_detailed_data)
                 minds_list.append(mind_response)
             
-            logger.info(f"Retrieved {len(minds_list)} minds for company {self.company_id} (offset={offset}, limit={limit})")
+            logger.info(
+                f"Retrieved {len(minds_list)} minds for company {self.company_id} "
+                f"(offset={offset}, limit={limit})"
+            )
             return minds_list
         except Exception as e:
             logger.error(f"Error listing minds for company {self.company_id}: {str(e)}")
-            raise MindsServiceError(f"Failed to list minds: {str(e)}")
+            raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
     
     async def get_mind(self, mind_name: str, with_detailed_data: bool = False) -> MindResponse:
         """
@@ -146,7 +147,7 @@ class MindsService:
                 and_(
                     Mind.name == mind_name,
                     Mind.company_id == self.company_id,
-                    Mind.is_active == True
+                    Mind.is_active
                 )
             )
             mind = self.session.exec(statement).first()
@@ -161,7 +162,7 @@ class MindsService:
             raise
         except Exception as e:
             logger.error(f"Error getting mind {mind_name}: {str(e)}")
-            raise MindsServiceError(f"Failed to get mind: {str(e)}")
+            raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
     
     async def create_mind(self, mind_data: MindCreateRequest) -> MindResponse:
         """
@@ -186,7 +187,7 @@ class MindsService:
                     and_(
                         Mind.name == mind_data.name,
                         Mind.company_id == self.company_id,
-                        Mind.is_active == True
+                        Mind.is_active
                     )
                 )
             ).first()
@@ -222,7 +223,7 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(f"Error creating mind {mind_data.name}: {str(e)}")
-            raise MindsServiceError(f"Failed to create mind: {str(e)}")
+            raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
     
     async def update_mind(self, mind_name: str, mind_data: MindUpdateRequest) -> MindResponse:
         """
@@ -245,7 +246,7 @@ class MindsService:
                 and_(
                     Mind.name == mind_name,
                     Mind.company_id == self.company_id,
-                    Mind.is_active == True
+                    Mind.is_active
                 )
             )
             mind = self.session.exec(statement).first()
@@ -260,7 +261,7 @@ class MindsService:
                         and_(
                             Mind.name == mind_data.name,
                             Mind.company_id == self.company_id,
-                            Mind.is_active == True
+                            Mind.is_active
                         )
                     )
                 ).first()
@@ -297,7 +298,7 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(f"Error updating mind {mind_name}: {str(e)}")
-            raise MindsServiceError(f"Failed to update mind: {str(e)}")
+            raise MindsServiceError(f"Failed to update mind: {str(e)}") from None
     
     async def delete_mind(self, mind_name: str, cascade: bool = False) -> bool:
         """
@@ -320,7 +321,7 @@ class MindsService:
                 and_(
                     Mind.name == mind_name,
                     Mind.company_id == self.company_id,
-                    Mind.is_active == True
+                    Mind.is_active
                 )
             )
             mind = self.session.exec(statement).first()
@@ -345,7 +346,7 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(f"Error deleting mind {mind_name}: {str(e)}")
-            raise MindsServiceError(f"Failed to delete mind: {str(e)}")
+            raise MindsServiceError(f"Failed to delete mind: {str(e)}") from None
     
     async def add_datasource_to_mind(self, mind_name: str, datasource_request: AddDatasourceRequest) -> bool:
         """
@@ -365,7 +366,7 @@ class MindsService:
                 and_(
                     Mind.name == mind_name,
                     Mind.company_id == self.company_id,
-                    Mind.is_active == True
+                    Mind.is_active
                 )
             )
             mind = self.session.exec(statement).first()
@@ -393,7 +394,7 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(f"Error adding datasource to mind: {str(e)}")
-            raise MindsServiceError(f"Failed to add datasource: {str(e)}")
+            raise MindsServiceError(f"Failed to add datasource: {str(e)}") from None
     
     async def remove_datasource_from_mind(self, mind_name: str, datasource_name: str) -> bool:
         """
@@ -413,7 +414,7 @@ class MindsService:
                 and_(
                     Mind.name == mind_name,
                     Mind.company_id == self.company_id,
-                    Mind.is_active == True
+                    Mind.is_active
                 )
             )
             mind = self.session.exec(statement).first()
@@ -442,7 +443,7 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(f"Error removing datasource from mind: {str(e)}")
-            raise MindsServiceError(f"Failed to remove datasource: {str(e)}")
+            raise MindsServiceError(f"Failed to remove datasource: {str(e)}") from None
     
     
     def _mind_to_response(self, mind: Mind, with_detailed_data: bool = False) -> MindResponse:
@@ -460,7 +461,7 @@ class MindsService:
             updated_at=str(mind.modified_on) if mind.modified_on else ""
         )
     
-    async def _validate_datasources(self, datasource_names: List[str]) -> None:
+    async def _validate_datasources(self, datasource_names: list[str]) -> None:
         """
         Validate that all datasources exist using MindsDB.
         
@@ -474,7 +475,7 @@ class MindsService:
                 logger.debug(f"Validating datasource: {datasource_name}")
             except Exception as e:
                 logger.error(f"Error validating datasource {datasource_name}: {str(e)}")
-                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' validation failed")
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' validation failed") from None
     
     
     async def _check_datasource_connection(self, datasource_name: str) -> None:
@@ -490,4 +491,4 @@ class MindsService:
             logger.debug(f"Checking connection for datasource: {datasource_name}")
         except Exception as e:
             logger.error(f"Error checking datasource connection {datasource_name}: {str(e)}")
-            raise MindsServiceError(f"Datasource connection check failed: {str(e)}")
+            raise MindsServiceError(f"Datasource connection check failed: {str(e)}") from None

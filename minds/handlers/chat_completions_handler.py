@@ -3,8 +3,8 @@ from mindsdb_sdk.server import Server
 from sqlmodel import Session
 
 from minds.common.logger import setup_logging
-from minds.schemas.chat import Message, Role
 from minds.requests.stream import MessageStreamer
+from minds.schemas.chat import Message, Role
 
 # Set up logging
 logger = setup_logging()

@@ -46,13 +46,10 @@ select = [
     # isort
     "I",
 ]
+ignore = ["B008"]  # Allow Depends() calls in FastAPI function signatures
 
 [tool.ruff.lint.per-file-ignores]
 "tests/e2e/evals/*.py" = ["E501"]
-"cw_summary/prompts.py" = ["E501"]
-"cw_summary/common/prompts.py" = ["E501"]
-"cw_summary/common/vars.py" = ["E501"]
-
 [tool.ruff.lint.pycodestyle]
 ignore-overlong-task-comments = true
 

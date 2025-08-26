@@ -8,8 +8,8 @@ and all necessary configurations for the Minds service.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from minds.common.logger import setup_logging
 from minds.api.v1.router import api_router as v1_router
+from minds.common.logger import setup_logging
 
 # Set up logging
 logger = setup_logging()

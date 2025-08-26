@@ -10,15 +10,15 @@ from langfuse import observe
 from sqlmodel import Session
 from starlette.responses import JSONResponse
 
+from minds.client.mindsdb import create_mindsdb_client_from_request
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.handlers.chat_completions_request_handler import (
     chat_completions_request_handler,
 )
 from minds.requests.chat_completions_request import ChatCompletionsRequest
-from minds.requests.context import Context, extract_context_from_request
+from minds.requests.context import extract_context_from_request
 from minds.requests.utils import setup_langfuse_observation
-from minds.client.mindsdb import create_mindsdb_client_from_request
 
 # Set up logging
 logger = setup_logging()
