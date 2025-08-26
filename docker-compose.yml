@@ -80,7 +80,7 @@ services:
     <<: *autoRestartOnFailure
     restart: unless-stopped
     ports:
-      - ${MINIO_PORT}:9000
+      - ${MINIO_PORT}:9002
       - ${MINIO_CONSOLE_PORT}:9001
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -110,6 +110,7 @@ services:
     image: langfuse/langfuse:3.101.0
     <<: *autoRestartOnFailure
     restart: unless-stopped
+    profiles: ["langfuse"]
     ports:
       - ${LANGFUSE_PORT}:3000
     depends_on:
@@ -176,6 +177,7 @@ services:
     image: langfuse/langfuse-worker:3.101.0
     <<: *autoRestartOnFailure
     restart: unless-stopped
+    profiles: ["langfuse"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -259,10 +261,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      langfuse-web:
-        condition: service_healthy
-      langfuse-worker:
-        condition: service_healthy
       postgres:
         condition: service_healthy
     ports:
