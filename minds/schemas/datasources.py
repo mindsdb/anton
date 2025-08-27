@@ -11,33 +11,25 @@ from pydantic import BaseModel, Field
 
 
 class DatasourceCreateRequest(BaseModel):
-    """Request model for creating a new datasource."""
+    """Request model for creating a new datasource (matches MindsDB schema)."""
     
     name: str = Field(..., description="Datasource name")
-    engine: str = Field(..., description="Database engine (mysql, postgres, etc.)")
+    engine: str = Field(..., description="Database engine (postgres, mysql, etc.)")
     connection_data: dict[str, Any] = Field(..., description="Connection parameters")
-    tables: list[str] | None = Field(None, description="Specific tables to include")
-    description: str | None = Field(None, max_length=1000, description="Datasource description")
-    check_connection: bool = Field(default=True, description="Test connection during creation")
 
 
 class DatasourceUpdateRequest(BaseModel):
-    """Request model for updating an existing datasource."""
+    """Request model for updating an existing datasource (simplified schema)."""
     
     connection_data: dict[str, Any] | None = Field(None, description="Updated connection parameters")
-    tables: list[str] | None = Field(None, description="Updated table list")
-    description: str | None = Field(None, max_length=1000, description="Updated description")
-    check_connection: bool = Field(default=True, description="Test connection during update")
 
 
 class DatasourceResponse(BaseModel):
-    """Response model for datasource data."""
+    """Response model for datasource data (simplified schema)."""
     
     name: str = Field(..., description="Datasource name")
     engine: str | None = Field(None, description="Database engine")
     connection_data: dict[str, Any] | None = Field(None, description="Connection parameters")
-    tables: list[str] | None = Field(None, description="Available tables")
-    description: str | None = Field(None, description="Datasource description")
     created_at: str | None = Field(None, description="Creation timestamp")
     is_demo: bool | None = Field(None, description="Whether this is a demo datasource")
 

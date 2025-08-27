@@ -32,30 +32,13 @@ class TestDatasourceCreateRequest:
         assert request.name == "test-db"
         assert request.engine == "postgres"
         assert request.connection_data == {"host": "localhost", "port": 5432}
-        assert request.tables is None
-        assert request.description is None
-        assert request.check_connection is True  # Default value
 
     def test_create_request_missing_required_fields(self):
         """Test validation error for missing required fields."""
         with pytest.raises(ValidationError):
             DatasourceCreateRequest(name="test")  # Missing engine and connection_data
 
-    def test_create_request_with_optional_fields(self):
-        """Test creation with all optional fields."""
-        data = {
-            "name": "test-db",
-            "engine": "mysql",
-            "connection_data": {"host": "localhost"},
-            "tables": ["users", "orders"],
-            "description": "Test database",
-            "check_connection": False
-        }
-        request = DatasourceCreateRequest(**data)
-        
-        assert request.tables == ["users", "orders"]
-        assert request.description == "Test database"
-        assert request.check_connection is False
+
 
 
 class TestDatasourceUpdateRequest:
@@ -66,21 +49,15 @@ class TestDatasourceUpdateRequest:
         request = DatasourceUpdateRequest()
         
         assert request.connection_data is None
-        assert request.tables is None
-        assert request.description is None
-        assert request.check_connection is True  # Default
 
     def test_update_request_partial(self):
         """Test update request with some fields."""
         data = {
-            "connection_data": {"host": "new-host"},
-            "description": "Updated description"
+            "connection_data": {"host": "new-host"}
         }
         request = DatasourceUpdateRequest(**data)
         
         assert request.connection_data == {"host": "new-host"}
-        assert request.description == "Updated description"
-        assert request.tables is None
 
 
 class TestDatasourceResponse:
@@ -94,8 +71,6 @@ class TestDatasourceResponse:
         assert response.name == "test-db"
         assert response.engine is None
         assert response.connection_data is None
-        assert response.tables is None
-        assert response.description is None
         assert response.created_at is None
         assert response.is_demo is None
 
@@ -105,8 +80,6 @@ class TestDatasourceResponse:
             "name": "test-db",
             "engine": "postgres",
             "connection_data": {"host": "localhost"},
-            "tables": ["table1", "table2"],
-            "description": "Test database",
             "created_at": "2023-01-01T00:00:00Z",
             "is_demo": True
         }

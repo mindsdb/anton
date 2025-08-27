@@ -7,5 +7,6 @@ endpoints and data access layers.
 """
 
 from .minds import MindsService
+from .datasources import DatasourcesService
 
-__all__ = ["MindsService"]
+__all__ = ["MindsService", "DatasourcesService"]

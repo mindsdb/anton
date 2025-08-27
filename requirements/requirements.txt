@@ -1,6 +1,7 @@
 pydantic==2.11.7
 fastapi==0.115.11
 uvicorn==0.35.0
+watchfiles==1.1.0
 python-dotenv==1.1.0
 pyodbc>=4.0.39
 openai==1.99.9

@@ -50,3 +50,5 @@ OPEN_AI_MODEL_NAME = os.getenv("OPEN_AI_MODEL_NAME", "gpt-4o")
 
 MINDSDB_URL = os.getenv("MINDSDB_URL", "http://localhost:47334")
 MINDSDB_API_KEY = os.getenv("MINDSDB_API_KEY", "not set")
+MINDSDB_LOGIN = os.getenv("MINDSDB_LOGIN", "mindsdb")
+MINDSDB_PASSWORD = os.getenv("MINDSDB_PASSWORD", "")

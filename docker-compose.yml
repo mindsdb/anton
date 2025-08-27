@@ -27,6 +27,8 @@ services:
     environment:
       POSTGRES_USER: "${PG_USER}"
       POSTGRES_PASSWORD: "${PG_PASSWORD}"
+      POSTGRES_DB: "${PG_USER}"
+      PG_PASSWORD: "${PG_PASSWORD}"  # For init script
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${PG_USER}" ]
       interval: 10s
@@ -238,6 +240,29 @@ services:
       timeout: 29s
       retries: 10
 
+  mindsdb:
+    build:
+      context: ../mindsdb
+      dockerfile: docker/mindsdb.Dockerfile
+    <<: *autoRestartOnFailure
+    restart: unless-stopped
+    ports:
+      - "${MINDSDB_PORT}:47334"
+      - "${MINDSDB_HTTP_PORT}:47335"
+    volumes:
+      - mindsdb_data:/opt/mindsdb
+    environment:
+      MINDSDB_CONFIG_PATH: /opt/mindsdb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:47334/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      autoheal:
+        condition: service_healthy
+
   migrate:
     build:
       context: .
@@ -263,15 +288,22 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      mindsdb:
+        condition: service_healthy
     ports:
       - "${MIND_PORT}:${MIND_PORT}"
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:${MIND_PORT}/healthz" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:${MIND_PORT}/api/v1/health/" ]
       interval: 10s
       timeout: 9s
       retries: 5
     environment:
       DATABASE_URI: "${DATABASE_URI}"
+
+      # MindsDB configuration  
+      MINDSDB_URL: "http://mindsdb:47334"
+      MINDSDB_LOGIN: "${MINDSDB_LOGIN}"
+      MINDSDB_PASSWORD: "${MINDSDB_PASSWORD}"
 
       OPEN_AI_API_URL: "${OPEN_AI_API_URL}"
       OPEN_AI_API_KEY: "${OPEN_AI_API_KEY}"
@@ -286,6 +318,7 @@ volumes:
   ch_data:
   ch_logs:
   minio_data:
+  mindsdb_data:
 
 networks:
   default:
