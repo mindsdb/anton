@@ -8,12 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from minds.schemas.datasources import (
-    DatasourceCreateRequest,
-    DatasourceUpdateRequest, 
-    DatasourceResponse,
     DatasourceConnectionStatus,
+    DatasourceCreateRequest,
     DatasourceDetailedResponse,
-    DeleteDatasourceRequest
+    DatasourceResponse,
+    DatasourceUpdateRequest,
+    DeleteDatasourceRequest,
 )
 
 
