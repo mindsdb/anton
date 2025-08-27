@@ -295,6 +295,130 @@ class TestMindsAPI:
         assert exc_info.value.status_code == 500
 
 
+class TestMindsAPIErrorHandling:
+    """Test error handling paths that aren't covered by main test class."""
+
+    @pytest.mark.asyncio
+    async def test_get_mind_service_error(self):
+        """Test get_mind with MindsServiceError (lines 112-114)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company"
+        mock_service.get_mind = AsyncMock(side_effect=MindsServiceError("Database connection failed"))
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await get_mind(mind_name="test", minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 400
+        assert "Database connection failed" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_get_mind_unexpected_error(self):
+        """Test get_mind with unexpected Exception (lines 115-117)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company" 
+        mock_service.get_mind = AsyncMock(side_effect=ValueError("Unexpected error"))
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await get_mind(mind_name="test", minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_create_mind_service_error(self):
+        """Test create_mind with MindsServiceError (lines 147-149)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company"
+        mock_service.create_mind = AsyncMock(side_effect=MindsServiceError("Validation failed"))
+        
+        request = MindCreateRequest(name="test", provider="openai")
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await create_mind(mind_data=request, minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 400
+        assert "Validation failed" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_create_mind_unexpected_error(self):
+        """Test create_mind with unexpected Exception (lines 150-152)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company"
+        mock_service.create_mind = AsyncMock(side_effect=RuntimeError("Database error"))
+        
+        request = MindCreateRequest(name="test", provider="openai")
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await create_mind(mind_data=request, minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_update_mind_service_error(self):
+        """Test update_mind with MindsServiceError (lines 184-186)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company"
+        mock_service.update_mind = AsyncMock(side_effect=MindsServiceError("Invalid parameters"))
+        
+        request = MindUpdateRequest(name="updated-test")
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await update_mind(mind_name="test", mind_data=request, minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 400
+        assert "Invalid parameters" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_update_mind_unexpected_error(self):
+        """Test update_mind with unexpected Exception (lines 187-189)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company"
+        mock_service.update_mind = AsyncMock(side_effect=KeyError("Missing key"))
+        
+        request = MindUpdateRequest(name="updated-test")
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await update_mind(mind_name="test", mind_data=request, minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_delete_mind_service_error(self):
+        """Test delete_mind with MindsServiceError (lines 219-221)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company"
+        mock_service.delete_mind = AsyncMock(side_effect=MindsServiceError("Cannot delete mind"))
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await delete_mind(mind_name="test", minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 400
+        assert "Cannot delete mind" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_delete_mind_unexpected_error(self):
+        """Test delete_mind with unexpected Exception (lines 222-224)."""
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.company_id = "test-company"
+        mock_service.delete_mind = AsyncMock(side_effect=OSError("File system error"))
+        
+        with pytest.raises(HTTPException) as exc_info:
+            await delete_mind(mind_name="test", minds_service=mock_service)
+        
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in exc_info.value.detail
+
+
 class TestMindsAPIValidation:
     """Test input validation for minds API endpoints."""
 

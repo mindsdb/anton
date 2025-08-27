@@ -311,4 +311,3 @@ class TestMindsService:
         assert result.model_name == "gpt-4o"
         assert result.parameters == {"temperature": 0.7}
         assert result.datasources == ["test-datasource"]
-
