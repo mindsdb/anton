@@ -9,8 +9,7 @@ Tests the SQLModel Mind class including:
 """
 
 import pytest
-from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, create_engine, SQLModel
+
 from minds.model.mind import Mind
 
 

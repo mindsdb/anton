@@ -8,20 +8,19 @@ Tests the business logic layer for minds management including:
 - Transaction management
 """
 
-import pytest
-from unittest.mock import Mock, AsyncMock
-from sqlmodel import Session, select
-from sqlalchemy.exc import IntegrityError
+from unittest.mock import Mock
 
-from minds.services.minds import (
-    MindsService,
-    MindsServiceError, 
-    MindNotFoundError,
-    MindAlreadyExistsError,
-    DatasourceNotFoundError
-)
+import pytest
+from sqlmodel import Session
+
 from minds.model.mind import Mind
 from minds.schemas.minds import MindCreateRequest, MindUpdateRequest
+from minds.services.minds import (
+    MindAlreadyExistsError,
+    MindNotFoundError,
+    MindsService,
+    MindsServiceError,
+)
 
 
 class TestMindsService:

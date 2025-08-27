@@ -8,27 +8,21 @@ Tests the FastAPI endpoints for minds management including:
 - Input validation
 """
 
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
-from unittest.mock import Mock, AsyncMock, patch
-from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
 from minds.api.v1.endpoints.minds import (
-    router,
+    create_mind,
+    delete_mind,
+    get_mind,
     get_minds_service,
     list_minds,
-    get_mind,
-    create_mind,
     update_mind,
-    delete_mind
 )
-from minds.services.minds import (
-    MindsService,
-    MindNotFoundError,
-    MindAlreadyExistsError,
-    MindsServiceError
-)
-from minds.schemas.minds import MindCreateRequest, MindUpdateRequest, MindResponse
+from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
 
 class TestMindsAPI:

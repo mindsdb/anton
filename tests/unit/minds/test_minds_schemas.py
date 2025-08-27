@@ -12,12 +12,12 @@ import pytest
 from pydantic import ValidationError
 
 from minds.schemas.minds import (
-    MindCreateRequest,
-    MindUpdateRequest,
-    MindResponse,
     AddDatasourceRequest,
     DeleteMindRequest,
-    MindDatasourceResponse
+    MindCreateRequest,
+    MindDatasourceResponse,
+    MindResponse,
+    MindUpdateRequest,
 )
 
 
