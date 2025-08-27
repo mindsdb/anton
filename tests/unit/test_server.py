@@ -99,7 +99,7 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
         return JSONResponse(content=response.model_dump())
 
     monkeypatch.setattr(
-        "minds.handlers.chat_completions_request_handler.chat_completions_request_handler",
+        "minds.api.v1.endpoints.chat.chat_completions_request_handler",
         _fake_chat_completions_handler
     )
 
