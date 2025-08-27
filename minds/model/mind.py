@@ -1,7 +1,7 @@
-from typing import Any
+from typing import Dict, List, Optional, Any
 
+from sqlmodel import Field, Column, JSON
 from sqlalchemy import Text, UniqueConstraint
-from sqlmodel import JSON, Column, Field
 
 from minds.model.base import BaseSQLModel
 
@@ -19,21 +19,21 @@ class Mind(BaseSQLModel, table=True):
     company_id: str = Field(description="ID of the company this mind belongs to", max_length=256, index=True)
     
     # Configuration
-    parameters: dict[str, Any] | None = Field(
+    parameters: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
         sa_column=Column(JSON),
         description="Mind parameters and configuration as JSON"
     )
     
     # Associated resources (stored as JSON arrays)
-    datasources: list[str] | None = Field(
+    datasources: Optional[List[str]] = Field(
         default_factory=list,
         sa_column=Column(JSON),
         description="List of datasource names attached to this mind"
     )
     
     # Optional metadata
-    description: str | None = Field(
+    description: Optional[str] = Field(
         default=None,
         sa_column=Column(Text),
         description="Optional description of the mind"
