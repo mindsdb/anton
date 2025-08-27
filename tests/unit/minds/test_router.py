@@ -61,23 +61,24 @@ class TestAPIV1Router:
     def test_datasources_endpoints_registered(self, client):
         """Test that datasources endpoints are registered."""
         response = client.get("/api/v1/datasources/")
-        assert response.status_code in [422, 500]  # Not 404 - endpoint exists
+        # Could be 200 (success), 422 (validation), or 500 (dependency error) - just not 404
+        assert response.status_code != 404  # Endpoint should exist
 
     def test_router_tags_configuration(self):
         """Test that router includes have correct tags."""
         # Check that the router was configured with proper tags
         routes = api_router.routes
         
-        # Find routes and verify tags
-        health_routes = [r for r in routes if r.path.startswith("/health")]
-        minds_routes = [r for r in routes if r.path.startswith("/minds")]
-        chat_routes = [r for r in routes if r.path.startswith("/chat")]
-        datasources_routes = [r for r in routes if r.path.startswith("/datasources")]
+        # Find routes and verify tags (routes have /api/v1 prefix)
+        health_routes = [r for r in routes if "/health" in r.path]
+        minds_routes = [r for r in routes if "/minds" in r.path]
+        chat_routes = [r for r in routes if "/chat" in r.path]
+        datasources_routes = [r for r in routes if "/datasources" in r.path]
         
-        assert len(health_routes) > 0
-        assert len(minds_routes) > 0
-        assert len(chat_routes) > 0
-        assert len(datasources_routes) > 0
+        assert len(health_routes) > 0, f"No health routes found in {[r.path for r in routes]}"
+        assert len(minds_routes) > 0, f"No minds routes found in {[r.path for r in routes]}"
+        assert len(chat_routes) > 0, f"No chat routes found in {[r.path for r in routes]}"
+        assert len(datasources_routes) > 0, f"No datasources routes found in {[r.path for r in routes]}"
 
     def test_openapi_docs_generation(self, app_with_router):
         """Test that OpenAPI docs are properly generated."""
@@ -102,10 +103,10 @@ class TestAPIV1Router:
         routes = api_router.routes
         
         for route in routes:
-            # All routes should start with the expected prefixes
-            expected_prefixes = ["/health", "/minds", "/chat", "/datasources"]
+            # All routes should start with /api/v1/ then the expected prefixes
+            expected_prefixes = ["/api/v1/health", "/api/v1/minds", "/api/v1/chat", "/api/v1/datasources"]
             assert any(route.path.startswith(prefix) for prefix in expected_prefixes), \
-                f"Route {route.path} doesn't match expected prefixes"
+                f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"
 
     def test_router_methods_available(self):
         """Test that router exposes expected HTTP methods."""
