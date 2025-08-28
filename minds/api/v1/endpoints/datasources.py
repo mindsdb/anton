@@ -247,7 +247,7 @@ async def delete_datasource(
 
 
 @router.post("/{datasource_name}/test-connection", status_code=200)
-async def test_datasource_connection(
+async def check_datasource_connection(
     datasource_name: str,
     datasources_service: DatasourcesService = Depends(get_datasources_service)
 ) -> DatasourceConnectionStatus:
@@ -271,7 +271,7 @@ async def test_datasource_connection(
         return result
         
     except Exception as e:
-        logger.error(f"Unexpected error in test_datasource_connection: {str(e)}")
+        logger.error(f"Unexpected error in check_datasource_connection: {str(e)}")
         return DatasourceConnectionStatus(
             success=False,
             error_message=f"Connection test failed: {str(e)}"

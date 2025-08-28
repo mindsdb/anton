@@ -216,7 +216,8 @@ class DatasourcesService:
             try:
                 await self._create_mindsdb_database(datasource)
                 
-                logger.info(f"Created datasource {datasource_data.name} for company {self.company_id} (synced to MindsDB)")
+                logger.info(f"Created datasource {datasource_data.name} for company \
+                                {self.company_id} (synced to MindsDB)")
                 
             except DatasourceServiceError:
                 # Rollback internal database if MindsDB creation fails
@@ -370,7 +371,7 @@ class DatasourcesService:
             logger.debug(f"Testing connection for datasource {datasource_name}")
             
             # Get datasource to verify it exists
-            datasource = await self.get_datasource(datasource_name)
+            _ = await self.get_datasource(datasource_name)
             
             # Test connection using MindsDB by trying to list tables
             databases = self.mindsdb_client.databases

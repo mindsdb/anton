@@ -2,25 +2,21 @@
 Unit tests for DatasourcesService.
 """
 
-import pytest
-from unittest.mock import Mock, AsyncMock
-from uuid import uuid4
 from datetime import datetime
+from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
-from sqlmodel import Session
+import pytest
 from mindsdb_sdk.server import Server
+from sqlmodel import Session
 
-from minds.services.datasources import (
-    DatasourcesService, 
-    DatasourceServiceError, 
-    DatasourceNotFoundError, 
-    DatasourceAlreadyExistsError
-)
 from minds.model.datasource import Datasource
-from minds.schemas.datasources import (
-    DatasourceCreateRequest, 
-    DatasourceUpdateRequest,
-    DatasourceResponse
+from minds.schemas.datasources import DatasourceCreateRequest, DatasourceResponse, DatasourceUpdateRequest
+from minds.services.datasources import (
+    DatasourceAlreadyExistsError,
+    DatasourceNotFoundError,
+    DatasourceServiceError,
+    DatasourcesService,
 )
 
 
@@ -198,7 +194,8 @@ class TestDatasourcesService:
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_create_datasource_already_exists(self, service, mock_session, sample_create_request, sample_datasource):
+    async def test_create_datasource_already_exists(self, service, mock_session, 
+                                                    sample_create_request, sample_datasource):
         """Test create datasource when it already exists."""
         mock_result = Mock()
         mock_result.first.return_value = sample_datasource
@@ -267,3 +264,76 @@ class TestDatasourcesService:
         
         with pytest.raises(DatasourceNotFoundError, match="Datasource 'nonexistent' not found"):
             await service.delete_datasource("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_connection_success(self, service, mock_mindsdb_client):
+        """Test successful connection testing."""
+        service.get_datasource = AsyncMock(return_value=Mock())
+        
+        mock_database = Mock()
+        mock_tables = Mock()
+        mock_tables.list = Mock()
+        mock_database.tables = mock_tables
+        
+        mock_databases = Mock()
+        mock_databases.get.return_value = mock_database
+        mock_mindsdb_client.databases = mock_databases
+        
+        result = await service.test_connection("test_postgres")
+        
+        assert result.success is True
+        assert result.error_message is None
+        mock_tables.list.assert_called_once()
+
+    @pytest.mark.asyncio 
+    async def test_connection_datasource_not_found_in_mindsdb(self, service, mock_mindsdb_client):
+        """Test connection when datasource not found in MindsDB."""
+        service.get_datasource = AsyncMock(return_value=Mock())
+        
+        mock_databases = Mock()
+        mock_databases.get.side_effect = AttributeError("Database not found")
+        mock_mindsdb_client.databases = mock_databases
+        
+        result = await service.test_connection("test_postgres")
+        
+        assert result.success is False
+        assert "Datasource not found in MindsDB" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_connection_table_list_failure(self, service, mock_mindsdb_client):
+        """Test connection when table listing fails."""
+        service.get_datasource = AsyncMock(return_value=Mock())
+        
+        mock_database = Mock()
+        mock_tables = Mock()
+        mock_tables.list.side_effect = Exception("Connection failed")
+        mock_database.tables = mock_tables
+        
+        mock_databases = Mock()
+        mock_databases.get.return_value = mock_database
+        mock_mindsdb_client.databases = mock_databases
+        
+        result = await service.test_connection("test_postgres")
+        
+        assert result.success is False
+        assert "Connection test failed: Connection failed" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_connection_datasource_not_found(self, service):
+        """Test connection when datasource doesn't exist."""
+        service.get_datasource = AsyncMock(side_effect=DatasourceNotFoundError("Not found"))
+        
+        result = await service.test_connection("nonexistent")
+        
+        assert result.success is False
+        assert "Datasource not found" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_connection_unexpected_error(self, service):
+        """Test connection with unexpected error."""
+        service.get_datasource = AsyncMock(side_effect=Exception("Unexpected error"))
+        
+        result = await service.test_connection("test_postgres")
+        
+        assert result.success is False
+        assert "Unexpected error" in result.error_message
