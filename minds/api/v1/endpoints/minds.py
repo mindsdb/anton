@@ -162,8 +162,9 @@ async def create_mind(
         # TODO: Should this be done before or after the mind is created?
         datasources = mind_data.datasources
         for datasource in datasources:
-            data_catalog_loader.load(datasource)
-            logger.info(f"Loaded datasource {datasource.name} to the data catalog")
+            # TODO: What about the table names?
+            await data_catalog_loader.load(datasource)
+            logger.info(f"Loaded datasource {datasource} to the data catalog")
 
         mind = await minds_service.create_mind(mind_data)
 
