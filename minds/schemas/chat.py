@@ -15,7 +15,7 @@ class Role(str, Enum):
 
 class Message(BaseModel):
     role: Role
-    content: str | list[Any] = None
+    content: dict | BaseModel | str | list[Any] = None
 
 
 class StreamChoice(BaseModel):
