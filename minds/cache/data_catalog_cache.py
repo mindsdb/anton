@@ -117,7 +117,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         logger.info(f"Cache miss for data catalogs with key: {key_str}")
 
         data_catalogs = []
-        for datasource in mind.data_sources:
+        for datasource in mind.datasources:
             pass
             # TODO: Load the data catalog for the datasource.
 

@@ -1,16 +1,17 @@
 from typing import Any, Optional, List
 from uuid import UUID
 
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import Field, Relationship
 
 from minds.model.base import BaseSQLModel
+from minds.model.datasource import Datasource
 
 
 class Table(BaseSQLModel, table=True):
     """Data source table metadata."""
     __tablename__ = "tables"
 
-    # TODO: Connect to datasource table.
+    datasource_id: UUID = Field(..., description="Datasource ID", foreign_key="datasources.id")
     name: str = Field(..., description="Table name")
     schema: str = Field(default=None, description="Schema name")
     description: Optional[str] = Field(default=None, description="Table description/comment")
@@ -79,17 +80,18 @@ class ForeignKeyConstraint(BaseSQLModel, table=True):
 
 class DataCatalog(BaseSQLModel, table=False):
     """Data catalog metadata."""
-    # TODO: Connect to datasource table.
+    datasource_id: UUID = Field(..., description="Datasource ID", foreign_key="datasources.id")
     tables: List["Table"] = Relationship()
+
+    datasource: Datasource = Relationship()
 
     def _format_header(self) -> List[str]:
         """Format the header section with data source information."""
-        # TODO: Fix reference to data source.
         lines = []
-        lines.append(f"MindsDB Data Source: {self.data_source.name}")
-        lines.append(f"Engine: {self.data_source.engine}")
-        if self.data_source.handler_info:
-            lines.append(f"Handler Info: {self.data_source.handler_info}")
+        lines.append(f"MindsDB Data Source: {self.datasource.name}")
+        lines.append(f"Engine: {self.datasource.engine}")
+        if self.datasource.handler_info:
+            lines.append(f"Handler Info: {self.datasource.handler_info}")
         lines.append("")
         lines.append(f"Tables: {len(self.tables)}")
         lines.append("")
@@ -99,8 +101,8 @@ class DataCatalog(BaseSQLModel, table=False):
         """Format a single table's complete information."""
         lines = []
         
-        # Table header
-        qualified_table_name = f"{self.data_source.name}.{table.name}"
+        # Table header.
+        qualified_table_name = f"{self.datasource.name}.{table.name}"
         table_header = f"Table: {qualified_table_name}"
         if table.description:
             table_header += f" - {table.description}"
@@ -112,7 +114,7 @@ class DataCatalog(BaseSQLModel, table=False):
         for column in table.columns:
             lines.extend(self._format_column(column))
 
-        lines.append("")  # Blank line between tables
+        lines.append("")  # Blank line between tables.
         return lines
     
     def _format_column(self, column: Column) -> List[str]:
@@ -130,7 +132,7 @@ class DataCatalog(BaseSQLModel, table=False):
 
         lines.extend(self._format_column_statistics(column))
 
-        # Sample values
+        # Sample values.
         # if column.sample_values and len(column.sample_values) > 0:
         #     sample_str = ", ".join([str(val) for val in column.sample_values[:5]])
         #     lines.append(f"      Samples: {sample_str}")
@@ -185,7 +187,7 @@ class DataCatalog(BaseSQLModel, table=False):
             for fk in table.foreign_key_constraints:
                 fk_columns = ", ".join([fk.column.name for fk in fk.column])
                 ref_columns = ", ".join([fk.referenced_column.name for fk in fk.referenced_column])
-                qualified_fk_table = f"{self.data_source.name}.{fk.referenced_table}"
+                qualified_fk_table = f"{self.datasource.name}.{fk.referenced_table}"
                 fk_info = f"    - {fk_columns} → {qualified_fk_table}({ref_columns})"
                 # if fk.is_implicit:
                 #     confidence = fk.confidence or 0.0
@@ -201,9 +203,9 @@ class DataCatalog(BaseSQLModel, table=False):
 
         for table in self.tables:
             related = self._get_related_tables(table)
-            related = [f"{self.data_source.name}.{n}" for n in related]
+            related = [f"{self.datasource.name}.{n}" for n in related]
             if related:
-                qualified_table_name = f"{self.data_source.name}.{table.name}"
+                qualified_table_name = f"{self.datasource.name}.{table.name}"
                 relationship_lines.append(
                     f"{qualified_table_name} is related to: {', '.join(related)}"
                 )
@@ -232,4 +234,25 @@ class DataCatalog(BaseSQLModel, table=False):
                 if fk.referenced_table == table.name:
                     related_tables.append(other_table.name)
 
-        return list(set(related_tables))  # Remove duplicates
+        return list(set(related_tables))
+
+    def to_context_str(self) -> str:
+        """
+        Convert the MindsDB data catalog to a formatted string for LLM context.
+
+        The format is optimized for LLMs to understand MindsDB integration structure.
+        for SQL query generation against the underlying data source.
+
+        Returns:
+            A formatted string representation of the MindsDB data catalog.
+        """
+        lines = []
+
+        lines.extend(self._format_header())
+
+        for table in self.tables:
+            lines.extend(self._format_table(table))
+
+        lines.extend(self._format_relationships())
+
+        return "\n".join(lines)
