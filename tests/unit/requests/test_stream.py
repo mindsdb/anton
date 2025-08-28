@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-import cw_summary.requests.stream as mod
+import minds.requests.stream as mod
 
 
 @pytest.fixture()
