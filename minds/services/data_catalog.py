@@ -37,35 +37,46 @@ class DataCatalogLoader:
         self.user_id = user_id
         self.company_id = company_id
 
-    def load(self, datasource_name: str, table_names: Optional[List[str]] = None) -> None:
+    async def load(self, datasource_name: str, table_names: Optional[List[str]] = None) -> None:
         """Load the data catalog."""
-        datasource_service = DatasourcesService(
-            session=self.session,
-            mindsdb_client=self.mindsdb_client,
-            user_id=self.user_id,
-            company_id=self.company_id
-        )
-        datasource = datasource_service.get_datasource(datasource_name)
+        try:
+            datasource_service = DatasourcesService(
+                session=self.session,
+                mindsdb_client=self.mindsdb_client,
+                user_id=self.user_id,
+                company_id=self.company_id
+            )
+            datasource = await datasource_service.get_datasource(datasource_name)
 
-        tables_df = self._get_tables(datasource, table_names)
+            tables_df = self._get_tables(datasource, table_names)
 
-        if len(tables_df) > 0:
-            tables = self._load_tables(datasource, tables_df)
+            if len(tables_df) > 0:
+                tables = self._load_tables(datasource, tables_df)
 
-            columns_df = self._get_columns(datasource, table_names)
-            columns = self._load_columns(columns_df, tables)
+                columns_df = self._get_columns(datasource, table_names)
+                columns = self._load_columns(columns_df, tables)
 
-            column_statistics_df = self._get_column_statistics(datasource, table_names)
-            if len(column_statistics_df) > 0:
-                self._load_column_statistics(column_statistics_df, columns)
+                column_statistics_df = self._get_column_statistics(datasource, table_names)
+                if len(column_statistics_df) > 0:
+                    self._load_column_statistics(column_statistics_df, columns)
 
-            primary_keys_df = self._get_primary_keys(datasource, table_names)
-            if len(primary_keys_df) > 0:
-                self._load_primary_keys(primary_keys_df, tables, columns)
+                primary_keys_df = self._get_primary_keys(datasource, table_names)
+                if len(primary_keys_df) > 0:
+                    self._load_primary_keys(primary_keys_df, tables, columns)
 
-            foreign_keys_df = self._get_foreign_keys(datasource, table_names)
-            if len(foreign_keys_df) > 0:
-                self._load_foreign_keys(foreign_keys_df, tables, columns)
+                foreign_keys_df = self._get_foreign_keys(datasource, table_names)
+                if len(foreign_keys_df) > 0:
+                    self._load_foreign_keys(foreign_keys_df, tables, columns)
+
+            # Only commit if everything succeeded
+            self.session.commit()
+            logger.info("Successfully committed all data catalog information to database")
+            
+        except Exception as e:
+            # Rollback all changes if any error occurs
+            self.session.rollback()
+            logger.error(f"Error loading data catalog: {str(e)}. All changes have been rolled back.")
+            raise
 
     def _execute_query(self, query: str) -> pd.DataFrame:
         """Execute a SQL query against MindsDB and return DataFrame."""
@@ -176,8 +187,8 @@ class DataCatalogLoader:
             kcu.COLUMN_NAME,
             kcu.ORDINAL_POSITION,
             kcu.CONSTRAINT_NAME
-        FROM INFORMATION_SCHEMA.META_KEY_COLUMN_USAGE kcu
-        INNER JOIN INFORMATION_SCHEMA.META_TABLE_CONSTRAINTS tc 
+        FROM information_schema.META_KEY_COLUMN_USAGE kcu
+        INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
             ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
             AND kcu.TABLE_NAME = tc.TABLE_NAME
             AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
@@ -208,8 +219,8 @@ class DataCatalogLoader:
             kcu.CONSTRAINT_NAME,
             kcu.REFERENCED_TABLE_NAME,
             kcu.REFERENCED_COLUMN_NAME
-        FROM INFORMATION_SCHEMA.META_KEY_COLUMN_USAGE kcu
-        INNER JOIN INFORMATION_SCHEMA.META_TABLE_CONSTRAINTS tc 
+        FROM information_schema.META_KEY_COLUMN_USAGE kcu
+        INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
             ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
             AND kcu.TABLE_NAME = tc.TABLE_NAME
             AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
@@ -247,7 +258,7 @@ class DataCatalogLoader:
             tables.append(table)
 
         self.session.add_all(tables)
-        self.session.commit()
+        self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(tables)} tables into the database")
 
         return tables
@@ -273,7 +284,7 @@ class DataCatalogLoader:
             columns.append(column)
 
         self.session.add_all(columns)
-        self.session.commit()
+        self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(columns)} columns into the database")
         return columns
     
@@ -284,6 +295,15 @@ class DataCatalogLoader:
         # Add column ids to column_statistics_df.
         column_statistics_df['COLUMN_ID'] = column_statistics_df['COLUMN_NAME'].map(lambda name: next((column.id for column in columns if column.name == name), None))
 
+        def normalize_distinct_count(val: Any) -> Optional[int]:
+            """Convert distinct values count to proper integer or None."""
+            if pd.isna(val):
+                return None
+            try:
+                return int(val) if val is not None else None
+            except (ValueError, TypeError):
+                return None
+
         column_statistics = []
         for _, row in column_statistics_df.iterrows():
             column_statistics.append(ColumnStatistics(
@@ -291,13 +311,13 @@ class DataCatalogLoader:
                 most_common_values=row['MOST_COMMON_VALS'],
                 most_common_frequencies=row['MOST_COMMON_FREQS'],
                 null_percentage=row['NULL_FRAC'],
-                distinct_values_count=row['N_DISTINCT'],
+                distinct_values_count=normalize_distinct_count(row['N_DISTINCT']),
                 min_value=row['MIN_VALUE'],
                 max_value=row['MAX_VALUE'],
             ))
 
         self.session.add_all(column_statistics)
-        self.session.commit()
+        self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(column_statistics)} column statistics into the database")
 
     def _load_primary_keys(self, primary_keys_df: pd.DataFrame, tables: List[Table], columns: List[Column]) -> None:
@@ -318,7 +338,7 @@ class DataCatalogLoader:
             ))
 
         self.session.add_all(primary_keys)
-        self.session.commit()
+        self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(primary_keys)} primary keys into the database")
 
     def _load_foreign_keys(self, foreign_keys_df: pd.DataFrame, tables: List[Table], columns: List[Column]) -> None:
@@ -343,5 +363,5 @@ class DataCatalogLoader:
             ))
 
         self.session.add_all(foreign_keys)
-        self.session.commit()
+        self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(foreign_keys)} foreign keys into the database")
