@@ -6,6 +6,7 @@ for datasource management operations.
 """
 
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -27,7 +28,7 @@ class DatasourceUpdateRequest(BaseModel):
 class DatasourceResponse(BaseModel):
     """Response model for datasource data (simplified schema)."""
     
-    id: str | None = Field(None, description="Datasource ID")
+    id: UUID = Field(..., description="Datasource ID")
     name: str = Field(..., description="Datasource name")
     engine: str | None = Field(None, description="Database engine")
     connection_data: dict[str, Any] | None = Field(None, description="Connection parameters")
