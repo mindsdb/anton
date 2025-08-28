@@ -125,9 +125,21 @@ class DataCatalogLoader:
     
     def _get_primary_keys(self) -> pd.DataFrame:
         """Get primary key information from META_KEY_COLUMN_USAGE with optional filtering."""
-        query = f"""
-        SELECT * FROM INFORMATION_SCHEMA.META_KEY_COLUMN_USAGE 
-        WHERE TABLE_CATALOG = '{self.datasource_name}'
+        query = """
+        SELECT 
+            kcu.TABLE_NAME,
+            kcu.COLUMN_NAME,
+            kcu.ORDINAL_POSITION,
+            kcu.CONSTRAINT_NAME
+        FROM INFORMATION_SCHEMA.META_KEY_COLUMN_USAGE kcu
+        INNER JOIN INFORMATION_SCHEMA.META_TABLE_CONSTRAINTS tc 
+            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            AND kcu.TABLE_NAME = tc.TABLE_NAME
+            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
+        WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+            AND kcu.CONSTRAINT_CATALOG = '{self.datasource_name}'
+        ORDER BY kcu.TABLE_NAME, kcu.ORDINAL_POSITION;
         """
 
         if self.tables_filter:
@@ -141,8 +153,22 @@ class DataCatalogLoader:
     def _get_table_constraints(self) -> pd.DataFrame:
         """Get table constraints from META_TABLE_CONSTRAINTS with optional filtering."""
         query = f"""
-        SELECT * FROM INFORMATION_SCHEMA.META_TABLE_CONSTRAINTS 
-        WHERE TABLE_CATALOG = '{self.datasource_name}'
+        SELECT 
+            kcu.TABLE_NAME,
+            kcu.COLUMN_NAME,
+            kcu.ORDINAL_POSITION,
+            kcu.CONSTRAINT_NAME,
+            kcu.REFERENCED_TABLE_NAME,
+            kcu.REFERENCED_COLUMN_NAME
+        FROM INFORMATION_SCHEMA.META_KEY_COLUMN_USAGE kcu
+        INNER JOIN INFORMATION_SCHEMA.META_TABLE_CONSTRAINTS tc 
+            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            AND kcu.TABLE_NAME = tc.TABLE_NAME
+            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
+        WHERE tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
+            AND kcu.CONSTRAINT_CATALOG = '{self.datasource_name}'
+        ORDER BY kcu.TABLE_NAME, kcu.ORDINAL_POSITION;
         """
 
         if self.tables_filter:
