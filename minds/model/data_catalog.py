@@ -124,8 +124,8 @@ class DataCatalog(BaseSQLModel, table=False):
         column_info = f"    - {column.name} ({column.data_type})"
         if not column.is_nullable:
             column_info += " NOT NULL"
-        if column.column_default and column.column_default != "[NULL]":
-            column_info += f" DEFAULT {column.column_default}"
+        if column.default_value and column.default_value != "[NULL]":
+            column_info += f" DEFAULT {column.default_value}"
         if column.description:
             column_info += f" - {column.description}"
         lines.append(column_info)
@@ -185,10 +185,10 @@ class DataCatalog(BaseSQLModel, table=False):
         if table.foreign_key_constraints:
             lines.append("  Foreign Keys:")
             for fk in table.foreign_key_constraints:
-                fk_columns = ", ".join([fk.column.name for fk in fk.column])
-                ref_columns = ", ".join([fk.referenced_column.name for fk in fk.referenced_column])
-                qualified_fk_table = f"{self.datasource.name}.{fk.referenced_table}"
-                fk_info = f"    - {fk_columns} → {qualified_fk_table}({ref_columns})"
+                fk_column_name = fk.column.name
+                ref_column_name = fk.referenced_column.name
+                qualified_fk_table = f"{self.datasource.name}.{fk.referenced_table.name}"
+                fk_info = f"    - {fk_column_name} → {qualified_fk_table}({ref_column_name})"
                 # if fk.is_implicit:
                 #     confidence = fk.confidence or 0.0
                 #     fk_info += f" [implicit, confidence: {confidence:.1%}]"
