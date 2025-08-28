@@ -4,12 +4,21 @@ import uuid
 try:
     from langfuse import get_client
 except ImportError:
+
     class NoOpClient:
-        def get_current_trace_id(self): return "disabled"
-        def get_current_observation_id(self): return "disabled"
-        def update_current_trace(self, **kwargs): pass
+        def get_current_trace_id(self):
+            return "disabled"
+
+        def get_current_observation_id(self):
+            return "disabled"
+
+        def update_current_trace(self, **kwargs):
+            pass
+
     def get_client():
         return NoOpClient()
+
+
 from minds.common.logger import setup_logging
 from minds.requests.context import Context, create_langfuse_context
 

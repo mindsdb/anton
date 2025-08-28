@@ -20,7 +20,7 @@ router = APIRouter()
 async def healthz():
     """
     Health check endpoint.
-    
+
     Returns:
         dict: Status of the service
     """
@@ -32,7 +32,7 @@ async def healthz():
 async def readiness():
     """
     Readiness check endpoint.
-    
+
     Returns:
         dict: Readiness status of the service
     """
@@ -46,7 +46,7 @@ async def readiness():
 async def liveness():
     """
     Liveness check endpoint.
-    
+
     Returns:
         dict: Liveness status of the service
     """

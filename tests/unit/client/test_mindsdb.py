@@ -25,9 +25,9 @@ class TestCreateMindsdbClientFromEnv:
         """Test client creation with None API key connects without auth."""
         mock_client = Mock(spec=Server)
         mock_connect.return_value = mock_client
-        
+
         result = create_mindsdb_client_from_env()
-        
+
         # Should connect without authentication when no API key
         mock_connect.assert_called_once()
         assert result == mock_client
