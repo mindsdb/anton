@@ -111,9 +111,9 @@ class DatasourcesService:
             responses = []
             for datasource in datasources:
                 if with_detailed_data:
-                    response = await self._datasource_to_detailed_response(datasource)
+                    response = await self._datasource_to_detailed_response(datasource[0])
                 else:
-                    response = self._datasource_to_response(datasource)
+                    response = self._datasource_to_response(datasource[0])
                 responses.append(response)
             
             logger.info(f"Found {len(responses)} datasources for company {self.company_id}")
@@ -152,7 +152,7 @@ class DatasourcesService:
             )
             
             result = self.session.exec(statement)
-            datasource = result.first()
+            datasource = result.first()[0]
             
             if not datasource:
                 raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
