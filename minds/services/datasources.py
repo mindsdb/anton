@@ -488,6 +488,7 @@ class DatasourcesService:
     def _datasource_to_response(self, datasource: Datasource) -> DatasourceResponse:
         """Convert Datasource model to response object."""
         return DatasourceResponse(
+            id=datasource.id,
             name=datasource.name,
             engine=datasource.engine,
             connection_data=datasource.connection_data,
