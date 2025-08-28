@@ -117,7 +117,7 @@ class MindsService:
                 minds_list.append(mind_response)
 
             logger.info(
-                f"Retrieved {len(minds_list)} minds for company {self.company_id} " f"(offset={offset}, limit={limit})"
+                f"Retrieved {len(minds_list)} minds for company {self.company_id} (offset={offset}, limit={limit})"
             )
             return minds_list
         except Exception as e:

@@ -204,8 +204,10 @@ class DatasourcesService:
             try:
                 await self._create_mindsdb_database(datasource)
 
-                logger.info(f"Created datasource {datasource_data.name} for company \
-                                {self.company_id} (synced to MindsDB)")
+                logger.info(
+                    f"Created datasource {datasource_data.name} for company \
+                                {self.company_id} (synced to MindsDB)"
+                )
 
             except DatasourceServiceError:
                 # Rollback internal database if MindsDB creation fails
@@ -302,7 +304,7 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
-            logger.debug(f"Deleting datasource {datasource_name} for company {self.company_id} " f"(cascade={cascade})")
+            logger.debug(f"Deleting datasource {datasource_name} for company {self.company_id} (cascade={cascade})")
 
             # Get existing datasource
             statement = select(Datasource).where(

@@ -17,4 +17,4 @@ jobs:
         with:
           python-version: '3.12.4'
       - name: Run linter
-        run: make check/lint
+        run: make lint

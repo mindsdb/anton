@@ -105,9 +105,9 @@ class TestAPIV1Router:
         for route in routes:
             # All routes should start with /api/v1/ then the expected prefixes
             expected_prefixes = ["/api/v1/health", "/api/v1/minds", "/api/v1/chat", "/api/v1/datasources"]
-            assert any(
-                route.path.startswith(prefix) for prefix in expected_prefixes
-            ), f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"
+            assert any(route.path.startswith(prefix) for prefix in expected_prefixes), (
+                f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"
+            )
 
     def test_router_methods_available(self):
         """Test that router exposes expected HTTP methods."""

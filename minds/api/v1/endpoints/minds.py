@@ -82,7 +82,7 @@ async def get_mind(
         MindResponse: Mind object with full details
     """
     logger.debug(
-        f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}, " f"company {minds_service.company_id}"
+        f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}"
     )
 
     try:
@@ -149,8 +149,7 @@ async def update_mind(
         MindResponse: Updated mind object with new values
     """
     logger.debug(
-        f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}, "
-        f"company {minds_service.company_id}"
+        f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}"
     )
 
     try:
@@ -181,8 +180,7 @@ async def delete_mind(mind_name: str, minds_service: MindsService = Depends(get_
         None: 204 No Content on successful deletion
     """
     logger.debug(
-        f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}, "
-        f"company {minds_service.company_id}"
+        f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}"
     )
 
     try:
