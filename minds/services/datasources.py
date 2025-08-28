@@ -5,7 +5,6 @@ This service handles both internal dataource information storage and MindsDB SDK
 for datasource management operations.
 """
 
-from typing import Optional
 
 from mindsdb_sdk.server import Server
 from sqlalchemy import and_, select
@@ -14,11 +13,11 @@ from sqlmodel import Session
 from minds.common.logger import setup_logging
 from minds.model.datasource import Datasource
 from minds.schemas.datasources import (
+    DatasourceConnectionStatus,
     DatasourceCreateRequest,
-    DatasourceUpdateRequest,
-    DatasourceResponse,
     DatasourceDetailedResponse,
-    DatasourceConnectionStatus
+    DatasourceResponse,
+    DatasourceUpdateRequest,
 )
 
 # Set up logging
@@ -73,7 +72,7 @@ class DatasourcesService:
         
     async def list_datasources(
         self,
-        engine: Optional[str] = None,
+        engine: str | None = None,
         limit: int = 100,
         offset: int = 0,
         with_detailed_data: bool = False
@@ -488,6 +487,7 @@ class DatasourcesService:
     def _datasource_to_response(self, datasource: Datasource) -> DatasourceResponse:
         """Convert Datasource model to response object."""
         return DatasourceResponse(
+            id=str(datasource.id) if datasource.id else None,
             name=datasource.name,
             engine=datasource.engine,
             connection_data=datasource.connection_data,
