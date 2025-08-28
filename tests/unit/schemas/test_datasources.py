@@ -63,20 +63,25 @@ class TestDatasourceUpdateRequest:
 class TestDatasourceResponse:
     """Test DatasourceResponse schema."""
 
-    def test_response_minimal(self):
+    def test_response_minimal(self, test_uuid):
         """Test response with minimal required data."""
-        data = {"name": "test-db"}
+        data = {
+            "id": test_uuid,
+            "name": "test-db"
+        }
         response = DatasourceResponse(**data)
         
         assert response.name == "test-db"
+        assert response.id == test_uuid
         assert response.engine is None
         assert response.connection_data is None
         assert response.created_at is None
         assert response.is_demo is None
 
-    def test_response_full(self):
+    def test_response_full(self, test_uuid):
         """Test response with all fields."""
         data = {
+            "id": test_uuid,
             "name": "test-db",
             "engine": "postgres",
             "connection_data": {"host": "localhost"},
@@ -118,25 +123,26 @@ class TestDatasourceConnectionStatus:
 class TestDatasourceDetailedResponse:
     """Test DatasourceDetailedResponse schema (extends DatasourceResponse)."""
 
-    def test_detailed_response_inheritance(self):
+    def test_detailed_response_inheritance(self, test_uuid):
         """Test that detailed response inherits from base response."""
         data = {
+            "id": test_uuid,
             "name": "test-db",
             "engine": "mysql",
             "connection_status": {"success": True}
         }
         response = DatasourceDetailedResponse(**data)
         
-        # Base fields
         assert response.name == "test-db"
         assert response.engine == "mysql"
-        
-        # Extended field
         assert response.connection_status.success is True
 
-    def test_detailed_response_without_connection_status(self):
+    def test_detailed_response_without_connection_status(self, test_uuid):
         """Test detailed response without connection status."""
-        data = {"name": "test-db"}
+        data = {
+            "id": test_uuid,
+            "name": "test-db"
+        }
         response = DatasourceDetailedResponse(**data)
         
         assert response.name == "test-db"
@@ -163,9 +169,8 @@ class TestDeleteDatasourceRequest:
 class TestSchemaIntegration:
     """Test integration between schemas."""
 
-    def test_schemas_json_serialization(self):
+    def test_schemas_json_serialization(self, test_uuid):
         """Test that all schemas can be serialized to JSON."""
-        # Create request
         create_req = DatasourceCreateRequest(
             name="test",
             engine="postgres", 
@@ -174,8 +179,10 @@ class TestSchemaIntegration:
         create_json = create_req.model_dump()
         assert "name" in create_json
         
-        # Response
-        response = DatasourceResponse(name="test")
+        response = DatasourceResponse(
+            id=test_uuid,
+            name="test"
+        )
         response_json = response.model_dump()
         assert "name" in response_json
         

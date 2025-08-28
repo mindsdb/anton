@@ -65,10 +65,10 @@ class TestDatasourcesAPI:
         return service
 
     @pytest.fixture
-    def sample_datasource_response(self):
+    def sample_datasource_response(self, test_uuid):
         """Sample DatasourceResponse for testing."""
         return DatasourceResponse(
-            id="test-id-123",
+            id=test_uuid,
             name="test_postgres",
             engine="postgres",
             connection_data={"host": "localhost", "port": 5432},

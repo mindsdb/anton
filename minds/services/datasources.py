@@ -110,9 +110,9 @@ class DatasourcesService:
             responses = []
             for datasource in datasources:
                 if with_detailed_data:
-                    response = await self._datasource_to_detailed_response(datasource[0])
+                    response = await self._datasource_to_detailed_response(datasource)
                 else:
-                    response = self._datasource_to_response(datasource[0])
+                    response = self._datasource_to_response(datasource)
                 responses.append(response)
             
             logger.info(f"Found {len(responses)} datasources for company {self.company_id}")
@@ -151,7 +151,7 @@ class DatasourcesService:
             )
             
             result = self.session.exec(statement)
-            datasource = result.first()[0]
+            datasource = result.first()
             
             if not datasource:
                 raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
@@ -488,7 +488,7 @@ class DatasourcesService:
     def _datasource_to_response(self, datasource: Datasource) -> DatasourceResponse:
         """Convert Datasource model to response object."""
         return DatasourceResponse(
-            id=str(datasource.id) if datasource.id else None,
+            id=datasource.id,
             name=datasource.name,
             engine=datasource.engine,
             connection_data=datasource.connection_data,

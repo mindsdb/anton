@@ -93,7 +93,7 @@ class TestDatasourcesService:
         result = service._datasource_to_response(sample_datasource)
         
         assert isinstance(result, DatasourceResponse)
-        assert result.id == str(sample_datasource.id)
+        assert result.id == sample_datasource.id
         assert result.name == "test_postgres"
         assert result.engine == "postgres"
         assert result.connection_data == {"host": "localhost", "port": 5432, "user": "test"}
@@ -178,9 +178,17 @@ class TestDatasourcesService:
     @pytest.mark.asyncio
     async def test_create_datasource_success(self, service, mock_session, mock_mindsdb_client, sample_create_request):
         """Test successful datasource creation."""
+        from uuid import uuid4
+        
         mock_result = Mock()
         mock_result.first.return_value = None   
         mock_session.exec.return_value = mock_result
+        
+        # Mock the refresh method to set an id on the datasource
+        def mock_refresh(datasource):
+            datasource.id = uuid4()
+        
+        mock_session.refresh.side_effect = mock_refresh
         
         mock_databases = Mock()
         mock_databases.create = AsyncMock()
@@ -190,6 +198,7 @@ class TestDatasourcesService:
         
         assert isinstance(result, DatasourceResponse)
         assert result.name == "test_postgres"
+        assert result.id is not None  # Should have an ID after creation
         mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
 

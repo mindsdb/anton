@@ -1,6 +1,7 @@
 import os
 import sys
 import types
+from uuid import UUID
 
 import pytest
 
@@ -63,3 +64,9 @@ def stub_langfuse_module() -> None:
     fake_langfuse.Langfuse = _MockLangfuseClient
 
     sys.modules["langfuse"] = fake_langfuse
+
+
+@pytest.fixture
+def test_uuid():
+    """Shared UUID for testing datasource responses."""
+    return UUID("c58da050-a5b2-4707-ae80-ceeb0e701271")
