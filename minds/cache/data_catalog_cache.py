@@ -173,3 +173,8 @@ class DataCatalogInMemoryCache(DataCatalogCache):
     def size(self) -> int:
         """Get the current size of the cache."""
         return len(self.cache)
+
+
+# TODO: Implement a Redis cache implementation of DataCatalogCache.
+class DataCatalogRedisCache(DataCatalogCache):
+    """A Redis cache implementation of DataCatalogCache."""
