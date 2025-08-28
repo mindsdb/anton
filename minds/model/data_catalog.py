@@ -1,10 +1,13 @@
-from typing import Any, Optional, List
+from typing import Any, Optional, List, TYPE_CHECKING
 from uuid import UUID
 
 from sqlmodel import Column as SQLModelColumn, Field, JSON, Relationship
 
 from minds.model.base import BaseSQLModel
-from minds.model.datasource import Datasource
+
+
+if TYPE_CHECKING:
+    from minds.model.datasource import Datasource
 
 
 class Table(BaseSQLModel, table=True):
@@ -104,28 +107,33 @@ class ForeignKeyConstraint(BaseSQLModel, table=True):
 
 
 class DataCatalog(BaseSQLModel, table=False):
-    """Data catalog metadata."""
-    datasource_id: UUID = Field(..., description="Datasource ID", foreign_key="datasources.id")
-    tables: List["Table"] = Relationship()
+    """Data catalog metadata - a helper model for accessing datasource metadata."""
+    datasource: "Datasource" = Field(..., description="Datasource")
 
-    datasource: Datasource = Relationship()
+    @classmethod
+    def from_datasource(cls, datasource: "Datasource") -> "DataCatalog":
+        """Create a DataCatalog instance from a datasource and its tables."""
+        return cls(
+            datasource=datasource
+        )
 
     def _format_header(self) -> List[str]:
         """Format the header section with data source information."""
         lines = []
         lines.append(f"MindsDB Data Source: {self.datasource.name}")
         lines.append(f"Engine: {self.datasource.engine}")
-        if self.datasource.handler_info:
-            lines.append(f"Handler Info: {self.datasource.handler_info}")
+        # TODO: Add handler info.
+        # if self.datasource.handler_info:
+        #     lines.append(f"Handler Info: {self.datasource.handler_info}")
         lines.append("")
-        lines.append(f"Tables: {len(self.tables)}")
+        lines.append(f"Tables: {len(self.datasource.tables)}")
         lines.append("")
         return lines
     
     def _format_table(self, table: Table) -> List[str]:
         """Format a single table's complete information."""
         lines = []
-        
+
         # Table header.
         qualified_table_name = f"{self.datasource.name}.{table.name}"
         table_header = f"Table: {qualified_table_name}"
@@ -226,7 +234,7 @@ class DataCatalog(BaseSQLModel, table=False):
         lines = []
         relationship_lines = []
 
-        for table in self.tables:
+        for table in self.datasource.tables:
             related = self._get_related_tables(table)
             related = [f"{self.datasource.name}.{n}" for n in related]
             if related:
@@ -251,7 +259,7 @@ class DataCatalog(BaseSQLModel, table=False):
             related_tables.append(fk.referenced_table)
 
         # Tables that reference this table.
-        for other_table in self.tables:
+        for other_table in self.datasource.tables:
             if other_table.name == table.name:
                 continue
 
@@ -275,9 +283,15 @@ class DataCatalog(BaseSQLModel, table=False):
 
         lines.extend(self._format_header())
 
-        for table in self.tables:
+        for table in self.datasource.tables:
             lines.extend(self._format_table(table))
 
         lines.extend(self._format_relationships())
 
         return "\n".join(lines)
+
+
+# Resolve forward references after all models are defined
+if not TYPE_CHECKING:
+    from minds.model.datasource import Datasource
+    DataCatalog.model_rebuild()
