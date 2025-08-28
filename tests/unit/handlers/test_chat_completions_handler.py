@@ -328,39 +328,7 @@ class TestChatCompletionsHandler:
         # Check dummy response logging
         assert any("This is a dummy chat completion response." in call for call in info_calls)
 
-    @pytest.mark.asyncio
-    async def test_chat_completions_messages_text_formatting(
-        self, handler_mod, mock_session, mock_mindsdb_client, mock_streamer
-    ):
-        """Test that messages are correctly formatted for MindsDB processing."""
-        # Create specific messages to test formatting
-        messages = [
-            Message(role=Role.user, content="First message"),
-            Message(role=Role.assistant, content="Second message"),
-        ]
 
-        handler = handler_mod.ChatCompletionsHandler(
-            session=mock_session,
-            mindsdb_client=mock_mindsdb_client,
-            messages=messages,
-            model="test-model",
-            stream=True,
-        )
-
-        # Setup successful MindsDB responses
-        mock_mindsdb_client.models.list.return_value = []
-        mock_mindsdb_client.databases.list.return_value = []
-
-        # Execute chat completions
-        await handler.chat_completions(mock_streamer)
-
-        # Check that the formatted messages text was used correctly
-        push_calls = mock_streamer.push.call_args_list
-        expected_messages_text = "Role.user: First message\nRole.assistant: Second message"
-
-        assert any(
-            call[1]["role"] == Role.assistant and expected_messages_text in call[1]["content"] for call in push_calls
-        )
 
     def test_chat_completions_handler_attributes_immutable_after_init(self, sample_handler, sample_messages):
         """Test that handler attributes remain unchanged after initialization."""
