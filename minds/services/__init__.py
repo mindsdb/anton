@@ -6,7 +6,7 @@ that encapsulate domain operations and coordinate between the API
 endpoints and data access layers.
 """
 
-from .minds import MindsService
 from .datasources import DatasourcesService
+from .minds import MindsService
 
 __all__ = ["MindsService", "DatasourcesService"]

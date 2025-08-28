@@ -5,7 +5,7 @@ This package contains SQLModel definitions for all database entities.
 """
 
 from .base import BaseSQLModel
-from .mind import Mind
 from .datasource import Datasource
+from .mind import Mind
 
 __all__ = ["BaseSQLModel", "Mind", "Datasource"]

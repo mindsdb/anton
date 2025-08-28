@@ -7,7 +7,7 @@ while adding user attribution for multi-user support.
 
 from typing import Any
 
-from sqlalchemy import UniqueConstraint, JSON
+from sqlalchemy import JSON, UniqueConstraint
 from sqlmodel import Column, Field
 
 from minds.model.base import BaseSQLModel

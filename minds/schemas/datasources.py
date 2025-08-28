@@ -27,6 +27,7 @@ class DatasourceUpdateRequest(BaseModel):
 class DatasourceResponse(BaseModel):
     """Response model for datasource data (simplified schema)."""
     
+    id: str | None = Field(None, description="Datasource ID")
     name: str = Field(..., description="Datasource name")
     engine: str | None = Field(None, description="Database engine")
     connection_data: dict[str, Any] | None = Field(None, description="Connection parameters")
