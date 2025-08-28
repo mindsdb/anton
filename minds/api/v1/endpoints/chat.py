@@ -31,7 +31,7 @@ router = APIRouter()
 async def options_handler():
     """
     Handle CORS preflight requests for chat completions endpoints.
-    
+
     Returns:
         JSONResponse: CORS headers for preflight requests
     """
@@ -48,9 +48,7 @@ async def options_handler():
 @router.post("/completions")
 @observe(name="Chat Completions v1", as_type="generation")
 async def chat_completions(
-    chat_completions_request: ChatCompletionsRequest,
-    request: Request,
-    session: Session = Depends(get_session)
+    chat_completions_request: ChatCompletionsRequest, request: Request, session: Session = Depends(get_session)
 ):
     """
     Handle chat completions for documents (API v1).
@@ -60,20 +58,20 @@ async def chat_completions(
     AI model management and includes comprehensive observability.
 
     Args:
-        chat_completions_request (ChatCompletionsRequest): The request containing 
+        chat_completions_request (ChatCompletionsRequest): The request containing
             chat messages and other parameters.
         request (Request): The FastAPI request object to extract context.
 
     Returns:
         StreamingResponse | JSONResponse: A streaming response if stream=True,
             otherwise a JSON response containing chat completion messages.
-            
+
     Raises:
         HTTPException: 500 if there's an error processing the request.
     """
     # Extract user context from request
     user = extract_context_from_request(request)
-    
+
     logger.debug(f"🔄 Context: {user.model_dump()}")
 
     # Set up Langfuse observation

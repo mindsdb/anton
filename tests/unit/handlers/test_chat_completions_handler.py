@@ -328,8 +328,6 @@ class TestChatCompletionsHandler:
         # Check dummy response logging
         assert any("This is a dummy chat completion response." in call for call in info_calls)
 
-
-
     def test_chat_completions_handler_attributes_immutable_after_init(self, sample_handler, sample_messages):
         """Test that handler attributes remain unchanged after initialization."""
         original_session = sample_handler.session

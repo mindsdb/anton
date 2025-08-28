@@ -17,10 +17,18 @@ from .minds import (
 
 __all__ = [
     # Chat schemas
-    "Role", "Message", "ChatCompletion", "ChatCompletionChunk",
-    "Choice", "StreamChoice", "Usage",
-    
-    # Mind schemas  
-    "MindCreateRequest", "MindUpdateRequest", "MindResponse",
-    "AddDatasourceRequest", "DeleteMindRequest", "MindDatasourceResponse",
+    "Role",
+    "Message",
+    "ChatCompletion",
+    "ChatCompletionChunk",
+    "Choice",
+    "StreamChoice",
+    "Usage",
+    # Mind schemas
+    "MindCreateRequest",
+    "MindUpdateRequest",
+    "MindResponse",
+    "AddDatasourceRequest",
+    "DeleteMindRequest",
+    "MindDatasourceResponse",
 ]

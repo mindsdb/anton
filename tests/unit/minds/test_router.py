@@ -35,10 +35,10 @@ class TestAPIV1Router:
         # Test health endpoints
         response = client.get("/api/v1/health/")
         assert response.status_code == 200
-        
+
         response = client.get("/api/v1/health/ready")
         assert response.status_code == 200
-        
+
         response = client.get("/api/v1/health/live")
         assert response.status_code == 200
 
@@ -46,10 +46,10 @@ class TestAPIV1Router:
         """Test that minds endpoints are registered."""
         # These will fail due to missing dependencies, but should be routed correctly
         # We expect various error codes (400, 422, 500), but not 404 (not found)
-        
+
         response = client.get("/api/v1/minds/")
         assert response.status_code != 404  # Endpoint should exist
-        
+
         response = client.get("/api/v1/minds/test-mind")
         assert response.status_code != 404  # Endpoint should exist
 
@@ -68,13 +68,13 @@ class TestAPIV1Router:
         """Test that router includes have correct tags."""
         # Check that the router was configured with proper tags
         routes = api_router.routes
-        
+
         # Find routes and verify tags (routes have /api/v1 prefix)
         health_routes = [r for r in routes if "/health" in r.path]
         minds_routes = [r for r in routes if "/minds" in r.path]
         chat_routes = [r for r in routes if "/chat" in r.path]
         datasources_routes = [r for r in routes if "/datasources" in r.path]
-        
+
         assert len(health_routes) > 0, f"No health routes found in {[r.path for r in routes]}"
         assert len(minds_routes) > 0, f"No minds routes found in {[r.path for r in routes]}"
         assert len(chat_routes) > 0, f"No chat routes found in {[r.path for r in routes]}"
@@ -83,15 +83,15 @@ class TestAPIV1Router:
     def test_openapi_docs_generation(self, app_with_router):
         """Test that OpenAPI docs are properly generated."""
         client = TestClient(app_with_router)
-        
+
         # Test that OpenAPI schema is available
         response = client.get("/openapi.json")
         assert response.status_code == 200
-        
+
         openapi_schema = response.json()
         assert "openapi" in openapi_schema
         assert "paths" in openapi_schema
-        
+
         # Verify some key paths exist
         paths = openapi_schema["paths"]
         assert "/api/v1/health/" in paths
@@ -101,27 +101,28 @@ class TestAPIV1Router:
     def test_route_path_prefixes(self):
         """Test that all routes have correct path prefixes."""
         routes = api_router.routes
-        
+
         for route in routes:
             # All routes should start with /api/v1/ then the expected prefixes
             expected_prefixes = ["/api/v1/health", "/api/v1/minds", "/api/v1/chat", "/api/v1/datasources"]
-            assert any(route.path.startswith(prefix) for prefix in expected_prefixes), \
-                f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"
+            assert any(
+                route.path.startswith(prefix) for prefix in expected_prefixes
+            ), f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"
 
     def test_router_methods_available(self):
         """Test that router exposes expected HTTP methods."""
         routes = api_router.routes
-        
+
         # Find a few key routes and verify they have correct methods
-        minds_list_routes = [r for r in routes if r.path == "/minds/" and hasattr(r, 'methods')]
+        minds_list_routes = [r for r in routes if r.path == "/minds/" and hasattr(r, "methods")]
         if minds_list_routes:
             route = minds_list_routes[0]
             assert "GET" in route.methods  # list_minds
             assert "POST" in route.methods  # create_mind
-        
-        minds_detail_routes = [r for r in routes if r.path == "/minds/{mind_name}" and hasattr(r, 'methods')]
+
+        minds_detail_routes = [r for r in routes if r.path == "/minds/{mind_name}" and hasattr(r, "methods")]
         if minds_detail_routes:
             route = minds_detail_routes[0]
-            assert "GET" in route.methods     # get_mind
-            assert "PUT" in route.methods     # update_mind
+            assert "GET" in route.methods  # get_mind
+            assert "PUT" in route.methods  # update_mind
             assert "DELETE" in route.methods  # delete_mind

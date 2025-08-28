@@ -3,7 +3,7 @@ Unit tests for Minds schemas.
 
 Tests the Pydantic models used for minds API including:
 - Request validation
-- Response serialization  
+- Response serialization
 - Field constraints
 - Default values
 """
@@ -31,11 +31,11 @@ class TestMindCreateRequest:
             "provider": "openai",
             "model_name": "gpt-4o",
             "parameters": {"temperature": 0.7, "max_tokens": 100},
-            "datasources": ["datasource1", "datasource2"]
+            "datasources": ["datasource1", "datasource2"],
         }
-        
+
         request = MindCreateRequest(**data)
-        
+
         assert request.name == "test-mind"
         assert request.provider == "openai"
         assert request.model_name == "gpt-4o"
@@ -48,9 +48,9 @@ class TestMindCreateRequest:
             "name": "minimal-mind"
             # Provider has default "openai", others have default factories
         }
-        
+
         request = MindCreateRequest(**data)
-        
+
         assert request.name == "minimal-mind"
         assert request.provider == "openai"  # Default value
         assert request.model_name is None  # Optional field
@@ -62,11 +62,11 @@ class TestMindCreateRequest:
         data = {
             "name": "default-mind",
             "provider": "google",
-            "datasources": []  # Empty list
+            "datasources": [],  # Empty list
         }
-        
+
         request = MindCreateRequest(**data)
-        
+
         assert request.datasources == []
 
     def test_create_request_missing_required_field(self):
@@ -74,7 +74,7 @@ class TestMindCreateRequest:
         # Missing name (the only required field)
         with pytest.raises(ValidationError) as exc_info:
             MindCreateRequest()
-        
+
         assert "name" in str(exc_info.value)
 
         # Provider is not required as it has a default value
@@ -106,9 +106,9 @@ class TestMindCreateRequest:
             {"temperature": 0.7},
             {"temperature": 0.7, "max_tokens": 100, "top_p": 0.9},
             {},  # Empty dict
-            {"custom_param": "custom_value"}
+            {"custom_param": "custom_value"},
         ]
-        
+
         for params in valid_params:
             request = MindCreateRequest(name="test", provider="openai", parameters=params)
             assert request.parameters == params
@@ -116,12 +116,8 @@ class TestMindCreateRequest:
     def test_create_request_datasources_validation(self):
         """Test datasources field validation."""
         # Valid datasources
-        valid_datasources = [
-            [],
-            ["single-datasource"],
-            ["datasource1", "datasource2", "datasource3"]
-        ]
-        
+        valid_datasources = [[], ["single-datasource"], ["datasource1", "datasource2", "datasource3"]]
+
         for datasources in valid_datasources:
             request = MindCreateRequest(name="test", provider="openai", datasources=datasources)
             assert request.datasources == datasources
@@ -133,7 +129,7 @@ class TestMindUpdateRequest:
     def test_update_request_all_fields_optional(self):
         """Test that all fields are optional in update request."""
         request = MindUpdateRequest()
-        
+
         assert request.name is None
         assert request.provider is None
         assert request.model_name is None
@@ -142,11 +138,8 @@ class TestMindUpdateRequest:
 
     def test_update_request_partial_update(self):
         """Test partial update with some fields."""
-        request = MindUpdateRequest(
-            name="updated-name",
-            parameters={"temperature": 0.9}
-        )
-        
+        request = MindUpdateRequest(name="updated-name", parameters={"temperature": 0.9})
+
         assert request.name == "updated-name"
         assert request.parameters == {"temperature": 0.9}
         assert request.provider is None  # Not updated
@@ -159,11 +152,11 @@ class TestMindUpdateRequest:
             "provider": "anthropic",
             "model_name": "claude-3",
             "parameters": {"temperature": 0.5},
-            "datasources": ["new-datasource"]
+            "datasources": ["new-datasource"],
         }
-        
+
         request = MindUpdateRequest(**data)
-        
+
         assert request.name == "fully-updated-mind"
         assert request.provider == "anthropic"
         assert request.model_name == "claude-3"
@@ -183,11 +176,11 @@ class TestMindResponse:
             "parameters": {"temperature": 0.7},
             "datasources": ["datasource1"],
             "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T12:00:00Z"
+            "updated_at": "2024-01-01T12:00:00Z",
         }
-        
+
         response = MindResponse(**data)
-        
+
         assert response.name == "response-mind"
         assert response.model_name == "gpt-4o"
         assert response.provider == "openai"
@@ -203,11 +196,11 @@ class TestMindResponse:
             "model_name": "gpt-4o",
             "provider": "openai",
             "parameters": {},
-            "datasources": []
+            "datasources": [],
         }
-        
+
         response = MindResponse(**data)
-        
+
         assert response.created_at is None
         assert response.updated_at is None
 
@@ -219,12 +212,12 @@ class TestMindResponse:
             "provider": "openai",
             "parameters": {"temperature": 0.7},
             "datasources": ["datasource1"],
-            "created_at": "2024-01-01T00:00:00Z"
+            "created_at": "2024-01-01T00:00:00Z",
         }
-        
+
         response = MindResponse(**data)
         serialized = response.model_dump()
-        
+
         assert isinstance(serialized, dict)
         assert serialized["name"] == "serializable-mind"
         assert serialized["parameters"] == {"temperature": 0.7}
@@ -235,14 +228,10 @@ class TestAddDatasourceRequest:
 
     def test_valid_add_datasource_request(self):
         """Test valid add datasource request."""
-        data = {
-            "name": "test-datasource",
-            "tables": ["table1", "table2"],
-            "check_connection": True
-        }
-        
+        data = {"name": "test-datasource", "tables": ["table1", "table2"], "check_connection": True}
+
         request = AddDatasourceRequest(**data)
-        
+
         assert request.name == "test-datasource"
         assert request.tables == ["table1", "table2"]
         assert request.check_connection is True
@@ -250,7 +239,7 @@ class TestAddDatasourceRequest:
     def test_add_datasource_request_minimal(self):
         """Test minimal add datasource request."""
         request = AddDatasourceRequest(name="minimal-datasource")
-        
+
         assert request.name == "minimal-datasource"
         assert request.tables is None
         assert request.check_connection is False  # Default value
@@ -277,13 +266,13 @@ class TestDeleteMindRequest:
     def test_delete_mind_request_default(self):
         """Test delete mind request with default values."""
         request = DeleteMindRequest()
-        
+
         assert request.cascade is False
 
     def test_delete_mind_request_with_cascade(self):
         """Test delete mind request with cascade option."""
         request = DeleteMindRequest(cascade=True)
-        
+
         assert request.cascade is True
 
 
@@ -292,28 +281,22 @@ class TestMindDatasourceResponse:
 
     def test_mind_datasource_response_success(self):
         """Test successful mind datasource response."""
-        response = MindDatasourceResponse(
-            success=True,
-            message="Datasource added successfully"
-        )
-        
+        response = MindDatasourceResponse(success=True, message="Datasource added successfully")
+
         assert response.success is True
         assert response.message == "Datasource added successfully"
 
     def test_mind_datasource_response_failure(self):
         """Test failed mind datasource response."""
-        response = MindDatasourceResponse(
-            success=False,
-            message="Failed to add datasource"
-        )
-        
+        response = MindDatasourceResponse(success=False, message="Failed to add datasource")
+
         assert response.success is False
         assert response.message == "Failed to add datasource"
 
     def test_mind_datasource_response_minimal(self):
         """Test minimal mind datasource response."""
         response = MindDatasourceResponse(success=True)
-        
+
         assert response.success is True
         assert response.message is None
 
@@ -328,33 +311,26 @@ class TestSchemaInteroperability:
             "provider": "openai",
             "model_name": "gpt-4o",
             "parameters": {"temperature": 0.7},
-            "datasources": ["datasource1"]
+            "datasources": ["datasource1"],
         }
-        
+
         create_request = MindCreateRequest(**create_data)
-        
+
         # Simulate what happens in the service layer
-        response_data = {
-            **create_data,
-            "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T00:00:00Z"
-        }
-        
+        response_data = {**create_data, "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"}
+
         response = MindResponse(**response_data)
-        
+
         assert response.name == create_request.name
         assert response.provider == create_request.provider
         assert response.parameters == create_request.parameters
 
     def test_update_to_response_conversion(self):
         """Test update request compatibility with response."""
-        update_data = {
-            "name": "updated-interop-mind",
-            "parameters": {"temperature": 0.9}
-        }
-        
+        update_data = {"name": "updated-interop-mind", "parameters": {"temperature": 0.9}}
+
         update_request = MindUpdateRequest(**update_data)
-        
+
         # Original response data
         original_response_data = {
             "name": "original-mind",
@@ -363,18 +339,18 @@ class TestSchemaInteroperability:
             "parameters": {"temperature": 0.7},
             "datasources": ["datasource1"],
             "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T00:00:00Z"
+            "updated_at": "2024-01-01T00:00:00Z",
         }
-        
+
         # Simulate update merge
         updated_response_data = original_response_data.copy()
         if update_request.name is not None:
             updated_response_data["name"] = update_request.name
         if update_request.parameters is not None:
             updated_response_data["parameters"] = update_request.parameters
-        
+
         response = MindResponse(**updated_response_data)
-        
+
         assert response.name == "updated-interop-mind"
         assert response.parameters == {"temperature": 0.9}
         assert response.provider == "openai"  # Unchanged

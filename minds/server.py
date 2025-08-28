@@ -18,7 +18,7 @@ logger = setup_logging()
 def create_app() -> FastAPI:
     """
     Create and configure the FastAPI application.
-    
+
     Returns:
         FastAPI: Configured FastAPI application instance
     """
@@ -42,8 +42,7 @@ def create_app() -> FastAPI:
 
     # Include v1 API routes
     app.include_router(v1_router)
-    
-    
+
     logger.info("Minds application created successfully")
     return app
 
