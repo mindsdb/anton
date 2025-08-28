@@ -5,6 +5,7 @@ import pandas as pd
 from sqlmodel import and_, select, Session
 
 from minds.common.logger import setup_logging
+from minds.model.datasource import Datasource
 from minds.model.data_catalog import Column, ColumnStatistics, Table, PrimaryKeyConstraint, ForeignKeyConstraint
 from minds.services.datasources import DatasourcesService
 
@@ -17,68 +18,65 @@ class DataCatalogLoader:
 
     def __init__(
         self,
-        datasource_name: str,
-        mindsdb_client: Server,
         session: Session,
+        mindsdb_client: Server,
         user_id: str,
         company_id: str,
-        tables_filter: Optional[List[str]] = None,
     ):
         """
         Initialize the MindsDB data catalog loader.
 
         Args:
-            datasource_name: Name of the MindsDB datasource.
-            mindsdb_client: MindsDB server instance from mindsdb_sdk.connect().
             session: Database session for internal storage.
+            mindsdb_client: MindsDB server instance from mindsdb_sdk.connect().
             user_id: Current user ID.
             company_id: Current company ID.
-            tables_filter: Optional list of table names to filter (empty list = no filtering).
         """
-        datasource_service = DatasourcesService(
-            session=session,
-            mindsdb_client=mindsdb_client,
-            user_id=user_id,
-            company_id=company_id
-        )
-        self.datasource = datasource_service.get_datasource(datasource_name)
-
-        self.mindsdb_client = mindsdb_client
-        self.tables_filter = tables_filter or []
         self.session = session
+        self.mindsdb_client = mindsdb_client
+        self.user_id = user_id
+        self.company_id = company_id
 
-    def load(self) -> None:
+    def load(self, datasource_name: str, table_names: Optional[List[str]] = None) -> None:
         """Load the data catalog."""
-        tables_df = self._get_tables()
+        datasource_service = DatasourcesService(
+            session=self.session,
+            mindsdb_client=self.mindsdb_client,
+            user_id=self.user_id,
+            company_id=self.company_id
+        )
+        datasource = datasource_service.get_datasource(datasource_name)
+
+        tables_df = self._get_tables(datasource, table_names)
 
         if len(tables_df) > 0:
-            tables = self._load_tables(tables_df)
+            tables = self._load_tables(datasource, tables_df)
 
-            columns_df = self._get_columns()
+            columns_df = self._get_columns(datasource, table_names)
             columns = self._load_columns(columns_df, tables)
 
-            column_statistics_df = self._get_column_statistics()
+            column_statistics_df = self._get_column_statistics(datasource, table_names)
             if len(column_statistics_df) > 0:
                 self._load_column_statistics(column_statistics_df, columns)
 
-            primary_keys_df = self._get_primary_keys()
+            primary_keys_df = self._get_primary_keys(datasource, table_names)
             if len(primary_keys_df) > 0:
                 self._load_primary_keys(primary_keys_df, tables, columns)
 
-            foreign_keys_df = self._get_foreign_keys()
+            foreign_keys_df = self._get_foreign_keys(datasource, table_names)
             if len(foreign_keys_df) > 0:
                 self._load_foreign_keys(foreign_keys_df, tables, columns)
 
     def _execute_query(self, query: str) -> pd.DataFrame:
         """Execute a SQL query against MindsDB and return DataFrame."""
         try:
-            logger.info(f"Executing MindsDB query for datasource '{self.datasource.name}': {query}")
+            logger.info(f"Executing MindsDB query: {query}")
             query_result = self.mindsdb_client.query(query)
             df = query_result.fetch()
-            logger.info(f"MindsDB query returned {len(df)} rows for datasource '{self.datasource.name}'")
+            logger.info(f"MindsDB query returned {len(df)} rows")
             return df
         except Exception as e:
-            logger.error(f"Failed to execute MindsDB query for datasource '{self.datasource.name}': {query}. Error: {str(e)}")
+            logger.error(f"Failed to execute MindsDB query: {query}. Error: {str(e)}")
             raise
 
     def _normalize_boolean(self, value: Any) -> bool:
@@ -93,19 +91,19 @@ class DataCatalogLoader:
             return None
         return value
     
-    def _get_tables(self) -> pd.DataFrame:
+    def _get_tables(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
         """Get table metadata from META_TABLES with optional filtering."""
         logger.info(
-            f"Getting table metadata for datasource '{self.datasource.name}' with filter: {self.tables_filter}"
+            f"Getting table metadata for datasource '{datasource.name}' with filter: {table_names}"
         )
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
-        WHERE TABLE_CATALOG = '{self.datasource.name}'
+        WHERE TABLE_CATALOG = '{datasource.name}'
         """
 
-        if self.tables_filter:
-            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in self.tables_filter)})"
+        if table_names:
+            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} tables")
@@ -114,7 +112,7 @@ class DataCatalogLoader:
         existing_tables = self.session.exec(
             select(Table).where(
                 and_(
-                    Table.datasource_id == self.datasource.id,
+                    Table.datasource_id == datasource.id,
                     Table.name.in_(df['TABLE_NAME'])
                 )
             )
@@ -128,51 +126,51 @@ class DataCatalogLoader:
 
         return df
     
-    def _get_columns(self) -> pd.DataFrame:
+    def _get_columns(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
         """Get column metadata from META_COLUMNS with optional filtering."""
         logger.info(
-            f"Getting column metadata for datasource '{self.datasource.name}' with filter: {self.tables_filter}"
+            f"Getting column metadata for datasource '{datasource.name}' with filter: {table_names}"
         )
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMNS 
-        WHERE TABLE_CATALOG = '{self.datasource.name}'
+        WHERE TABLE_CATALOG = '{datasource.name}'
         """
 
-        if self.tables_filter:
-            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in self.tables_filter)})"
+        if table_names:
+            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} columns")
 
         return df
     
-    def _get_column_statistics(self) -> pd.DataFrame:
+    def _get_column_statistics(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
         """Get column statistics from META_COLUMN_STATISTICS with optional filtering."""
         logger.info(
-            f"Getting column statistics for datasource '{self.datasource.name}' with filter: {self.tables_filter}"
+            f"Getting column statistics for datasource '{datasource.name}' with filter: {table_names}"
         )
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMN_STATISTICS 
-        WHERE TABLE_CATALOG = '{self.datasource.name}'
+        WHERE TABLE_CATALOG = '{datasource.name}'
         """
 
-        if self.tables_filter:
-            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in self.tables_filter)})"
+        if table_names:
+            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} column statistics")
 
         return df
     
-    def _get_primary_keys(self) -> pd.DataFrame:
+    def _get_primary_keys(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
         """Get primary key information from META_KEY_COLUMN_USAGE with optional filtering."""
         logger.info(
-            f"Getting primary key information for datasource '{self.datasource.name}' with filter: {self.tables_filter}"
+            f"Getting primary key information for datasource '{datasource.name}' with filter: {table_names}"
         )
 
-        query = """
+        query = f"""
         SELECT 
             kcu.TABLE_NAME,
             kcu.COLUMN_NAME,
@@ -185,21 +183,21 @@ class DataCatalogLoader:
             AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
             AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
         WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-            AND kcu.CONSTRAINT_CATALOG = '{self.datasource.name}'
+            AND kcu.CONSTRAINT_CATALOG = '{datasource.name}'
         """
 
-        if self.tables_filter:
-            query += f" AND kcu.TABLE_NAME IN ({', '.join(f"'{name}'" for name in self.tables_filter)})"
+        if table_names:
+            query += f" AND kcu.TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
 
         df = self._execute_query(query)
-        logger.info(f"Found {len(df)} primary keys")
+        logger.info(f"Found {len(df)} primary keys")    
 
         return df
 
-    def _get_foreign_keys(self) -> pd.DataFrame:
+    def _get_foreign_keys(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
         """Get table constraints from META_TABLE_CONSTRAINTS with optional filtering."""
         logger.info(
-            f"Getting foreign key information for datasource '{self.datasource.name}' with filter: {self.tables_filter}"
+            f"Getting foreign key information for datasource '{datasource.name}' with filter: {table_names}"
         )
 
         query = f"""
@@ -217,18 +215,18 @@ class DataCatalogLoader:
             AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
             AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
         WHERE tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
-            AND kcu.CONSTRAINT_CATALOG = '{self.datasource.name}'
+            AND kcu.CONSTRAINT_CATALOG = '{datasource.name}'
         """
 
-        if self.tables_filter:
-            query += f" AND kcu.TABLE_NAME IN ({', '.join(f"'{name}'" for name in self.tables_filter)})"
+        if table_names:
+            query += f" AND kcu.TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} foreign keys")
 
         return df
 
-    def _load_tables(self, tables_df: pd.DataFrame) -> List[Table]:
+    def _load_tables(self, datasource: Datasource, tables_df: pd.DataFrame) -> List[Table]:
         """Load tables from metadata."""
         logger.info(f"Loading {len(tables_df)} tables into the database")
 
@@ -238,7 +236,7 @@ class DataCatalogLoader:
             row_count = int(row_count) if pd.notna(row_count) else None
 
             table = Table(
-                datasource_id=self.datasource.id,
+                datasource_id=datasource.id,
                 name=row['TABLE_NAME'],
                 schema=row['TABLE_SCHEMA'],
                 description=row['TABLE_DESCRIPTION'],
