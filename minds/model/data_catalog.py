@@ -1,7 +1,7 @@
 from typing import Any, Optional, List
 from uuid import UUID
 
-from sqlmodel import Field, Relationship
+from sqlmodel import Column as SQLModelColumn, Field, JSON, Relationship
 
 from minds.model.base import BaseSQLModel
 from minds.model.datasource import Datasource
@@ -20,7 +20,12 @@ class Table(BaseSQLModel, table=True):
 
     columns: List["Column"] = Relationship(cascade_delete=True)
     primary_key_constraints: List["PrimaryKeyConstraint"] = Relationship(cascade_delete=True)
-    foreign_key_constraints: List["ForeignKeyConstraint"] = Relationship(cascade_delete=True)
+    foreign_key_constraints: List["ForeignKeyConstraint"] = Relationship(
+        sa_relationship_kwargs={
+            "foreign_keys": "ForeignKeyConstraint.table_id",
+        },
+        cascade_delete=True
+    )
 
 
 class Column(BaseSQLModel, table=True):
@@ -42,8 +47,16 @@ class ColumnStatistics(BaseSQLModel, table=True):
     __tablename__ = "column_statistics"
     
     column_id: UUID = Field(..., description="Column ID", foreign_key="columns.id")
-    most_common_values: Optional[List[Any]] = Field(default=None, description="Most common values")
-    most_common_frequencies: Optional[List[float]] = Field(default=None, description="Most common frequencies")
+    most_common_values: list[Any] | None = Field(
+        default_factory=list,
+        sa_column=SQLModelColumn(JSON),
+        description="List of most common values"
+    )
+    most_common_frequencies: list[float] | None = Field(
+        default_factory=list,
+        sa_column=SQLModelColumn(JSON),
+        description="List of most common frequencies"
+    )
     null_percentage: Optional[float] = Field(default=None, description="Null percentage")
     distinct_values_count: Optional[int] = Field(default=None, description="Distinct values count")
     min_value: Optional[str] = Field(default=None, description="Minimum value")
@@ -73,9 +86,21 @@ class ForeignKeyConstraint(BaseSQLModel, table=True):
     constraint_name: Optional[str] = Field(default=None, description="Constraint name")
     ordinal_position: Optional[int] = Field(default=None, description="Ordinal position")
 
-    column: "Column" = Relationship()
-    referenced_table: "Table" = Relationship()
-    referenced_column: "Column" = Relationship()
+    column: "Column" = Relationship(
+        sa_relationship_kwargs={
+            "foreign_keys": "ForeignKeyConstraint.column_id",
+        }
+    )
+    referenced_table: "Table" = Relationship(
+        sa_relationship_kwargs={
+            "foreign_keys": "ForeignKeyConstraint.referenced_table_id",
+        }
+    )
+    referenced_column: "Column" = Relationship(
+        sa_relationship_kwargs={
+            "foreign_keys": "ForeignKeyConstraint.referenced_column_id",
+        }
+    )
 
 
 class DataCatalog(BaseSQLModel, table=False):
