@@ -7,8 +7,7 @@ for datasource management operations.
 
 
 from mindsdb_sdk.server import Server
-from sqlalchemy import and_, select
-from sqlmodel import Session
+from sqlmodel import and_, select, Session
 
 from minds.common.logger import setup_logging
 from minds.model.datasource import Datasource
