@@ -1,0 +1,47 @@
+[run]
+source = minds
+omit = 
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */migrations/*
+
+[report]
+exclude_lines =
+    # Have to re-enable the standard pragma
+    pragma: no cover
+    
+    # Don't complain about missing debug-only code
+    def __repr__
+    if self\.debug
+    
+    # Don't complain if tests don't hit defensive assertion code
+    raise AssertionError
+    raise NotImplementedError
+    
+    # Don't complain if non-runnable code isn't run
+    if 0:
+    if __name__ == .__main__.:
+    
+    # Don't complain about import fallbacks and try/except ImportError blocks
+    except ImportError:
+    try:
+    except ImportError
+    
+    # Don't complain about logger setup and infrastructure code
+    HAS_COLORLOG = False
+    HAS_RICH = False
+    class NoOpClient:
+    def get_current_trace_id
+    def get_current_observation_id
+    def update_current_trace
+    def get_client
+    
+    # Don't complain about abstract methods
+    @abstractmethod
+    
+    # Don't complain about type checking blocks
+    if TYPE_CHECKING:
+
+[html]
+directory = htmlcov
