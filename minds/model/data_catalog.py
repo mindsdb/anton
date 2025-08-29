@@ -16,9 +16,9 @@ class Table(BaseSQLModel, table=True):
 
     datasource_id: UUID = Field(..., description="Datasource ID", foreign_key="datasources.id")
     name: str = Field(..., description="Table name")
-    schema: str = Field(default=None, description="Schema name")
+    schema: Optional[str] = Field(default=None, description="Schema name")
     description: Optional[str] = Field(default=None, description="Table description/comment")
-    type: str = Field(default=None, description="Table type")
+    type: Optional[str] = Field(default=None, description="Table type")
     row_count: Optional[int] = Field(default=None, description="Row count")
 
     columns: List["Column"] = Relationship(cascade_delete=True)
