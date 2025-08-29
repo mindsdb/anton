@@ -89,12 +89,7 @@ async def chat_completions(
             chat_completions_request=chat_completions_request,
         )
 
-        session.commit()
+        return response
     except Exception as e:
         logger.error(f"❌ [{request_id}] Error processing chat completions request: {str(e)}", exc_info=True)
-        session.rollback()
         raise HTTPException(status_code=500, detail=str(e)) from e
-    finally:
-        session.close()
-
-    return response

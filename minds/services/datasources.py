@@ -403,7 +403,7 @@ class DatasourcesService:
                 logger.debug(f"Dropped existing MindsDB database {datasource.name}")
             except Exception:
                 # Database might not exist, continue with creation
-                pass
+                logger.debug("Datasource not found. Skipping...")
 
             # Recreate with new parameters
             databases.create(name=datasource.name, company_id=self.user_id, engine=datasource.engine, connection_args=datasource.connection_data)

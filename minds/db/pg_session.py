@@ -98,22 +98,36 @@ def get_session_factory(engine):
     return _session_factories[engine_id]
 
 
-def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT) -> SQLModelSession:
-    """Get a PostgreSQL database session.
-
+def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT):
+    """
+    FastAPI dependency that provides a database session with automatic cleanup.
+    
+    This is a generator-based dependency that ensures sessions are always closed
+    after the request completes, preventing database connection leaks.
+    
+    Usage:
+        @router.get("/example")
+        async def endpoint(session: Session = Depends(get_session)):
+            # Session will be automatically closed after this function completes
+            pass
+    
     Args:
         db_uri: Database connection URI
-    Returns:
-        SQLAlchemy Session instance
+        
+    Yields:
+        SQLModelSession: Database session that will be automatically closed
     """
     engine = get_engine(db_uri=db_uri)
     session_factory = get_session_factory(engine)
-
+    
     db = session_factory()
     try:
-        return db
+        logger.debug(f"🔗 Created database session for '{db_uri.name}'")
+        yield db
     except Exception as e:
+        logger.error(f"❌ Session error for '{db_uri.name}': {str(e)}")
+        db.rollback()
+        raise
+    finally:
+        logger.debug(f"🔒 Closing database session for '{db_uri.name}'")
         db.close()
-        error_msg = str(e).lower()
-        logger.error(f"Failed to get PostgreSQL session for '{db_uri.name}': {error_msg}")
-        raise RuntimeError(f"PostgreSQL session creation failed: {error_msg}") from e
