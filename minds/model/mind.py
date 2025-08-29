@@ -1,9 +1,12 @@
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import Text, UniqueConstraint
-from sqlmodel import JSON, Column, Field
+from sqlmodel import JSON, Column, Field, Relationship
 
 from minds.model.base import BaseSQLModel
+
+if TYPE_CHECKING:
+    from minds.model.mind_datasource import MindDatasource
 
 
 class Mind(BaseSQLModel, table=True):
@@ -22,32 +25,16 @@ class Mind(BaseSQLModel, table=True):
         default_factory=dict, sa_column=Column(JSON), description="Mind parameters and configuration as JSON"
     )
 
-    # Associated resources (stored as JSON arrays)
-    datasources: list[str] | None = Field(
-        default_factory=list, sa_column=Column(JSON), description="List of datasource names attached to this mind"
-    )
-
     # Optional metadata
     description: str | None = Field(
         default=None, sa_column=Column(Text), description="Optional description of the mind"
     )
 
-    # Status tracking
+    # Status tracking  
     is_active: bool = Field(default=True, description="Whether the mind is active")
+    
+    # Relationships - Many-to-many with datasources through junction table
+    mind_datasources: list["MindDatasource"] = Relationship(back_populates="mind")
 
     # Database constraints
     __table_args__ = (UniqueConstraint("name", "user_id", name="unique_mind_name_per_user"),)
-
-    def add_datasource(self, datasource_name: str) -> None:
-        """Add a datasource to this mind."""
-        if self.datasources is None:
-            self.datasources = []
-        if datasource_name not in self.datasources:
-            self.datasources.append(datasource_name)
-
-    def remove_datasource(self, datasource_name: str) -> bool:
-        """Remove a datasource from this mind. Returns True if removed, False if not found."""
-        if self.datasources and datasource_name in self.datasources:
-            self.datasources.remove(datasource_name)
-            return True
-        return False

@@ -7,9 +7,12 @@ MindsDB is only used for datasource validation, not for minds storage.
 """
 
 from sqlmodel import Session, and_, select
+from sqlalchemy.orm import selectinload
 
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
+from minds.model.mind_datasource import MindDatasource
+from minds.model.datasource import Datasource
 from minds.schemas.minds import AddDatasourceRequest, MindCreateRequest, MindResponse, MindUpdateRequest
 
 # Set up logging
@@ -105,7 +108,12 @@ class MindsService:
                 conditions.append(Mind.is_active)
 
             statement = (
-                select(Mind).where(and_(*conditions)).order_by(Mind.created_on.desc()).offset(offset).limit(limit)
+                select(Mind)
+                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
+                .where(and_(*conditions))
+                .order_by(Mind.created_on.desc())
+                .offset(offset)
+                .limit(limit)
             )
             minds = self.session.exec(statement).all()
 
@@ -139,8 +147,10 @@ class MindsService:
         try:
             logger.debug(f"Getting mind {mind_name} for user {self.user_id}")
 
-            statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
+            statement = (
+                select(Mind)
+                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
+                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
             )
             mind = self.session.exec(statement).first()
 
@@ -183,8 +193,9 @@ class MindsService:
             if existing_mind:
                 raise MindAlreadyExistsError(f"Mind '{mind_data.name}' already exists")
 
-            # Validate datasources exist (using MindsDB for validation)
-            await self._validate_datasources(mind_data.datasources)
+            # Validate datasources exist if provided
+            if mind_data.datasources:
+                await self._validate_datasources(mind_data.datasources)
 
             new_mind = Mind(
                 name=mind_data.name,
@@ -192,13 +203,16 @@ class MindsService:
                 model_name=mind_data.model_name or "gpt-4o",  # Default model
                 user_id=self.user_id,
                 parameters=mind_data.parameters or {},
-                datasources=mind_data.datasources or [],
                 is_active=True,
             )
 
             self.session.add(new_mind)
             self.session.commit()
             self.session.refresh(new_mind)
+
+            # Add datasource relationships if provided
+            if mind_data.datasources:
+                await self._add_datasources_to_mind(new_mind, mind_data.datasources)
 
             logger.info(f"Created mind {mind_data.name} for user {self.user_id}")
 
@@ -229,8 +243,10 @@ class MindsService:
         try:
             logger.debug(f"Updating mind {mind_name} for user {self.user_id}")
 
-            statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
+            statement = (
+                select(Mind)
+                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
+                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
             )
             mind = self.session.exec(statement).first()
 
@@ -260,8 +276,10 @@ class MindsService:
                 mind.model_name = mind_data.model_name
             if mind_data.parameters is not None:
                 mind.parameters = mind_data.parameters
+            
+            # Handle datasource relationships separately
             if mind_data.datasources is not None:
-                mind.datasources = mind_data.datasources
+                await self._update_mind_datasources(mind, mind_data.datasources)
 
             self.session.add(mind)
             self.session.commit()
@@ -296,8 +314,9 @@ class MindsService:
         try:
             logger.debug(f"Deleting mind {mind_name} for user {self.user_id}")
 
-            statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
+            statement = (
+                select(Mind)
+                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
             )
             mind = self.session.exec(statement).first()
 
@@ -336,23 +355,51 @@ class MindsService:
         try:
             logger.debug(f"Adding datasource {datasource_request.name} to mind {mind_name}")
 
-            statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
+            statement = (
+                select(Mind)
+                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
             )
             mind = self.session.exec(statement).first()
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
+            # Validate datasource exists
             await self._validate_datasources([datasource_request.name])
 
             # Check connection if requested
             if datasource_request.check_connection:
                 await self._check_datasource_connection(datasource_request.name)
 
-            mind.add_datasource(datasource_request.name)
+            # Find the datasource in our database
+            datasource = self.session.exec(
+                select(Datasource).where(
+                    and_(Datasource.name == datasource_request.name, Datasource.user_id == self.user_id)
+                )
+            ).first()
+            
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_request.name}' not found")
 
-            self.session.add(mind)
+            # Check if relationship already exists
+            existing_relationship = self.session.exec(
+                select(MindDatasource).where(
+                    and_(MindDatasource.mind_id == mind.id, MindDatasource.datasource_id == datasource.id)
+                )
+            ).first()
+            
+            if existing_relationship:
+                logger.info(f"Datasource {datasource_request.name} already linked to mind {mind_name}")
+                return True
+
+            # Create new relationship
+            mind_datasource = MindDatasource(
+                mind_id=mind.id,
+                datasource_id=datasource.id,
+                purpose=getattr(datasource_request, 'purpose', None)
+            )
+            
+            self.session.add(mind_datasource)
             self.session.commit()
 
             logger.info(f"Added datasource {datasource_request.name} to mind {mind_name}")
@@ -380,22 +427,36 @@ class MindsService:
         try:
             logger.debug(f"Removing datasource {datasource_name} from mind {mind_name}")
 
-            statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
+            statement = (
+                select(Mind)
+                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
             )
             mind = self.session.exec(statement).first()
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
-            # Check if datasource is attached to this mind
-            if not mind.datasources or datasource_name not in mind.datasources:
-                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found in mind '{mind_name}'")
+            # Find the datasource
+            datasource = self.session.exec(
+                select(Datasource).where(
+                    and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
+                )
+            ).first()
+            
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
 
-            # Remove datasource from mind using the model method
-            mind.remove_datasource(datasource_name)
+            # Find and remove the relationship
+            relationship = self.session.exec(
+                select(MindDatasource).where(
+                    and_(MindDatasource.mind_id == mind.id, MindDatasource.datasource_id == datasource.id)
+                )
+            ).first()
+            
+            if not relationship:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not linked to mind '{mind_name}'")
 
-            self.session.add(mind)
+            self.session.delete(relationship)
             self.session.commit()
 
             logger.info(f"Removed datasource {datasource_name} from mind {mind_name}")
@@ -411,15 +472,21 @@ class MindsService:
 
     def _mind_to_response(self, mind: Mind, with_detailed_data: bool = False) -> MindResponse:
         """Convert Mind database model to MindResponse object."""
+        # Get linked datasources through the many-to-many relationship
+        datasources = [
+            relationship.datasource.name 
+            for relationship in mind.mind_datasources
+        ]
+        
         # TODO: add detailed datasource data if with_detailed_data is True, this is the
-        # actuall DATA valiue in the integrations e.g without password which should be hashed
+        # actual DATA value in the integrations e.g without password which should be hashed
         # {"user": "", "password": "", "host": ".com", "port": "5432", "database": "demo", "schema": "demo_data"}
         return MindResponse(
             name=mind.name,
             model_name=mind.model_name,
             provider=mind.provider,
             parameters=mind.parameters or {},
-            datasources=mind.datasources or [],
+            datasources=datasources,
             created_at=str(mind.created_on) if mind.created_on else "",
             updated_at=str(mind.modified_on) if mind.modified_on else "",
         )
@@ -454,3 +521,84 @@ class MindsService:
         except Exception as e:
             logger.error(f"Error checking datasource connection {datasource_name}: {str(e)}")
             raise MindsServiceError(f"Datasource connection check failed: {str(e)}") from None
+
+    async def _add_datasources_to_mind(self, mind: Mind, datasource_names: list[str]) -> None:
+        """
+        Add multiple datasources to a mind by creating MindDatasource relationships.
+        
+        Args:
+            mind (Mind): The mind to add datasources to
+            datasource_names (list[str]): List of datasource names to add
+        """
+        for datasource_name in datasource_names:
+            try:
+                # Find the datasource
+                datasource = self.session.exec(
+                    select(Datasource).where(
+                        and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
+                    )
+                ).first()
+                
+                if not datasource:
+                    logger.warning(f"Datasource '{datasource_name}' not found in database, skipping")
+                    continue
+
+                # Check if relationship already exists
+                existing_relationship = self.session.exec(
+                    select(MindDatasource).where(
+                        and_(MindDatasource.mind_id == mind.id, MindDatasource.datasource_id == datasource.id)
+                    )
+                ).first()
+                
+                if existing_relationship:
+                    logger.debug(f"Datasource {datasource_name} already linked to mind {mind.name}")
+                    continue
+
+                # Create new relationship
+                mind_datasource = MindDatasource(
+                    mind_id=mind.id,
+                    datasource_id=datasource.id
+                )
+                
+                self.session.add(mind_datasource)
+                logger.debug(f"Added datasource {datasource_name} to mind {mind.name}")
+                
+            except Exception as e:
+                logger.error(f"Error adding datasource {datasource_name} to mind {mind.name}: {str(e)}")
+                # Continue with other datasources even if one fails
+                continue
+        
+        # Commit all relationships at once
+        try:
+            self.session.commit()
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error committing datasource relationships: {str(e)}")
+            raise
+
+    async def _update_mind_datasources(self, mind: Mind, new_datasource_names: list[str]) -> None:
+        """
+        Update the datasources associated with a mind by replacing all relationships.
+        
+        Args:
+            mind (Mind): The mind to update datasources for
+            new_datasource_names (list[str]): New list of datasource names
+        """
+        try:
+            # Remove all existing relationships
+            existing_relationships = self.session.exec(
+                select(MindDatasource).where(MindDatasource.mind_id == mind.id)
+            ).all()
+            
+            for relationship in existing_relationships:
+                self.session.delete(relationship)
+            
+            # Add new relationships
+            await self._add_datasources_to_mind(mind, new_datasource_names)
+            
+            logger.debug(f"Updated datasources for mind {mind.name}")
+            
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error updating datasources for mind {mind.name}: {str(e)}")
+            raise

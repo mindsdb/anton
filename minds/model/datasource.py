@@ -5,12 +5,15 @@ This module defines the SQLModel for datasources, matching MindsDB's schema
 while adding user attribution for multi-user support.
 """
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import JSON, UniqueConstraint
-from sqlmodel import Column, Field
+from sqlmodel import Column, Field, Relationship
 
 from minds.model.base import BaseSQLModel
+
+if TYPE_CHECKING:
+    from minds.model.mind_datasource import MindDatasource
 
 
 class Datasource(BaseSQLModel, table=True):
@@ -31,6 +34,9 @@ class Datasource(BaseSQLModel, table=True):
     )
 
     user_id: str = Field(..., max_length=255, description="ID of the user who created this datasource")
+    
+    # Relationships - Many-to-many with minds through junction table
+    mind_datasources: list["MindDatasource"] = Relationship(back_populates="datasource")
 
     # Database constraints
     __table_args__ = (UniqueConstraint("name", "user_id", name="unique_datasource_name_per_user"),)
