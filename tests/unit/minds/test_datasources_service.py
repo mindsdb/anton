@@ -47,7 +47,6 @@ class TestDatasourcesService:
         return DatasourcesService(
             session=mock_session,
             user_id="test-user-123",
-            company_id="test-company-456",
             mindsdb_client=mock_mindsdb_client,
         )
 
@@ -60,7 +59,6 @@ class TestDatasourcesService:
             engine="postgres",
             connection_data={"host": "localhost", "port": 5432, "user": "test"},
             user_id="test-user-123",
-            company_id="test-company-456",
             created_on=datetime(2023, 1, 1, 12, 0, 0),
             modified_on=datetime(2023, 1, 1, 12, 0, 0),
         )
@@ -75,12 +73,11 @@ class TestDatasourcesService:
     def test_service_initialization(self, mock_session, mock_mindsdb_client):
         """Test service initialization."""
         service = DatasourcesService(
-            session=mock_session, user_id="test-user", company_id="test-company", mindsdb_client=mock_mindsdb_client
+            session=mock_session, user_id="test-user", mindsdb_client=mock_mindsdb_client
         )
 
         assert service.session == mock_session
         assert service.user_id == "test-user"
-        assert service.company_id == "test-company"
         assert service.mindsdb_client == mock_mindsdb_client
 
     def test_datasource_to_response(self, service, sample_datasource):

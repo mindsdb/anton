@@ -49,7 +49,6 @@ class TestMindsAPI:
         """Mock MindsService instance."""
         service = Mock(spec=MindsService)
         service.user_id = "test-user-123"
-        service.company_id = "test-company-456"
         return service
 
     @pytest.fixture
@@ -85,14 +84,12 @@ class TestMindsAPI:
         """Test the get_minds_service dependency function."""
         with patch("minds.api.v1.endpoints.minds.extract_context_from_request") as mock_extract:
             mock_extract.return_value.user_id = "test-user-123"
-            mock_extract.return_value.company_id = "test-company-456"
 
             service = get_minds_service(mock_request, mock_session)
 
             assert isinstance(service, MindsService)
             assert service.session == mock_session
             assert service.user_id == "test-user-123"
-            assert service.company_id == "test-company-456"
 
     @pytest.mark.asyncio
     async def test_list_minds_success(self, mock_minds_service, sample_mind_response):
@@ -266,7 +263,6 @@ class TestMindsAPIErrorHandling:
         """Test get_mind with MindsServiceError (lines 112-114)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.get_mind = AsyncMock(side_effect=MindsServiceError("Database connection failed"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -280,7 +276,6 @@ class TestMindsAPIErrorHandling:
         """Test get_mind with unexpected Exception (lines 115-117)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.get_mind = AsyncMock(side_effect=ValueError("Unexpected error"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -294,7 +289,6 @@ class TestMindsAPIErrorHandling:
         """Test create_mind with MindsServiceError (lines 147-149)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.create_mind = AsyncMock(side_effect=MindsServiceError("Validation failed"))
 
         request = MindCreateRequest(name="test", provider="openai")
@@ -310,7 +304,6 @@ class TestMindsAPIErrorHandling:
         """Test create_mind with unexpected Exception (lines 150-152)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.create_mind = AsyncMock(side_effect=RuntimeError("Database error"))
 
         request = MindCreateRequest(name="test", provider="openai")
@@ -326,7 +319,6 @@ class TestMindsAPIErrorHandling:
         """Test update_mind with MindsServiceError (lines 184-186)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.update_mind = AsyncMock(side_effect=MindsServiceError("Invalid parameters"))
 
         request = MindUpdateRequest(name="updated-test")
@@ -342,7 +334,6 @@ class TestMindsAPIErrorHandling:
         """Test update_mind with unexpected Exception (lines 187-189)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.update_mind = AsyncMock(side_effect=KeyError("Missing key"))
 
         request = MindUpdateRequest(name="updated-test")
@@ -358,7 +349,6 @@ class TestMindsAPIErrorHandling:
         """Test delete_mind with MindsServiceError (lines 219-221)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.delete_mind = AsyncMock(side_effect=MindsServiceError("Cannot delete mind"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -370,9 +360,8 @@ class TestMindsAPIErrorHandling:
     @pytest.mark.asyncio
     async def test_delete_mind_unexpected_error(self):
         """Test delete_mind with unexpected Exception (lines 222-224)."""
-        mock_service = Mock(spec=MindsService)
+        mock_service = Mock(spec=MindsService)  
         mock_service.user_id = "test-user"
-        mock_service.company_id = "test-company"
         mock_service.delete_mind = AsyncMock(side_effect=OSError("File system error"))
 
         with pytest.raises(HTTPException) as exc_info:

@@ -25,7 +25,7 @@ def get_minds_service(request: Request, session: Session = Depends(get_session))
     Dependency function to create MindsService with user context.
     """
     context = extract_context_from_request(request)
-    return MindsService.create(session=session, user_id=context.user_id, company_id=context.company_id)
+    return MindsService.create(session=session, user_id=context.user_id)
 
 
 @router.get("/")
@@ -49,7 +49,7 @@ async def list_minds(
     Returns:
         List[MindResponse]: List of mind objects
     """
-    logger.debug(f"List minds requested (v1) for user {minds_service.user_id}, company {minds_service.company_id}")
+    logger.debug(f"List minds requested (v1) for user {minds_service.user_id}")
 
     try:
         minds = await minds_service.list_minds(provider=provider, is_active=is_active, limit=limit, offset=offset)
@@ -82,7 +82,7 @@ async def get_mind(
         MindResponse: Mind object with full details
     """
     logger.debug(
-        f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}"
+        f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}"
     )
 
     try:
@@ -114,8 +114,7 @@ async def create_mind(
         MindResponse: Created mind object with generated ID and timestamps
     """
     logger.debug(
-        f"Create mind requested: {mind_data.name} (v1) for user {minds_service.user_id}, "
-        f"company {minds_service.company_id}"
+        f"Create mind requested: {mind_data.name} (v1) for user {minds_service.user_id}"
     )
 
     try:
@@ -149,7 +148,7 @@ async def update_mind(
         MindResponse: Updated mind object with new values
     """
     logger.debug(
-        f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}"
+        f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}"
     )
 
     try:
@@ -180,7 +179,7 @@ async def delete_mind(mind_name: str, minds_service: MindsService = Depends(get_
         None: 204 No Content on successful deletion
     """
     logger.debug(
-        f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}, company {minds_service.company_id}"
+        f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}"
     )
 
     try:

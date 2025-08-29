@@ -24,7 +24,6 @@ class TestMindModel:
             "provider": "openai",
             "model_name": "gpt-4o",
             "user_id": "user-123",
-            "company_id": "company-456",
             "parameters": {"temperature": 0.7, "max_tokens": 100},
             "datasources": ["datasource1", "datasource2"],
             "description": "Test mind for unit tests",
@@ -39,7 +38,6 @@ class TestMindModel:
         assert mind.provider == "openai"
         assert mind.model_name == "gpt-4o"
         assert mind.user_id == "user-123"
-        assert mind.company_id == "company-456"
         assert mind.parameters == {"temperature": 0.7, "max_tokens": 100}
         assert mind.datasources == ["datasource1", "datasource2"]
         assert mind.description == "Test mind for unit tests"
@@ -48,14 +46,13 @@ class TestMindModel:
     def test_mind_creation_with_minimal_fields(self):
         """Test creating a Mind with minimal required fields."""
         mind = Mind(
-            name="minimal-mind", provider="openai", model_name="gpt-4o", user_id="user-123", company_id="company-456"
+            name="minimal-mind", provider="openai", model_name="gpt-4o", user_id="user-123"
         )
 
         assert mind.name == "minimal-mind"
         assert mind.provider == "openai"
         assert mind.model_name == "gpt-4o"
         assert mind.user_id == "user-123"
-        assert mind.company_id == "company-456"
 
         # Test default values
         assert mind.parameters == {}
@@ -66,7 +63,7 @@ class TestMindModel:
     def test_mind_default_values(self):
         """Test Mind model default values."""
         mind = Mind(
-            name="default-test", provider="openai", model_name="gpt-4o", user_id="user-123", company_id="company-456"
+            name="default-test", provider="openai", model_name="gpt-4o", user_id="user-123"
         )
 
         # Test that default factories create new instances
@@ -75,7 +72,7 @@ class TestMindModel:
         assert mind.is_active is True
 
         mind2 = Mind(
-            name="default-test-2", provider="openai", model_name="gpt-4o", user_id="user-123", company_id="company-456"
+            name="default-test-2", provider="openai", model_name="gpt-4o", user_id="user-123"
         )
 
         mind.parameters["test"] = "value"
@@ -106,7 +103,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
             datasources=None,
         )
 
@@ -136,7 +132,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
             datasources=None,
         )
 
@@ -150,7 +145,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
             datasources=[],
         )
 
@@ -188,7 +182,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
         )
         assert len(mind.name) == 256
 
@@ -198,7 +191,6 @@ class TestMindModel:
             provider="a" * 50,  # Max length
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
         )
         assert len(mind.provider) == 50
 
@@ -208,7 +200,6 @@ class TestMindModel:
             provider="openai",
             model_name="a" * 256,  # Max length
             user_id="user-123",
-            company_id="company-456",
         )
         assert len(mind.model_name) == 256
 
@@ -218,19 +209,17 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="a" * 256,  # Max length
-            company_id="company-456",
         )
         assert len(mind.user_id) == 256
 
-        # Test company_id field constraints
+        # Test user_id field constraints
         mind = Mind(
             name="test",
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="a" * 256,  # Max length
         )
-        assert len(mind.company_id) == 256
+        assert len(mind.user_id) == 256
 
     def test_mind_unique_constraint(self):
         """Test Mind unique constraint configuration."""
@@ -246,18 +235,16 @@ class TestMindModel:
         constraint = unique_constraints[0]
         constraint_columns = [col.name for col in constraint.columns]
         assert "name" in constraint_columns
-        assert "company_id" in constraint_columns
+        assert "user_id" in constraint_columns
 
     def test_mind_indexes(self):
         """Test Mind index configuration."""
         # Test that indexed fields are properly configured
         name_field = Mind.__table__.columns["name"]
         user_id_field = Mind.__table__.columns["user_id"]
-        company_id_field = Mind.__table__.columns["company_id"]
 
         assert name_field.index is True
         assert user_id_field.index is True
-        assert company_id_field.index is True
 
     def test_mind_json_fields(self):
         """Test Mind JSON field handling."""
@@ -266,7 +253,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
             parameters={"nested": {"deep": {"value": 42}}},
             datasources=["complex", "datasource", "list"],
         )
@@ -284,7 +270,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
             description=long_description,
         )
 
@@ -299,7 +284,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
             is_active=True,
         )
         assert mind_active.is_active is True
@@ -310,7 +294,6 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            company_id="company-456",
             is_active=False,
         )
         assert mind_inactive.is_active is False

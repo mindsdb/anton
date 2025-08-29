@@ -52,7 +52,7 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
     from minds.requests.context import Context
 
     def _fake_extract_context(request):
-        return Context(user_id="test-user-123", user_email="test@example.com", company_id="test-company-456")
+        return Context(user_id="test-user-123", user_email="test@example.com")
 
     monkeypatch.setattr(
         "minds.requests.context.extract_context_from_request",

@@ -57,7 +57,7 @@ class DatasourcesService:
     Follows eager sync pattern - always syncs to MindsDB on create/update/delete.
     """
 
-    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, company_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str):
         """
         Initialize the datasources service.
 
@@ -65,12 +65,10 @@ class DatasourcesService:
             session: Database session for internal storage
             mindsdb_client: MindsDB client for SDK operations
             user_id: Current user ID
-            company_id: Current company ID
         """
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
-        self.company_id = company_id
 
     async def list_datasources(
         self, engine: str | None = None, limit: int = 100, offset: int = 0, with_detailed_data: bool = False
@@ -89,12 +87,12 @@ class DatasourcesService:
         """
         try:
             logger.debug(
-                f"Listing datasources for company {self.company_id} with filters: "
+                f"Listing datasources for user {self.user_id} with filters: "
                 f"engine={engine}, limit={limit}, offset={offset}"
             )
 
             # Build query with filters
-            statement = select(Datasource).where(Datasource.company_id == self.company_id)
+            statement = select(Datasource).where(Datasource.user_id == self.user_id)
 
             if engine is not None:
                 statement = statement.where(Datasource.engine == engine)
@@ -113,7 +111,7 @@ class DatasourcesService:
                     response = self._datasource_to_response(datasource)
                 responses.append(response)
 
-            logger.info(f"Found {len(responses)} datasources for company {self.company_id}")
+            logger.info(f"Found {len(responses)} datasources for user {self.user_id}")
             return responses
 
         except Exception as e:
@@ -137,10 +135,10 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
-            logger.debug(f"Getting datasource {datasource_name} for company {self.company_id}")
+            logger.debug(f"Getting datasource {datasource_name} for user {self.user_id}")
 
             statement = select(Datasource).where(
-                and_(Datasource.name == datasource_name, Datasource.company_id == self.company_id)
+                and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
             )
 
             result = self.session.exec(statement)
@@ -175,12 +173,12 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
-            logger.debug(f"Creating datasource {datasource_data.name} for company {self.company_id}")
+            logger.debug(f"Creating datasource {datasource_data.name} for user {self.user_id}")
 
             # Check if datasource already exists
             existing = self.session.exec(
                 select(Datasource).where(
-                    and_(Datasource.name == datasource_data.name, Datasource.company_id == self.company_id)
+                    and_(Datasource.name == datasource_data.name, Datasource.user_id == self.user_id)
                 )
             ).first()
 
@@ -193,7 +191,6 @@ class DatasourcesService:
                 engine=datasource_data.engine,
                 connection_data=datasource_data.connection_data,
                 user_id=self.user_id,
-                company_id=self.company_id,
             )
 
             # Save to internal database first
@@ -205,8 +202,8 @@ class DatasourcesService:
                 await self._create_mindsdb_database(datasource)
 
                 logger.info(
-                    f"Created datasource {datasource_data.name} for company \
-                                {self.company_id} (synced to MindsDB)"
+                    f"Created datasource {datasource_data.name} for user \
+                                {self.user_id} (synced to MindsDB)"
                 )
 
             except DatasourceServiceError:
@@ -243,11 +240,11 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
-            logger.debug(f"Updating datasource {datasource_name} for company {self.company_id}")
+            logger.debug(f"Updating datasource {datasource_name} for user {self.user_id}")
 
             # Get existing datasource
             statement = select(Datasource).where(
-                and_(Datasource.name == datasource_name, Datasource.company_id == self.company_id)
+                and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
             )
 
             result = self.session.exec(statement)
@@ -273,7 +270,7 @@ class DatasourcesService:
                 if datasource_data.connection_data is not None:
                     await self._update_mindsdb_database(datasource)
 
-                logger.info(f"Updated datasource {datasource_name} for company {self.company_id} (synced to MindsDB)")
+                logger.info(f"Updated datasource {datasource_name} for user {self.user_id} (synced to MindsDB)")
 
             except DatasourceServiceError:
                 # Rollback internal database if MindsDB update fails
@@ -304,11 +301,11 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
-            logger.debug(f"Deleting datasource {datasource_name} for company {self.company_id} (cascade={cascade})")
+            logger.debug(f"Deleting datasource {datasource_name} for user {self.user_id} (cascade={cascade})")
 
             # Get existing datasource
             statement = select(Datasource).where(
-                and_(Datasource.name == datasource_name, Datasource.company_id == self.company_id)
+                and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
             )
 
             result = self.session.exec(statement)
@@ -326,7 +323,7 @@ class DatasourcesService:
             self.session.delete(datasource)
             self.session.commit()
 
-            logger.info(f"Deleted datasource {datasource_name} for company {self.company_id} (removed from MindsDB)")
+            logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} (removed from MindsDB)")
 
         except DatasourceNotFoundError:
             self.session.rollback()
@@ -385,7 +382,7 @@ class DatasourcesService:
             databases = self.mindsdb_client.databases
 
             # Create the database with connection validation
-            databases.create(name=datasource.name, engine=datasource.engine, connection_args=datasource.connection_data)
+            databases.create(name=datasource.name, engine=datasource.engine, connection_args=datasource.connection_data, company_id=self.user_id)
 
             logger.info(f"Created MindsDB database {datasource.name}")
 
@@ -409,7 +406,7 @@ class DatasourcesService:
                 pass
 
             # Recreate with new parameters
-            databases.create(name=datasource.name, engine=datasource.engine, connection_args=datasource.connection_data)
+            databases.create(name=datasource.name, company_id=self.user_id, engine=datasource.engine, connection_args=datasource.connection_data)
 
             logger.info(f"Updated MindsDB database {datasource.name}")
 

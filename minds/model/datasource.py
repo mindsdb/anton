@@ -17,7 +17,7 @@ class Datasource(BaseSQLModel, table=True):
     """
     Datasource model matching MindsDB schema with user attribution.
 
-    Schema matches MindsDB: id, updated_at, created_at, name, data, company_id, engine
+    Schema matches MindsDB: id, updated_at, created_at, name, data, engine
     Plus user_id for user attribution that MindsDB lacks.
     """
 
@@ -30,13 +30,11 @@ class Datasource(BaseSQLModel, table=True):
         default_factory=dict, sa_column=Column(JSON), description="Connection parameters (matches MindsDB 'data' field)"
     )
 
-    # Multi-tenancy (MindsDB has company_id, we add user_id)
     user_id: str = Field(..., max_length=255, description="ID of the user who created this datasource")
-    company_id: str = Field(..., max_length=255, description="Company ID for multi-tenancy (matches MindsDB)")
 
     # Database constraints
-    __table_args__ = (UniqueConstraint("name", "company_id", name="unique_datasource_name_per_company"),)
+    __table_args__ = (UniqueConstraint("name", "user_id", name="unique_datasource_name_per_user"),)
 
     def __repr__(self) -> str:
         """String representation of the datasource."""
-        return f"Datasource(name='{self.name}', engine='{self.engine}', company_id='{self.company_id}')"
+        return f"Datasource(name='{self.name}', engine='{self.engine}', user_id='{self.user_id}')"

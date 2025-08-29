@@ -40,7 +40,7 @@ def get_datasources_service(request: Request, session: Session = Depends(get_ses
     mindsdb_client = create_mindsdb_client_from_request(request)
 
     return DatasourcesService(
-        session=session, mindsdb_client=mindsdb_client, user_id=context.user_id, company_id=context.company_id
+        session=session, mindsdb_client=mindsdb_client, user_id=context.user_id
     )
 
 
@@ -69,9 +69,7 @@ async def list_datasources(
     """
     try:
         logger.debug(
-            f"List datasources requested (v1) for user {datasources_service.user_id}, "
-            f"company {datasources_service.company_id}"
-        )
+            f"List datasources requested (v1) for user {datasources_service.user_id} ")
 
         datasources = await datasources_service.list_datasources(
             engine=engine, limit=limit, offset=offset, with_detailed_data=with_detailed_data
@@ -105,9 +103,7 @@ async def get_datasource(
     """
     try:
         logger.debug(
-            f"Get datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}, "
-            f"company {datasources_service.company_id}"
-        )
+            f"Get datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}")
 
         datasource = await datasources_service.get_datasource(
             datasource_name=datasource_name, with_detailed_data=with_detailed_data
@@ -141,9 +137,7 @@ async def create_datasource(
     """
     try:
         logger.debug(
-            f"Create datasource requested: {datasource_data.name} (v1) for user {datasources_service.user_id}, "
-            f"company {datasources_service.company_id}"
-        )
+            f"Create datasource requested: {datasource_data.name} (v1) for user {datasources_service.user_id}, "    )
 
         datasource = await datasources_service.create_datasource(datasource_data)
 
@@ -178,8 +172,7 @@ async def update_datasource(
     """
     try:
         logger.debug(
-            f"Update datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}, "
-            f"company {datasources_service.company_id}"
+            f"Update datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}"
         )
 
         datasource = await datasources_service.update_datasource(datasource_name, datasource_data)
@@ -215,8 +208,8 @@ async def delete_datasource(
     """
     try:
         logger.debug(
-            f"Delete datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}, "
-            f"company {datasources_service.company_id}, cascade={cascade}"
+            f"Delete datasource requested: {datasource_name} (v1) \
+                for user {datasources_service.user_id}, cascade={cascade}"
         )
 
         await datasources_service.delete_datasource(datasource_name, cascade=cascade)
@@ -250,8 +243,7 @@ async def check_datasource_connection(
     """
     try:
         logger.debug(
-            f"Test connection requested: {datasource_name} (v1) for user {datasources_service.user_id}, "
-            f"company {datasources_service.company_id}"
+            f"Test connection requested: {datasource_name} (v1) for user {datasources_service.user_id}"
         )
 
         result = await datasources_service.test_connection(datasource_name)

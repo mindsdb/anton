@@ -20,15 +20,13 @@ class TestContext:
 
         assert context.user_id == ""
         assert context.user_email == ""
-        assert context.company_id == ""
 
     def test_context_initialization_with_values(self):
         """Test Context initialization with provided values."""
-        context = Context(user_id="123", user_email="test@example.com", company_id="456")
+        context = Context(user_id="123", user_email="test@example.com")
 
         assert context.user_id == "123"
         assert context.user_email == "test@example.com"
-        assert context.company_id == "456"
 
     def test_context_is_basemodel(self):
         """Test that Context inherits from BaseModel."""
@@ -48,14 +46,12 @@ class TestExtractContextFromRequest:
         mock_request.headers = {
             "x-user-id": "123",
             "x-user-email": "test@example.com",
-            "x-company-id": "456",
         }
 
         context = extract_context_from_request(mock_request)
 
         assert context.user_id == "123"
         assert context.user_email == "test@example.com"
-        assert context.company_id == "456"
 
     def test_extract_context_with_missing_headers(self):
         """Test extracting context when headers are missing."""
@@ -70,7 +66,6 @@ class TestExtractContextFromRequest:
 
         assert context.user_id == ""
         assert context.user_email == ""
-        assert context.company_id == ""
 
     def test_extract_context_with_partial_headers(self):
         """Test extracting context when only some headers are present."""
@@ -86,7 +81,6 @@ class TestExtractContextFromRequest:
 
         assert context.user_id == "789"
         assert context.user_email == "partial@example.com"
-        assert context.company_id == ""  # Default value
 
 
 class TestLangfuseContextMetadata:
@@ -98,15 +92,13 @@ class TestLangfuseContextMetadata:
 
         assert metadata.user_id == ""
         assert metadata.user_email == ""
-        assert metadata.company_id == ""
 
     def test_langfuse_context_metadata_with_values(self):
         """Test LangfuseContextMetadata initialization with values."""
-        metadata = LangfuseContextMetadata(user_id="123", user_email="test@example.com", company_id="456")
+        metadata = LangfuseContextMetadata(user_id="123", user_email="test@example.com")
 
         assert metadata.user_id == "123"
         assert metadata.user_email == "test@example.com"
-        assert metadata.company_id == "456"
 
 
 class TestLangfuseContext:
@@ -123,7 +115,7 @@ class TestLangfuseContext:
 
     def test_langfuse_context_with_values(self):
         """Test LangfuseContext initialization with values."""
-        metadata = LangfuseContextMetadata(user_id="123", user_email="test@example.com", company_id="456")
+        metadata = LangfuseContextMetadata(user_id="123", user_email="test@example.com")
 
         langfuse_context = LangfuseContext(
             user_id="123",
@@ -143,15 +135,14 @@ class TestCreateLangfuseContext:
 
     def test_create_langfuse_context_from_context(self):
         """Test creating LangfuseContext from Context."""
-        context = Context(user_id="123", user_email="test@example.com", company_id="456")
+        context = Context(user_id="123", user_email="test@example.com")
 
         langfuse_context = create_langfuse_context(context)
 
         assert langfuse_context.user_id == "123"
         assert langfuse_context.metadata.user_id == "123"
         assert langfuse_context.metadata.user_email == "test@example.com"
-        assert langfuse_context.metadata.company_id == "456"
-        assert langfuse_context.tags == ["test@example.com", "456"]
+        assert langfuse_context.tags == ["test@example.com"]
         assert langfuse_context.trace_id is None
 
     def test_create_langfuse_context_with_empty_context(self):
@@ -163,22 +154,21 @@ class TestCreateLangfuseContext:
         assert langfuse_context.user_id == ""
         assert langfuse_context.metadata.user_id == ""
         assert langfuse_context.metadata.user_email == ""
-        assert langfuse_context.metadata.company_id == ""
-        assert langfuse_context.tags == ["", ""]
+        assert langfuse_context.tags == [""]
 
     def test_create_langfuse_context_tags_format(self):
         """Test that tags are created in the correct format."""
-        context = Context(user_id="999", user_email="tags@example.com", company_id="888")
+        context = Context(user_id="999", user_email="tags@example.com")
 
         langfuse_context = create_langfuse_context(context)
 
-        # Tags should be [user_email, company_id]
-        expected_tags = ["tags@example.com", "888"]
+        # Tags should be [user_email]
+        expected_tags = ["tags@example.com"]
         assert langfuse_context.tags == expected_tags
 
     def test_create_langfuse_context_metadata_consistency(self):
         """Test that metadata fields match the context fields."""
-        context = Context(user_id="555", user_email="consistency@example.com", company_id="666")
+        context = Context(user_id="555", user_email="consistency@example.com")
 
         langfuse_context = create_langfuse_context(context)
 
@@ -186,4 +176,3 @@ class TestCreateLangfuseContext:
         assert langfuse_context.user_id == context.user_id
         assert langfuse_context.metadata.user_id == context.user_id
         assert langfuse_context.metadata.user_email == context.user_email
-        assert langfuse_context.metadata.company_id == context.company_id

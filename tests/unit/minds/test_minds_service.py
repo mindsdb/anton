@@ -40,7 +40,7 @@ class TestMindsService:
     @pytest.fixture
     def minds_service(self, mock_session):
         """Create MindsService instance with mocked session."""
-        return MindsService(session=mock_session, user_id="test-user-123", company_id="test-company-456")
+        return MindsService(session=mock_session, user_id="test-user-123")
 
     @pytest.fixture
     def sample_mind(self):
@@ -50,7 +50,6 @@ class TestMindsService:
             provider="openai",
             model_name="gpt-4o",
             user_id="test-user-123",
-            company_id="test-company-456",
             parameters={"temperature": 0.7},
             datasources=["test-datasource"],
             is_active=True,
@@ -74,20 +73,18 @@ class TestMindsService:
 
     def test_service_initialization(self, mock_session):
         """Test MindsService initialization."""
-        service = MindsService(session=mock_session, user_id="user-123", company_id="company-456")
+        service = MindsService(session=mock_session, user_id="user-123")
 
         assert service.session == mock_session
         assert service.user_id == "user-123"
-        assert service.company_id == "company-456"
 
     def test_create_classmethod(self, mock_session):
         """Test the create classmethod."""
-        service = MindsService.create(session=mock_session, user_id="user-123", company_id="company-456")
+        service = MindsService.create(session=mock_session, user_id="user-123")
 
         assert isinstance(service, MindsService)
         assert service.session == mock_session
         assert service.user_id == "user-123"
-        assert service.company_id == "company-456"
 
     @pytest.mark.asyncio
     async def test_list_minds_success(self, minds_service, mock_session, sample_mind):

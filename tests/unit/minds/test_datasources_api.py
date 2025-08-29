@@ -36,7 +36,7 @@ class TestDatasourcesAPI:
     def mock_request(self):
         """Mock FastAPI request object."""
         request = Mock()
-        request.headers = {"x-user-id": "test-user-123", "x-company-id": "test-company-456"}
+        request.headers = {"x-user-id": "test-user-123"}
         return request
 
     @pytest.fixture
@@ -58,7 +58,6 @@ class TestDatasourcesAPI:
         """Mock DatasourcesService instance."""
         service = Mock(spec=DatasourcesService)
         service.user_id = "test-user-123"
-        service.company_id = "test-company-456"
         return service
 
     @pytest.fixture
@@ -85,7 +84,6 @@ class TestDatasourcesAPI:
             patch("minds.api.v1.endpoints.datasources.create_mindsdb_client_from_request") as mock_create_client,
         ):
             mock_extract.return_value.user_id = "test-user-123"
-            mock_extract.return_value.company_id = "test-company-456"
             mock_create_client.return_value = mock_mindsdb_client
 
             service = get_datasources_service(mock_request, mock_session)
@@ -93,7 +91,6 @@ class TestDatasourcesAPI:
             assert isinstance(service, DatasourcesService)
             assert service.session == mock_session
             assert service.user_id == "test-user-123"
-            assert service.company_id == "test-company-456"
 
     @pytest.mark.asyncio
     async def test_list_datasources_success(self, mock_datasources_service, sample_datasource_response):

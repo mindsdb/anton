@@ -49,24 +49,22 @@ class MindsService:
     only used for datasource validation, not for storing minds data.
     """
 
-    def __init__(self, session: Session, user_id: str, company_id: str):
+    def __init__(self, session: Session, user_id: str):
         """
         Initialize the minds service.
 
         Args:
             session (Session): Database session
             user_id (str): Current user ID
-            company_id (str): Current company ID
         """
         self.session = session
         self.user_id = user_id
-        self.company_id = company_id
-        logger.debug(f"MindsService initialized for user {user_id}, company {company_id}")
+        logger.debug(f"MindsService initialized for user {user_id}")
 
     @classmethod
-    def create(cls, session: Session, user_id: str, company_id: str) -> "MindsService":
+    def create(cls, session: Session, user_id: str) -> "MindsService":
         """Factory method to create a MindsService instance."""
-        return cls(session=session, user_id=user_id, company_id=company_id)
+        return cls(session=session, user_id=user_id)
 
     async def list_minds(
         self,
@@ -91,12 +89,12 @@ class MindsService:
         """
         try:
             logger.debug(
-                f"Listing minds for company {self.company_id} with filters: "
+                f"Listing minds for user {self.user_id} with filters: "
                 f"provider={provider}, is_active={is_active}, limit={limit}, offset={offset}"
             )
 
             # Build query conditions
-            conditions = [Mind.company_id == self.company_id]
+            conditions = [Mind.user_id == self.user_id]
             if provider is not None:
                 conditions.append(Mind.provider == provider)
             # not sure if this is needed initially
@@ -117,11 +115,11 @@ class MindsService:
                 minds_list.append(mind_response)
 
             logger.info(
-                f"Retrieved {len(minds_list)} minds for company {self.company_id} (offset={offset}, limit={limit})"
+                f"Retrieved {len(minds_list)} minds for user {self.user_id} (offset={offset}, limit={limit})"
             )
             return minds_list
         except Exception as e:
-            logger.error(f"Error listing minds for company {self.company_id}: {str(e)}")
+            logger.error(f"Error listing minds for user {self.user_id}: {str(e)}")
             raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
 
     async def get_mind(self, mind_name: str, with_detailed_data: bool = False) -> MindResponse:
@@ -139,10 +137,10 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
-            logger.debug(f"Getting mind {mind_name} for company {self.company_id}")
+            logger.debug(f"Getting mind {mind_name} for user {self.user_id}")
 
             statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.company_id == self.company_id, Mind.is_active)
+                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
             )
             mind = self.session.exec(statement).first()
 
@@ -150,7 +148,7 @@ class MindsService:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
             mind_response = self._mind_to_response(mind, with_detailed_data)
-            logger.info(f"Retrieved mind {mind_name} for company {self.company_id}")
+            logger.info(f"Retrieved mind {mind_name} for user {self.user_id}")
             return mind_response
         except MindNotFoundError:
             raise
@@ -173,12 +171,12 @@ class MindsService:
             DatasourceNotFoundError: If any specified datasource doesn't exist
         """
         try:
-            logger.debug(f"Creating mind {mind_data.name} for company {self.company_id}")
+            logger.debug(f"Creating mind {mind_data.name} for user {self.user_id}")
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
                 select(Mind).where(
-                    and_(Mind.name == mind_data.name, Mind.company_id == self.company_id, Mind.is_active)
+                    and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.is_active)
                 )
             ).first()
 
@@ -193,7 +191,6 @@ class MindsService:
                 provider=mind_data.provider,
                 model_name=mind_data.model_name or "gpt-4o",  # Default model
                 user_id=self.user_id,
-                company_id=self.company_id,
                 parameters=mind_data.parameters or {},
                 datasources=mind_data.datasources or [],
                 is_active=True,
@@ -203,7 +200,7 @@ class MindsService:
             self.session.commit()
             self.session.refresh(new_mind)
 
-            logger.info(f"Created mind {mind_data.name} for company {self.company_id}")
+            logger.info(f"Created mind {mind_data.name} for user {self.user_id}")
 
             return self._mind_to_response(new_mind)
 
@@ -230,10 +227,10 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
-            logger.debug(f"Updating mind {mind_name} for company {self.company_id}")
+            logger.debug(f"Updating mind {mind_name} for user {self.user_id}")
 
             statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.company_id == self.company_id, Mind.is_active)
+                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
             )
             mind = self.session.exec(statement).first()
 
@@ -244,7 +241,7 @@ class MindsService:
             if mind_data.name and mind_data.name != mind_name:
                 existing_mind = self.session.exec(
                     select(Mind).where(
-                        and_(Mind.name == mind_data.name, Mind.company_id == self.company_id, Mind.is_active)
+                        and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.is_active)
                     )
                 ).first()
                 if existing_mind:
@@ -270,7 +267,7 @@ class MindsService:
             self.session.commit()
             self.session.refresh(mind)
 
-            logger.info(f"Updated mind {mind_name} for company {self.company_id}")
+            logger.info(f"Updated mind {mind_name} for user {self.user_id}")
 
             return self._mind_to_response(mind)
 
@@ -297,10 +294,10 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
-            logger.debug(f"Deleting mind {mind_name} for company {self.company_id}")
+            logger.debug(f"Deleting mind {mind_name} for user {self.user_id}")
 
             statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.company_id == self.company_id, Mind.is_active)
+                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
             )
             mind = self.session.exec(statement).first()
 
@@ -315,7 +312,7 @@ class MindsService:
             self.session.add(mind)
             self.session.commit()
 
-            logger.info(f"Deleted mind {mind_name} for company {self.company_id}")
+            logger.info(f"Deleted mind {mind_name} for user {self.user_id}")
             return True
 
         except MindNotFoundError:
@@ -340,7 +337,7 @@ class MindsService:
             logger.debug(f"Adding datasource {datasource_request.name} to mind {mind_name}")
 
             statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.company_id == self.company_id, Mind.is_active)
+                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
             )
             mind = self.session.exec(statement).first()
 
@@ -384,7 +381,7 @@ class MindsService:
             logger.debug(f"Removing datasource {datasource_name} from mind {mind_name}")
 
             statement = select(Mind).where(
-                and_(Mind.name == mind_name, Mind.company_id == self.company_id, Mind.is_active)
+                and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active)
             )
             mind = self.session.exec(statement).first()
 

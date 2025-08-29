@@ -9,15 +9,15 @@ from minds.requests.utils import setup_langfuse_observation
 
 @pytest.fixture()
 def context():
-    return Context(user_id="123", user_email="test@example.com", company_id="456")
+    return Context(user_id="123", user_email="test@example.com")
 
 
 @pytest.fixture()
 def langfuse_context():
     return LangfuseContext(
         user_id="123",
-        metadata=LangfuseContextMetadata(user_id="123", user_email="test@example.com", company_id="456"),
-        tags=["test@example.com", "456"],
+        metadata=LangfuseContextMetadata(user_id="123", user_email="test@example.com"),
+        tags=["test@example.com"],
     )
 
 
