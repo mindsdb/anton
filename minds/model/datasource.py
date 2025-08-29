@@ -34,7 +34,7 @@ class Datasource(BaseSQLModel, table=True):
     )
 
     user_id: str = Field(..., max_length=255, description="ID of the user who created this datasource")
-    
+
     # Relationships - Many-to-many with minds through junction table
     mind_datasources: list["MindDatasource"] = Relationship(back_populates="datasource")
 

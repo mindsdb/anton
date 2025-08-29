@@ -101,25 +101,25 @@ def get_session_factory(engine):
 def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT):
     """
     FastAPI dependency that provides a database session with automatic cleanup.
-    
+
     This is a generator-based dependency that ensures sessions are always closed
     after the request completes, preventing database connection leaks.
-    
+
     Usage:
         @router.get("/example")
         async def endpoint(session: Session = Depends(get_session)):
             # Session will be automatically closed after this function completes
             pass
-    
+
     Args:
         db_uri: Database connection URI
-        
+
     Yields:
         SQLModelSession: Database session that will be automatically closed
     """
     engine = get_engine(db_uri=db_uri)
     session_factory = get_session_factory(engine)
-    
+
     db = session_factory()
     try:
         logger.debug(f"🔗 Created database session for '{db_uri.name}'")

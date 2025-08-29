@@ -44,9 +44,7 @@ class TestMindModel:
 
     def test_mind_creation_with_minimal_fields(self):
         """Test creating a Mind with minimal required fields."""
-        mind = Mind(
-            name="minimal-mind", provider="openai", model_name="gpt-4o", user_id="user-123"
-        )
+        mind = Mind(name="minimal-mind", provider="openai", model_name="gpt-4o", user_id="user-123")
 
         assert mind.name == "minimal-mind"
         assert mind.provider == "openai"
@@ -61,18 +59,14 @@ class TestMindModel:
 
     def test_mind_default_values(self):
         """Test Mind model default values."""
-        mind = Mind(
-            name="default-test", provider="openai", model_name="gpt-4o", user_id="user-123"
-        )
+        mind = Mind(name="default-test", provider="openai", model_name="gpt-4o", user_id="user-123")
 
         # Test that default factories create new instances
         assert isinstance(mind.parameters, dict)
         assert isinstance(mind.mind_datasources, list)
         assert mind.is_active is True
 
-        mind2 = Mind(
-            name="default-test-2", provider="openai", model_name="gpt-4o", user_id="user-123"
-        )
+        mind2 = Mind(name="default-test-2", provider="openai", model_name="gpt-4o", user_id="user-123")
 
         mind.parameters["test"] = "value"
         # mind_datasources is managed through relationships, not direct list manipulation
@@ -82,15 +76,10 @@ class TestMindModel:
 
     def test_mind_datasources_relationship_exists(self):
         """Test that mind_datasources relationship is properly configured."""
-        mind = Mind(
-            name="test",
-            provider="openai",
-            model_name="gpt-4o",
-            user_id="user-123"
-        )
-        
+        mind = Mind(name="test", provider="openai", model_name="gpt-4o", user_id="user-123")
+
         # Test that the relationship exists and is empty by default
-        assert hasattr(mind, 'mind_datasources')
+        assert hasattr(mind, "mind_datasources")
         assert mind.mind_datasources == []
         assert isinstance(mind.mind_datasources, list)
 
@@ -98,24 +87,18 @@ class TestMindModel:
         """Test that parameters field has proper default factory."""
         mind1 = Mind(name="test1", provider="openai", model_name="gpt-4o", user_id="user-123")
         mind2 = Mind(name="test2", provider="openai", model_name="gpt-4o", user_id="user-123")
-        
+
         # Test that each instance gets its own parameters dict
         mind1.parameters["test"] = "value1"
         mind2.parameters["test"] = "value2"
-        
+
         assert mind1.parameters["test"] == "value1"
         assert mind2.parameters["test"] == "value2"
 
-
     def test_mind_field_types(self):
         """Test Mind field types and validation."""
-        mind = Mind(
-            name="test",
-            provider="openai",
-            model_name="gpt-4o",
-            user_id="user-123"
-        )
-        
+        mind = Mind(name="test", provider="openai", model_name="gpt-4o", user_id="user-123")
+
         # Test field types
         assert isinstance(mind.name, str)
         assert isinstance(mind.provider, str)
@@ -129,7 +112,7 @@ class TestMindModel:
         # Test that required fields must be provided
         try:
             Mind()  # Should fail - missing required fields
-            assert False, "Should have raised an error for missing required fields"
+            raise AssertionError("Should have raised an error for missing required fields")
         except Exception:
             pass  # Expected to fail
 
@@ -243,7 +226,7 @@ class TestMindModel:
         # Test that complex JSON structures are handled
         assert mind.parameters["nested"]["deep"]["value"] == 42
         # Test that mind_datasources relationship exists
-        assert hasattr(mind, 'mind_datasources')
+        assert hasattr(mind, "mind_datasources")
         assert mind.mind_datasources == []
 
     def test_mind_text_field(self):

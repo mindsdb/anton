@@ -39,9 +39,7 @@ def get_datasources_service(request: Request, session: Session = Depends(get_ses
     context = extract_context_from_request(request)
     mindsdb_client = create_mindsdb_client_from_request(request)
 
-    return DatasourcesService(
-        session=session, mindsdb_client=mindsdb_client, user_id=context.user_id
-    )
+    return DatasourcesService(session=session, mindsdb_client=mindsdb_client, user_id=context.user_id)
 
 
 @router.get("/", status_code=200)
@@ -68,8 +66,7 @@ async def list_datasources(
         List of datasource objects matching the specified criteria
     """
     try:
-        logger.debug(
-            f"List datasources requested (v1) for user {datasources_service.user_id} ")
+        logger.debug(f"List datasources requested (v1) for user {datasources_service.user_id} ")
 
         datasources = await datasources_service.list_datasources(
             engine=engine, limit=limit, offset=offset, with_detailed_data=with_detailed_data
@@ -102,8 +99,7 @@ async def get_datasource(
         Datasource details object
     """
     try:
-        logger.debug(
-            f"Get datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}")
+        logger.debug(f"Get datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}")
 
         datasource = await datasources_service.get_datasource(
             datasource_name=datasource_name, with_detailed_data=with_detailed_data
@@ -137,7 +133,8 @@ async def create_datasource(
     """
     try:
         logger.debug(
-            f"Create datasource requested: {datasource_data.name} (v1) for user {datasources_service.user_id}, "    )
+            f"Create datasource requested: {datasource_data.name} (v1) for user {datasources_service.user_id}, "
+        )
 
         datasource = await datasources_service.create_datasource(datasource_data)
 
@@ -171,9 +168,7 @@ async def update_datasource(
         Updated datasource details
     """
     try:
-        logger.debug(
-            f"Update datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}"
-        )
+        logger.debug(f"Update datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}")
 
         datasource = await datasources_service.update_datasource(datasource_name, datasource_data)
 
@@ -242,9 +237,7 @@ async def check_datasource_connection(
         Connection status with success/failure and error details
     """
     try:
-        logger.debug(
-            f"Test connection requested: {datasource_name} (v1) for user {datasources_service.user_id}"
-        )
+        logger.debug(f"Test connection requested: {datasource_name} (v1) for user {datasources_service.user_id}")
 
         result = await datasources_service.test_connection(datasource_name)
 

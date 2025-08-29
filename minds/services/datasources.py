@@ -382,7 +382,12 @@ class DatasourcesService:
             databases = self.mindsdb_client.databases
 
             # Create the database with connection validation
-            databases.create(name=datasource.name, engine=datasource.engine, connection_args=datasource.connection_data, company_id=self.user_id)
+            databases.create(
+                name=datasource.name,
+                engine=datasource.engine,
+                connection_args=datasource.connection_data,
+                company_id=self.user_id,
+            )
 
             logger.info(f"Created MindsDB database {datasource.name}")
 
@@ -406,7 +411,12 @@ class DatasourcesService:
                 logger.debug("Datasource not found. Skipping...")
 
             # Recreate with new parameters
-            databases.create(name=datasource.name, company_id=self.user_id, engine=datasource.engine, connection_args=datasource.connection_data)
+            databases.create(
+                name=datasource.name,
+                company_id=self.user_id,
+                engine=datasource.engine,
+                connection_args=datasource.connection_data,
+            )
 
             logger.info(f"Updated MindsDB database {datasource.name}")
 

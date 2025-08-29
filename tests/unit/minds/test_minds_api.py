@@ -360,7 +360,7 @@ class TestMindsAPIErrorHandling:
     @pytest.mark.asyncio
     async def test_delete_mind_unexpected_error(self):
         """Test delete_mind with unexpected Exception (lines 222-224)."""
-        mock_service = Mock(spec=MindsService)  
+        mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
         mock_service.delete_mind = AsyncMock(side_effect=OSError("File system error"))
 

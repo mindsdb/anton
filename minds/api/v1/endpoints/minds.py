@@ -81,9 +81,7 @@ async def get_mind(
     Returns:
         MindResponse: Mind object with full details
     """
-    logger.debug(
-        f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}"
-    )
+    logger.debug(f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}")
 
     try:
         mind = await minds_service.get_mind(mind_name=mind_name, with_detailed_data=with_detailed_data)
@@ -113,9 +111,7 @@ async def create_mind(
     Returns:
         MindResponse: Created mind object with generated ID and timestamps
     """
-    logger.debug(
-        f"Create mind requested: {mind_data.name} (v1) for user {minds_service.user_id}"
-    )
+    logger.debug(f"Create mind requested: {mind_data.name} (v1) for user {minds_service.user_id}")
 
     try:
         mind = await minds_service.create_mind(mind_data)
@@ -147,9 +143,7 @@ async def update_mind(
     Returns:
         MindResponse: Updated mind object with new values
     """
-    logger.debug(
-        f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}"
-    )
+    logger.debug(f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}")
 
     try:
         mind = await minds_service.update_mind(mind_name, mind_data)
@@ -178,9 +172,7 @@ async def delete_mind(mind_name: str, minds_service: MindsService = Depends(get_
     Returns:
         None: 204 No Content on successful deletion
     """
-    logger.debug(
-        f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}"
-    )
+    logger.debug(f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}")
 
     try:
         await minds_service.delete_mind(mind_name)
