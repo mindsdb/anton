@@ -51,7 +51,6 @@ class TestMindsService:
             model_name="gpt-4o",
             user_id="test-user-123",
             parameters={"temperature": 0.7},
-            datasources=["test-datasource"],
             is_active=True,
         )
 
@@ -175,7 +174,8 @@ class TestMindsService:
         assert result.name == "new-mind"
         assert result.provider == "openai"
         mock_session.add.assert_called_once()
-        mock_session.commit.assert_called_once()
+        # Commit is called twice: once for mind creation, once for datasource relationships
+        assert mock_session.commit.call_count == 2
 
     @pytest.mark.asyncio
     async def test_create_mind_already_exists(self, minds_service, mock_session, create_request, sample_mind):
@@ -288,4 +288,4 @@ class TestMindsService:
         assert result.provider == "openai"
         assert result.model_name == "gpt-4o"
         assert result.parameters == {"temperature": 0.7}
-        assert result.datasources == ["test-datasource"]
+        assert result.datasources == []

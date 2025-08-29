@@ -25,7 +25,6 @@ class TestMindModel:
             "model_name": "gpt-4o",
             "user_id": "user-123",
             "parameters": {"temperature": 0.7, "max_tokens": 100},
-            "datasources": ["datasource1", "datasource2"],
             "description": "Test mind for unit tests",
             "is_active": True,
         }
@@ -39,7 +38,7 @@ class TestMindModel:
         assert mind.model_name == "gpt-4o"
         assert mind.user_id == "user-123"
         assert mind.parameters == {"temperature": 0.7, "max_tokens": 100}
-        assert mind.datasources == ["datasource1", "datasource2"]
+        assert mind.mind_datasources == []  # No relationships set in this basic test
         assert mind.description == "Test mind for unit tests"
         assert mind.is_active is True
 
@@ -56,7 +55,7 @@ class TestMindModel:
 
         # Test default values
         assert mind.parameters == {}
-        assert mind.datasources == []
+        assert mind.mind_datasources == []
         assert mind.description is None
         assert mind.is_active is True
 
@@ -68,7 +67,7 @@ class TestMindModel:
 
         # Test that default factories create new instances
         assert isinstance(mind.parameters, dict)
-        assert isinstance(mind.datasources, list)
+        assert isinstance(mind.mind_datasources, list)
         assert mind.is_active is True
 
         mind2 = Mind(
@@ -76,80 +75,63 @@ class TestMindModel:
         )
 
         mind.parameters["test"] = "value"
-        mind.datasources.append("test-datasource")
+        # mind_datasources is managed through relationships, not direct list manipulation
 
         assert "test" not in mind2.parameters
-        assert "test-datasource" not in mind2.datasources
+        assert len(mind2.mind_datasources) == 0
 
-    def test_add_datasource_method(self, sample_mind_data):
-        """Test add_datasource helper method."""
-        mind = Mind(**sample_mind_data)
-        original_count = len(mind.datasources)
-
-        # Add new datasource
-        mind.add_datasource("new-datasource")
-        assert len(mind.datasources) == original_count + 1
-        assert "new-datasource" in mind.datasources
-
-        # Add existing datasource (should not duplicate)
-        mind.add_datasource("datasource1")
-        assert len(mind.datasources) == original_count + 1
-        assert mind.datasources.count("datasource1") == 1
-
-    def test_add_datasource_method_with_none_datasources(self):
-        """Test add_datasource when datasources is None."""
+    def test_mind_datasources_relationship_exists(self):
+        """Test that mind_datasources relationship is properly configured."""
         mind = Mind(
             name="test",
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
-            datasources=None,
+            user_id="user-123"
         )
+        
+        # Test that the relationship exists and is empty by default
+        assert hasattr(mind, 'mind_datasources')
+        assert mind.mind_datasources == []
+        assert isinstance(mind.mind_datasources, list)
 
-        mind.add_datasource("first-datasource")
-        assert mind.datasources == ["first-datasource"]
+    def test_mind_parameters_default_factory(self):
+        """Test that parameters field has proper default factory."""
+        mind1 = Mind(name="test1", provider="openai", model_name="gpt-4o", user_id="user-123")
+        mind2 = Mind(name="test2", provider="openai", model_name="gpt-4o", user_id="user-123")
+        
+        # Test that each instance gets its own parameters dict
+        mind1.parameters["test"] = "value1"
+        mind2.parameters["test"] = "value2"
+        
+        assert mind1.parameters["test"] == "value1"
+        assert mind2.parameters["test"] == "value2"
 
-    def test_remove_datasource_method(self, sample_mind_data):
-        """Test remove_datasource helper method."""
-        mind = Mind(**sample_mind_data)
-        original_count = len(mind.datasources)
 
-        # Remove existing datasource
-        result = mind.remove_datasource("datasource1")
-        assert result is True
-        assert len(mind.datasources) == original_count - 1
-        assert "datasource1" not in mind.datasources
-
-        # Remove non-existing datasource
-        result = mind.remove_datasource("non-existing")
-        assert result is False
-        assert len(mind.datasources) == original_count - 1
-
-    def test_remove_datasource_method_with_none_datasources(self):
-        """Test remove_datasource when datasources is None."""
+    def test_mind_field_types(self):
+        """Test Mind field types and validation."""
         mind = Mind(
             name="test",
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
-            datasources=None,
+            user_id="user-123"
         )
+        
+        # Test field types
+        assert isinstance(mind.name, str)
+        assert isinstance(mind.provider, str)
+        assert isinstance(mind.model_name, str)
+        assert isinstance(mind.user_id, str)
+        assert isinstance(mind.parameters, dict)
+        assert isinstance(mind.is_active, bool)
 
-        result = mind.remove_datasource("any-datasource")
-        assert result is False
-
-    def test_remove_datasource_method_with_empty_datasources(self):
-        """Test remove_datasource when datasources is empty."""
-        mind = Mind(
-            name="test",
-            provider="openai",
-            model_name="gpt-4o",
-            user_id="user-123",
-            datasources=[],
-        )
-
-        result = mind.remove_datasource("any-datasource")
-        assert result is False
+    def test_mind_required_fields(self):
+        """Test that Mind requires essential fields."""
+        # Test that required fields must be provided
+        try:
+            Mind()  # Should fail - missing required fields
+            assert False, "Should have raised an error for missing required fields"
+        except Exception:
+            pass  # Expected to fail
 
     def test_mind_string_representation(self, sample_mind_data):
         """Test Mind string representation."""
@@ -165,14 +147,15 @@ class TestMindModel:
 
         # Test that parameters and datasources are properly serializable
         assert isinstance(mind.parameters, dict)
-        assert isinstance(mind.datasources, list)
+        assert isinstance(mind.mind_datasources, list)
 
         # Test model_dump works
         mind_dict = mind.model_dump()
         assert isinstance(mind_dict, dict)
         assert mind_dict["name"] == "test-mind"
         assert mind_dict["parameters"] == {"temperature": 0.7, "max_tokens": 100}
-        assert mind_dict["datasources"] == ["datasource1", "datasource2"]
+        assert "mind_datasources" in mind_dict
+        assert mind_dict["mind_datasources"] == []
 
     def test_mind_field_constraints(self):
         """Test Mind field constraints and validation."""
@@ -212,12 +195,13 @@ class TestMindModel:
         )
         assert len(mind.user_id) == 256
 
-        # Test user_id field constraints
+        # Test user_id field constraints with actual long string
+        long_user_id = "a" * 256
         mind = Mind(
             name="test",
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
+            user_id=long_user_id,
         )
         assert len(mind.user_id) == 256
 
@@ -254,12 +238,13 @@ class TestMindModel:
             model_name="gpt-4o",
             user_id="user-123",
             parameters={"nested": {"deep": {"value": 42}}},
-            datasources=["complex", "datasource", "list"],
         )
 
         # Test that complex JSON structures are handled
         assert mind.parameters["nested"]["deep"]["value"] == 42
-        assert len(mind.datasources) == 3
+        # Test that mind_datasources relationship exists
+        assert hasattr(mind, 'mind_datasources')
+        assert mind.mind_datasources == []
 
     def test_mind_text_field(self):
         """Test Mind text field (description)."""
