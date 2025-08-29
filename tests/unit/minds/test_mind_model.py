@@ -137,8 +137,8 @@ class TestMindModel:
         assert isinstance(mind_dict, dict)
         assert mind_dict["name"] == "test-mind"
         assert mind_dict["parameters"] == {"temperature": 0.7, "max_tokens": 100}
-        assert "mind_datasources" in mind_dict
-        assert mind_dict["mind_datasources"] == []
+        assert hasattr(mind, "mind_datasources")
+        assert mind.mind_datasources == []
 
     def test_mind_field_constraints(self):
         """Test Mind field constraints and validation."""

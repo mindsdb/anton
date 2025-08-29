@@ -64,6 +64,12 @@ class TestAPIV1Router:
         # Could be 200 (success), 422 (validation), or 500 (dependency error) - just not 404
         assert response.status_code != 404  # Endpoint should exist
 
+    def test_tree_endpoints_registered(self, client):
+        """Test that tree endpoints are registered."""
+        response = client.get("/api/v1/tree/")
+        # Could be 200 (success), 422 (validation), or 500 (dependency error) - just not 404
+        assert response.status_code != 404  # Endpoint should exist
+
     def test_router_tags_configuration(self):
         """Test that router includes have correct tags."""
         # Check that the router was configured with proper tags
@@ -74,11 +80,13 @@ class TestAPIV1Router:
         minds_routes = [r for r in routes if "/minds" in r.path]
         chat_routes = [r for r in routes if "/chat" in r.path]
         datasources_routes = [r for r in routes if "/datasources" in r.path]
+        tree_routes = [r for r in routes if "/tree" in r.path]
 
         assert len(health_routes) > 0, f"No health routes found in {[r.path for r in routes]}"
         assert len(minds_routes) > 0, f"No minds routes found in {[r.path for r in routes]}"
         assert len(chat_routes) > 0, f"No chat routes found in {[r.path for r in routes]}"
         assert len(datasources_routes) > 0, f"No datasources routes found in {[r.path for r in routes]}"
+        assert len(tree_routes) > 0, f"No tree routes found in {[r.path for r in routes]}"
 
     def test_openapi_docs_generation(self, app_with_router):
         """Test that OpenAPI docs are properly generated."""
@@ -104,7 +112,8 @@ class TestAPIV1Router:
 
         for route in routes:
             # All routes should start with /api/v1/ then the expected prefixes
-            expected_prefixes = ["/api/v1/health", "/api/v1/minds", "/api/v1/chat", "/api/v1/datasources"]
+            expected_prefixes = ["/api/v1/health", "/api/v1/minds", "/api/v1/chat", \
+                                  "/api/v1/datasources", "/api/v1/tree"]
             assert any(route.path.startswith(prefix) for prefix in expected_prefixes), (
                 f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"
             )
