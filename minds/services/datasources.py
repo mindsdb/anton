@@ -386,7 +386,6 @@ class DatasourcesService:
                 name=datasource.name,
                 engine=datasource.engine,
                 connection_args=datasource.connection_data,
-                company_id=self.user_id,
             )
 
             logger.info(f"Created MindsDB database {datasource.name}")
@@ -413,7 +412,6 @@ class DatasourcesService:
             # Recreate with new parameters
             databases.create(
                 name=datasource.name,
-                company_id=self.user_id,
                 engine=datasource.engine,
                 connection_args=datasource.connection_data,
             )
