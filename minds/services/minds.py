@@ -6,13 +6,13 @@ related to mind management, including CRUD operations with internal database sto
 MindsDB is only used for datasource validation, not for minds storage.
 """
 
-from sqlmodel import Session, and_, select
 from sqlalchemy.orm import selectinload
+from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
+from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import MindDatasource
-from minds.model.datasource import Datasource
 from minds.schemas.minds import AddDatasourceRequest, MindCreateRequest, MindResponse, MindUpdateRequest
 
 # Set up logging

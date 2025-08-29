@@ -5,7 +5,7 @@ This module defines the SQLModel for datasources, matching MindsDB's schema
 while adding user attribution for multi-user support.
 """
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import JSON, UniqueConstraint
 from sqlmodel import Column, Field, Relationship

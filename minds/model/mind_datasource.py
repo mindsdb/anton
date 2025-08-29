@@ -9,7 +9,7 @@ This allows:
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, Relationship
 
 from minds.model.base import BaseSQLModel
