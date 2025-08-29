@@ -20,8 +20,7 @@ class DataCatalogLoader:
         self,
         session: Session,
         mindsdb_client: Server,
-        user_id: str,
-        company_id: str,
+        user_id: str
     ):
         """
         Initialize the MindsDB data catalog loader.
@@ -30,12 +29,10 @@ class DataCatalogLoader:
             session: Database session for internal storage.
             mindsdb_client: MindsDB server instance from mindsdb_sdk.connect().
             user_id: Current user ID.
-            company_id: Current company ID.
         """
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
-        self.company_id = company_id
 
     async def load(self, datasource_name: str, table_names: Optional[List[str]] = None) -> None:
         """Load the data catalog."""
@@ -44,7 +41,6 @@ class DataCatalogLoader:
                 session=self.session,
                 mindsdb_client=self.mindsdb_client,
                 user_id=self.user_id,
-                company_id=self.company_id
             )
             datasource = await datasource_service.get_datasource(datasource_name)
 

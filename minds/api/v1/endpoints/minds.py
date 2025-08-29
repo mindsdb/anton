@@ -49,8 +49,7 @@ def get_data_catalog_loader_service(
     return DataCatalogLoader(
         session=session,
         mindsdb_client=mindsdb_client,
-        user_id=context.user_id,
-        company_id=context.company_id
+        user_id=context.user_id
     )
 
 
