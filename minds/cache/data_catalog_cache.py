@@ -3,8 +3,6 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import List
 
-from mindsdb_sdk.server import Server
-
 from minds.common.logger import setup_logging
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
@@ -41,13 +39,12 @@ class DataCatalogCache(ABC):
 
     @abstractmethod
     def load(
-        self, con: Server, mind: Mind
+        self, mind: Mind
     ) -> List[DataCatalog]:
         """
         Load data catalogs for the given mind.
 
         Args:
-            con: The MindsDB connection to use.
             mind: The mind requesting the catalog.
 
         Returns:
@@ -91,17 +88,16 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         self.cache: OrderedDict[str, List[DataCatalog]] = OrderedDict()
 
     def load(
-        self, con: Server, mind: Mind
+        self, mind: Mind
     ) -> List[DataCatalog]:
         """
         Load data catalogs from the cache or create new ones.
 
         Args:
-            con: The MindsDB connection to use
-            mind: The mind requesting the catalogs
+            mind: The Mind requesting the data catalogs.
 
         Returns:
-            A list of cached data catalogs if found, or newly created ones
+            A list of cached data catalogs if found, or newly created ones.
         """
         key = DataCatalogCache.MindKey(mind_name=mind.name, updated_at=str(mind.updated_at))
         key_str = key.to_string()
@@ -117,9 +113,9 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         logger.info(f"Cache miss for data catalogs with key: {key_str}")
 
         data_catalogs = []
-        for datasource in mind.datasources:
-            pass
-            # TODO: Load the data catalog for the datasource.
+        for mind_datasource in mind.mind_datasources:
+            data_catalog = mind_datasource.datasource.get_data_catalog()
+            data_catalogs.append(data_catalog)
 
         # Cache the catalogs if any were created.
         if data_catalogs:
