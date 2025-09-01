@@ -18,16 +18,16 @@ class DataCatalogCache(ABC):
     class MindKey:
         """Key class for storing and retrieving data catalogs."""
 
-        def __init__(self, mind_name: str, updated_at: str):
+        def __init__(self, mind_name: str, modified_on: datetime):
             """
             Initialize a MindKey.
 
             Args:
                 mind_name: The name of the mind.
-                updated_at: The last updated timestamp of the mind.
+                modified_on: The last updated timestamp of the mind.
             """
             self.mind_name = mind_name
-            self.updated_at = updated_at
+            self.modified_on = modified_on
 
         def to_string(self) -> str:
             """
@@ -36,7 +36,7 @@ class DataCatalogCache(ABC):
             Returns:
                 A string representation of the MindKey.
             """
-            return f"{self.mind_name}:{self.updated_at}"
+            return f"{self.mind_name}:{str(self.modified_on)}"
 
     @abstractmethod
     def load(
@@ -100,7 +100,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         Returns:
             A list of cached data catalogs if found, or newly created ones.
         """
-        key = DataCatalogCache.MindKey(mind_name=mind.name, updated_at=str(mind.updated_at))
+        key = DataCatalogCache.MindKey(mind_name=mind.name, modified_on=mind.modified_on)
         key_str = key.to_string()
     
         # Check if we have it in the cache.
@@ -140,7 +140,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         # Update the last_updated field for all catalogs.
         for catalog in catalogs:
-            catalog.last_updated = datetime.now()
+            catalog.modified_on = datetime.now()
 
         # Add to the cache.
         self.cache[key_str] = catalogs
