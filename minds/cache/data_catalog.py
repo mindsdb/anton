@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import List
 
 from minds.common.logger import setup_logging
+from minds.common.vars import DATA_CATALOG_CACHE_TYPE, DATA_CATALOG_CACHE_MAX_SIZE
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
 
@@ -174,3 +175,15 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 # TODO: Implement a Redis cache implementation of DataCatalogCache.
 class DataCatalogRedisCache(DataCatalogCache):
     """A Redis cache implementation of DataCatalogCache."""
+
+
+class DataCatalogCacheFactory:
+    """Factory class for creating DataCatalogCache instances."""
+
+    @staticmethod
+    def create_cache() -> DataCatalogCache:
+        """Create a DataCatalogCache instance based on the cache type."""
+        if DATA_CATALOG_CACHE_TYPE == "in_memory":
+            return DataCatalogInMemoryCache(max_size=DATA_CATALOG_CACHE_MAX_SIZE)
+        else:
+            raise ValueError(f"Unknown cache type '{DATA_CATALOG_CACHE_TYPE}'")
