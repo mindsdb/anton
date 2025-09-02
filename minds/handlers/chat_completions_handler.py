@@ -63,5 +63,5 @@ class ChatCompletionsHandler:
         database_toolkit = DatabaseToolkit(mind=mind, mindsdb_client=self.mindsdb_client)
         database_agent = DatabaseAgent(mind=mind, database_toolkit=database_toolkit)
 
-        async for chunk in database_agent.get_completion(self.messages):
+        async for chunk in database_agent.get_completion(self.messages, stream=self.stream):
             await streamer.push(role=Role.assistant, content=chunk)

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import AsyncGenerator, List, Optional
 
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai import RunContext
@@ -9,6 +9,7 @@ from minds.agent.database_toolkit import DatabaseToolkit
 from minds.agent.llm import get_llm_config
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
+from minds.schemas.chat import Message
 
 
 logger = setup_logging()
@@ -83,14 +84,14 @@ class DatabaseAgent:
 
         return agent
 
-    def _build_conversation_context(self, messages: List[Dict]) -> str:
+    def _build_conversation_context(self, messages: List[Message]) -> str:
         """Build a conversation context string from messages.
 
         Args:
-            messages: List of conversation messages
+            messages: List of conversation messages.
 
         Returns:
-            Formatted conversation context string
+            Formatted conversation context string.
         """       
         if not messages:
             return ""
@@ -119,11 +120,12 @@ class DatabaseAgent:
 
         return conversation_context
 
-    async def get_completion(self, messages):
+    async def get_completion(self, messages: List[Message], stream: bool = False) -> AsyncGenerator[str, None]:
         """Get completion from the Pydantic-based agent.
 
         Args:
             messages: List of message dictionaries.
+            stream: Whether to stream the response.
 
         Returns:
             ChatCompletionCustom object for non-streaming or a generator for streaming.
@@ -137,8 +139,12 @@ class DatabaseAgent:
         # Store the complete conversation context for the tool context
         self.deps.conversation_context = conversation_context
 
-        async with agent.run_stream(
+        if stream:
+            async with agent.run_stream(
             conversation_context, deps=self.deps
-        ) as result:
-            async for chunk in result.stream_text(delta=True):
-                yield chunk
+            ) as result:
+                async for chunk in result.stream_text(delta=True):
+                    yield chunk
+        else:
+            result = await agent.run(conversation_context, deps=self.deps)
+            yield result.output
