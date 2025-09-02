@@ -11,6 +11,8 @@ from minds.api.v1.endpoints.datasources import (
     create_datasource,
     delete_datasource,
     get_datasource,
+    get_datasource_table_row_count,
+    get_datasource_table_sample,
     get_datasources_service,
     list_datasources,
     update_datasource,
@@ -19,6 +21,7 @@ from minds.schemas.datasources import (
     DatasourceConnectionStatus,
     DatasourceCreateRequest,
     DatasourceResponse,
+    DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
 )
 from minds.services.datasources import (
@@ -293,3 +296,151 @@ class TestDatasourcesAPI:
 
         assert result.success is False
         assert "Connection failed" in result.error_message
+
+    @pytest.fixture
+    def sample_table_sample_response(self):
+        """Sample table sample response for testing."""
+        return DatasourceTableSampleResponse(
+            data=[["30/09/2007", 441854, "house", 2], ["31/12/2007", 441854, "house", 2]],
+            column_names=["saledate", "MA", "type", "bedrooms"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_sample_success(self, mock_datasources_service, sample_table_sample_response):
+        """Test successful table sample retrieval."""
+        mock_datasources_service.get_datasource_table_sample = AsyncMock(return_value=sample_table_sample_response)
+
+        result = await get_datasource_table_sample(
+            datasource_name="test_postgres",
+            table_name="test_table",
+            limit=10,
+            datasources_service=mock_datasources_service
+        )
+
+        assert result.data == [["30/09/2007", 441854, "house", 2], ["31/12/2007", 441854, "house", 2]]
+        assert result.column_names == ["saledate", "MA", "type", "bedrooms"]
+        mock_datasources_service.get_datasource_table_sample.assert_called_once_with("test_postgres", "test_table", 10)
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_sample_not_found(self, mock_datasources_service):
+        """Test get table sample when datasource is not found."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.get_datasource_table_sample = AsyncMock(
+            side_effect=DatasourceNotFoundError("Datasource 'test_postgres' not found")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_datasource_table_sample(
+                datasource_name="test_postgres",
+                table_name="test_table",
+                datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 404
+        assert "Datasource 'test_postgres' not found" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_sample_service_error(self, mock_datasources_service):
+        """Test get table sample with service error."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.get_datasource_table_sample = AsyncMock(
+            side_effect=DatasourceServiceError("Failed to get sample data")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_datasource_table_sample(
+                datasource_name="test_postgres",
+                table_name="test_table",
+                datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "Failed to get sample data" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_sample_unexpected_error(self, mock_datasources_service):
+        """Test get table sample with unexpected error."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.get_datasource_table_sample = AsyncMock(side_effect=Exception("Unexpected error"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_datasource_table_sample(
+                datasource_name="test_postgres",
+                table_name="test_table",
+                datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_row_count_success(self, mock_datasources_service):
+        """Test successful table row count retrieval."""
+        mock_datasources_service.get_datasource_table_row_count = AsyncMock(return_value=42)
+
+        result = await get_datasource_table_row_count(
+            datasource_name="test_postgres",
+            table_name="test_table",
+            datasources_service=mock_datasources_service
+        )
+
+        assert result == 42
+        mock_datasources_service.get_datasource_table_row_count.assert_called_once_with("test_postgres", "test_table")
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_row_count_not_found(self, mock_datasources_service):
+        """Test get table row count when datasource is not found."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.get_datasource_table_row_count = AsyncMock(
+            side_effect=DatasourceNotFoundError("Datasource 'test_postgres' not found")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_datasource_table_row_count(
+                datasource_name="test_postgres",
+                table_name="test_table",
+                datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 404
+        assert "Datasource 'test_postgres' not found" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_row_count_service_error(self, mock_datasources_service):
+        """Test get table row count with service error."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.get_datasource_table_row_count = AsyncMock(
+            side_effect=DatasourceServiceError("Failed to get row count")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_datasource_table_row_count(
+                datasource_name="test_postgres",
+                table_name="test_table",
+                datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "Failed to get row count" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_row_count_unexpected_error(self, mock_datasources_service):
+        """Test get table row count with unexpected error."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.get_datasource_table_row_count = AsyncMock(side_effect=Exception("Unexpected error"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_datasource_table_row_count(
+                datasource_name="test_postgres",
+                table_name="test_table",
+                datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in str(exc_info.value.detail)

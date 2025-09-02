@@ -289,6 +289,26 @@ async def get_datasource_table_row_count(
 ) -> int:
     """
     Get the row count of a table from a datasource.
+    
+    Args:
+        datasource_name: Name of the datasource.
+        table_name: Name of the table to get row count for.
+        
+    Returns:
+        Number of rows in the table.
     """
-    row_count = await datasources_service.get_datasource_table_row_count(datasource_name, table_name)
-    return row_count
+    try:
+        logger.debug(f"Get table row count requested: {datasource_name}.{table_name} (v1) for user {datasources_service.user_id}")
+        
+        row_count = await datasources_service.get_datasource_table_row_count(datasource_name, table_name)
+        return row_count
+        
+    except DatasourceNotFoundError as e:
+        logger.error(f"Datasource not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except DatasourceServiceError as e:
+        logger.error(f"Service error in get_datasource_table_row_count: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_datasource_table_row_count: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error") from None

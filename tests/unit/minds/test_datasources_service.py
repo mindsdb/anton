@@ -3,6 +3,7 @@ Unit tests for DatasourcesService.
 """
 
 from datetime import datetime
+import pandas as pd
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -11,7 +12,7 @@ from mindsdb_sdk.server import Server
 from sqlmodel import Session
 
 from minds.model.datasource import Datasource
-from minds.schemas.datasources import DatasourceCreateRequest, DatasourceResponse, DatasourceUpdateRequest
+from minds.schemas.datasources import DatasourceCreateRequest, DatasourceResponse, DatasourceTableSampleResponse, DatasourceUpdateRequest
 from minds.services.datasources import (
     DatasourceAlreadyExistsError,
     DatasourceNotFoundError,
@@ -335,3 +336,117 @@ class TestDatasourcesService:
 
         assert result.success is False
         assert "Unexpected error" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_sample_success(self, service, mock_mindsdb_client):
+        """Test getting sample data for a table from a datasource."""
+        # Mock the _get_datasource method to return a datasource
+        service._get_datasource = AsyncMock(return_value=Mock())
+
+        sample_df = pd.DataFrame({"col1": [1, 2, 3], "col2": ["a", "b", "c"]})
+
+        # Mock the query chain: databases.get().query().fetch()
+        mock_query = Mock()
+        mock_query.fetch.return_value = sample_df
+
+        mock_database = Mock()
+        mock_database.query.return_value = mock_query
+
+        mock_databases = Mock()
+        mock_databases.get.return_value = mock_database
+        mock_mindsdb_client.databases = mock_databases
+
+        result = await service.get_datasource_table_sample("test_postgres", "test_table")
+
+        # Verify the response structure
+        assert hasattr(result, 'data')
+        assert hasattr(result, 'column_names')
+        assert result.data == [[1, "a"], [2, "b"], [3, "c"]]
+        assert result.column_names == ["col1", "col2"]
+
+        # Verify the query was called correctly
+        mock_database.query.assert_called_once_with("SELECT * FROM test_table LIMIT 10")
+        mock_query.fetch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_sample_datasource_not_found(self, service):
+        """Test getting sample data when datasource is not found."""
+        service._get_datasource = AsyncMock(return_value=None)
+
+        with pytest.raises(DatasourceNotFoundError, match="Datasource 'test_postgres' not found"):
+            await service.get_datasource_table_sample("test_postgres", "test_table")
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_sample_query_error(self, service, mock_mindsdb_client):
+        """Test getting sample data when query fails."""
+        service._get_datasource = AsyncMock(return_value=Mock())
+
+        # Mock the query chain to raise an exception
+        mock_query = Mock()
+        mock_query.fetch.side_effect = Exception("Query failed")
+
+        mock_database = Mock()
+        mock_database.query.return_value = mock_query
+
+        mock_databases = Mock()
+        mock_databases.get.return_value = mock_database
+        mock_mindsdb_client.databases = mock_databases
+
+        with pytest.raises(DatasourceServiceError, match="Failed to get sample data"):
+            await service.get_datasource_table_sample("test_postgres", "test_table")
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_row_count_success(self, service, mock_mindsdb_client):
+        """Test getting row count for a table from a datasource."""
+        # Mock the _get_datasource method to return a datasource
+        service._get_datasource = AsyncMock(return_value=Mock())
+
+        # Mock the query result - COUNT(*) returns a DataFrame with one row and one column
+        row_count_df = pd.DataFrame({"count": [42]})
+
+        # Mock the query chain: databases.get().query().fetch()
+        mock_query = Mock()
+        mock_query.fetch.return_value = row_count_df
+
+        mock_database = Mock()
+        mock_database.query.return_value = mock_query
+
+        mock_databases = Mock()
+        mock_databases.get.return_value = mock_database
+        mock_mindsdb_client.databases = mock_databases
+
+        result = await service.get_datasource_table_row_count("test_postgres", "test_table")
+
+        # Verify the result is the expected integer
+        assert result == 42
+
+        # Verify the query was called correctly
+        mock_database.query.assert_called_once_with("SELECT COUNT(*) FROM test_table")
+        mock_query.fetch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_row_count_datasource_not_found(self, service):
+        """Test getting row count when datasource is not found."""
+        service._get_datasource = AsyncMock(return_value=None)
+
+        with pytest.raises(DatasourceNotFoundError, match="Datasource 'test_postgres' not found"):
+            await service.get_datasource_table_row_count("test_postgres", "test_table")
+
+    @pytest.mark.asyncio
+    async def test_get_datasource_table_row_count_query_error(self, service, mock_mindsdb_client):
+        """Test getting row count when query fails."""
+        service._get_datasource = AsyncMock(return_value=Mock())
+
+        # Mock the query chain to raise an exception
+        mock_query = Mock()
+        mock_query.fetch.side_effect = Exception("Query failed")
+
+        mock_database = Mock()
+        mock_database.query.return_value = mock_query
+
+        mock_databases = Mock()
+        mock_databases.get.return_value = mock_database
+        mock_mindsdb_client.databases = mock_databases
+
+        with pytest.raises(DatasourceServiceError, match="Failed to get row count"):
+            await service.get_datasource_table_row_count("test_postgres", "test_table")
