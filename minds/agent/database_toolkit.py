@@ -1,6 +1,7 @@
 import copy
 from datetime import datetime
 import re
+from typing import List
 
 from mindsdb_sdk.server import Server
 from mindsdb_sql_parser import parse_sql
@@ -18,6 +19,7 @@ from minds.common.vars import (
 )
 from minds.agent.exceptions import QueryGenerationError
 from minds.model.database_agent import QueryGenerationResult, QueryGenerationResultRetry, QueryPlanResult
+from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
 
 
@@ -82,7 +84,7 @@ class DatabaseToolkit:
                 
                 logger.info(f"SQL attempt {attempt + 1} failed, retrying: {str(e)}")
 
-    def _sanitize_and_validate_sql_mindsdb(self, sql: str, default_limit: int = 100) -> str:
+    def _sanitize_and_validate_sql_mindsdb(self, sql: str) -> str:
         """Validate that SQL is a single SELECT and add LIMIT if missing. Uses mindsdb_sql_parser when available."""
         if not sql or not isinstance(sql, str):
             raise QueryGenerationError("Empty SQL generated")
@@ -159,7 +161,7 @@ class DatabaseToolkit:
 
         return filtered
 
-    async def _plan_selection(self, conversation_context: str, data_catalogs):
+    async def _plan_selection(self, conversation_context: str, data_catalogs: List[DataCatalog]) -> QueryPlanResult | None:
         """Run a planning agent to decide engine/datasources/tables from full catalogs."""
         # Convert catalogs to context string
         catalog_contexts = [catalog.to_context_str() for catalog in data_catalogs]
@@ -209,7 +211,7 @@ class DatabaseToolkit:
         data_catalogs_filtered = self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
 
         # Extract engine types from data catalogs (same as generate_sql)
-        engines = {catalog.engine for catalog in data_catalogs_filtered}
+        engines = {catalog.datasource.engine for catalog in data_catalogs_filtered}
         logger.info(f"Engine types detected for retry in agent '{self.mind.name}': {engines}")
 
         # Convert data catalogs to context strings (same as generate_sql)
@@ -292,7 +294,7 @@ class DatabaseToolkit:
         data_catalogs_filtered = self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
 
         # Extract engine types from filtered data catalogs
-        engines = {catalog.engine for catalog in data_catalogs_filtered}
+        engines = {catalog.datasource.engine for catalog in data_catalogs_filtered}
         logger.info(f"Engine types detected for agent '{self.mind.name}' after planning: {engines}")
 
         # Convert data catalogs to context strings
