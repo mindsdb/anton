@@ -12,7 +12,12 @@ from mindsdb_sdk.server import Server
 from sqlmodel import Session
 
 from minds.model.datasource import Datasource
-from minds.schemas.datasources import DatasourceCreateRequest, DatasourceResponse, DatasourceTableSampleResponse, DatasourceUpdateRequest
+from minds.schemas.datasources import (
+    DatasourceCreateRequest,
+    DatasourceResponse,
+    DatasourceTableSampleResponse,
+    DatasourceUpdateRequest,
+)
 from minds.services.datasources import (
     DatasourceAlreadyExistsError,
     DatasourceNotFoundError,
@@ -359,8 +364,8 @@ class TestDatasourcesService:
         result = await service.get_datasource_table_sample("test_postgres", "test_table")
 
         # Verify the response structure
-        assert hasattr(result, 'data')
-        assert hasattr(result, 'column_names')
+        assert hasattr(result, "data")
+        assert hasattr(result, "column_names")
         assert result.data == [[1, "a"], [2, "b"], [3, "c"]]
         assert result.column_names == ["col1", "col2"]
 

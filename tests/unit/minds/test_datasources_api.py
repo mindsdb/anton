@@ -302,7 +302,7 @@ class TestDatasourcesAPI:
         """Sample table sample response for testing."""
         return DatasourceTableSampleResponse(
             data=[["30/09/2007", 441854, "house", 2], ["31/12/2007", 441854, "house", 2]],
-            column_names=["saledate", "MA", "type", "bedrooms"]
+            column_names=["saledate", "MA", "type", "bedrooms"],
         )
 
     @pytest.mark.asyncio
@@ -314,7 +314,7 @@ class TestDatasourcesAPI:
             datasource_name="test_postgres",
             table_name="test_table",
             limit=10,
-            datasources_service=mock_datasources_service
+            datasources_service=mock_datasources_service,
         )
 
         assert result.data == [["30/09/2007", 441854, "house", 2], ["31/12/2007", 441854, "house", 2]]
@@ -332,9 +332,7 @@ class TestDatasourcesAPI:
 
         with pytest.raises(HTTPException) as exc_info:
             await get_datasource_table_sample(
-                datasource_name="test_postgres",
-                table_name="test_table",
-                datasources_service=mock_datasources_service
+                datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
             )
 
         assert exc_info.value.status_code == 404
@@ -351,9 +349,7 @@ class TestDatasourcesAPI:
 
         with pytest.raises(HTTPException) as exc_info:
             await get_datasource_table_sample(
-                datasource_name="test_postgres",
-                table_name="test_table",
-                datasources_service=mock_datasources_service
+                datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
             )
 
         assert exc_info.value.status_code == 400
@@ -368,9 +364,7 @@ class TestDatasourcesAPI:
 
         with pytest.raises(HTTPException) as exc_info:
             await get_datasource_table_sample(
-                datasource_name="test_postgres",
-                table_name="test_table",
-                datasources_service=mock_datasources_service
+                datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
             )
 
         assert exc_info.value.status_code == 500
@@ -382,9 +376,7 @@ class TestDatasourcesAPI:
         mock_datasources_service.get_datasource_table_row_count = AsyncMock(return_value=42)
 
         result = await get_datasource_table_row_count(
-            datasource_name="test_postgres",
-            table_name="test_table",
-            datasources_service=mock_datasources_service
+            datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
         )
 
         assert result == 42
@@ -401,9 +393,7 @@ class TestDatasourcesAPI:
 
         with pytest.raises(HTTPException) as exc_info:
             await get_datasource_table_row_count(
-                datasource_name="test_postgres",
-                table_name="test_table",
-                datasources_service=mock_datasources_service
+                datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
             )
 
         assert exc_info.value.status_code == 404
@@ -420,9 +410,7 @@ class TestDatasourcesAPI:
 
         with pytest.raises(HTTPException) as exc_info:
             await get_datasource_table_row_count(
-                datasource_name="test_postgres",
-                table_name="test_table",
-                datasources_service=mock_datasources_service
+                datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
             )
 
         assert exc_info.value.status_code == 400
@@ -437,9 +425,7 @@ class TestDatasourcesAPI:
 
         with pytest.raises(HTTPException) as exc_info:
             await get_datasource_table_row_count(
-                datasource_name="test_postgres",
-                table_name="test_table",
-                datasources_service=mock_datasources_service
+                datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
             )
 
         assert exc_info.value.status_code == 500
