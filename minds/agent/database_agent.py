@@ -96,13 +96,13 @@ class DatabaseAgent:
             return ""
 
         if len(messages) == 1:
-            return messages[0].get('content', '')
+            return messages[0].content if messages[0].content else ""
 
         # Build conversation context from multiple messages
         context_parts = []
         for msg in messages:
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
+            role = msg.role.name if msg.role else "user"
+            content = msg.content if msg.content else ""
 
             if role == 'user':
                 context_parts.append(f"User: {content}")
