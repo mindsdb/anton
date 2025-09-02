@@ -117,6 +117,24 @@ class DatasourcesService:
         except Exception as e:
             logger.error(f"Error listing datasources: {str(e)}")
             raise DatasourceServiceError(f"Failed to list datasources: {str(e)}") from None
+        
+    async def _get_datasource(self, datasource_name: str) -> Datasource:
+        """
+        Utility function to get a specific datasource by name.
+        
+        Args:
+            datasource_name: Name of the datasource to get.
+
+        Returns:
+            Datasource: Datasource object.
+        """
+        statement = select(Datasource).where(
+            and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
+        )
+        result = self.session.exec(statement)
+        datasource = result.first()
+
+        return datasource
 
     async def get_datasource(
         self, datasource_name: str, with_detailed_data: bool = False
@@ -137,12 +155,7 @@ class DatasourcesService:
         try:
             logger.debug(f"Getting datasource {datasource_name} for user {self.user_id}")
 
-            statement = select(Datasource).where(
-                and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
-            )
-
-            result = self.session.exec(statement)
-            datasource = result.first()
+            datasource = await self._get_datasource(datasource_name)
 
             if not datasource:
                 raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
@@ -176,11 +189,7 @@ class DatasourcesService:
             logger.debug(f"Creating datasource {datasource_data.name} for user {self.user_id}")
 
             # Check if datasource already exists
-            existing = self.session.exec(
-                select(Datasource).where(
-                    and_(Datasource.name == datasource_data.name, Datasource.user_id == self.user_id)
-                )
-            ).first()
+            existing = await self._get_datasource(datasource_data.name)
 
             if existing:
                 raise DatasourceAlreadyExistsError(f"Datasource with name '{datasource_data.name}' already exists")
@@ -243,12 +252,7 @@ class DatasourcesService:
             logger.debug(f"Updating datasource {datasource_name} for user {self.user_id}")
 
             # Get existing datasource
-            statement = select(Datasource).where(
-                and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
-            )
-
-            result = self.session.exec(statement)
-            datasource = result.first()
+            datasource = await self._get_datasource(datasource_name)
 
             if not datasource:
                 raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
@@ -304,12 +308,7 @@ class DatasourcesService:
             logger.debug(f"Deleting datasource {datasource_name} for user {self.user_id} (cascade={cascade})")
 
             # Get existing datasource
-            statement = select(Datasource).where(
-                and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
-            )
-
-            result = self.session.exec(statement)
-            datasource = result.first()
+            datasource = await self._get_datasource(datasource_name)
 
             if not datasource:
                 raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
