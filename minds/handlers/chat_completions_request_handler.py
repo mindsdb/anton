@@ -6,6 +6,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from minds.common.logger import setup_logging
 from minds.handlers.chat_completions_handler import ChatCompletionsHandler
 from minds.requests.chat_completions_request import ChatCompletionsRequest
+from minds.requests.context import Context
 from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
@@ -19,6 +20,7 @@ logger = setup_logging()
 async def chat_completions_request_handler(
     request_id: str,
     session: Session,
+    context: Context,
     mindsdb_client: Server,
     chat_completions_request: ChatCompletionsRequest,
 ) -> StreamingResponse | JSONResponse:
@@ -48,6 +50,7 @@ async def chat_completions_request_handler(
 
     chat_completions_handler = ChatCompletionsHandler(
         session=session,
+        context=context,
         mindsdb_client=mindsdb_client,
         messages=messages,
         model=model,

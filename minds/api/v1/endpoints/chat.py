@@ -70,12 +70,11 @@ async def chat_completions(
         HTTPException: 500 if there's an error processing the request.
     """
     # Extract user context from request
-    user = extract_context_from_request(request)
-
-    logger.debug(f"🔄 Context: {user.model_dump()}")
+    context = extract_context_from_request(request)
+    logger.debug(f"🔄 Context: {context.model_dump()}")
 
     # Set up Langfuse observation
-    request_id = setup_langfuse_observation(context=user)
+    request_id = setup_langfuse_observation(context=context)
 
     mindsdb_client = create_mindsdb_client_from_request(request)
 
@@ -84,6 +83,7 @@ async def chat_completions(
 
         response = await chat_completions_request_handler(
             request_id=request_id,
+            context=context,
             session=session,
             mindsdb_client=mindsdb_client,
             chat_completions_request=chat_completions_request,
