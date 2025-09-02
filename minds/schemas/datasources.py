@@ -53,3 +53,10 @@ class DeleteDatasourceRequest(BaseModel):
     """Request model for datasource deletion."""
 
     cascade: bool = Field(default=False, description="Remove from all minds that use it")
+
+
+class DatasourceTableSampleResponse(BaseModel):
+    """Response model for datasource table sample data."""
+
+    data: list[list[Any]] = Field(..., description="Sample data as array of arrays")
+    column_names: list[str] = Field(..., description="Column names for the data")

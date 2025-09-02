@@ -6,6 +6,7 @@ for datasource management operations.
 """
 
 from mindsdb_sdk.server import Server
+import pandas as pd
 from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
@@ -15,6 +16,7 @@ from minds.schemas.datasources import (
     DatasourceCreateRequest,
     DatasourceDetailedResponse,
     DatasourceResponse,
+    DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
 )
 
@@ -468,3 +470,27 @@ class DatasourcesService:
         connection_status = await self.test_connection(datasource.name)
 
         return DatasourceDetailedResponse(**base_response.model_dump(), connection_status=connection_status)
+
+    async def get_datasource_table_sample(self, datasource_name: str, table_name: str, limit: int = 10) -> DatasourceTableSampleResponse:
+        """Get a sample of a table from a datasource."""
+        logger.debug(f"Getting sample data for table {table_name} of datasource {datasource_name} for user {self.user_id}")
+
+        try:
+            datasource = await self._get_datasource(datasource_name)
+
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+            
+            sample_query = self.mindsdb_client.databases.get(datasource_name).query(f"SELECT * FROM {table_name} LIMIT {limit}")
+            result = sample_query.fetch()
+            
+            # Convert DataFrame to structured response
+            column_names = result.columns.tolist()
+            data = result.values.tolist()
+            
+            return DatasourceTableSampleResponse(data=data, column_names=column_names)
+        except DatasourceNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting sample data for table {table_name} of datasource {datasource_name}: {str(e)}")
+            raise DatasourceServiceError(f"Failed to get sample data: {str(e)}") from None

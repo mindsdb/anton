@@ -17,6 +17,7 @@ from minds.schemas.datasources import (
     DatasourceCreateRequest,
     DatasourceDetailedResponse,
     DatasourceResponse,
+    DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
 )
 from minds.services.datasources import (
@@ -246,3 +247,37 @@ async def check_datasource_connection(
     except Exception as e:
         logger.error(f"Unexpected error in check_datasource_connection: {str(e)}")
         return DatasourceConnectionStatus(success=False, error_message=f"Connection test failed: {str(e)}")
+
+
+@router.get("/{datasource_name}/tables/{table_name}/sample", status_code=200)
+async def get_datasource_table_sample(
+    datasource_name: str, 
+    table_name: str, 
+    limit: int = Query(10, ge=1, le=1000, description="Number of sample rows to return (1-1000)"),
+    datasources_service: DatasourcesService = Depends(get_datasources_service)
+) -> DatasourceTableSampleResponse:
+    """
+    Get a sample of a table from a datasource.
+    
+    Args:
+        datasource_name: Name of the datasource.
+        table_name: Name of the table to sample.
+        limit: Number of sample rows to return.
+        
+    Returns:
+        Sample data with column names in structured format.
+    """
+    try:
+        logger.debug(f"Get table sample requested: {datasource_name}.{table_name} (v1) for user {datasources_service.user_id}")
+        
+        sample_response = await datasources_service.get_datasource_table_sample(datasource_name, table_name, limit)
+        return sample_response
+    except DatasourceNotFoundError as e:
+        logger.error(f"Datasource not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except DatasourceServiceError as e:
+        logger.error(f"Service error in get_datasource_table_sample: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_datasource_table_sample: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
