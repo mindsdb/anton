@@ -281,3 +281,14 @@ async def get_datasource_table_sample(
     except Exception as e:
         logger.error(f"Unexpected error in get_datasource_table_sample: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.get("/{datasource_name}/tables/{table_name}/row-count", status_code=200)
+async def get_datasource_table_row_count(
+    datasource_name: str, table_name: str, datasources_service: DatasourcesService = Depends(get_datasources_service)
+) -> int:
+    """
+    Get the row count of a table from a datasource.
+    """
+    row_count = await datasources_service.get_datasource_table_row_count(datasource_name, table_name)
+    return row_count

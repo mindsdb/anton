@@ -494,3 +494,22 @@ class DatasourcesService:
         except Exception as e:
             logger.error(f"Error getting sample data for table {table_name} of datasource {datasource_name}: {str(e)}")
             raise DatasourceServiceError(f"Failed to get sample data: {str(e)}") from None
+
+    async def get_datasource_table_row_count(self, datasource_name: str, table_name: str) -> int:
+        """Get the row count of a table from a datasource."""
+        logger.debug(f"Getting row count for table {table_name} of datasource {datasource_name} for user {self.user_id}")
+
+        try:
+            datasource = await self._get_datasource(datasource_name)
+            
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+            
+            row_count_query = self.mindsdb_client.databases.get(datasource_name).query(f"SELECT COUNT(*) FROM {table_name}")
+            result = row_count_query.fetch()
+            return result.values[0][0]
+        except DatasourceNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting row count for table {table_name} of datasource {datasource_name}: {str(e)}")
+            raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
