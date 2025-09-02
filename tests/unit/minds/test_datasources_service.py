@@ -3,10 +3,10 @@ Unit tests for DatasourcesService.
 """
 
 from datetime import datetime
-import pandas as pd
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
+import pandas as pd
 import pytest
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
@@ -364,6 +364,7 @@ class TestDatasourcesService:
         result = await service.get_datasource_table_sample("test_postgres", "test_table")
 
         # Verify the response structure
+        assert isinstance(result, DatasourceTableSampleResponse)
         assert hasattr(result, "data")
         assert hasattr(result, "column_names")
         assert result.data == [[1, "a"], [2, "b"], [3, "c"]]

@@ -6,7 +6,6 @@ for datasource management operations.
 """
 
 from mindsdb_sdk.server import Server
-import pandas as pd
 from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
