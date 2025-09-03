@@ -158,6 +158,8 @@ async def create_mind(
     )
 
     try:
+        mind = await minds_service.create_mind(mind_data)
+
         # TODO: Should this be done before or after the mind is created?
         datasources = mind_data.datasources
         for datasource in datasources:
