@@ -5,7 +5,9 @@ This module contains the MindsService class that handles all business logic
 related to mind management, including CRUD operations with internal database storage.
 MindsDB is only used for datasource validation, not for minds storage.
 """
+
 from datetime import datetime, timezone
+
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
@@ -13,7 +15,7 @@ from minds.common.logger import setup_logging
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import MindDatasource
-from minds.schemas.minds import AddDatasourceRequest, MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
 
 # Set up logging
 logger = setup_logging()
@@ -109,10 +111,7 @@ class MindsService:
                 .join(Mind.mind_datasources)
                 .join(MindDatasource.datasource)
                 .where(MindDatasource.deleted_at.is_(None))
-                .options(
-                    selectinload(Mind.mind_datasources)
-                        .selectinload(MindDatasource.datasource)
-                )
+                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
                 .where(and_(*conditions))
                 .order_by(Mind.created_at.desc())
                 .offset(offset)
@@ -182,7 +181,9 @@ class MindsService:
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
-                select(Mind).where(and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.deleted_at.is_(None)))
+                select(Mind).where(
+                    and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.deleted_at.is_(None))
+                )
             ).first()
 
             if existing_mind:
@@ -328,10 +329,12 @@ class MindsService:
             self.session.rollback()
             logger.error(f"Error deleting mind {mind_name}: {str(e)}")
             raise MindsServiceError(f"Failed to delete mind: {str(e)}") from None
-        
+
     async def _get_mind(self, mind_name: str) -> Mind:
         """Utility function to get a specific mind by name."""
-        statement = select(Mind).where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at.is_(None)))
+        statement = select(Mind).where(
+            and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at.is_(None))
+        )
         return self.session.exec(statement).first()
 
     async def _get_mind_with_datasources(self, mind_name: str) -> Mind:

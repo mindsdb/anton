@@ -9,6 +9,7 @@ Tests the SQLModel Mind class including:
 """
 
 from datetime import datetime
+
 import pytest
 
 from minds.model.mind import Mind

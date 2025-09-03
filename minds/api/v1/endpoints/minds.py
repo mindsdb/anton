@@ -52,7 +52,9 @@ async def list_minds(
     logger.debug(f"List minds requested (v1) for user {minds_service.user_id}")
 
     try:
-        minds = await minds_service.list_minds(provider=provider, include_deleted=include_deleted, limit=limit, offset=offset)
+        minds = await minds_service.list_minds(
+            provider=provider, include_deleted=include_deleted, limit=limit, offset=offset
+        )
 
         logger.info(f"Retrieved {len(minds)} minds for user {minds_service.user_id}")
         return minds

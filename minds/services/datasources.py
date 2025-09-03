@@ -6,6 +6,7 @@ for datasource management operations.
 """
 
 from datetime import datetime, timezone
+
 from mindsdb_sdk.server import Server
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
@@ -394,7 +395,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(f"Connection test failed for {datasource_name}: {str(e)}")
             return DatasourceConnectionStatus(success=False, error_message=str(e))
-        
+
     async def get_datasource_table_sample(
         self, datasource_name: str, table_name: str, limit: int = 10
     ) -> DatasourceTableSampleResponse:
@@ -459,7 +460,9 @@ class DatasourcesService:
             Datasource: Datasource object.
         """
         statement = select(Datasource).where(
-            and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
+            and_(
+                Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None)
+            )
         )
         result = self.session.exec(statement)
         datasource = result.first()
@@ -562,4 +565,3 @@ class DatasourcesService:
         connection_status = await self.test_connection(datasource.name)
 
         return DatasourceDetailedResponse(**base_response.model_dump(), connection_status=connection_status)
-
