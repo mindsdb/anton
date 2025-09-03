@@ -647,6 +647,7 @@ class TestDataCatalog:
         datasource.name = "test_datasource"
         datasource.engine = "postgresql"
         datasource.tables = []
+        datasource.handler_info = None  # Add handler_info attribute
         return datasource
 
     @pytest.fixture
@@ -699,16 +700,16 @@ class TestDataCatalog:
         catalog = DataCatalog(datasource=mock_datasource)
         
         assert catalog.datasource == mock_datasource
-        assert catalog.created_at is not None
-        assert catalog.modified_at is not None
+        assert catalog.created_at is None  # Not set until saved to database
+        assert catalog.modified_at is None  # Not set until saved to database
 
     def test_data_catalog_from_datasource_class_method(self, mock_datasource):
         """Test DataCatalog.from_datasource class method."""
         catalog = DataCatalog.from_datasource(mock_datasource)
         
         assert catalog.datasource == mock_datasource
-        assert catalog.created_at is not None
-        assert catalog.modified_at is not None
+        assert catalog.created_at is None  # Not set until saved to database
+        assert catalog.modified_at is None  # Not set until saved to database
 
     def test_data_catalog_is_not_table_model(self):
         """Test that DataCatalog is not configured as a table model."""
@@ -1018,15 +1019,17 @@ class TestDataCatalog:
         """Test that DataCatalog fields have proper descriptions."""
         fields = DataCatalog.model_fields
         
-        assert fields["created_at"].description == "The date and time the catalog was created."
-        assert fields["modified_at"].description == "The date and time the catalog was updated."
+        assert fields["created_at"].description == "The date and time the record was created. Field is optional and not needed when instantiating a new record. It will be automatically set when the record is created in the database."
+        assert fields["modified_at"].description == "The date and time the record was updated. Field is optional and not needed when instantiating a new record. It will be automatically set when the record is created in the database."
         assert fields["datasource"].description == "Datasource"
 
     def test_data_catalog_field_types(self):
         """Test that DataCatalog fields have correct types."""
         fields = DataCatalog.model_fields
         
-        assert fields["created_at"].annotation is datetime
-        assert fields["modified_at"].annotation is datetime
+        # created_at and modified_at are Optional[datetime] (Union[datetime, None])
+        from typing import Union
+        assert fields["created_at"].annotation == Union[datetime, None]
+        assert fields["modified_at"].annotation == Union[datetime, None]
         # Datasource field type is complex due to forward reference
         assert "Datasource" in str(fields["datasource"].annotation)

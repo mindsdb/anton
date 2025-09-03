@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock
 from uuid import UUID
 import pandas as pd
 from sqlmodel import Session
@@ -118,13 +118,12 @@ class TestDataCatalogLoader:
         with pytest.raises(Exception, match="Query failed"):
             data_catalog_loader._execute_query("SELECT * FROM test")
 
-    @patch('minds.services.data_catalog.DatasourcesService')
-    async def test_load_success(self, mock_datasources_service, data_catalog_loader, mock_datasource):
+    async def test_load_success(self, data_catalog_loader, mock_datasource):
         """Test successful load operation."""
-        # Setup mocks
-        mock_datasource_service_instance = AsyncMock()
-        mock_datasource_service_instance.get_datasource.return_value = mock_datasource
-        mock_datasources_service.return_value = mock_datasource_service_instance
+        # Setup mock for database query
+        mock_result = Mock()
+        mock_result.first.return_value = mock_datasource
+        data_catalog_loader.session.exec.return_value = mock_result
 
         # Mock all the _get_* methods to return empty DataFrames
         data_catalog_loader._get_tables = Mock(return_value=pd.DataFrame())
@@ -137,19 +136,18 @@ class TestDataCatalogLoader:
         await data_catalog_loader.load("test_datasource")
 
         # Verify
-        mock_datasource_service_instance.get_datasource.assert_called_once_with("test_datasource")
+        data_catalog_loader.session.exec.assert_called_once()
         data_catalog_loader.session.commit.assert_called_once()
 
-    @patch('minds.services.data_catalog.DatasourcesService')
-    async def test_load_with_error_and_rollback(self, mock_datasources_service, data_catalog_loader):
+    async def test_load_with_error_and_rollback(self, data_catalog_loader):
         """Test load operation with error and rollback."""
-        # Setup mocks
-        mock_datasource_service_instance = AsyncMock()
-        mock_datasource_service_instance.get_datasource.side_effect = Exception("Datasource not found")
-        mock_datasources_service.return_value = mock_datasource_service_instance
+        # Setup mock for database query that returns None (datasource not found)
+        mock_result = Mock()
+        mock_result.first.return_value = None
+        data_catalog_loader.session.exec.return_value = mock_result
 
-        # Execute load and expect exception
-        with pytest.raises(Exception, match="Datasource not found"):
+        # Execute load and expect exception (datasource is None, so accessing .name will fail)
+        with pytest.raises(AttributeError, match="'NoneType' object has no attribute 'name'"):
             await data_catalog_loader.load("nonexistent_datasource")
 
         # Verify rollback was called

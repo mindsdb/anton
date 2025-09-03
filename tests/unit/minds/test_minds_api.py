@@ -184,9 +184,7 @@ class TestMindsAPI:
         result = await create_mind(mind_data=request, minds_service=mock_minds_service, data_catalog_loader=mock_data_catalog_loader)
 
         assert result.name == "test-mind"
-        mock_minds_service.create_mind.assert_called_once_with(request)
-        # Verify that data catalog loader was called for each datasource
-        mock_data_catalog_loader.load.assert_called_once_with("datasource1")
+        mock_minds_service.create_mind.assert_called_once_with(request, mock_data_catalog_loader)
 
     @pytest.mark.asyncio
     async def test_create_mind_already_exists(self, mock_minds_service, mock_data_catalog_loader, create_request_data):
