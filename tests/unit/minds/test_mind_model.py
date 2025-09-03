@@ -272,8 +272,8 @@ class TestMindModel:
 
         # Test that it has the expected base fields
         assert hasattr(mind, "id")
-        assert hasattr(mind, "created_on")
-        assert hasattr(mind, "modified_on")
+        assert hasattr(mind, "created_at")
+        assert hasattr(mind, "modified_at")
 
-        assert mind.created_on is None
-        assert mind.modified_on is None
+        assert mind.created_at is None
+        assert mind.modified_at is None

@@ -168,7 +168,7 @@ python -m alembic history
 
 The application uses SQLModel (built on SQLAlchemy) for database models:
 
-- **BaseSQLModel**: Base class with UUID primary key, created_on, and modified_on fields
+- **BaseSQLModel**: Base class with UUID primary key, created_at, and modified_at fields
 - **Mind**: Example model representing a "mind" entity
 
 Example usage:

@@ -457,7 +457,7 @@ class DatasourcesService:
             name=datasource.name,
             engine=datasource.engine,
             connection_data=datasource.connection_data,
-            created_at=datasource.created_on.isoformat() if datasource.created_on else None,
+            created_at=datasource.created_at.isoformat() if datasource.created_at else None,
             is_demo=False,
         )
 

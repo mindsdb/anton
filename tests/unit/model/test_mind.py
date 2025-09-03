@@ -15,8 +15,8 @@ class TestMind:
         assert mind.name == mind_name
         # Inherited from BaseSQLModel
         assert mind.id is None
-        assert mind.created_on is None
-        assert mind.modified_on is None
+        assert mind.created_at is None
+        assert mind.modified_at is None
 
     def test_mind_inherits_from_base_sql_model(self):
         """Test that Mind inherits all properties from BaseSQLModel."""
@@ -24,8 +24,8 @@ class TestMind:
 
         # Should have all BaseSQLModel attributes
         assert hasattr(mind, "id")
-        assert hasattr(mind, "created_on")
-        assert hasattr(mind, "modified_on")
+        assert hasattr(mind, "created_at")
+        assert hasattr(mind, "modified_at")
 
         # Should have the count class method
         assert hasattr(Mind, "count")
@@ -43,14 +43,14 @@ class TestMind:
         mind = Mind(
             id=test_id,
             name=mind_name,
-            created_on=test_datetime,
-            modified_on=test_datetime,
+            created_at=test_datetime,
+            modified_at=test_datetime,
         )
 
         assert mind.id == test_id
         assert mind.name == mind_name
-        assert mind.created_on == test_datetime
-        assert mind.modified_on == test_datetime
+        assert mind.created_at == test_datetime
+        assert mind.modified_at == test_datetime
 
     def test_mind_name_field_description(self):
         """Test that name field has proper description."""

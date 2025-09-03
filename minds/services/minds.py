@@ -111,7 +111,7 @@ class MindsService:
                 select(Mind)
                 .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
                 .where(and_(*conditions))
-                .order_by(Mind.created_on.desc())
+                .order_by(Mind.created_at.desc())
                 .offset(offset)
                 .limit(limit)
             )
@@ -465,8 +465,8 @@ class MindsService:
             provider=mind.provider,
             parameters=mind.parameters or {},
             datasources=datasources,
-            created_at=str(mind.created_on) if mind.created_on else "",
-            updated_at=str(mind.modified_on) if mind.modified_on else "",
+            created_at=str(mind.created_at) if mind.created_at else "",
+            updated_at=str(mind.modified_at) if mind.modified_at else "",
         )
 
     async def _validate_datasources(self, datasource_names: list[str]) -> None:

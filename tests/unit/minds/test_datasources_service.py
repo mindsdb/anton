@@ -65,8 +65,8 @@ class TestDatasourcesService:
             engine="postgres",
             connection_data={"host": "localhost", "port": 5432, "user": "test"},
             user_id="test-user-123",
-            created_on=datetime(2023, 1, 1, 12, 0, 0),
-            modified_on=datetime(2023, 1, 1, 12, 0, 0),
+            created_at=datetime(2023, 1, 1, 12, 0, 0),
+            modified_at=datetime(2023, 1, 1, 12, 0, 0),
         )
 
     @pytest.fixture
