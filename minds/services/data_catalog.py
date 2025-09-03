@@ -1,14 +1,12 @@
-from typing import Any, Optional, List
+from typing import Any
 
-from mindsdb_sdk.server import Server
 import pandas as pd
-from sqlmodel import and_, select, Session
+from mindsdb_sdk.server import Server
+from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
+from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
 from minds.model.datasource import Datasource
-from minds.model.data_catalog import Column, ColumnStatistics, Table, PrimaryKeyConstraint, ForeignKeyConstraint
-from minds.services.datasources import DatasourcesService
-
 
 logger = setup_logging()
 
@@ -16,12 +14,7 @@ logger = setup_logging()
 class DataCatalogLoader:
     """A class for loading data catalogs."""
 
-    def __init__(
-        self,
-        session: Session,
-        mindsdb_client: Server,
-        user_id: str
-    ):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str):
         """
         Initialize the MindsDB data catalog loader.
 
@@ -34,12 +27,14 @@ class DataCatalogLoader:
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
 
-    async def load(self, datasource_name: str, table_names: Optional[List[str]] = None) -> None:
+    async def load(self, datasource_name: str, table_names: list[str] | None = None) -> None:
         """Load the data catalog."""
         try:
             statement = select(Datasource).where(
                 and_(
-                    Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None)
+                    Datasource.name == datasource_name,
+                    Datasource.user_id == self.user_id,
+                    Datasource.deleted_at.is_(None),
                 )
             )
             result = self.session.exec(statement)
@@ -50,7 +45,7 @@ class DataCatalogLoader:
             if len(tables_df) > 0:
                 tables = self._load_tables(datasource, tables_df)
 
-                engine_info = self._get_engine_info(datasource) 
+                engine_info = self._get_engine_info(datasource)
                 if engine_info:
                     datasource.engine_info = engine_info
 
@@ -72,7 +67,7 @@ class DataCatalogLoader:
             # Only commit if everything succeeded
             self.session.commit()
             logger.info("Successfully committed all data catalog information to database")
-            
+
         except Exception as e:
             # Rollback all changes if any error occurs
             self.session.rollback()
@@ -97,7 +92,7 @@ class DataCatalogLoader:
             return value.upper() == "YES"
         return bool(value)
 
-    def _normalize_null_value(self, value: Any) -> Optional[Any]:
+    def _normalize_null_value(self, value: Any) -> Any | None:
         """Convert MindsDB [NULL] strings to None."""
         if value == "[NULL]" or value is None:
             return None
@@ -105,9 +100,7 @@ class DataCatalogLoader:
 
     def _get_engine_info(self, datasource: Datasource) -> str:
         """Get engine info from datasource."""
-        logger.info(
-            f"Getting engine info for datasource '{datasource.name}'"
-        )
+        logger.info(f"Getting engine info for datasource '{datasource.name}'")
 
         query = f"""
         SELECT HANDLER_INFO FROM INFORMATION_SCHEMA.META_HANDLER_INFO
@@ -117,13 +110,11 @@ class DataCatalogLoader:
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} engine info")
 
-        return df['HANDLER_INFO'].iloc[0]
+        return df["HANDLER_INFO"].iloc[0]
 
-    def _get_tables(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
+    def _get_tables(self, datasource: Datasource, table_names: list[str] | None = None) -> pd.DataFrame:
         """Get table metadata from META_TABLES with optional filtering."""
-        logger.info(
-            f"Getting table metadata for datasource '{datasource.name}' with filter: {table_names}"
-        )
+        logger.info(f"Getting table metadata for datasource '{datasource.name}' with filter: {table_names}")
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
@@ -131,34 +122,27 @@ class DataCatalogLoader:
         """
 
         if table_names:
-            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
+            query += f" AND TABLE_NAME IN ({', '.join(f'{name!r}' for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} tables")
 
         # Check if the returned tables are already in the database.
         existing_tables = self.session.exec(
-            select(Table).where(
-                and_(
-                    Table.datasource_id == datasource.id,
-                    Table.name.in_(df['TABLE_NAME'])
-                )
-            )
+            select(Table).where(and_(Table.datasource_id == datasource.id, Table.name.in_(df["TABLE_NAME"])))
         ).all()
         logger.info(f"{len(existing_tables)} have already been loaded")
 
         existing_tables_names = [table.name for table in existing_tables]
-        df = df[~df['TABLE_NAME'].isin(existing_tables_names)]
+        df = df[~df["TABLE_NAME"].isin(existing_tables_names)]
 
         logger.info(f"Found {len(df)} tables to load")
 
         return df
-    
-    def _get_columns(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
+
+    def _get_columns(self, datasource: Datasource, table_names: list[str] | None = None) -> pd.DataFrame:
         """Get column metadata from META_COLUMNS with optional filtering."""
-        logger.info(
-            f"Getting column metadata for datasource '{datasource.name}' with filter: {table_names}"
-        )
+        logger.info(f"Getting column metadata for datasource '{datasource.name}' with filter: {table_names}")
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMNS 
@@ -166,18 +150,16 @@ class DataCatalogLoader:
         """
 
         if table_names:
-            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
+            query += f" AND TABLE_NAME IN ({', '.join(f'{name!r}' for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} columns")
 
         return df
-    
-    def _get_column_statistics(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
+
+    def _get_column_statistics(self, datasource: Datasource, table_names: list[str] | None = None) -> pd.DataFrame:
         """Get column statistics from META_COLUMN_STATISTICS with optional filtering."""
-        logger.info(
-            f"Getting column statistics for datasource '{datasource.name}' with filter: {table_names}"
-        )
+        logger.info(f"Getting column statistics for datasource '{datasource.name}' with filter: {table_names}")
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMN_STATISTICS 
@@ -185,18 +167,16 @@ class DataCatalogLoader:
         """
 
         if table_names:
-            query += f" AND TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
+            query += f" AND TABLE_NAME IN ({', '.join(f'{name!r}' for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} column statistics")
 
         return df
-    
-    def _get_primary_keys(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
+
+    def _get_primary_keys(self, datasource: Datasource, table_names: list[str] | None = None) -> pd.DataFrame:
         """Get primary key information from META_KEY_COLUMN_USAGE with optional filtering."""
-        logger.info(
-            f"Getting primary key information for datasource '{datasource.name}' with filter: {table_names}"
-        )
+        logger.info(f"Getting primary key information for datasource '{datasource.name}' with filter: {table_names}")
 
         query = f"""
         SELECT 
@@ -215,18 +195,16 @@ class DataCatalogLoader:
         """
 
         if table_names:
-            query += f" AND kcu.TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
+            query += f" AND kcu.TABLE_NAME IN ({', '.join(f'{name!r}' for name in table_names)})"
 
         df = self._execute_query(query)
-        logger.info(f"Found {len(df)} primary keys")    
+        logger.info(f"Found {len(df)} primary keys")
 
         return df
 
-    def _get_foreign_keys(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
+    def _get_foreign_keys(self, datasource: Datasource, table_names: list[str] | None = None) -> pd.DataFrame:
         """Get table constraints from META_TABLE_CONSTRAINTS with optional filtering."""
-        logger.info(
-            f"Getting foreign key information for datasource '{datasource.name}' with filter: {table_names}"
-        )
+        logger.info(f"Getting foreign key information for datasource '{datasource.name}' with filter: {table_names}")
 
         query = f"""
         SELECT 
@@ -247,14 +225,14 @@ class DataCatalogLoader:
         """
 
         if table_names:
-            query += f" AND kcu.TABLE_NAME IN ({', '.join(f"'{name}'" for name in table_names)})"
+            query += f" AND kcu.TABLE_NAME IN ({', '.join(f'{name!r}' for name in table_names)})"
 
         df = self._execute_query(query)
         logger.info(f"Found {len(df)} foreign keys")
 
         return df
 
-    def _load_tables(self, datasource: Datasource, tables_df: pd.DataFrame) -> List[Table]:
+    def _load_tables(self, datasource: Datasource, tables_df: pd.DataFrame) -> list[Table]:
         """Load tables from metadata."""
         logger.info(f"Loading {len(tables_df)} tables into the database")
 
@@ -265,10 +243,10 @@ class DataCatalogLoader:
 
             table = Table(
                 datasource_id=datasource.id,
-                name=row['TABLE_NAME'],
-                schema=row['TABLE_SCHEMA'],
-                description=row['TABLE_DESCRIPTION'],
-                type=row['TABLE_TYPE'],
+                name=row["TABLE_NAME"],
+                schema=row["TABLE_SCHEMA"],
+                description=row["TABLE_DESCRIPTION"],
+                type=row["TABLE_TYPE"],
                 row_count=row_count,
             )
 
@@ -280,22 +258,24 @@ class DataCatalogLoader:
 
         return tables
 
-    def _load_columns(self, columns_df: pd.DataFrame, tables: List[Table]) -> List[Column]:
+    def _load_columns(self, columns_df: pd.DataFrame, tables: list[Table]) -> list[Column]:
         """Load columns from metadata."""
         logger.info(f"Loading {len(columns_df)} columns into the database")
 
         # Add table ids to columns_df.
-        columns_df['TABLE_ID'] = columns_df['TABLE_NAME'].map(lambda name: next((table.id for table in tables if table.name == name), None))
+        columns_df["TABLE_ID"] = columns_df["TABLE_NAME"].map(
+            lambda name: next((table.id for table in tables if table.name == name), None)
+        )
 
         columns = []
         for _, row in columns_df.iterrows():
             column = Column(
-                table_id=row['TABLE_ID'],
-                name=row['COLUMN_NAME'],
-                data_type=row['DATA_TYPE'],
-                description=row['COLUMN_DESCRIPTION'],
-                default_value=self._normalize_null_value(row['COLUMN_DEFAULT']),
-                is_nullable=self._normalize_boolean(row['IS_NULLABLE']),
+                table_id=row["TABLE_ID"],
+                name=row["COLUMN_NAME"],
+                data_type=row["DATA_TYPE"],
+                description=row["COLUMN_DESCRIPTION"],
+                default_value=self._normalize_null_value(row["COLUMN_DEFAULT"]),
+                is_nullable=self._normalize_boolean(row["IS_NULLABLE"]),
             )
 
             columns.append(column)
@@ -304,15 +284,17 @@ class DataCatalogLoader:
         self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(columns)} columns into the database")
         return columns
-    
-    def _load_column_statistics(self, column_statistics_df: pd.DataFrame, columns: List[Column]) -> None:
+
+    def _load_column_statistics(self, column_statistics_df: pd.DataFrame, columns: list[Column]) -> None:
         """Load column statistics from metadata."""
         logger.info(f"Loading {len(column_statistics_df)} column statistics into the database")
 
         # Add column ids to column_statistics_df.
-        column_statistics_df['COLUMN_ID'] = column_statistics_df['COLUMN_NAME'].map(lambda name: next((column.id for column in columns if column.name == name), None))
+        column_statistics_df["COLUMN_ID"] = column_statistics_df["COLUMN_NAME"].map(
+            lambda name: next((column.id for column in columns if column.name == name), None)
+        )
 
-        def normalize_distinct_count(val: Any) -> Optional[int]:
+        def normalize_distinct_count(val: Any) -> int | None:
             """Convert distinct values count to proper integer or None."""
             if pd.isna(val):
                 return None
@@ -323,61 +305,79 @@ class DataCatalogLoader:
 
         column_statistics = []
         for _, row in column_statistics_df.iterrows():
-            column_statistics.append(ColumnStatistics(
-                column_id=row['COLUMN_ID'],
-                most_common_values=row['MOST_COMMON_VALS'],
-                most_common_frequencies=row['MOST_COMMON_FREQS'],
-                null_percentage=row['NULL_FRAC'],
-                distinct_values_count=normalize_distinct_count(row['N_DISTINCT']),
-                min_value=row['MIN_VALUE'],
-                max_value=row['MAX_VALUE'],
-            ))
+            column_statistics.append(
+                ColumnStatistics(
+                    column_id=row["COLUMN_ID"],
+                    most_common_values=row["MOST_COMMON_VALS"],
+                    most_common_frequencies=row["MOST_COMMON_FREQS"],
+                    null_percentage=row["NULL_FRAC"],
+                    distinct_values_count=normalize_distinct_count(row["N_DISTINCT"]),
+                    min_value=row["MIN_VALUE"],
+                    max_value=row["MAX_VALUE"],
+                )
+            )
 
         self.session.add_all(column_statistics)
         self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(column_statistics)} column statistics into the database")
 
-    def _load_primary_keys(self, primary_keys_df: pd.DataFrame, tables: List[Table], columns: List[Column]) -> None:
+    def _load_primary_keys(self, primary_keys_df: pd.DataFrame, tables: list[Table], columns: list[Column]) -> None:
         """Load primary keys from metadata."""
         logger.info(f"Loading {len(primary_keys_df)} primary keys into the database")
 
         # Add table and column ids to primary_keys_df.
-        primary_keys_df['TABLE_ID'] = primary_keys_df['TABLE_NAME'].map(lambda name: next((table.id for table in tables if table.name == name), None))
-        primary_keys_df['COLUMN_ID'] = primary_keys_df['COLUMN_NAME'].map(lambda name: next((column.id for column in columns if column.name == name), None))
+        primary_keys_df["TABLE_ID"] = primary_keys_df["TABLE_NAME"].map(
+            lambda name: next((table.id for table in tables if table.name == name), None)
+        )
+        primary_keys_df["COLUMN_ID"] = primary_keys_df["COLUMN_NAME"].map(
+            lambda name: next((column.id for column in columns if column.name == name), None)
+        )
 
         primary_keys = []
         for _, row in primary_keys_df.iterrows():
-            primary_keys.append(PrimaryKeyConstraint(
-                table_id=row['TABLE_ID'],
-                column_id=row['COLUMN_ID'],
-                ordinal_position=row['ORDINAL_POSITION'],
-                constraint_name=row['CONSTRAINT_NAME'],
-            ))
+            primary_keys.append(
+                PrimaryKeyConstraint(
+                    table_id=row["TABLE_ID"],
+                    column_id=row["COLUMN_ID"],
+                    ordinal_position=row["ORDINAL_POSITION"],
+                    constraint_name=row["CONSTRAINT_NAME"],
+                )
+            )
 
         self.session.add_all(primary_keys)
         self.session.flush()  # Generate IDs but don't commit yet
         logger.info(f"Loaded {len(primary_keys)} primary keys into the database")
 
-    def _load_foreign_keys(self, foreign_keys_df: pd.DataFrame, tables: List[Table], columns: List[Column]) -> None:
+    def _load_foreign_keys(self, foreign_keys_df: pd.DataFrame, tables: list[Table], columns: list[Column]) -> None:
         """Load foreign keys from metadata."""
         logger.info(f"Loading {len(foreign_keys_df)} foreign keys into the database")
 
         # Add table and column ids to foreign_keys_df.
-        foreign_keys_df['TABLE_ID'] = foreign_keys_df['TABLE_NAME'].map(lambda name: next((table.id for table in tables if table.name == name), None))
-        foreign_keys_df['COLUMN_ID'] = foreign_keys_df['COLUMN_NAME'].map(lambda name: next((column.id for column in columns if column.name == name), None))
-        foreign_keys_df['REFERENCED_TABLE_ID'] = foreign_keys_df['REFERENCED_TABLE_NAME'].map(lambda name: next((table.id for table in tables if table.name == name), None))
-        foreign_keys_df['REFERENCED_COLUMN_ID'] = foreign_keys_df['REFERENCED_COLUMN_NAME'].map(lambda name: next((column.id for column in columns if column.name == name), None))
+        foreign_keys_df["TABLE_ID"] = foreign_keys_df["TABLE_NAME"].map(
+            lambda name: next((table.id for table in tables if table.name == name), None)
+        )
+        foreign_keys_df["COLUMN_ID"] = foreign_keys_df["COLUMN_NAME"].map(
+            lambda name: next((column.id for column in columns if column.name == name), None)
+        )
+        foreign_keys_df["REFERENCED_TABLE_ID"] = foreign_keys_df["REFERENCED_TABLE_NAME"].map(
+            lambda name: next((table.id for table in tables if table.name == name), None)
+        )
+        foreign_keys_df["REFERENCED_COLUMN_ID"] = foreign_keys_df["REFERENCED_COLUMN_NAME"].map(
+            lambda name: next((column.id for column in columns if column.name == name), None)
+        )
 
         foreign_keys = []
         for _, row in foreign_keys_df.iterrows():
-            foreign_keys.append(ForeignKeyConstraint(
-                table_id=row['TABLE_ID'],
-                column_id=row['COLUMN_ID'],
-                referenced_table_id=row['REFERENCED_TABLE_ID'],
-                referenced_column_id=row['REFERENCED_COLUMN_ID'],
-                constraint_name=row['CONSTRAINT_NAME'],
-                ordinal_position=row['ORDINAL_POSITION'],
-            ))
+            foreign_keys.append(
+                ForeignKeyConstraint(
+                    table_id=row["TABLE_ID"],
+                    column_id=row["COLUMN_ID"],
+                    referenced_table_id=row["REFERENCED_TABLE_ID"],
+                    referenced_column_id=row["REFERENCED_COLUMN_ID"],
+                    constraint_name=row["CONSTRAINT_NAME"],
+                    ordinal_position=row["ORDINAL_POSITION"],
+                )
+            )
 
         self.session.add_all(foreign_keys)
         self.session.flush()  # Generate IDs but don't commit yet

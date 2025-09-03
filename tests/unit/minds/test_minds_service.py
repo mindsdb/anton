@@ -178,7 +178,9 @@ class TestMindsService:
         assert "Failed to get mind" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_create_mind_success(self, minds_service, mock_session, create_request, sample_mind, mock_data_catalog_loader):
+    async def test_create_mind_success(
+        self, minds_service, mock_session, create_request, sample_mind, mock_data_catalog_loader
+    ):
         """Test successful mind creation."""
         # Mock: No existing mind with same name
         mock_session.exec.return_value.first.return_value = None
@@ -197,7 +199,9 @@ class TestMindsService:
         assert mock_session.commit.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_create_mind_already_exists(self, minds_service, mock_session, create_request, sample_mind, mock_data_catalog_loader):
+    async def test_create_mind_already_exists(
+        self, minds_service, mock_session, create_request, sample_mind, mock_data_catalog_loader
+    ):
         """Test mind creation when mind already exists."""
         # Mock: Existing mind with same name
         mock_session.exec.return_value.first.return_value = sample_mind
@@ -209,7 +213,9 @@ class TestMindsService:
         mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_create_mind_database_error(self, minds_service, mock_session, create_request, mock_data_catalog_loader):
+    async def test_create_mind_database_error(
+        self, minds_service, mock_session, create_request, mock_data_catalog_loader
+    ):
         """Test mind creation with database error."""
         # Mock: No existing mind
         mock_session.exec.return_value.first.return_value = None

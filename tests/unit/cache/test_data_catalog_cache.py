@@ -8,16 +8,17 @@ Tests the caching mechanisms for data catalogs including:
 - Abstract base class behavior
 """
 
-import pytest
-from unittest.mock import Mock, patch
-from datetime import datetime
 from collections import OrderedDict
+from datetime import datetime
+from unittest.mock import Mock, patch
+
+import pytest
 
 from minds.cache.data_catalog import (
     DataCatalogCache,
+    DataCatalogCacheFactory,
     DataCatalogInMemoryCache,
     DataCatalogRedisCache,
-    DataCatalogCacheFactory,
 )
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
@@ -30,9 +31,9 @@ class TestDataCatalogCacheMindKey:
         """Test MindKey initialization with valid parameters."""
         mind_name = "test-mind"
         modified_on = datetime(2024, 1, 1, 12, 0, 0)
-        
+
         key = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
-        
+
         assert key.mind_name == mind_name
         assert key.modified_on == modified_on
 
@@ -40,10 +41,10 @@ class TestDataCatalogCacheMindKey:
         """Test MindKey string representation."""
         mind_name = "test-mind"
         modified_on = datetime(2024, 1, 1, 12, 0, 0)
-        
+
         key = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
         key_str = key.to_string()
-        
+
         expected_str = f"{mind_name}:{str(modified_on)}"
         assert key_str == expected_str
 
@@ -51,10 +52,10 @@ class TestDataCatalogCacheMindKey:
         """Test MindKey string representation with different datetime formats."""
         mind_name = "test-mind"
         modified_on = datetime(2024, 12, 31, 23, 59, 59, 999999)
-        
+
         key = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
         key_str = key.to_string()
-        
+
         # Should include microseconds in the string representation
         assert mind_name in key_str
         assert "2024-12-31 23:59:59.999999" in key_str
@@ -63,11 +64,11 @@ class TestDataCatalogCacheMindKey:
         """Test MindKey equality comparison."""
         mind_name = "test-mind"
         modified_on = datetime(2024, 1, 1, 12, 0, 0)
-        
+
         key1 = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
         key2 = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
         key3 = DataCatalogCache.MindKey(mind_name="different-mind", modified_on=modified_on)
-        
+
         # Same key should have same string representation
         assert key1.to_string() == key2.to_string()
         assert key1.to_string() != key3.to_string()
@@ -142,7 +143,7 @@ class TestDataCatalogInMemoryCache:
         key = DataCatalogCache.MindKey("test-mind", datetime(2024, 1, 1, 12, 0, 0))
         catalogs = [mock_data_catalog]
 
-        with patch('minds.cache.data_catalog.datetime') as mock_datetime:
+        with patch("minds.cache.data_catalog.datetime") as mock_datetime:
             mock_datetime.now.return_value = datetime(2024, 2, 1, 12, 0, 0)
             cache.save(key, catalogs)
 
@@ -177,7 +178,7 @@ class TestDataCatalogInMemoryCache:
         mock_datasource = Mock()
         mock_catalog = Mock(spec=DataCatalog)
         mock_datasource.get_data_catalog.return_value = mock_catalog
-        
+
         mock_mind_datasource = Mock()
         mock_mind_datasource.datasource = mock_datasource
         mock_mind.mind_datasources = [mock_mind_datasource]
@@ -195,16 +196,16 @@ class TestDataCatalogInMemoryCache:
         mock_datasource1 = Mock()
         mock_catalog1 = Mock(spec=DataCatalog)
         mock_datasource1.get_data_catalog.return_value = mock_catalog1
-        
+
         mock_datasource2 = Mock()
         mock_catalog2 = Mock(spec=DataCatalog)
         mock_datasource2.get_data_catalog.return_value = mock_catalog2
-        
+
         mock_mind_datasource1 = Mock()
         mock_mind_datasource1.datasource = mock_datasource1
         mock_mind_datasource2 = Mock()
         mock_mind_datasource2.datasource = mock_datasource2
-        
+
         mock_mind.mind_datasources = [mock_mind_datasource1, mock_mind_datasource2]
 
         result = cache.load(mock_mind)
@@ -258,11 +259,11 @@ class TestDataCatalogInMemoryCache:
         key1 = DataCatalogCache.MindKey("mind-1", datetime(2024, 1, 1, 12, 1, 0))
         key2 = DataCatalogCache.MindKey("mind-2", datetime(2024, 1, 1, 12, 2, 0))
         key3 = DataCatalogCache.MindKey("mind-3", datetime(2024, 1, 1, 12, 3, 0))
-        
+
         catalog1 = Mock(spec=DataCatalog)
         catalog2 = Mock(spec=DataCatalog)
         catalog3 = Mock(spec=DataCatalog)
-        
+
         cache.save(key1, [catalog1])
         cache.save(key2, [catalog2])
         cache.save(key3, [catalog3])
@@ -344,52 +345,52 @@ class TestDataCatalogRedisCache:
         """Test that Redis cache inherits from the base cache class."""
         # Test that the class exists and inherits from DataCatalogCache
         assert issubclass(DataCatalogRedisCache, DataCatalogCache)
-        
+
         # Test that it has the required abstract methods
-        assert hasattr(DataCatalogRedisCache, 'load')
-        assert hasattr(DataCatalogRedisCache, 'save')
-        assert hasattr(DataCatalogRedisCache, 'invalidate')
+        assert hasattr(DataCatalogRedisCache, "load")
+        assert hasattr(DataCatalogRedisCache, "save")
+        assert hasattr(DataCatalogRedisCache, "invalidate")
 
 
 class TestDataCatalogCacheFactory:
     """Test cases for DataCatalogCacheFactory class."""
 
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE', 'in_memory')
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE', 50)
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "in_memory")
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE", 50)
     def test_create_in_memory_cache(self):
         """Test creating an in-memory cache instance."""
         cache = DataCatalogCacheFactory.create_cache()
-        
+
         assert isinstance(cache, DataCatalogInMemoryCache)
         assert cache.max_size == 50
 
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE', 'in_memory')
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE', 100)
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "in_memory")
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE", 100)
     def test_create_in_memory_cache_default_size(self):
         """Test creating an in-memory cache with default size."""
         cache = DataCatalogCacheFactory.create_cache()
-        
+
         assert isinstance(cache, DataCatalogInMemoryCache)
         assert cache.max_size == 100
 
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE', 'redis')
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "redis")
     def test_create_redis_cache_raises_error(self):
         """Test that creating a Redis cache raises an error (not implemented)."""
         with pytest.raises(ValueError, match="Unknown cache type 'redis'"):
             DataCatalogCacheFactory.create_cache()
 
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE', 'unknown')
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "unknown")
     def test_create_unknown_cache_type_raises_error(self):
         """Test that creating an unknown cache type raises an error."""
         with pytest.raises(ValueError, match="Unknown cache type 'unknown'"):
             DataCatalogCacheFactory.create_cache()
 
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE', 'in_memory')
-    @patch('minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE', 0)
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "in_memory")
+    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE", 0)
     def test_create_cache_with_zero_max_size(self):
         """Test creating a cache with zero max size."""
         cache = DataCatalogCacheFactory.create_cache()
-        
+
         assert isinstance(cache, DataCatalogInMemoryCache)
         assert cache.max_size == 0
 
@@ -400,12 +401,12 @@ class TestDataCatalogCacheIntegration:
     def test_full_cache_workflow(self):
         """Test a complete cache workflow: save, load, invalidate."""
         cache = DataCatalogInMemoryCache(max_size=2)
-        
+
         # Create test data
         key1 = DataCatalogCache.MindKey("mind-1", datetime(2024, 1, 1, 12, 1, 0))
         catalog1 = Mock(spec=DataCatalog)
         catalogs1 = [catalog1]
-        
+
         key2 = DataCatalogCache.MindKey("mind-2", datetime(2024, 1, 1, 12, 2, 0))
         catalog2 = Mock(spec=DataCatalog)
         catalogs2 = [catalog2]
@@ -420,7 +421,7 @@ class TestDataCatalogCacheIntegration:
         mock_mind1.name = "mind-1"
         mock_mind1.modified_on = datetime(2024, 1, 1, 12, 1, 0)
         mock_mind1.mind_datasources = []
-        
+
         # Simulate cache hit by directly accessing cache
         result1 = cache.cache[key1.to_string()]
         assert result1 == catalogs1
@@ -438,21 +439,21 @@ class TestDataCatalogCacheIntegration:
     def test_cache_with_realistic_mind_data(self):
         """Test cache with realistic mind and datasource data."""
         cache = DataCatalogInMemoryCache(max_size=5)
-        
+
         # Create realistic mock data
         mock_datasource1 = Mock()
         mock_catalog1 = Mock(spec=DataCatalog)
         mock_datasource1.get_data_catalog.return_value = mock_catalog1
-        
+
         mock_datasource2 = Mock()
         mock_catalog2 = Mock(spec=DataCatalog)
         mock_datasource2.get_data_catalog.return_value = mock_catalog2
-        
+
         mock_mind_datasource1 = Mock()
         mock_mind_datasource1.datasource = mock_datasource1
         mock_mind_datasource2 = Mock()
         mock_mind_datasource2.datasource = mock_datasource2
-        
+
         mock_mind = Mock(spec=Mind)
         mock_mind.name = "analytics-mind"
         mock_mind.modified_on = datetime(2024, 1, 15, 14, 30, 0)
@@ -460,7 +461,7 @@ class TestDataCatalogCacheIntegration:
 
         # Load data (cache miss)
         result = cache.load(mock_mind)
-        
+
         assert len(result) == 2
         assert result[0] == mock_catalog1
         assert result[1] == mock_catalog2
@@ -474,7 +475,7 @@ class TestDataCatalogCacheIntegration:
     def test_cache_performance_with_large_dataset(self):
         """Test cache performance and behavior with larger datasets."""
         cache = DataCatalogInMemoryCache(max_size=10)
-        
+
         # Add many items to test LRU behavior
         for i in range(15):  # More than max_size
             key = DataCatalogCache.MindKey(f"mind-{i}", datetime(2024, 1, 1, 12, i, 0))
@@ -483,12 +484,12 @@ class TestDataCatalogCacheIntegration:
 
         # Should only have max_size items
         assert cache.size() == 10
-        
+
         # First 5 items should be evicted
         for i in range(5):
             key_str = f"mind-{i}:2024-01-01 12:{i:02d}:00"
             assert key_str not in cache.cache
-        
+
         # Last 10 items should be present
         for i in range(5, 15):
             key_str = f"mind-{i}:2024-01-01 12:{i:02d}:00"

@@ -1,13 +1,11 @@
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from datetime import datetime
-from typing import List
 
 from minds.common.logger import setup_logging
-from minds.common.vars import DATA_CATALOG_CACHE_TYPE, DATA_CATALOG_CACHE_MAX_SIZE
+from minds.common.vars import DATA_CATALOG_CACHE_MAX_SIZE, DATA_CATALOG_CACHE_TYPE
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
-
 
 logger = setup_logging()
 
@@ -39,9 +37,7 @@ class DataCatalogCache(ABC):
             return f"{self.mind_name}:{str(self.modified_on)}"
 
     @abstractmethod
-    def load(
-        self, mind: Mind
-    ) -> List[DataCatalog]:
+    def load(self, mind: Mind) -> list[DataCatalog]:
         """
         Load data catalogs for the given mind.
 
@@ -54,7 +50,7 @@ class DataCatalogCache(ABC):
         pass
 
     @abstractmethod
-    def save(self, key: MindKey, catalogs: List[DataCatalog]) -> None:
+    def save(self, key: MindKey, catalogs: list[DataCatalog]) -> None:
         """
         Save data catalogs for the given key.
 
@@ -86,11 +82,9 @@ class DataCatalogInMemoryCache(DataCatalogCache):
             max_size: Maximum number of catalogs to keep in the cache
         """
         self.max_size = max_size
-        self.cache: OrderedDict[str, List[DataCatalog]] = OrderedDict()
+        self.cache: OrderedDict[str, list[DataCatalog]] = OrderedDict()
 
-    def load(
-        self, mind: Mind
-    ) -> List[DataCatalog]:
+    def load(self, mind: Mind) -> list[DataCatalog]:
         """
         Load data catalogs from the cache or create new ones.
 
@@ -102,7 +96,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         """
         key = DataCatalogCache.MindKey(mind_name=mind.name, modified_on=mind.modified_on)
         key_str = key.to_string()
-    
+
         # Check if we have it in the cache.
         if key_str in self.cache:
             # Move to the end to mark as most recently used.
@@ -123,8 +117,8 @@ class DataCatalogInMemoryCache(DataCatalogCache):
             self.save(key, data_catalogs)
 
         return data_catalogs
-    
-    def save(self, key: DataCatalogCache.MindKey, catalogs: List[DataCatalog]) -> None:
+
+    def save(self, key: DataCatalogCache.MindKey, catalogs: list[DataCatalog]) -> None:
         """
         Save data catalogs to the cache.
 
@@ -158,9 +152,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         if key_str in self.cache:
             catalog_count = len(self.cache[key_str])
             self.cache.pop(key_str)
-            logger.info(
-                f"Invalidated {catalog_count} data catalogs with key: {key_str}"
-            )
+            logger.info(f"Invalidated {catalog_count} data catalogs with key: {key_str}")
 
     def clear(self) -> None:
         """Clear the entire cache."""

@@ -1,22 +1,22 @@
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any
 from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
 
 from minds.model.data_catalog import (
-    Table,
     Column,
     ColumnStatistics,
-    PrimaryKeyConstraint,
-    ForeignKeyConstraint,
     DataCatalog,
+    ForeignKeyConstraint,
+    PrimaryKeyConstraint,
+    Table,
 )
+
 # Import related models to ensure SQLAlchemy can resolve all relationships
 from minds.model.datasource import Datasource
-from minds.model.mind_datasource import MindDatasource
-from minds.model.mind import Mind
+from minds.model.mind_datasource import MindDatasource  # noqa
 
 
 class TestTable:
@@ -88,7 +88,7 @@ class TestTable:
     def test_table_field_descriptions(self):
         """Test that fields have proper descriptions."""
         fields = Table.model_fields
-        
+
         assert fields["datasource_id"].description == "Datasource ID"
         assert fields["name"].description == "Table name"
         assert fields["schema"].description == "Schema name"
@@ -99,19 +99,15 @@ class TestTable:
     def test_table_field_types(self):
         """Test that fields have correct types."""
         fields = Table.model_fields
-        
+
         assert fields["datasource_id"].annotation is UUID
         assert fields["name"].annotation is str
-        assert fields["schema"].annotation is Optional[str]
+        assert fields["schema"].annotation == str | None
         # Handle both Optional and Union syntax
-        assert (fields["description"].annotation == Optional[str] or 
-                fields["description"].annotation == Union[str, None] or
-                str(fields["description"].annotation) == "str | None")
-        assert fields["type"].annotation is Optional[str]
+        assert fields["description"].annotation == str | None or str(fields["description"].annotation) == "str | None"
+        assert fields["type"].annotation == str | None
         # Handle both Optional and Union syntax
-        assert (fields["row_count"].annotation == Optional[int] or 
-                fields["row_count"].annotation == Union[int, None] or
-                str(fields["row_count"].annotation) == "int | None")
+        assert fields["row_count"].annotation == int | None or str(fields["row_count"].annotation) == "int | None"
 
     def test_table_is_table_model(self):
         """Test that Table is configured as a table model."""
@@ -205,7 +201,7 @@ class TestColumn:
     def test_column_field_descriptions(self):
         """Test that fields have proper descriptions."""
         fields = Column.model_fields
-        
+
         assert fields["table_id"].description == "Table ID"
         assert fields["name"].description == "Column name"
         assert fields["data_type"].description == "Column data type"
@@ -216,17 +212,15 @@ class TestColumn:
     def test_column_field_types(self):
         """Test that fields have correct types."""
         fields = Column.model_fields
-        
+
         assert fields["table_id"].annotation is UUID
         assert fields["name"].annotation is str
         assert fields["data_type"].annotation is str
         # Handle both Optional and Union syntax
-        assert (fields["description"].annotation == Optional[str] or 
-                fields["description"].annotation == Union[str, None] or
-                str(fields["description"].annotation) == "str | None")
-        assert (fields["default_value"].annotation == Optional[str] or 
-                fields["default_value"].annotation == Union[str, None] or
-                str(fields["default_value"].annotation) == "str | None")
+        assert fields["description"].annotation == str | None or str(fields["description"].annotation) == "str | None"
+        assert (
+            fields["default_value"].annotation == str | None or str(fields["default_value"].annotation) == "str | None"
+        )
         assert fields["is_nullable"].annotation is bool
 
     def test_column_is_table_model(self):
@@ -325,7 +319,7 @@ class TestColumnStatistics:
     def test_column_statistics_field_descriptions(self):
         """Test that fields have proper descriptions."""
         fields = ColumnStatistics.model_fields
-        
+
         assert fields["column_id"].description == "Column ID"
         assert fields["most_common_values"].description == "List of most common values"
         assert fields["most_common_frequencies"].description == "List of most common frequencies"
@@ -337,32 +331,29 @@ class TestColumnStatistics:
     def test_column_statistics_field_types(self):
         """Test that fields have correct types."""
         fields = ColumnStatistics.model_fields
-        
+
         assert fields["column_id"].annotation is UUID
         # Handle both list[Any] | None and Optional[list[Any]] syntax
         most_common_values_type = fields["most_common_values"].annotation
-        assert (str(most_common_values_type) == "list[Any] | None" or
-                most_common_values_type == Optional[list[Any]] or
-                most_common_values_type == Union[list[Any], None])
-        
+        assert str(most_common_values_type) == "list[Any] | None" or most_common_values_type == list[Any] | None
+
         most_common_frequencies_type = fields["most_common_frequencies"].annotation
-        assert (str(most_common_frequencies_type) == "list[float] | None" or
-                most_common_frequencies_type == Optional[list[float]] or
-                most_common_frequencies_type == Union[list[float], None])
-        
+        assert (
+            str(most_common_frequencies_type) == "list[float] | None"
+            or most_common_frequencies_type == list[float] | None
+        )
+
         # Handle both Optional and Union syntax
-        assert (fields["null_percentage"].annotation == Optional[float] or 
-                fields["null_percentage"].annotation == Union[float, None] or
-                str(fields["null_percentage"].annotation) == "float | None")
-        assert (fields["distinct_values_count"].annotation == Optional[int] or 
-                fields["distinct_values_count"].annotation == Union[int, None] or
-                str(fields["distinct_values_count"].annotation) == "int | None")
-        assert (fields["min_value"].annotation == Optional[str] or 
-                fields["min_value"].annotation == Union[str, None] or
-                str(fields["min_value"].annotation) == "str | None")
-        assert (fields["max_value"].annotation == Optional[str] or 
-                fields["max_value"].annotation == Union[str, None] or
-                str(fields["max_value"].annotation) == "str | None")
+        assert (
+            fields["null_percentage"].annotation == float | None
+            or str(fields["null_percentage"].annotation) == "float | None"
+        )
+        assert (
+            fields["distinct_values_count"].annotation == int | None
+            or str(fields["distinct_values_count"].annotation) == "int | None"
+        )
+        assert fields["min_value"].annotation == str | None or str(fields["min_value"].annotation) == "str | None"
+        assert fields["max_value"].annotation == str | None or str(fields["max_value"].annotation) == "str | None"
 
     def test_column_statistics_is_table_model(self):
         """Test that ColumnStatistics is configured as a table model."""
@@ -448,7 +439,7 @@ class TestPrimaryKeyConstraint:
     def test_primary_key_constraint_field_descriptions(self):
         """Test that fields have proper descriptions."""
         fields = PrimaryKeyConstraint.model_fields
-        
+
         assert fields["table_id"].description == "Table ID"
         assert fields["column_id"].description == "Column ID"
         assert fields["ordinal_position"].description == "Ordinal position"
@@ -457,16 +448,18 @@ class TestPrimaryKeyConstraint:
     def test_primary_key_constraint_field_types(self):
         """Test that fields have correct types."""
         fields = PrimaryKeyConstraint.model_fields
-        
+
         assert fields["table_id"].annotation is UUID
         assert fields["column_id"].annotation is UUID
         # Handle both Optional and Union syntax
-        assert (fields["ordinal_position"].annotation == Optional[int] or 
-                fields["ordinal_position"].annotation == Union[int, None] or
-                str(fields["ordinal_position"].annotation) == "int | None")
-        assert (fields["constraint_name"].annotation == Optional[str] or 
-                fields["constraint_name"].annotation == Union[str, None] or
-                str(fields["constraint_name"].annotation) == "str | None")
+        assert (
+            fields["ordinal_position"].annotation == int | None
+            or str(fields["ordinal_position"].annotation) == "int | None"
+        )
+        assert (
+            fields["constraint_name"].annotation == str | None
+            or str(fields["constraint_name"].annotation) == "str | None"
+        )
 
     def test_primary_key_constraint_is_table_model(self):
         """Test that PrimaryKeyConstraint is configured as a table model."""
@@ -504,7 +497,7 @@ class TestForeignKeyConstraint:
             table_id=table_id,
             column_id=column_id,
             referenced_table_id=referenced_table_id,
-            referenced_column_id=referenced_column_id
+            referenced_column_id=referenced_column_id,
         )
 
         assert constraint.table_id == table_id
@@ -526,7 +519,7 @@ class TestForeignKeyConstraint:
             table_id=table_id,
             column_id=column_id,
             referenced_table_id=referenced_table_id,
-            referenced_column_id=referenced_column_id
+            referenced_column_id=referenced_column_id,
         )
 
         assert hasattr(constraint, "id")
@@ -574,7 +567,7 @@ class TestForeignKeyConstraint:
     def test_foreign_key_constraint_field_descriptions(self):
         """Test that fields have proper descriptions."""
         fields = ForeignKeyConstraint.model_fields
-        
+
         assert fields["table_id"].description == "Table ID"
         assert fields["column_id"].description == "Column ID"
         assert fields["referenced_table_id"].description == "Referenced table ID"
@@ -585,18 +578,20 @@ class TestForeignKeyConstraint:
     def test_foreign_key_constraint_field_types(self):
         """Test that fields have correct types."""
         fields = ForeignKeyConstraint.model_fields
-        
+
         assert fields["table_id"].annotation is UUID
         assert fields["column_id"].annotation is UUID
         assert fields["referenced_table_id"].annotation is UUID
         assert fields["referenced_column_id"].annotation is UUID
         # Handle both Optional and Union syntax
-        assert (fields["constraint_name"].annotation == Optional[str] or 
-                fields["constraint_name"].annotation == Union[str, None] or
-                str(fields["constraint_name"].annotation) == "str | None")
-        assert (fields["ordinal_position"].annotation == Optional[int] or 
-                fields["ordinal_position"].annotation == Union[int, None] or
-                str(fields["ordinal_position"].annotation) == "int | None")
+        assert (
+            fields["constraint_name"].annotation == str | None
+            or str(fields["constraint_name"].annotation) == "str | None"
+        )
+        assert (
+            fields["ordinal_position"].annotation == int | None
+            or str(fields["ordinal_position"].annotation) == "int | None"
+        )
 
     def test_foreign_key_constraint_is_table_model(self):
         """Test that ForeignKeyConstraint is configured as a table model."""
@@ -613,7 +608,7 @@ class TestForeignKeyConstraint:
             table_id=table_id,
             column_id=column_id,
             referenced_table_id=referenced_table_id,
-            referenced_column_id=referenced_column_id
+            referenced_column_id=referenced_column_id,
         )
 
         assert hasattr(constraint, "column")
@@ -630,7 +625,7 @@ class TestForeignKeyConstraint:
             table_id=table_id,
             column_id=column_id,
             referenced_table_id=referenced_table_id,
-            referenced_column_id=referenced_column_id
+            referenced_column_id=referenced_column_id,
         )
 
         str_repr = str(constraint)
@@ -682,7 +677,7 @@ class TestDataCatalog:
         column.is_nullable = True
         column.default_value = None
         column.description = "User age"
-        
+
         # Mock statistics
         stats = Mock(spec=ColumnStatistics)
         stats.distinct_values_count = 50
@@ -692,13 +687,13 @@ class TestDataCatalog:
         stats.most_common_values = ["25", "30", "35"]
         stats.most_common_frequencies = [0.15, 0.12, 0.10]
         column.statistics = stats
-        
+
         return column
 
     def test_data_catalog_initialization(self, mock_datasource):
         """Test DataCatalog initialization."""
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         assert catalog.datasource == mock_datasource
         assert catalog.created_at is None  # Not set until saved to database
         assert catalog.modified_at is None  # Not set until saved to database
@@ -706,7 +701,7 @@ class TestDataCatalog:
     def test_data_catalog_from_datasource_class_method(self, mock_datasource):
         """Test DataCatalog.from_datasource class method."""
         catalog = DataCatalog.from_datasource(mock_datasource)
-        
+
         assert catalog.datasource == mock_datasource
         assert catalog.created_at is None  # Not set until saved to database
         assert catalog.modified_at is None  # Not set until saved to database
@@ -719,9 +714,9 @@ class TestDataCatalog:
         """Test _format_header method."""
         mock_datasource.tables = [Mock(), Mock()]  # 2 tables
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         header_lines = catalog._format_header()
-        
+
         assert len(header_lines) == 5
         assert "MindsDB Data Source: test_datasource" in header_lines[0]
         assert "Engine: postgresql" in header_lines[1]
@@ -735,9 +730,9 @@ class TestDataCatalog:
         sample_table.primary_key_constraints = []
         sample_table.foreign_key_constraints = []
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         table_lines = catalog._format_table(sample_table)
-        
+
         assert len(table_lines) >= 3
         assert "Table: test_datasource.users - User information table" in table_lines[0]
         assert "  Columns:" in table_lines[1]
@@ -752,18 +747,18 @@ class TestDataCatalog:
         table.primary_key_constraints = []
         table.foreign_key_constraints = []
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         table_lines = catalog._format_table(table)
-        
+
         assert "Table: test_datasource.orders" in table_lines[0]
         assert " - " not in table_lines[0]  # No description separator
 
     def test_format_column_basic(self, sample_column, mock_datasource):
         """Test _format_column method with basic column."""
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         column_lines = catalog._format_column(sample_column)
-        
+
         assert len(column_lines) >= 1
         assert "    - id (INTEGER) NOT NULL - Primary key" in column_lines[0]
 
@@ -776,10 +771,10 @@ class TestDataCatalog:
         column.default_value = "active"
         column.description = "User status"
         column.statistics = None
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         column_lines = catalog._format_column(column)
-        
+
         assert "    - status (VARCHAR) DEFAULT active - User status" in column_lines[0]
 
     def test_format_column_with_null_default(self, mock_datasource):
@@ -791,10 +786,10 @@ class TestDataCatalog:
         column.default_value = "[NULL]"
         column.description = "User notes"
         column.statistics = None
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         column_lines = catalog._format_column(column)
-        
+
         # Should not include DEFAULT [NULL] in output
         assert "    - notes (TEXT) - User notes" in column_lines[0]
         assert "DEFAULT" not in column_lines[0]
@@ -808,10 +803,10 @@ class TestDataCatalog:
         column.default_value = None
         column.description = None
         column.statistics = None
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         column_lines = catalog._format_column(column)
-        
+
         assert "    - email (VARCHAR)" in column_lines[0]
         # Should not have description after the data type
         assert "VARCHAR) - " not in column_lines[0]  # No description separator
@@ -819,9 +814,9 @@ class TestDataCatalog:
     def test_format_column_statistics(self, sample_column_with_stats, mock_datasource):
         """Test _format_column_statistics method."""
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         stats_lines = catalog._format_column_statistics(sample_column_with_stats)
-        
+
         assert len(stats_lines) >= 3
         assert "      Distinct Values: 50" in stats_lines
         assert "      Null %: 5.0%" in stats_lines
@@ -831,9 +826,9 @@ class TestDataCatalog:
     def test_format_column_statistics_no_stats(self, sample_column, mock_datasource):
         """Test _format_column_statistics method with no statistics."""
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         stats_lines = catalog._format_column_statistics(sample_column)
-        
+
         assert len(stats_lines) == 0
 
     def test_format_column_statistics_empty_common_values(self, mock_datasource):
@@ -846,10 +841,10 @@ class TestDataCatalog:
         column.statistics.max_value = "10"
         column.statistics.most_common_values = [""]  # Empty string
         column.statistics.most_common_frequencies = [""]  # Empty string
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         stats_lines = catalog._format_column_statistics(column)
-        
+
         # Should not include Most Common line for empty values
         assert len(stats_lines) == 3
         assert "Most Common:" not in "".join(stats_lines)
@@ -859,16 +854,16 @@ class TestDataCatalog:
         table = Mock(spec=Table)
         table.primary_key_constraints = []
         table.foreign_key_constraints = []
-        
+
         # Mock primary key constraint
         pk_constraint = Mock()
         pk_constraint.column = Mock()
         pk_constraint.column.name = "id"
         table.primary_key_constraints = [pk_constraint]
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         constraint_lines = catalog._format_table_constraints(table)
-        
+
         assert len(constraint_lines) == 1
         assert "  Primary Key: id" in constraint_lines[0]
 
@@ -876,7 +871,7 @@ class TestDataCatalog:
         """Test _format_table_constraints method with foreign keys."""
         table = Mock(spec=Table)
         table.primary_key_constraints = []
-        
+
         # Mock foreign key constraint
         fk_constraint = Mock()
         fk_constraint.column = Mock()
@@ -886,10 +881,10 @@ class TestDataCatalog:
         fk_constraint.referenced_column = Mock()
         fk_constraint.referenced_column.name = "id"
         table.foreign_key_constraints = [fk_constraint]
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         constraint_lines = catalog._format_table_constraints(table)
-        
+
         assert len(constraint_lines) == 2
         assert "  Foreign Keys:" in constraint_lines[0]
         assert "    - user_id → test_datasource.users(id)" in constraint_lines[1]
@@ -899,10 +894,10 @@ class TestDataCatalog:
         table = Mock(spec=Table)
         table.primary_key_constraints = []
         table.foreign_key_constraints = []
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         constraint_lines = catalog._format_table_constraints(table)
-        
+
         assert len(constraint_lines) == 0
 
     def test_get_related_tables(self, mock_datasource):
@@ -911,26 +906,26 @@ class TestDataCatalog:
         table1 = Mock(spec=Table)
         table1.name = "orders"
         table1.foreign_key_constraints = []
-        
+
         table2 = Mock(spec=Table)
         table2.name = "users"
         table2.foreign_key_constraints = []
-        
+
         # Mock foreign key from orders to users
         fk_constraint = Mock()
         fk_constraint.referenced_table = "users"  # This should be a string (table name)
         table1.foreign_key_constraints = [fk_constraint]
-        
+
         # Mock foreign key from users to orders (reverse relationship)
         fk_constraint2 = Mock()
         fk_constraint2.referenced_table = "orders"  # This should be a string (table name)
         table2.foreign_key_constraints = [fk_constraint2]
-        
+
         mock_datasource.tables = [table1, table2]
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         related_tables = catalog._get_related_tables(table1)
-        
+
         assert "users" in related_tables  # From table1's foreign key
         assert "orders" not in related_tables  # Self-reference should be excluded
         assert len(related_tables) == 1  # Only "users" should be returned
@@ -941,21 +936,21 @@ class TestDataCatalog:
         table1 = Mock(spec=Table)
         table1.name = "orders"
         table1.foreign_key_constraints = []
-        
+
         table2 = Mock(spec=Table)
         table2.name = "users"
         table2.foreign_key_constraints = []
-        
+
         # Mock foreign key relationship
         fk_constraint = Mock()
         fk_constraint.referenced_table = "users"
         table1.foreign_key_constraints = [fk_constraint]
-        
+
         mock_datasource.tables = [table1, table2]
         catalog = DataCatalog(datasource=mock_datasource)
-        
+
         relationship_lines = catalog._format_relationships()
-        
+
         assert len(relationship_lines) == 4  # Header + 2 relationships + empty line
         assert "Relationships:" in relationship_lines[0]
         assert "test_datasource.orders is related to: test_datasource.users" in relationship_lines[1]
@@ -968,10 +963,10 @@ class TestDataCatalog:
         table.name = "standalone"
         table.foreign_key_constraints = []
         mock_datasource.tables = [table]
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         relationship_lines = catalog._format_relationships()
-        
+
         assert len(relationship_lines) == 0
 
     def test_to_context_str_complete(self, mock_datasource, sample_table, sample_column_with_stats):
@@ -981,17 +976,17 @@ class TestDataCatalog:
         sample_table.primary_key_constraints = []
         sample_table.foreign_key_constraints = []
         mock_datasource.tables = [sample_table]
-        
+
         catalog = DataCatalog(datasource=mock_datasource)
         context_str = catalog.to_context_str()
-        
-        lines = context_str.split('\n')
-        
+
+        lines = context_str.split("\n")
+
         # Check header
         assert "MindsDB Data Source: test_datasource" in lines[0]
         assert "Engine: postgresql" in lines[1]
         assert "Tables: 1" in lines[3]
-        
+
         # Check table information
         assert "Table: test_datasource.users - User information table" in lines[5]
         assert "  Columns:" in lines[6]
@@ -1006,9 +1001,9 @@ class TestDataCatalog:
         mock_datasource.tables = []
         catalog = DataCatalog(datasource=mock_datasource)
         context_str = catalog.to_context_str()
-        
-        lines = context_str.split('\n')
-        
+
+        lines = context_str.split("\n")
+
         # Should only have header
         assert "MindsDB Data Source: test_datasource" in lines[0]
         assert "Engine: postgresql" in lines[1]
@@ -1018,18 +1013,24 @@ class TestDataCatalog:
     def test_data_catalog_field_descriptions(self):
         """Test that DataCatalog fields have proper descriptions."""
         fields = DataCatalog.model_fields
-        
-        assert fields["created_at"].description == "The date and time the record was created. Field is optional and not needed when instantiating a new record. It will be automatically set when the record is created in the database."
-        assert fields["modified_at"].description == "The date and time the record was updated. Field is optional and not needed when instantiating a new record. It will be automatically set when the record is created in the database."
+
+        assert (
+            fields["created_at"].description
+            == "The date and time the record was created. Field is optional and not needed when "
+            "instantiating a new record. It will be automatically set when the record is created in the database."
+        )
+        assert (
+            fields["modified_at"].description
+            == "The date and time the record was updated. Field is optional and not needed when "
+            "instantiating a new record. It will be automatically set when the record is created in the database."
+        )
         assert fields["datasource"].description == "Datasource"
 
     def test_data_catalog_field_types(self):
         """Test that DataCatalog fields have correct types."""
         fields = DataCatalog.model_fields
-        
-        # created_at and modified_at are Optional[datetime] (Union[datetime, None])
-        from typing import Union
-        assert fields["created_at"].annotation == Union[datetime, None]
-        assert fields["modified_at"].annotation == Union[datetime, None]
+
+        assert fields["created_at"].annotation == datetime | None
+        assert fields["modified_at"].annotation == datetime | None
         # Datasource field type is complex due to forward reference
         assert "Datasource" in str(fields["datasource"].annotation)

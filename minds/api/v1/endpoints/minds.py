@@ -36,21 +36,14 @@ def get_minds_service(request: Request, session: Session = Depends(get_session))
     )
 
 
-def get_data_catalog_loader_service(
-    request: Request,
-    session: Session = Depends(get_session)
-) -> DataCatalogLoader:
+def get_data_catalog_loader_service(request: Request, session: Session = Depends(get_session)) -> DataCatalogLoader:
     """
     Dependency function to create DataCatalogLoader with user context and MindsDB client.
     """
     context = extract_context_from_request(request)
     mindsdb_client = create_mindsdb_client_from_request(request)
 
-    return DataCatalogLoader(
-        session=session,
-        mindsdb_client=mindsdb_client,
-        user_id=context.user_id
-    )
+    return DataCatalogLoader(session=session, mindsdb_client=mindsdb_client, user_id=context.user_id)
 
 
 @router.get("/")
@@ -141,7 +134,7 @@ async def get_mind(
 async def create_mind(
     mind_data: MindCreateRequest,
     minds_service: MindsService = Depends(get_minds_service),
-    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader_service)
+    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader_service),
 ) -> MindResponse:
     """
     Create a new mind for the authenticated user.

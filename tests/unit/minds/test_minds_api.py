@@ -176,12 +176,16 @@ class TestMindsAPI:
         assert "Mind not found" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_create_mind_success(self, mock_minds_service, mock_data_catalog_loader, create_request_data, sample_mind_response):
+    async def test_create_mind_success(
+        self, mock_minds_service, mock_data_catalog_loader, create_request_data, sample_mind_response
+    ):
         """Test successful mind creation."""
         mock_minds_service.create_mind = AsyncMock(return_value=sample_mind_response)
         request = MindCreateRequest(**create_request_data)
 
-        result = await create_mind(mind_data=request, minds_service=mock_minds_service, data_catalog_loader=mock_data_catalog_loader)
+        result = await create_mind(
+            mind_data=request, minds_service=mock_minds_service, data_catalog_loader=mock_data_catalog_loader
+        )
 
         assert result.name == "test-mind"
         mock_minds_service.create_mind.assert_called_once_with(request, mock_data_catalog_loader)
@@ -193,7 +197,9 @@ class TestMindsAPI:
         request = MindCreateRequest(**create_request_data)
 
         with pytest.raises(HTTPException) as exc_info:
-            await create_mind(mind_data=request, minds_service=mock_minds_service, data_catalog_loader=mock_data_catalog_loader)
+            await create_mind(
+                mind_data=request, minds_service=mock_minds_service, data_catalog_loader=mock_data_catalog_loader
+            )
 
         assert exc_info.value.status_code == 409
         assert "Mind already exists" in exc_info.value.detail
@@ -270,7 +276,7 @@ class TestMindsAPI:
                     datasources=[],
                 ),
                 minds_service=mock_minds_service,
-                data_catalog_loader=mock_data_catalog_loader
+                data_catalog_loader=mock_data_catalog_loader,
             )
         assert exc_info.value.status_code == 409
 
@@ -325,7 +331,9 @@ class TestMindsAPIErrorHandling:
         mock_data_catalog_loader.load = AsyncMock()
 
         with pytest.raises(HTTPException) as exc_info:
-            await create_mind(mind_data=request, minds_service=mock_service, data_catalog_loader=mock_data_catalog_loader)
+            await create_mind(
+                mind_data=request, minds_service=mock_service, data_catalog_loader=mock_data_catalog_loader
+            )
 
         assert exc_info.value.status_code == 400
         assert "Validation failed" in exc_info.value.detail
@@ -343,7 +351,9 @@ class TestMindsAPIErrorHandling:
         mock_data_catalog_loader.load = AsyncMock()
 
         with pytest.raises(HTTPException) as exc_info:
-            await create_mind(mind_data=request, minds_service=mock_service, data_catalog_loader=mock_data_catalog_loader)
+            await create_mind(
+                mind_data=request, minds_service=mock_service, data_catalog_loader=mock_data_catalog_loader
+            )
 
         assert exc_info.value.status_code == 500
         assert "Internal server error" in exc_info.value.detail

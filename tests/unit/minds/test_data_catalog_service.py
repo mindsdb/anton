@@ -1,12 +1,13 @@
-import pytest
 from unittest.mock import Mock
 from uuid import UUID
+
 import pandas as pd
+import pytest
 from sqlmodel import Session
 
-from minds.services.data_catalog import DataCatalogLoader
+from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
 from minds.model.datasource import Datasource
-from minds.model.data_catalog import Table, Column, ColumnStatistics, PrimaryKeyConstraint, ForeignKeyConstraint
+from minds.services.data_catalog import DataCatalogLoader
 
 
 class TestDataCatalogLoader:
@@ -41,19 +42,11 @@ class TestDataCatalogLoader:
     @pytest.fixture
     def data_catalog_loader(self, mock_session, mock_mindsdb_client):
         """Create DataCatalogLoader instance with mocked dependencies."""
-        return DataCatalogLoader(
-            session=mock_session,
-            mindsdb_client=mock_mindsdb_client,
-            user_id="test_user_123"
-        )
+        return DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123")
 
     def test_initialization(self, mock_session, mock_mindsdb_client):
         """Test DataCatalogLoader initialization."""
-        loader = DataCatalogLoader(
-            session=mock_session,
-            mindsdb_client=mock_mindsdb_client,
-            user_id="test_user_123"
-        )
+        loader = DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123")
 
         assert loader.session == mock_session
         assert loader.mindsdb_client == mock_mindsdb_client
@@ -157,13 +150,15 @@ class TestDataCatalogLoader:
     def test_get_tables_without_filter(self, data_catalog_loader, mock_datasource):
         """Test _get_tables method without table name filter."""
         # Setup mock
-        mock_df = pd.DataFrame({
-            "TABLE_NAME": ["table1", "table2"],
-            "TABLE_SCHEMA": ["schema1", "schema2"],
-            "TABLE_DESCRIPTION": ["desc1", "desc2"],
-            "TABLE_TYPE": ["BASE TABLE", "VIEW"],
-            "ROW_COUNT": [100, 200]
-        })
+        mock_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1", "table2"],
+                "TABLE_SCHEMA": ["schema1", "schema2"],
+                "TABLE_DESCRIPTION": ["desc1", "desc2"],
+                "TABLE_TYPE": ["BASE TABLE", "VIEW"],
+                "ROW_COUNT": [100, 200],
+            }
+        )
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
         data_catalog_loader.session.exec.return_value.all.return_value = []
 
@@ -177,22 +172,22 @@ class TestDataCatalogLoader:
         """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
-        assert "INFORMATION_SCHEMA.META_TABLES" in call_args
-        assert f"TABLE_CATALOG = '{mock_datasource.name}'" in call_args
+        assert call_args == expected_query
 
-        # Verify result
         pd.testing.assert_frame_equal(result, mock_df)
 
     def test_get_tables_with_filter(self, data_catalog_loader, mock_datasource):
         """Test _get_tables method with table name filter."""
         # Setup mock
-        mock_df = pd.DataFrame({
-            "TABLE_NAME": ["table1"],
-            "TABLE_SCHEMA": ["schema1"],
-            "TABLE_DESCRIPTION": ["desc1"],
-            "TABLE_TYPE": ["BASE TABLE"],
-            "ROW_COUNT": [100]
-        })
+        mock_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1"],
+                "TABLE_SCHEMA": ["schema1"],
+                "TABLE_DESCRIPTION": ["desc1"],
+                "TABLE_TYPE": ["BASE TABLE"],
+                "ROW_COUNT": [100],
+            }
+        )
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
         data_catalog_loader.session.exec.return_value.all.return_value = []
 
@@ -200,19 +195,28 @@ class TestDataCatalogLoader:
         result = data_catalog_loader._get_tables(mock_datasource, ["table1", "table2"])
 
         # Verify query includes filter
+        expected_query = f"""
+        SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
+        WHERE TABLE_CATALOG = '{mock_datasource.name}'
+         AND TABLE_NAME IN ('table1', 'table2')"""
+        data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
-        assert "AND TABLE_NAME IN ('table1', 'table2')" in call_args
+        assert call_args == expected_query
+
+        pd.testing.assert_frame_equal(result, mock_df)
 
     def test_get_tables_excludes_existing(self, data_catalog_loader, mock_datasource):
         """Test _get_tables method excludes already existing tables."""
         # Setup mock
-        mock_df = pd.DataFrame({
-            "TABLE_NAME": ["table1", "table2", "table3"],
-            "TABLE_SCHEMA": ["schema1", "schema2", "schema3"],
-            "TABLE_DESCRIPTION": ["desc1", "desc2", "desc3"],
-            "TABLE_TYPE": ["BASE TABLE", "BASE TABLE", "VIEW"],
-            "ROW_COUNT": [100, 200, 300]
-        })
+        mock_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1", "table2", "table3"],
+                "TABLE_SCHEMA": ["schema1", "schema2", "schema3"],
+                "TABLE_DESCRIPTION": ["desc1", "desc2", "desc3"],
+                "TABLE_TYPE": ["BASE TABLE", "BASE TABLE", "VIEW"],
+                "ROW_COUNT": [100, 200, 300],
+            }
+        )
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Mock existing tables
@@ -232,104 +236,146 @@ class TestDataCatalogLoader:
     def test_get_columns(self, data_catalog_loader, mock_datasource):
         """Test _get_columns method."""
         # Setup mock
-        mock_df = pd.DataFrame({
-            "TABLE_NAME": ["table1", "table1"],
-            "COLUMN_NAME": ["col1", "col2"],
-            "DATA_TYPE": ["VARCHAR", "INTEGER"],
-            "COLUMN_DESCRIPTION": ["desc1", "desc2"],
-            "COLUMN_DEFAULT": ["default1", "[NULL]"],
-            "IS_NULLABLE": ["YES", "NO"]
-        })
+        mock_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1", "table1"],
+                "COLUMN_NAME": ["col1", "col2"],
+                "DATA_TYPE": ["VARCHAR", "INTEGER"],
+                "COLUMN_DESCRIPTION": ["desc1", "desc2"],
+                "COLUMN_DEFAULT": ["default1", "[NULL]"],
+                "IS_NULLABLE": ["YES", "NO"],
+            }
+        )
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
         result = data_catalog_loader._get_columns(mock_datasource, ["table1"])
 
-        # Verify
+        expected_query = f"""
+        SELECT * FROM INFORMATION_SCHEMA.META_COLUMNS 
+        WHERE TABLE_CATALOG = '{mock_datasource.name}'
+         AND TABLE_NAME IN ('table1')"""
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
-        assert "INFORMATION_SCHEMA.META_COLUMNS" in call_args
-        assert "AND TABLE_NAME IN ('table1')" in call_args
+        assert call_args == expected_query
+
         pd.testing.assert_frame_equal(result, mock_df)
 
     def test_get_column_statistics(self, data_catalog_loader, mock_datasource):
         """Test _get_column_statistics method."""
         # Setup mock
-        mock_df = pd.DataFrame({
-            "TABLE_NAME": ["table1"],
-            "COLUMN_NAME": ["col1"],
-            "MOST_COMMON_VALS": [["val1", "val2"]],
-            "MOST_COMMON_FREQS": [[0.5, 0.3]],
-            "NULL_FRAC": [0.1],
-            "N_DISTINCT": [10],
-            "MIN_VALUE": ["min_val"],
-            "MAX_VALUE": ["max_val"]
-        })
+        mock_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1"],
+                "COLUMN_NAME": ["col1"],
+                "MOST_COMMON_VALS": [["val1", "val2"]],
+                "MOST_COMMON_FREQS": [[0.5, 0.3]],
+                "NULL_FRAC": [0.1],
+                "N_DISTINCT": [10],
+                "MIN_VALUE": ["min_val"],
+                "MAX_VALUE": ["max_val"],
+            }
+        )
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
         result = data_catalog_loader._get_column_statistics(mock_datasource)
 
-        # Verify
+        expected_query = f"""
+        SELECT * FROM INFORMATION_SCHEMA.META_COLUMN_STATISTICS 
+        WHERE TABLE_CATALOG = '{mock_datasource.name}'
+        """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
-        assert "INFORMATION_SCHEMA.META_COLUMN_STATISTICS" in call_args
+        assert call_args == expected_query
+
         pd.testing.assert_frame_equal(result, mock_df)
 
     def test_get_primary_keys(self, data_catalog_loader, mock_datasource):
         """Test _get_primary_keys method."""
         # Setup mock
-        mock_df = pd.DataFrame({
-            "TABLE_NAME": ["table1"],
-            "COLUMN_NAME": ["id"],
-            "ORDINAL_POSITION": [1],
-            "CONSTRAINT_NAME": ["pk_table1"]
-        })
+        mock_df = pd.DataFrame(
+            {"TABLE_NAME": ["table1"], "COLUMN_NAME": ["id"], "ORDINAL_POSITION": [1], "CONSTRAINT_NAME": ["pk_table1"]}
+        )
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
         result = data_catalog_loader._get_primary_keys(mock_datasource)
 
-        # Verify
+        expected_query = f"""
+        SELECT 
+            kcu.TABLE_NAME,
+            kcu.COLUMN_NAME,
+            kcu.ORDINAL_POSITION,
+            kcu.CONSTRAINT_NAME
+        FROM information_schema.META_KEY_COLUMN_USAGE kcu
+        INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
+            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            AND kcu.TABLE_NAME = tc.TABLE_NAME
+            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
+        WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+            AND kcu.CONSTRAINT_CATALOG = '{mock_datasource.name}'
+        """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
-        assert "META_KEY_COLUMN_USAGE" in call_args
-        assert "CONSTRAINT_TYPE = 'PRIMARY KEY'" in call_args
+        assert call_args == expected_query
+
         pd.testing.assert_frame_equal(result, mock_df)
 
     def test_get_foreign_keys(self, data_catalog_loader, mock_datasource):
         """Test _get_foreign_keys method."""
         # Setup mock
-        mock_df = pd.DataFrame({
-            "TABLE_NAME": ["table1"],
-            "COLUMN_NAME": ["foreign_id"],
-            "ORDINAL_POSITION": [1],
-            "CONSTRAINT_NAME": ["fk_table1"],
-            "REFERENCED_TABLE_NAME": ["table2"],
-            "REFERENCED_COLUMN_NAME": ["id"]
-        })
+        mock_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1"],
+                "COLUMN_NAME": ["foreign_id"],
+                "ORDINAL_POSITION": [1],
+                "CONSTRAINT_NAME": ["fk_table1"],
+                "REFERENCED_TABLE_NAME": ["table2"],
+                "REFERENCED_COLUMN_NAME": ["id"],
+            }
+        )
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
         result = data_catalog_loader._get_foreign_keys(mock_datasource)
 
-        # Verify
+        expected_query = f"""
+        SELECT 
+            kcu.TABLE_NAME,
+            kcu.COLUMN_NAME,
+            kcu.ORDINAL_POSITION,
+            kcu.CONSTRAINT_NAME,
+            kcu.REFERENCED_TABLE_NAME,
+            kcu.REFERENCED_COLUMN_NAME
+        FROM information_schema.META_KEY_COLUMN_USAGE kcu
+        INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
+            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            AND kcu.TABLE_NAME = tc.TABLE_NAME
+            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
+        WHERE tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
+            AND kcu.CONSTRAINT_CATALOG = '{mock_datasource.name}'
+        """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
-        assert "META_KEY_COLUMN_USAGE" in call_args
-        assert "CONSTRAINT_TYPE = 'FOREIGN KEY'" in call_args
+        assert call_args == expected_query
+
         pd.testing.assert_frame_equal(result, mock_df)
 
     def test_load_tables(self, data_catalog_loader, mock_datasource):
         """Test _load_tables method."""
         # Setup mock data
-        tables_df = pd.DataFrame({
-            "TABLE_NAME": ["table1", "table2"],
-            "TABLE_SCHEMA": ["schema1", "schema2"],
-            "TABLE_DESCRIPTION": ["desc1", "desc2"],
-            "TABLE_TYPE": ["BASE TABLE", "VIEW"],
-            "ROW_COUNT": [100, 200]
-        })
+        tables_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1", "table2"],
+                "TABLE_SCHEMA": ["schema1", "schema2"],
+                "TABLE_DESCRIPTION": ["desc1", "desc2"],
+                "TABLE_TYPE": ["BASE TABLE", "VIEW"],
+                "ROW_COUNT": [100, 200],
+            }
+        )
 
         # Execute
         result = data_catalog_loader._load_tables(mock_datasource, tables_df)
@@ -359,14 +405,16 @@ class TestDataCatalogLoader:
         tables = [table1, table2]
 
         # Setup mock data
-        columns_df = pd.DataFrame({
-            "TABLE_NAME": ["table1", "table2"],
-            "COLUMN_NAME": ["col1", "col2"],
-            "DATA_TYPE": ["VARCHAR", "INTEGER"],
-            "COLUMN_DESCRIPTION": ["desc1", "desc2"],
-            "COLUMN_DEFAULT": ["default1", "[NULL]"],
-            "IS_NULLABLE": ["YES", "NO"]
-        })
+        columns_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1", "table2"],
+                "COLUMN_NAME": ["col1", "col2"],
+                "DATA_TYPE": ["VARCHAR", "INTEGER"],
+                "COLUMN_DESCRIPTION": ["desc1", "desc2"],
+                "COLUMN_DEFAULT": ["default1", "[NULL]"],
+                "IS_NULLABLE": ["YES", "NO"],
+            }
+        )
 
         # Execute
         result = data_catalog_loader._load_columns(columns_df, tables)
@@ -394,15 +442,17 @@ class TestDataCatalogLoader:
         columns = [column1]
 
         # Setup mock data
-        column_statistics_df = pd.DataFrame({
-            "COLUMN_NAME": ["col1"],
-            "MOST_COMMON_VALS": [["val1", "val2"]],
-            "MOST_COMMON_FREQS": [[0.5, 0.3]],
-            "NULL_FRAC": [0.1],
-            "N_DISTINCT": [10],
-            "MIN_VALUE": ["min_val"],
-            "MAX_VALUE": ["max_val"]
-        })
+        column_statistics_df = pd.DataFrame(
+            {
+                "COLUMN_NAME": ["col1"],
+                "MOST_COMMON_VALS": [["val1", "val2"]],
+                "MOST_COMMON_FREQS": [[0.5, 0.3]],
+                "NULL_FRAC": [0.1],
+                "N_DISTINCT": [10],
+                "MIN_VALUE": ["min_val"],
+                "MAX_VALUE": ["max_val"],
+            }
+        )
 
         # Execute
         data_catalog_loader._load_column_statistics(column_statistics_df, columns)
@@ -434,12 +484,9 @@ class TestDataCatalogLoader:
         columns = [column1]
 
         # Setup mock data
-        primary_keys_df = pd.DataFrame({
-            "TABLE_NAME": ["table1"],
-            "COLUMN_NAME": ["id"],
-            "ORDINAL_POSITION": [1],
-            "CONSTRAINT_NAME": ["pk_table1"]
-        })
+        primary_keys_df = pd.DataFrame(
+            {"TABLE_NAME": ["table1"], "COLUMN_NAME": ["id"], "ORDINAL_POSITION": [1], "CONSTRAINT_NAME": ["pk_table1"]}
+        )
 
         # Execute
         data_catalog_loader._load_primary_keys(primary_keys_df, tables, columns)
@@ -476,14 +523,16 @@ class TestDataCatalogLoader:
         columns = [column1, column2]
 
         # Setup mock data
-        foreign_keys_df = pd.DataFrame({
-            "TABLE_NAME": ["table1"],
-            "COLUMN_NAME": ["foreign_id"],
-            "ORDINAL_POSITION": [1],
-            "CONSTRAINT_NAME": ["fk_table1"],
-            "REFERENCED_TABLE_NAME": ["table2"],
-            "REFERENCED_COLUMN_NAME": ["id"]
-        })
+        foreign_keys_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1"],
+                "COLUMN_NAME": ["foreign_id"],
+                "ORDINAL_POSITION": [1],
+                "CONSTRAINT_NAME": ["fk_table1"],
+                "REFERENCED_TABLE_NAME": ["table2"],
+                "REFERENCED_COLUMN_NAME": ["id"],
+            }
+        )
 
         # Execute
         data_catalog_loader._load_foreign_keys(foreign_keys_df, tables, columns)
@@ -505,20 +554,23 @@ class TestDataCatalogLoader:
     def test_load_tables_with_nan_row_count(self, data_catalog_loader, mock_datasource):
         """Test _load_tables method handles NaN row_count values."""
         # Setup mock data with NaN row_count
-        tables_df = pd.DataFrame({
-            "TABLE_NAME": ["table1"],
-            "TABLE_SCHEMA": ["schema1"],
-            "TABLE_DESCRIPTION": ["desc1"],
-            "TABLE_TYPE": ["BASE TABLE"],
-            "ROW_COUNT": [pd.NA]  # NaN value
-        })
+        tables_df = pd.DataFrame(
+            {
+                "TABLE_NAME": ["table1"],
+                "TABLE_SCHEMA": ["schema1"],
+                "TABLE_DESCRIPTION": ["desc1"],
+                "TABLE_TYPE": ["BASE TABLE"],
+                "ROW_COUNT": [pd.NA],  # NaN value
+            }
+        )
 
         # Execute
-        result = data_catalog_loader._load_tables(mock_datasource, tables_df)
+        data_catalog_loader._load_tables(mock_datasource, tables_df)
 
         # Verify
         added_tables = data_catalog_loader.session.add_all.call_args[0][0]
         assert added_tables[0].row_count is None
+        assert len(added_tables) == 1
 
     def test_load_column_statistics_with_invalid_distinct_count(self, data_catalog_loader):
         """Test _load_column_statistics method handles invalid distinct count values."""
@@ -529,15 +581,17 @@ class TestDataCatalogLoader:
         columns = [column1]
 
         # Setup mock data with invalid distinct count
-        column_statistics_df = pd.DataFrame({
-            "COLUMN_NAME": ["col1"],
-            "MOST_COMMON_VALS": [["val1"]],
-            "MOST_COMMON_FREQS": [[0.5]],
-            "NULL_FRAC": [0.1],
-            "N_DISTINCT": ["invalid"],  # Invalid value
-            "MIN_VALUE": ["min_val"],
-            "MAX_VALUE": ["max_val"]
-        })
+        column_statistics_df = pd.DataFrame(
+            {
+                "COLUMN_NAME": ["col1"],
+                "MOST_COMMON_VALS": [["val1"]],
+                "MOST_COMMON_FREQS": [[0.5]],
+                "NULL_FRAC": [0.1],
+                "N_DISTINCT": ["invalid"],  # Invalid value
+                "MIN_VALUE": ["min_val"],
+                "MAX_VALUE": ["max_val"],
+            }
+        )
 
         # Execute
         data_catalog_loader._load_column_statistics(column_statistics_df, columns)

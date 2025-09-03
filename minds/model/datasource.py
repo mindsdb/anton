@@ -5,7 +5,7 @@ This module defines the SQLModel for datasources, matching MindsDB's schema
 while adding user attribution for multi-user support.
 """
 
-from typing import Any, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import JSON, UniqueConstraint
 from sqlmodel import Column, Field, Relationship
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 if TYPE_CHECKING:
-    from minds.model.data_catalog import Table, DataCatalog
+    from minds.model.data_catalog import DataCatalog, Table
 
 
 class Datasource(BaseSQLModel, table=True):
@@ -38,7 +38,7 @@ class Datasource(BaseSQLModel, table=True):
     )
 
     user_id: str = Field(..., max_length=255, description="ID of the user who created this datasource")
-    engine_info: Optional[str] = Field(None, description="Engine information")
+    engine_info: str | None = Field(None, description="Engine information")
 
     # Relationships - Many-to-many with minds through junction table
     mind_datasources: list["MindDatasource"] = Relationship(back_populates="datasource")
@@ -46,16 +46,14 @@ class Datasource(BaseSQLModel, table=True):
     # Database constraints
     __table_args__ = (UniqueConstraint("name", "user_id", name="unique_datasource_name_per_user"),)
 
-    tables: List["Table"] = Relationship(
-        cascade_delete=True,
-        sa_relationship_kwargs={
-            "foreign_keys": "Table.datasource_id"
-        }
+    tables: list["Table"] = Relationship(
+        cascade_delete=True, sa_relationship_kwargs={"foreign_keys": "Table.datasource_id"}
     )
 
     def get_data_catalog(self) -> "DataCatalog":
         """Get a DataCatalog instance for this datasource."""
         from minds.model.data_catalog import DataCatalog
+
         return DataCatalog.from_datasource(self)
 
     def __repr__(self) -> str:
