@@ -25,8 +25,8 @@ class TestTable:
         assert table.name == table_name
         # Inherited from BaseSQLModel
         assert table.id is None
-        assert table.created_on is None
-        assert table.modified_on is None
+        assert table.created_at is None
+        assert table.modified_at is None
 
     def test_table_inherits_from_base_sql_model(self):
         """Test that Table inherits all properties from BaseSQLModel."""
@@ -35,8 +35,8 @@ class TestTable:
 
         # Should have all BaseSQLModel attributes
         assert hasattr(table, "id")
-        assert hasattr(table, "created_on")
-        assert hasattr(table, "modified_on")
+        assert hasattr(table, "created_at")
+        assert hasattr(table, "modified_at")
 
         # Should have the count class method
         assert hasattr(Table, "count")
@@ -64,8 +64,8 @@ class TestTable:
             description=description,
             type=table_type,
             row_count=row_count,
-            created_on=test_datetime,
-            modified_on=test_datetime,
+            created_at=test_datetime,
+            modified_at=test_datetime,
         )
 
         assert table.id == test_id
@@ -75,8 +75,8 @@ class TestTable:
         assert table.description == description
         assert table.type == table_type
         assert table.row_count == row_count
-        assert table.created_on == test_datetime
-        assert table.modified_on == test_datetime
+        assert table.created_at == test_datetime
+        assert table.modified_at == test_datetime
 
     def test_table_field_descriptions(self):
         """Test that fields have proper descriptions."""
@@ -145,8 +145,8 @@ class TestColumn:
         assert column.data_type == data_type
         # Inherited from BaseSQLModel
         assert column.id is None
-        assert column.created_on is None
-        assert column.modified_on is None
+        assert column.created_at is None
+        assert column.modified_at is None
 
     def test_column_inherits_from_base_sql_model(self):
         """Test that Column inherits all properties from BaseSQLModel."""
@@ -154,8 +154,8 @@ class TestColumn:
         column = Column(table_id=table_id, name="test_column", data_type="VARCHAR")
 
         assert hasattr(column, "id")
-        assert hasattr(column, "created_on")
-        assert hasattr(column, "modified_on")
+        assert hasattr(column, "created_at")
+        assert hasattr(column, "modified_at")
         assert hasattr(Column, "count")
 
     def test_column_name(self):
@@ -181,8 +181,8 @@ class TestColumn:
             description=description,
             default_value=default_value,
             is_nullable=is_nullable,
-            created_on=test_datetime,
-            modified_on=test_datetime,
+            created_at=test_datetime,
+            modified_at=test_datetime,
         )
 
         assert column.id == test_id
@@ -192,8 +192,8 @@ class TestColumn:
         assert column.description == description
         assert column.default_value == default_value
         assert column.is_nullable == is_nullable
-        assert column.created_on == test_datetime
-        assert column.modified_on == test_datetime
+        assert column.created_at == test_datetime
+        assert column.modified_at == test_datetime
 
     def test_column_field_descriptions(self):
         """Test that fields have proper descriptions."""
@@ -262,8 +262,8 @@ class TestColumnStatistics:
         assert stats.column_id == column_id
         # Inherited from BaseSQLModel
         assert stats.id is None
-        assert stats.created_on is None
-        assert stats.modified_on is None
+        assert stats.created_at is None
+        assert stats.modified_at is None
 
     def test_column_statistics_inherits_from_base_sql_model(self):
         """Test that ColumnStatistics inherits all properties from BaseSQLModel."""
@@ -271,8 +271,8 @@ class TestColumnStatistics:
         stats = ColumnStatistics(column_id=column_id)
 
         assert hasattr(stats, "id")
-        assert hasattr(stats, "created_on")
-        assert hasattr(stats, "modified_on")
+        assert hasattr(stats, "created_at")
+        assert hasattr(stats, "modified_at")
         assert hasattr(ColumnStatistics, "count")
 
     def test_column_statistics_name(self):
@@ -300,8 +300,8 @@ class TestColumnStatistics:
             distinct_values_count=distinct_values_count,
             min_value=min_value,
             max_value=max_value,
-            created_on=test_datetime,
-            modified_on=test_datetime,
+            created_at=test_datetime,
+            modified_at=test_datetime,
         )
 
         assert stats.id == test_id
@@ -312,8 +312,8 @@ class TestColumnStatistics:
         assert stats.distinct_values_count == distinct_values_count
         assert stats.min_value == min_value
         assert stats.max_value == max_value
-        assert stats.created_on == test_datetime
-        assert stats.modified_on == test_datetime
+        assert stats.created_at == test_datetime
+        assert stats.modified_at == test_datetime
 
     def test_column_statistics_field_descriptions(self):
         """Test that fields have proper descriptions."""
@@ -393,8 +393,8 @@ class TestPrimaryKeyConstraint:
         assert constraint.column_id == column_id
         # Inherited from BaseSQLModel
         assert constraint.id is None
-        assert constraint.created_on is None
-        assert constraint.modified_on is None
+        assert constraint.created_at is None
+        assert constraint.modified_at is None
 
     def test_primary_key_constraint_inherits_from_base_sql_model(self):
         """Test that PrimaryKeyConstraint inherits all properties from BaseSQLModel."""
@@ -403,8 +403,8 @@ class TestPrimaryKeyConstraint:
         constraint = PrimaryKeyConstraint(table_id=table_id, column_id=column_id)
 
         assert hasattr(constraint, "id")
-        assert hasattr(constraint, "created_on")
-        assert hasattr(constraint, "modified_on")
+        assert hasattr(constraint, "created_at")
+        assert hasattr(constraint, "modified_at")
         assert hasattr(PrimaryKeyConstraint, "count")
 
     def test_primary_key_constraint_name(self):
@@ -426,8 +426,8 @@ class TestPrimaryKeyConstraint:
             column_id=column_id,
             ordinal_position=ordinal_position,
             constraint_name=constraint_name,
-            created_on=test_datetime,
-            modified_on=test_datetime,
+            created_at=test_datetime,
+            modified_at=test_datetime,
         )
 
         assert constraint.id == test_id
@@ -435,8 +435,8 @@ class TestPrimaryKeyConstraint:
         assert constraint.column_id == column_id
         assert constraint.ordinal_position == ordinal_position
         assert constraint.constraint_name == constraint_name
-        assert constraint.created_on == test_datetime
-        assert constraint.modified_on == test_datetime
+        assert constraint.created_at == test_datetime
+        assert constraint.modified_at == test_datetime
 
     def test_primary_key_constraint_field_descriptions(self):
         """Test that fields have proper descriptions."""
@@ -506,8 +506,8 @@ class TestForeignKeyConstraint:
         assert constraint.referenced_column_id == referenced_column_id
         # Inherited from BaseSQLModel
         assert constraint.id is None
-        assert constraint.created_on is None
-        assert constraint.modified_on is None
+        assert constraint.created_at is None
+        assert constraint.modified_at is None
 
     def test_foreign_key_constraint_inherits_from_base_sql_model(self):
         """Test that ForeignKeyConstraint inherits all properties from BaseSQLModel."""
@@ -523,8 +523,8 @@ class TestForeignKeyConstraint:
         )
 
         assert hasattr(constraint, "id")
-        assert hasattr(constraint, "created_on")
-        assert hasattr(constraint, "modified_on")
+        assert hasattr(constraint, "created_at")
+        assert hasattr(constraint, "modified_at")
         assert hasattr(ForeignKeyConstraint, "count")
 
     def test_foreign_key_constraint_name(self):
@@ -550,8 +550,8 @@ class TestForeignKeyConstraint:
             referenced_column_id=referenced_column_id,
             constraint_name=constraint_name,
             ordinal_position=ordinal_position,
-            created_on=test_datetime,
-            modified_on=test_datetime,
+            created_at=test_datetime,
+            modified_at=test_datetime,
         )
 
         assert constraint.id == test_id
@@ -561,8 +561,8 @@ class TestForeignKeyConstraint:
         assert constraint.referenced_column_id == referenced_column_id
         assert constraint.constraint_name == constraint_name
         assert constraint.ordinal_position == ordinal_position
-        assert constraint.created_on == test_datetime
-        assert constraint.modified_on == test_datetime
+        assert constraint.created_at == test_datetime
+        assert constraint.modified_at == test_datetime
 
     def test_foreign_key_constraint_field_descriptions(self):
         """Test that fields have proper descriptions."""

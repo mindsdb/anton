@@ -109,8 +109,8 @@ class ForeignKeyConstraint(BaseSQLModel, table=True):
 
 class DataCatalog(BaseSQLModel, table=False):
     """Data catalog metadata - a helper model for accessing datasource metadata."""
-    created_on: datetime = Field(default_factory=datetime.now, description="The date and time the catalog was created.")
-    modified_on: datetime = Field(default_factory=datetime.now, description="The date and time the catalog was updated.")
+    created_at: datetime = Field(default_factory=datetime.now, description="The date and time the catalog was created.")
+    modified_at: datetime = Field(default_factory=datetime.now, description="The date and time the catalog was updated.")
     datasource: "Datasource" = Field(..., description="Datasource")
 
     @classmethod
