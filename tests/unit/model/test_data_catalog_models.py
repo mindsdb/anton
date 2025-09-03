@@ -10,6 +10,10 @@ from minds.model.data_catalog import (
     PrimaryKeyConstraint,
     ForeignKeyConstraint,
 )
+# Import related models to ensure SQLAlchemy can resolve all relationships
+from minds.model.datasource import Datasource
+from minds.model.mind_datasource import MindDatasource
+from minds.model.mind import Mind
 
 
 class TestTable:
