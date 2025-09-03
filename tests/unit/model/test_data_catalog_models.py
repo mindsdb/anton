@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Any, Optional, Union
+from unittest.mock import Mock
 from uuid import UUID
 
+import pytest
 
 from minds.model.data_catalog import (
     Table,
@@ -9,6 +11,7 @@ from minds.model.data_catalog import (
     ColumnStatistics,
     PrimaryKeyConstraint,
     ForeignKeyConstraint,
+    DataCatalog,
 )
 # Import related models to ensure SQLAlchemy can resolve all relationships
 from minds.model.datasource import Datasource
@@ -633,3 +636,397 @@ class TestForeignKeyConstraint:
         str_repr = str(constraint)
         assert str_repr is not None
 
+
+class TestDataCatalog:
+    """Test cases for DataCatalog model class."""
+
+    @pytest.fixture
+    def mock_datasource(self):
+        """Mock datasource for testing."""
+        datasource = Mock(spec=Datasource)
+        datasource.name = "test_datasource"
+        datasource.engine = "postgresql"
+        datasource.tables = []
+        return datasource
+
+    @pytest.fixture
+    def sample_table(self):
+        """Sample table for testing."""
+        table = Mock(spec=Table)
+        table.name = "users"
+        table.description = "User information table"
+        table.columns = []
+        table.primary_key_constraints = []
+        table.foreign_key_constraints = []
+        return table
+
+    @pytest.fixture
+    def sample_column(self):
+        """Sample column for testing."""
+        column = Mock(spec=Column)
+        column.name = "id"
+        column.data_type = "INTEGER"
+        column.is_nullable = False
+        column.default_value = None
+        column.description = "Primary key"
+        column.statistics = None
+        return column
+
+    @pytest.fixture
+    def sample_column_with_stats(self):
+        """Sample column with statistics for testing."""
+        column = Mock(spec=Column)
+        column.name = "age"
+        column.data_type = "INTEGER"
+        column.is_nullable = True
+        column.default_value = None
+        column.description = "User age"
+        
+        # Mock statistics
+        stats = Mock(spec=ColumnStatistics)
+        stats.distinct_values_count = 50
+        stats.null_percentage = 5.0
+        stats.min_value = "18"
+        stats.max_value = "65"
+        stats.most_common_values = ["25", "30", "35"]
+        stats.most_common_frequencies = [0.15, 0.12, 0.10]
+        column.statistics = stats
+        
+        return column
+
+    def test_data_catalog_initialization(self, mock_datasource):
+        """Test DataCatalog initialization."""
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        assert catalog.datasource == mock_datasource
+        assert catalog.created_at is not None
+        assert catalog.modified_at is not None
+
+    def test_data_catalog_from_datasource_class_method(self, mock_datasource):
+        """Test DataCatalog.from_datasource class method."""
+        catalog = DataCatalog.from_datasource(mock_datasource)
+        
+        assert catalog.datasource == mock_datasource
+        assert catalog.created_at is not None
+        assert catalog.modified_at is not None
+
+    def test_data_catalog_is_not_table_model(self):
+        """Test that DataCatalog is not configured as a table model."""
+        assert not hasattr(DataCatalog, "__table__")
+
+    def test_format_header(self, mock_datasource):
+        """Test _format_header method."""
+        mock_datasource.tables = [Mock(), Mock()]  # 2 tables
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        header_lines = catalog._format_header()
+        
+        assert len(header_lines) == 5
+        assert "MindsDB Data Source: test_datasource" in header_lines[0]
+        assert "Engine: postgresql" in header_lines[1]
+        assert header_lines[2] == ""  # Empty line
+        assert "Tables: 2" in header_lines[3]
+        assert header_lines[4] == ""  # Empty line
+
+    def test_format_table_basic(self, mock_datasource, sample_table):
+        """Test _format_table method with basic table."""
+        sample_table.columns = []
+        sample_table.primary_key_constraints = []
+        sample_table.foreign_key_constraints = []
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        table_lines = catalog._format_table(sample_table)
+        
+        assert len(table_lines) >= 3
+        assert "Table: test_datasource.users - User information table" in table_lines[0]
+        assert "  Columns:" in table_lines[1]
+        assert table_lines[-1] == ""  # Blank line at end
+
+    def test_format_table_without_description(self, mock_datasource):
+        """Test _format_table method with table without description."""
+        table = Mock(spec=Table)
+        table.name = "orders"
+        table.description = None
+        table.columns = []
+        table.primary_key_constraints = []
+        table.foreign_key_constraints = []
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        table_lines = catalog._format_table(table)
+        
+        assert "Table: test_datasource.orders" in table_lines[0]
+        assert " - " not in table_lines[0]  # No description separator
+
+    def test_format_column_basic(self, sample_column, mock_datasource):
+        """Test _format_column method with basic column."""
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        column_lines = catalog._format_column(sample_column)
+        
+        assert len(column_lines) >= 1
+        assert "    - id (INTEGER) NOT NULL - Primary key" in column_lines[0]
+
+    def test_format_column_with_default_value(self, mock_datasource):
+        """Test _format_column method with default value."""
+        column = Mock(spec=Column)
+        column.name = "status"
+        column.data_type = "VARCHAR"
+        column.is_nullable = True
+        column.default_value = "active"
+        column.description = "User status"
+        column.statistics = None
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        column_lines = catalog._format_column(column)
+        
+        assert "    - status (VARCHAR) DEFAULT active - User status" in column_lines[0]
+
+    def test_format_column_with_null_default(self, mock_datasource):
+        """Test _format_column method with [NULL] default value."""
+        column = Mock(spec=Column)
+        column.name = "notes"
+        column.data_type = "TEXT"
+        column.is_nullable = True
+        column.default_value = "[NULL]"
+        column.description = "User notes"
+        column.statistics = None
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        column_lines = catalog._format_column(column)
+        
+        # Should not include DEFAULT [NULL] in output
+        assert "    - notes (TEXT) - User notes" in column_lines[0]
+        assert "DEFAULT" not in column_lines[0]
+
+    def test_format_column_without_description(self, mock_datasource):
+        """Test _format_column method without description."""
+        column = Mock(spec=Column)
+        column.name = "email"
+        column.data_type = "VARCHAR"
+        column.is_nullable = True
+        column.default_value = None
+        column.description = None
+        column.statistics = None
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        column_lines = catalog._format_column(column)
+        
+        assert "    - email (VARCHAR)" in column_lines[0]
+        # Should not have description after the data type
+        assert "VARCHAR) - " not in column_lines[0]  # No description separator
+
+    def test_format_column_statistics(self, sample_column_with_stats, mock_datasource):
+        """Test _format_column_statistics method."""
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        stats_lines = catalog._format_column_statistics(sample_column_with_stats)
+        
+        assert len(stats_lines) >= 3
+        assert "      Distinct Values: 50" in stats_lines
+        assert "      Null %: 5.0%" in stats_lines
+        assert "      Range: 18 to 65" in stats_lines
+        assert "      Most Common: 25 (15.0%), 30 (12.0%), 35 (10.0%)" in stats_lines
+
+    def test_format_column_statistics_no_stats(self, sample_column, mock_datasource):
+        """Test _format_column_statistics method with no statistics."""
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        stats_lines = catalog._format_column_statistics(sample_column)
+        
+        assert len(stats_lines) == 0
+
+    def test_format_column_statistics_empty_common_values(self, mock_datasource):
+        """Test _format_column_statistics method with empty common values."""
+        column = Mock(spec=Column)
+        column.statistics = Mock(spec=ColumnStatistics)
+        column.statistics.distinct_values_count = 10
+        column.statistics.null_percentage = 0.0
+        column.statistics.min_value = "1"
+        column.statistics.max_value = "10"
+        column.statistics.most_common_values = [""]  # Empty string
+        column.statistics.most_common_frequencies = [""]  # Empty string
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        stats_lines = catalog._format_column_statistics(column)
+        
+        # Should not include Most Common line for empty values
+        assert len(stats_lines) == 3
+        assert "Most Common:" not in "".join(stats_lines)
+
+    def test_format_table_constraints_with_primary_key(self, mock_datasource):
+        """Test _format_table_constraints method with primary key."""
+        table = Mock(spec=Table)
+        table.primary_key_constraints = []
+        table.foreign_key_constraints = []
+        
+        # Mock primary key constraint
+        pk_constraint = Mock()
+        pk_constraint.column = Mock()
+        pk_constraint.column.name = "id"
+        table.primary_key_constraints = [pk_constraint]
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        constraint_lines = catalog._format_table_constraints(table)
+        
+        assert len(constraint_lines) == 1
+        assert "  Primary Key: id" in constraint_lines[0]
+
+    def test_format_table_constraints_with_foreign_keys(self, mock_datasource):
+        """Test _format_table_constraints method with foreign keys."""
+        table = Mock(spec=Table)
+        table.primary_key_constraints = []
+        
+        # Mock foreign key constraint
+        fk_constraint = Mock()
+        fk_constraint.column = Mock()
+        fk_constraint.column.name = "user_id"
+        fk_constraint.referenced_table = Mock()
+        fk_constraint.referenced_table.name = "users"
+        fk_constraint.referenced_column = Mock()
+        fk_constraint.referenced_column.name = "id"
+        table.foreign_key_constraints = [fk_constraint]
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        constraint_lines = catalog._format_table_constraints(table)
+        
+        assert len(constraint_lines) == 2
+        assert "  Foreign Keys:" in constraint_lines[0]
+        assert "    - user_id → test_datasource.users(id)" in constraint_lines[1]
+
+    def test_format_table_constraints_empty(self, mock_datasource):
+        """Test _format_table_constraints method with no constraints."""
+        table = Mock(spec=Table)
+        table.primary_key_constraints = []
+        table.foreign_key_constraints = []
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        constraint_lines = catalog._format_table_constraints(table)
+        
+        assert len(constraint_lines) == 0
+
+    def test_get_related_tables(self, mock_datasource):
+        """Test _get_related_tables method."""
+        # Create tables with foreign key relationships
+        table1 = Mock(spec=Table)
+        table1.name = "orders"
+        table1.foreign_key_constraints = []
+        
+        table2 = Mock(spec=Table)
+        table2.name = "users"
+        table2.foreign_key_constraints = []
+        
+        # Mock foreign key from orders to users
+        fk_constraint = Mock()
+        fk_constraint.referenced_table = "users"  # This should be a string (table name)
+        table1.foreign_key_constraints = [fk_constraint]
+        
+        # Mock foreign key from users to orders (reverse relationship)
+        fk_constraint2 = Mock()
+        fk_constraint2.referenced_table = "orders"  # This should be a string (table name)
+        table2.foreign_key_constraints = [fk_constraint2]
+        
+        mock_datasource.tables = [table1, table2]
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        related_tables = catalog._get_related_tables(table1)
+        
+        assert "users" in related_tables  # From table1's foreign key
+        assert "orders" not in related_tables  # Self-reference should be excluded
+        assert len(related_tables) == 1  # Only "users" should be returned
+
+    def test_format_relationships(self, mock_datasource):
+        """Test _format_relationships method."""
+        # Create tables with relationships
+        table1 = Mock(spec=Table)
+        table1.name = "orders"
+        table1.foreign_key_constraints = []
+        
+        table2 = Mock(spec=Table)
+        table2.name = "users"
+        table2.foreign_key_constraints = []
+        
+        # Mock foreign key relationship
+        fk_constraint = Mock()
+        fk_constraint.referenced_table = "users"
+        table1.foreign_key_constraints = [fk_constraint]
+        
+        mock_datasource.tables = [table1, table2]
+        catalog = DataCatalog(datasource=mock_datasource)
+        
+        relationship_lines = catalog._format_relationships()
+        
+        assert len(relationship_lines) == 4  # Header + 2 relationships + empty line
+        assert "Relationships:" in relationship_lines[0]
+        assert "test_datasource.orders is related to: test_datasource.users" in relationship_lines[1]
+        assert "test_datasource.users is related to: test_datasource.orders" in relationship_lines[2]
+        assert relationship_lines[3] == ""
+
+    def test_format_relationships_no_relationships(self, mock_datasource):
+        """Test _format_relationships method with no relationships."""
+        table = Mock(spec=Table)
+        table.name = "standalone"
+        table.foreign_key_constraints = []
+        mock_datasource.tables = [table]
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        relationship_lines = catalog._format_relationships()
+        
+        assert len(relationship_lines) == 0
+
+    def test_to_context_str_complete(self, mock_datasource, sample_table, sample_column_with_stats):
+        """Test to_context_str method with complete data."""
+        # Setup table with column and statistics
+        sample_table.columns = [sample_column_with_stats]
+        sample_table.primary_key_constraints = []
+        sample_table.foreign_key_constraints = []
+        mock_datasource.tables = [sample_table]
+        
+        catalog = DataCatalog(datasource=mock_datasource)
+        context_str = catalog.to_context_str()
+        
+        lines = context_str.split('\n')
+        
+        # Check header
+        assert "MindsDB Data Source: test_datasource" in lines[0]
+        assert "Engine: postgresql" in lines[1]
+        assert "Tables: 1" in lines[3]
+        
+        # Check table information
+        assert "Table: test_datasource.users - User information table" in lines[5]
+        assert "  Columns:" in lines[6]
+        assert "    - age (INTEGER) - User age" in lines[7]
+        assert "      Distinct Values: 50" in lines[8]
+        assert "      Null %: 5.0%" in lines[9]
+        assert "      Range: 18 to 65" in lines[10]
+        assert "      Most Common: 25 (15.0%), 30 (12.0%), 35 (10.0%)" in lines[11]
+
+    def test_to_context_str_empty_datasource(self, mock_datasource):
+        """Test to_context_str method with empty datasource."""
+        mock_datasource.tables = []
+        catalog = DataCatalog(datasource=mock_datasource)
+        context_str = catalog.to_context_str()
+        
+        lines = context_str.split('\n')
+        
+        # Should only have header
+        assert "MindsDB Data Source: test_datasource" in lines[0]
+        assert "Engine: postgresql" in lines[1]
+        assert "Tables: 0" in lines[3]
+        assert len(lines) == 5  # Header + empty lines only
+
+    def test_data_catalog_field_descriptions(self):
+        """Test that DataCatalog fields have proper descriptions."""
+        fields = DataCatalog.model_fields
+        
+        assert fields["created_at"].description == "The date and time the catalog was created."
+        assert fields["modified_at"].description == "The date and time the catalog was updated."
+        assert fields["datasource"].description == "Datasource"
+
+    def test_data_catalog_field_types(self):
+        """Test that DataCatalog fields have correct types."""
+        fields = DataCatalog.model_fields
+        
+        assert fields["created_at"].annotation is datetime
+        assert fields["modified_at"].annotation is datetime
+        # Datasource field type is complex due to forward reference
+        assert "Datasource" in str(fields["datasource"].annotation)
