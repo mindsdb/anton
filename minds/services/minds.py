@@ -6,7 +6,7 @@ related to mind management, including CRUD operations with internal database sto
 MindsDB is only used for datasource validation, not for minds storage.
 """
 from datetime import datetime, timezone
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
@@ -182,7 +182,7 @@ class MindsService:
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
-                select(Mind).where(and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.deleted_at is None))
+                select(Mind).where(and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.deleted_at.is_(None)))
             ).first()
 
             if existing_mind:
@@ -338,18 +338,20 @@ class MindsService:
         """Utility function to get a specific mind by name."""
         statement = (
             select(Mind)
-            .join(Mind.mind_datasources)
-            .join(MindDatasource.datasource)
-            .options(
-                selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource)
-            )
             .where(
                 and_(
                     Mind.name == mind_name,
                     Mind.user_id == self.user_id,
                     Mind.deleted_at.is_(None),
-                    MindDatasource.deleted_at.is_(None),
                 )
+            )
+            .options(
+                selectinload(Mind.mind_datasources),
+                with_loader_criteria(
+                    MindDatasource,
+                    lambda cls: cls.deleted_at.is_(None),
+                    include_aliases=True,
+                ),
             )
         )
         return self.session.exec(statement).first()
@@ -463,13 +465,9 @@ class MindsService:
             new_datasource_names (list[str]): New list of datasource names
         """
         try:
-            # Remove all existing relationships
-            existing_relationships = self.session.exec(
-                select(MindDatasource).where(MindDatasource.mind_id == mind.id)
-            ).all()
-
-            for relationship in existing_relationships:
-                self.session.delete(relationship)
+            # Remove all existing relationships - soft delete only.
+            for relationship in mind.mind_datasources:
+                relationship.deleted_at = datetime.now(timezone.utc)
 
             # Add new relationships
             await self._add_datasources_to_mind(mind, new_datasource_names)

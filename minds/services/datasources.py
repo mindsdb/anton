@@ -7,6 +7,7 @@ for datasource management operations.
 
 from datetime import datetime, timezone
 from mindsdb_sdk.server import Server
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
@@ -129,24 +130,6 @@ class DatasourcesService:
         except Exception as e:
             logger.error(f"Error listing datasources: {str(e)}")
             raise DatasourceServiceError(f"Failed to list datasources: {str(e)}") from None
-
-    async def _get_datasource(self, datasource_name: str) -> Datasource:
-        """
-        Utility function to get a specific datasource by name.
-
-        Args:
-            datasource_name: Name of the datasource to get.
-
-        Returns:
-            Datasource: Datasource object.
-        """
-        statement = select(Datasource).where(
-            and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
-        )
-        result = self.session.exec(statement)
-        datasource = result.first()
-
-        return datasource
 
     async def get_datasource(
         self, datasource_name: str, with_detailed_data: bool = False
@@ -320,7 +303,26 @@ class DatasourcesService:
             logger.debug(f"Deleting datasource {datasource_name} for user {self.user_id} (cascade={cascade})")
 
             # Get existing datasource
-            datasource = await self._get_datasource(datasource_name)
+            statement = (
+                select(Datasource)
+                .where(
+                    and_(
+                        Datasource.name == datasource_name,
+                        Datasource.user_id == self.user_id,
+                        Datasource.deleted_at.is_(None),
+                    )
+                )
+                .options(
+                    selectinload(Datasource.mind_datasources),
+                    with_loader_criteria(
+                        MindDatasource,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                )
+            )
+
+            datasource = self.session.exec(statement).first()
 
             if not datasource:
                 raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
@@ -328,17 +330,17 @@ class DatasourcesService:
             # TODO: If cascade is True, remove from all minds that use this datasource
             if cascade:
                 logger.debug(f"Cascade deletion for datasource {datasource_name} - implement mind updates")
+
             await self._delete_mindsdb_database(datasource_name)
 
+            deleted_at = datetime.now(timezone.utc)
+
             # Then delete from internal database
-            datasource.deleted_at = datetime.now(timezone.utc)
+            datasource.deleted_at = deleted_at
 
             # Remove relationships with minds - soft delete only.
-            existing_relationships = self.session.exec(
-                select(MindDatasource).where(MindDatasource.datasource_id == datasource.id)
-            ).all()
-            for relationship in existing_relationships:
-                relationship.deleted_at = datetime.now(timezone.utc)
+            for relationship in datasource.mind_datasources:
+                relationship.deleted_at = deleted_at
 
             self.session.add(datasource)
             self.session.commit()
@@ -392,6 +394,77 @@ class DatasourcesService:
         except Exception as e:
             logger.error(f"Connection test failed for {datasource_name}: {str(e)}")
             return DatasourceConnectionStatus(success=False, error_message=str(e))
+        
+    async def get_datasource_table_sample(
+        self, datasource_name: str, table_name: str, limit: int = 10
+    ) -> DatasourceTableSampleResponse:
+        """Get a sample of a table from a datasource."""
+        logger.debug(
+            f"Getting sample data for table {table_name} of datasource {datasource_name} for user {self.user_id}"
+        )
+
+        try:
+            datasource = await self._get_datasource(datasource_name)
+
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
+            sample_query = self.mindsdb_client.databases.get(datasource_name).query(
+                f"SELECT * FROM {table_name} LIMIT {limit}"
+            )
+            result = sample_query.fetch()
+
+            # Convert DataFrame to structured response
+            column_names = result.columns.tolist()
+            data = result.values.tolist()
+
+            return DatasourceTableSampleResponse(data=data, column_names=column_names)
+        except DatasourceNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting sample data for table {table_name} of datasource {datasource_name}: {str(e)}")
+            raise DatasourceServiceError(f"Failed to get sample data: {str(e)}") from None
+
+    async def get_datasource_table_row_count(self, datasource_name: str, table_name: str) -> int:
+        """Get the row count of a table from a datasource."""
+        logger.debug(
+            f"Getting row count for table {table_name} of datasource {datasource_name} for user {self.user_id}"
+        )
+
+        try:
+            datasource = await self._get_datasource(datasource_name)
+
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
+            row_count_query = self.mindsdb_client.databases.get(datasource_name).query(
+                f"SELECT COUNT(*) FROM {table_name}"
+            )
+            result = row_count_query.fetch()
+            return result.values[0][0]
+        except DatasourceNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting row count for table {table_name} of datasource {datasource_name}: {str(e)}")
+            raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
+
+    async def _get_datasource(self, datasource_name: str) -> Datasource:
+        """
+        Utility function to get a specific datasource by name.
+
+        Args:
+            datasource_name: Name of the datasource to get.
+
+        Returns:
+            Datasource: Datasource object.
+        """
+        statement = select(Datasource).where(
+            and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
+        )
+        result = self.session.exec(statement)
+        datasource = result.first()
+
+        return datasource
 
     async def _create_mindsdb_database(self, datasource: Datasource) -> None:
         """Create database/integration in MindsDB."""
@@ -490,55 +563,3 @@ class DatasourcesService:
 
         return DatasourceDetailedResponse(**base_response.model_dump(), connection_status=connection_status)
 
-    async def get_datasource_table_sample(
-        self, datasource_name: str, table_name: str, limit: int = 10
-    ) -> DatasourceTableSampleResponse:
-        """Get a sample of a table from a datasource."""
-        logger.debug(
-            f"Getting sample data for table {table_name} of datasource {datasource_name} for user {self.user_id}"
-        )
-
-        try:
-            datasource = await self._get_datasource(datasource_name)
-
-            if not datasource:
-                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
-
-            sample_query = self.mindsdb_client.databases.get(datasource_name).query(
-                f"SELECT * FROM {table_name} LIMIT {limit}"
-            )
-            result = sample_query.fetch()
-
-            # Convert DataFrame to structured response
-            column_names = result.columns.tolist()
-            data = result.values.tolist()
-
-            return DatasourceTableSampleResponse(data=data, column_names=column_names)
-        except DatasourceNotFoundError:
-            raise
-        except Exception as e:
-            logger.error(f"Error getting sample data for table {table_name} of datasource {datasource_name}: {str(e)}")
-            raise DatasourceServiceError(f"Failed to get sample data: {str(e)}") from None
-
-    async def get_datasource_table_row_count(self, datasource_name: str, table_name: str) -> int:
-        """Get the row count of a table from a datasource."""
-        logger.debug(
-            f"Getting row count for table {table_name} of datasource {datasource_name} for user {self.user_id}"
-        )
-
-        try:
-            datasource = await self._get_datasource(datasource_name)
-
-            if not datasource:
-                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
-
-            row_count_query = self.mindsdb_client.databases.get(datasource_name).query(
-                f"SELECT COUNT(*) FROM {table_name}"
-            )
-            result = row_count_query.fetch()
-            return result.values[0][0]
-        except DatasourceNotFoundError:
-            raise
-        except Exception as e:
-            logger.error(f"Error getting row count for table {table_name} of datasource {datasource_name}: {str(e)}")
-            raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
