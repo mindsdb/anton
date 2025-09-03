@@ -96,9 +96,21 @@ class TestMindModel:
         assert mind1.parameters["test"] == "value1"
         assert mind2.parameters["test"] == "value2"
 
-    def test_mind_field_types(self):
-        """Test Mind field types and validation."""
+    def test_active_mind_field_types(self):
+        """Test active Mind field types and validation."""
         mind = Mind(name="test", provider="openai", model_name="gpt-4o", user_id="user-123")
+
+        # Test field types
+        assert isinstance(mind.name, str)
+        assert isinstance(mind.provider, str)
+        assert isinstance(mind.model_name, str)
+        assert isinstance(mind.user_id, str)
+        assert isinstance(mind.parameters, dict)
+        assert mind.deleted_at is None
+
+    def test_inactive_mind_field_types(self):
+        """Test inactive Mind field types and validation."""
+        mind = Mind(name="test", provider="openai", model_name="gpt-4o", user_id="user-123", deleted_at=datetime.now())
 
         # Test field types
         assert isinstance(mind.name, str)
