@@ -97,12 +97,12 @@ class TestMindsAPI:
         mock_minds_service.list_minds = AsyncMock(return_value=[sample_mind_response])
 
         result = await list_minds(
-            minds_service=mock_minds_service, provider="openai", is_active=True, limit=10, offset=0
+            minds_service=mock_minds_service, provider="openai", include_deleted=False, limit=10, offset=0
         )
 
         assert len(result) == 1
         assert result[0].name == "test-mind"
-        mock_minds_service.list_minds.assert_called_once_with(provider="openai", is_active=True, limit=10, offset=0)
+        mock_minds_service.list_minds.assert_called_once_with(provider="openai", include_deleted=False, limit=10, offset=0)
 
     @pytest.mark.asyncio
     async def test_list_minds_empty(self, mock_minds_service):
