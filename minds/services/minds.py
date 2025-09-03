@@ -326,8 +326,8 @@ class MindsService:
             raise
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Error removing datasource from mind: {str(e)}")
-            raise MindsServiceError(f"Failed to remove datasource: {str(e)}") from None
+            logger.error(f"Error deleting mind {mind_name}: {str(e)}")
+            raise MindsServiceError(f"Failed to delete mind: {str(e)}") from None
         
     async def _get_mind(self, mind_name: str) -> Mind:
         """Utility function to get a specific mind by name."""
