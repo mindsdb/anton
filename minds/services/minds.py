@@ -17,6 +17,7 @@ from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import MindDatasource
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.services.data_catalog import DataCatalogLoader
 
 # Set up logging
 logger = setup_logging()
@@ -169,7 +170,7 @@ class MindsService:
             logger.error(f"Error getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
 
-    async def create_mind(self, mind_data: MindCreateRequest) -> MindResponse:
+    async def create_mind(self, mind_data: MindCreateRequest, data_catalog_loader: DataCatalogLoader) -> MindResponse:
         """
         Create a new mind.
 
@@ -204,6 +205,10 @@ class MindsService:
             # Validate datasources exist if provided
             if mind_data.datasources:
                 await self._validate_datasources(mind_data.datasources)
+
+            for datasource in mind_data.datasources:
+                await data_catalog_loader.load(datasource)
+                logger.info(f"Loaded datasource {datasource} to the data catalog")
 
             new_mind = Mind(
                 name=mind_data.name,

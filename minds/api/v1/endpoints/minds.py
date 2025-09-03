@@ -158,20 +158,8 @@ async def create_mind(
     )
 
     try:
-        mind = await minds_service.create_mind(mind_data)
-
-        # TODO: Should this be done before or after the mind is created?
-        datasources = mind_data.datasources
-        for datasource in datasources:
-            # TODO: What about the table names?
-            await data_catalog_loader.load(datasource)
-            logger.info(f"Loaded datasource {datasource} to the data catalog")
-
-        mind = await minds_service.create_mind(mind_data)
-
-        logger.info(
-            f"Created mind {mind_data.name} for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
-        )
+        mind = await minds_service.create_mind(mind_data, data_catalog_loader)
+        logger.info(f"Created mind {mind_data.name} for user {minds_service.user_id}")
         return mind
     except MindAlreadyExistsError as e:
         logger.warning(f"Mind already exists for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}")
