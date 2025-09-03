@@ -37,17 +37,22 @@ class DataCatalogLoader:
     async def load(self, datasource_name: str, table_names: Optional[List[str]] = None) -> None:
         """Load the data catalog."""
         try:
-            datasource_service = DatasourcesService(
-                session=self.session,
-                mindsdb_client=self.mindsdb_client,
-                user_id=self.user_id,
+            statement = select(Datasource).where(
+                and_(
+                    Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None)
+                )
             )
-            datasource = await datasource_service.get_datasource(datasource_name)
+            result = self.session.exec(statement)
+            datasource = result.first()
 
             tables_df = self._get_tables(datasource, table_names)
 
             if len(tables_df) > 0:
                 tables = self._load_tables(datasource, tables_df)
+
+                engine_info = self._get_engine_info(datasource) 
+                if engine_info:
+                    datasource.engine_info = engine_info
 
                 columns_df = self._get_columns(datasource, table_names)
                 columns = self._load_columns(columns_df, tables)
@@ -97,7 +102,23 @@ class DataCatalogLoader:
         if value == "[NULL]" or value is None:
             return None
         return value
-    
+
+    def _get_engine_info(self, datasource: Datasource) -> str:
+        """Get engine info from datasource."""
+        logger.info(
+            f"Getting engine info for datasource '{datasource.name}'"
+        )
+
+        query = f"""
+        SELECT HANDLER_INFO FROM INFORMATION_SCHEMA.META_HANDLER_INFO
+        WHERE TABLE_CATALOG = '{datasource.name}'
+        """
+
+        df = self._execute_query(query)
+        logger.info(f"Found {len(df)} engine info")
+
+        return df['HANDLER_INFO'].iloc[0]
+
     def _get_tables(self, datasource: Datasource, table_names: Optional[List[str]] = None) -> pd.DataFrame:
         """Get table metadata from META_TABLES with optional filtering."""
         logger.info(

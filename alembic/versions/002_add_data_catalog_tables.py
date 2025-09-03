@@ -230,6 +230,9 @@ def upgrade() -> None:
     op.create_index('ix_foreign_key_constraints_referenced_table_id', 'foreign_key_constraints', ['referenced_table_id'])
     op.create_index('ix_foreign_key_constraints_referenced_column_id', 'foreign_key_constraints', ['referenced_column_id'])
 
+    # Add a column to the datasources table to store engine info.
+    op.add_column('datasources', sa.Column('engine_info', sa.Text(), nullable=True))
+
 
 def downgrade() -> None:
     op.drop_index('ix_foreign_key_constraints_referenced_column_id', table_name='foreign_key_constraints')
@@ -249,3 +252,5 @@ def downgrade() -> None:
     op.drop_table('column_statistics')
     op.drop_table('columns')
     op.drop_table('tables')
+
+    op.drop_column('datasources', 'engine_info')

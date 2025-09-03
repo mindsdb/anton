@@ -109,8 +109,6 @@ class ForeignKeyConstraint(BaseSQLModel, table=True):
 
 class DataCatalog(BaseSQLModel, table=False):
     """Data catalog metadata - a helper model for accessing datasource metadata."""
-    created_at: datetime = Field(default_factory=datetime.now, description="The date and time the catalog was created.")
-    modified_at: datetime = Field(default_factory=datetime.now, description="The date and time the catalog was updated.")
     datasource: "Datasource" = Field(..., description="Datasource")
 
     @classmethod
@@ -125,10 +123,11 @@ class DataCatalog(BaseSQLModel, table=False):
         lines = []
         lines.append(f"MindsDB Data Source: {self.datasource.name}")
         lines.append(f"Engine: {self.datasource.engine}")
-        # TODO: Add handler info.
-        # if self.datasource.handler_info:
-        #     lines.append(f"Handler Info: {self.datasource.handler_info}")
+
+        if self.datasource.handler_info:
+            lines.append(f"Handler Info: {self.datasource.handler_info}")
         lines.append("")
+
         lines.append(f"Tables: {len(self.datasource.tables)}")
         lines.append("")
         return lines
