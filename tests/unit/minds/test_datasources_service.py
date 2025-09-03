@@ -256,7 +256,8 @@ class TestDatasourcesService:
 
         await service.delete_datasource("test_postgres")
 
-        mock_session.delete.assert_called_once()
+        # Soft delete only.
+        mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
