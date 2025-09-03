@@ -5,11 +5,13 @@ This service handles both internal dataource information storage and MindsDB SDK
 for datasource management operations.
 """
 
+from datetime import datetime, timezone
 from mindsdb_sdk.server import Server
 from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
 from minds.model.datasource import Datasource
+from minds.model.mind_datasource import MindDatasource
 from minds.schemas.datasources import (
     DatasourceConnectionStatus,
     DatasourceCreateRequest,
@@ -72,13 +74,19 @@ class DatasourcesService:
         self.user_id = user_id
 
     async def list_datasources(
-        self, engine: str | None = None, limit: int = 100, offset: int = 0, with_detailed_data: bool = False
+        self,
+        engine: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+        with_detailed_data: bool = False,
     ) -> list[DatasourceResponse | DatasourceDetailedResponse]:
         """
         List datasources for the current company.
 
         Args:
             engine: Filter by database engine
+            include_deleted: Include deleted datasources
             limit: Maximum number of results
             offset: Number of results to skip
             with_detailed_data: Include connection status and other details
@@ -89,7 +97,7 @@ class DatasourcesService:
         try:
             logger.debug(
                 f"Listing datasources for user {self.user_id} with filters: "
-                f"engine={engine}, limit={limit}, offset={offset}"
+                f"engine={engine}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
             )
 
             # Build query with filters
@@ -97,6 +105,9 @@ class DatasourcesService:
 
             if engine is not None:
                 statement = statement.where(Datasource.engine == engine)
+
+            if not include_deleted:
+                statement = statement.where(Datasource.deleted_at.is_(None))
 
             statement = statement.offset(offset).limit(limit)
 
@@ -130,7 +141,7 @@ class DatasourcesService:
             Datasource: Datasource object.
         """
         statement = select(Datasource).where(
-            and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
+            and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
         )
         result = self.session.exec(statement)
         datasource = result.first()
@@ -296,7 +307,7 @@ class DatasourcesService:
 
     async def delete_datasource(self, datasource_name: str, cascade: bool = False) -> None:
         """
-        Delete a datasource (hard delete to match MindsDB behavior).
+        Delete a datasource (hard delete on MindsDB and soft delete in internal database).
 
         Args:
             datasource_name: Name of the datasource to delete
@@ -320,7 +331,16 @@ class DatasourcesService:
             await self._delete_mindsdb_database(datasource_name)
 
             # Then delete from internal database
-            self.session.delete(datasource)
+            datasource.deleted_at = datetime.now(timezone.utc)
+
+            # Remove relationships with minds - soft delete only.
+            existing_relationships = self.session.exec(
+                select(MindDatasource).where(MindDatasource.datasource_id == datasource.id)
+            ).all()
+            for relationship in existing_relationships:
+                relationship.deleted_at = datetime.now(timezone.utc)
+
+            self.session.add(datasource)
             self.session.commit()
 
             logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} (removed from MindsDB)")

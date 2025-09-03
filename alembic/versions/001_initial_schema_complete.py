@@ -63,7 +63,7 @@ def upgrade() -> None:
         sa.Column('parameters', sa.JSON(), nullable=True),
         sa.Column('description', sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('name', 'user_id', name='unique_mind_name_per_user'),
+        sa.UniqueConstraint('name', 'user_id', 'deleted_at', name='unique_mind_name_per_user'),
         comment='Minds table with UUID primary key and automatic timestamps'
     )
     
@@ -106,7 +106,7 @@ def upgrade() -> None:
         sa.Column('connection_data', sa.JSON(), nullable=True),
         sa.Column('user_id', sa.String(length=255), nullable=False),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('name', 'user_id', name='unique_datasource_name_per_user'),
+        sa.UniqueConstraint('name', 'user_id', 'deleted_at', name='unique_datasource_name_per_user'),
         comment='Datasources table for storing database connection information'
     )
     
@@ -143,10 +143,10 @@ def upgrade() -> None:
         sa.Column('mind_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('datasource_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('purpose', sa.String(length=255), nullable=True),
-        sa.ForeignKeyConstraint(['mind_id'], ['minds.id'], ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['datasource_id'], ['datasources.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['mind_id'], ['minds.id']),
+        sa.ForeignKeyConstraint(['datasource_id'], ['datasources.id']),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('mind_id', 'datasource_id', name='unique_mind_datasource_pair'),
+        sa.UniqueConstraint('mind_id', 'datasource_id', 'deleted_at', name='unique_mind_datasource_pair'),
         comment='Junction table linking minds to datasources (many-to-many relationship)'
     )
     
