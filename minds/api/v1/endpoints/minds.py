@@ -33,7 +33,7 @@ async def list_minds(
     minds_service: MindsService = Depends(get_minds_service),
     # Optional query parameters for filtering and pagination
     provider: str | None = Query(None, description="Filter by provider (openai, google, etc.)"),
-    is_active: bool | None = Query(None, description="Filter by active status"),
+    include_deleted: bool = Query(False, description="Filter by deleted status"),
     limit: int = Query(50, le=100, ge=1, description="Maximum number of minds to return"),
     offset: int = Query(0, ge=0, description="Number of minds to skip for pagination"),
 ) -> list[MindResponse]:
@@ -42,7 +42,7 @@ async def list_minds(
 
     Query Parameters:
         - provider: Filter by AI provider (openai, google, etc.)
-        - is_active: Filter by active status (true/false)
+        - include_deleted: Filter by deleted status (true/false)
         - limit: Maximum number of minds to return (1-100, default: 50)
         - offset: Number of minds to skip for pagination (default: 0)
 
@@ -52,7 +52,7 @@ async def list_minds(
     logger.debug(f"List minds requested (v1) for user {minds_service.user_id}")
 
     try:
-        minds = await minds_service.list_minds(provider=provider, is_active=is_active, limit=limit, offset=offset)
+        minds = await minds_service.list_minds(provider=provider, include_deleted=include_deleted, limit=limit, offset=offset)
 
         logger.info(f"Retrieved {len(minds)} minds for user {minds_service.user_id}")
         return minds

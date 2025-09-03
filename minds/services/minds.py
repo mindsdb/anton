@@ -5,7 +5,7 @@ This module contains the MindsService class that handles all business logic
 related to mind management, including CRUD operations with internal database storage.
 MindsDB is only used for datasource validation, not for minds storage.
 """
-
+from datetime import datetime
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, select
 
@@ -72,7 +72,7 @@ class MindsService:
     async def list_minds(
         self,
         provider: str | None = None,
-        is_active: bool | None = None,
+        include_deleted: bool = False,
         limit: int = 50,
         offset: int = 0,
         with_detailed_data: bool = False,
@@ -82,7 +82,7 @@ class MindsService:
 
         Args:
             provider (Optional[str]): Filter by provider (openai, google, etc.)
-            is_active (Optional[bool]): Filter by active status
+            include_deleted (Optional[bool]): Filter by deleted status
             limit (int): Maximum number of minds to return (default: 50)
             offset (int): Number of minds to skip (default: 0)
             with_detailed_data (bool): Include detailed datasource base data
@@ -93,7 +93,7 @@ class MindsService:
         try:
             logger.debug(
                 f"Listing minds for user {self.user_id} with filters: "
-                f"provider={provider}, is_active={is_active}, limit={limit}, offset={offset}"
+                f"provider={provider}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
             )
 
             # Build query conditions
@@ -101,11 +101,8 @@ class MindsService:
             if provider is not None:
                 conditions.append(Mind.provider == provider)
             # not sure if this is needed initially
-            if is_active is not None:
-                conditions.append(Mind.is_active == is_active)
-            else:
-                # Default: only active minds unless explicitly requested
-                conditions.append(Mind.is_active)
+            if not include_deleted:
+                conditions.append(Mind.deleted_at is None)
 
             statement = (
                 select(Mind)
@@ -148,7 +145,7 @@ class MindsService:
             statement = (
                 select(Mind)
                 .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
-                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
+                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at is None))
             )
             mind = self.session.exec(statement).first()
 
@@ -183,7 +180,7 @@ class MindsService:
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
-                select(Mind).where(and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.is_active))
+                select(Mind).where(and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.deleted_at is None))
             ).first()
 
             if existing_mind:
@@ -199,7 +196,7 @@ class MindsService:
                 model_name=mind_data.model_name or "gpt-4o",  # Default model
                 user_id=self.user_id,
                 parameters=mind_data.parameters or {},
-                is_active=True,
+                deleted_at=None,
             )
 
             self.session.add(new_mind)
@@ -242,7 +239,7 @@ class MindsService:
             statement = (
                 select(Mind)
                 .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
-                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
+                .where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at is None))
             )
             mind = self.session.exec(statement).first()
 
@@ -252,7 +249,7 @@ class MindsService:
             # Check if new name conflicts with existing minds
             if mind_data.name and mind_data.name != mind_name:
                 existing_mind = self.session.exec(
-                    select(Mind).where(and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.is_active))
+                    select(Mind).where(and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.deleted_at is None))
                 ).first()
                 if existing_mind:
                     raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
@@ -308,7 +305,7 @@ class MindsService:
         try:
             logger.debug(f"Deleting mind {mind_name} for user {self.user_id}")
 
-            statement = select(Mind).where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
+            statement = select(Mind).where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at is None))
             mind = self.session.exec(statement).first()
 
             if not mind:
@@ -317,7 +314,7 @@ class MindsService:
             if cascade:
                 logger.debug(f"Cascade deletion requested for mind {mind_name}")
 
-            mind.is_active = False
+            mind.deleted_at = datetime.now()
 
             self.session.add(mind)
             self.session.commit()
@@ -346,7 +343,7 @@ class MindsService:
         try:
             logger.debug(f"Adding datasource {datasource_request.name} to mind {mind_name}")
 
-            statement = select(Mind).where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
+            statement = select(Mind).where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at is None))
             mind = self.session.exec(statement).first()
 
             if not mind:
@@ -413,7 +410,7 @@ class MindsService:
         try:
             logger.debug(f"Removing datasource {datasource_name} from mind {mind_name}")
 
-            statement = select(Mind).where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.is_active))
+            statement = select(Mind).where(and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at is None))
             mind = self.session.exec(statement).first()
 
             if not mind:

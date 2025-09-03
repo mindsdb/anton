@@ -47,7 +47,6 @@ class BaseSQLModel(SQLModel):
     deleted_at: datetime | None = Field(
         default=None,
         sa_type=sa.DateTime(timezone=True),  # type: ignore
-        sa_column_kwargs={"onupdate": sa.func.now(), "server_default": sa.func.now()},
         description=(
             "The date and time the record was deleted. "
             "Field is optional and not needed when instantiating a new record. "

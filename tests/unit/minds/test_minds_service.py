@@ -51,7 +51,7 @@ class TestMindsService:
             model_name="gpt-4o",
             user_id="test-user-123",
             parameters={"temperature": 0.7},
-            is_active=True,
+            deleted_at=None,
         )
 
     @pytest.fixture
@@ -102,7 +102,7 @@ class TestMindsService:
         """Test minds listing with filters."""
         mock_session.exec.return_value.all.return_value = [sample_mind]
 
-        result = await minds_service.list_minds(provider="openai", is_active=True, limit=5, offset=10)
+        result = await minds_service.list_minds(provider="openai", include_deleted=False, limit=5, offset=10)
 
         assert len(result) == 1
         mock_session.exec.assert_called_once()
@@ -253,7 +253,7 @@ class TestMindsService:
         result = await minds_service.delete_mind("test-mind")
 
         assert result is True
-        assert sample_mind.is_active is False  # Should be soft deleted
+        assert sample_mind.deleted_at is not None  # Should be soft deleted
         mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
 

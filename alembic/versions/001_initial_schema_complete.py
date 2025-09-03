@@ -62,7 +62,6 @@ def upgrade() -> None:
         sa.Column('user_id', sa.String(length=256), nullable=False),
         sa.Column('parameters', sa.JSON(), nullable=True),
         sa.Column('description', sa.Text(), nullable=True),
-        sa.Column('is_active', sa.Boolean(), nullable=False, server_default='true'),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('name', 'user_id', name='unique_mind_name_per_user'),
         comment='Minds table with UUID primary key and automatic timestamps'

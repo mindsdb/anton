@@ -8,6 +8,7 @@ Tests the SQLModel Mind class including:
 - Database constraints
 """
 
+from datetime import datetime
 import pytest
 
 from minds.model.mind import Mind
@@ -26,7 +27,7 @@ class TestMindModel:
             "user_id": "user-123",
             "parameters": {"temperature": 0.7, "max_tokens": 100},
             "description": "Test mind for unit tests",
-            "is_active": True,
+            "deleted_at": None,
         }
 
     def test_mind_creation_with_all_fields(self, sample_mind_data):
@@ -40,7 +41,7 @@ class TestMindModel:
         assert mind.parameters == {"temperature": 0.7, "max_tokens": 100}
         assert mind.mind_datasources == []  # No relationships set in this basic test
         assert mind.description == "Test mind for unit tests"
-        assert mind.is_active is True
+        assert mind.deleted_at is None
 
     def test_mind_creation_with_minimal_fields(self):
         """Test creating a Mind with minimal required fields."""
@@ -55,7 +56,7 @@ class TestMindModel:
         assert mind.parameters == {}
         assert mind.mind_datasources == []
         assert mind.description is None
-        assert mind.is_active is True
+        assert mind.deleted_at is None
 
     def test_mind_default_values(self):
         """Test Mind model default values."""
@@ -64,7 +65,7 @@ class TestMindModel:
         # Test that default factories create new instances
         assert isinstance(mind.parameters, dict)
         assert isinstance(mind.mind_datasources, list)
-        assert mind.is_active is True
+        assert mind.deleted_at is None
 
         mind2 = Mind(name="default-test-2", provider="openai", model_name="gpt-4o", user_id="user-123")
 
@@ -105,7 +106,7 @@ class TestMindModel:
         assert isinstance(mind.model_name, str)
         assert isinstance(mind.user_id, str)
         assert isinstance(mind.parameters, dict)
-        assert isinstance(mind.is_active, bool)
+        assert isinstance(mind.deleted_at, datetime)
 
     def test_mind_required_fields(self):
         """Test that Mind requires essential fields."""
@@ -244,17 +245,17 @@ class TestMindModel:
         assert mind.description == long_description
         assert len(mind.description) == 1000
 
-    def test_mind_boolean_field(self):
-        """Test Mind boolean field (is_active)."""
+    def test_mind_datetime_field(self):
+        """Test Mind datetime field (deleted_at)."""
         # Test True value
         mind_active = Mind(
             name="active-mind",
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            is_active=True,
+            deleted_at=None,
         )
-        assert mind_active.is_active is True
+        assert mind_active.deleted_at is None
 
         # Test False value
         mind_inactive = Mind(
@@ -262,9 +263,9 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id="user-123",
-            is_active=False,
+            deleted_at=datetime.now(),
         )
-        assert mind_inactive.is_active is False
+        assert mind_inactive.deleted_at is not None
 
     def test_mind_inheritance_from_base(self, sample_mind_data):
         """Test that Mind inherits from BaseSQLModel correctly."""

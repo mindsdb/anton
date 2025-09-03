@@ -30,9 +30,6 @@ class Mind(BaseSQLModel, table=True):
         default=None, sa_column=Column(Text), description="Optional description of the mind"
     )
 
-    # Status tracking
-    is_active: bool = Field(default=True, description="Whether the mind is active")
-
     # Relationships - Many-to-many with datasources through junction table
     mind_datasources: list["MindDatasource"] = Relationship(back_populates="mind")
 
