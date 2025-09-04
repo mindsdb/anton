@@ -648,9 +648,9 @@ class TestDataCatalog:
     @pytest.fixture
     def mock_mind_datasource(self, mock_datasource):
         """Mock mind_datasource for testing."""
-        from uuid import uuid4
         from datetime import datetime
-        
+        from uuid import uuid4
+
         mind_datasource = Mock()
         mind_datasource.id = uuid4()
         mind_datasource.created_at = datetime.now()
@@ -733,17 +733,17 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the datasource access by patching the method
         def mock_format_header(self):
             lines = []
-            lines.append(f"MindsDB Data Source: test_datasource")
-            lines.append(f"Engine: postgresql")
+            lines.append("MindsDB Data Source: test_datasource")
+            lines.append("Engine: postgresql")
             lines.append("")
-            lines.append(f"Number of Tables: 2")
+            lines.append("Number of Tables: 2")
             lines.append("")
             return lines
-        
+
         catalog._format_header = mock_format_header.__get__(catalog, DataCatalog)
         header_lines = catalog._format_header()
 
@@ -762,15 +762,15 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the _format_table method to avoid SQLAlchemy relationship issues
         def mock_format_table(self, table):
             lines = []
-            lines.append(f"Table: test_datasource.users - User information table")
+            lines.append("Table: test_datasource.users - User information table")
             lines.append("  Columns:")
             lines.append("")  # Blank line at end
             return lines
-        
+
         catalog._format_table = mock_format_table.__get__(catalog, DataCatalog)
         table_lines = catalog._format_table(sample_table)
 
@@ -790,13 +790,13 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the _format_table method to avoid SQLAlchemy relationship issues
         def mock_format_table(self, table):
             lines = []
-            lines.append(f"Table: test_datasource.orders")
+            lines.append("Table: test_datasource.orders")
             return lines
-        
+
         catalog._format_table = mock_format_table.__get__(catalog, DataCatalog)
         table_lines = catalog._format_table(table)
 
@@ -935,14 +935,14 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the _format_table_constraints method to avoid SQLAlchemy relationship issues
         def mock_format_table_constraints(self, table):
             lines = []
             lines.append("  Foreign Keys:")
             lines.append("    - user_id → test_datasource.users(id)")
             return lines
-        
+
         catalog._format_table_constraints = mock_format_table_constraints.__get__(catalog, DataCatalog)
         constraint_lines = catalog._format_table_constraints(table)
 
@@ -988,14 +988,14 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the _format_relationships method to avoid SQLAlchemy relationship issues
         def mock_format_relationships(self, table):
             lines = []
             if table.name == "orders":
                 lines.append("test_datasource.orders is related to: users")
             return lines
-        
+
         catalog._format_relationships = mock_format_relationships.__get__(catalog, DataCatalog)
         relationship_lines = catalog._format_relationships(table1)
         related_tables = []
@@ -1027,7 +1027,7 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the _format_relationships method to avoid SQLAlchemy relationship issues
         def mock_format_relationships(self, table):
             lines = []
@@ -1036,7 +1036,7 @@ class TestDataCatalog:
             lines.append("test_datasource.users is related to: test_datasource.orders")
             lines.append("")
             return lines
-        
+
         catalog._format_relationships = mock_format_relationships.__get__(catalog, DataCatalog)
         relationship_lines = catalog._format_relationships(table1)
 
@@ -1069,7 +1069,7 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the to_context_str method to avoid SQLAlchemy relationship issues
         def mock_to_context_str(self):
             lines = []
@@ -1087,8 +1087,8 @@ class TestDataCatalog:
             lines.append("      Most Common: 25 (15.0%), 30 (12.0%), 35 (10.0%)")
             lines.append("")
             return "\n".join(lines)
-        
-        object.__setattr__(catalog, 'to_context_str', mock_to_context_str.__get__(catalog, DataCatalog))
+
+        object.__setattr__(catalog, "to_context_str", mock_to_context_str.__get__(catalog, DataCatalog))
         context_str = catalog.to_context_str()
 
         lines = context_str.split("\n")
@@ -1113,7 +1113,7 @@ class TestDataCatalog:
         # Create DataCatalog with mock directly to avoid validation issues
         catalog = DataCatalog.__new__(DataCatalog)
         catalog.mind_datasource = mock_mind_datasource
-        
+
         # Mock the to_context_str method to avoid SQLAlchemy relationship issues
         def mock_to_context_str(self):
             lines = []
@@ -1123,8 +1123,8 @@ class TestDataCatalog:
             lines.append("Number of Tables: 0")
             lines.append("")
             return "\n".join(lines)
-        
-        object.__setattr__(catalog, 'to_context_str', mock_to_context_str.__get__(catalog, DataCatalog))
+
+        object.__setattr__(catalog, "to_context_str", mock_to_context_str.__get__(catalog, DataCatalog))
         context_str = catalog.to_context_str()
 
         lines = context_str.split("\n")

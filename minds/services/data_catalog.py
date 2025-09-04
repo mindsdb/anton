@@ -178,7 +178,7 @@ class DataCatalogLoader:
         """Get primary key information from META_KEY_COLUMN_USAGE with optional filtering."""
         logger.info(f"Getting primary key information for datasource '{datasource.name}' with filter: {table_names}")
 
-         # TODO: This query is hacky. It is written to allow it to run on MindsDB.
+        # TODO: This query is hacky. It is written to allow it to run on MindsDB.
         query = f"""
         SELECT 
             kcu.TABLE_NAME,

@@ -222,7 +222,8 @@ class DataCatalog(BaseSQLModel, table=False):
                 if fk.referenced_table.name == table.name:
                     continue
 
-                # Further, foreign keys will also contains instances where the referenced table is not included in the relationship.
+                # Further, foreign keys will also contains instances where the referenced table is
+                # not included in the relationship.
                 if fk.referenced_table.name not in self.mind_datasource.tables:
                     continue
 
