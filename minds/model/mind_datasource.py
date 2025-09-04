@@ -10,8 +10,8 @@ This allows:
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import UniqueConstraint
-from sqlmodel import Field, Relationship
+from sqlalchemy import JSON, UniqueConstraint
+from sqlmodel import Column as SQLModelColumn, Field, Relationship
 
 from minds.model.base import BaseSQLModel
 
@@ -35,6 +35,10 @@ class MindDatasource(BaseSQLModel, table=True):
     mind_id: UUID = Field(..., foreign_key="minds.id", description="ID of the mind", index=True)
 
     datasource_id: UUID = Field(..., foreign_key="datasources.id", description="ID of the datasource", index=True)
+
+    tables: list[str] | None = Field(
+        default_factory=list, sa_column=SQLModelColumn(JSON), description="Specific tables to use (None = all tables)"
+    )
 
     # Relationships back to parent models
     mind: "Mind" = Relationship(back_populates="mind_datasources")

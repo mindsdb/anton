@@ -15,7 +15,7 @@ from minds.common.logger import setup_logging
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import MindDatasource
-from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
 
 # Set up logging
 logger = setup_logging()
@@ -362,7 +362,7 @@ class MindsService:
     def _mind_to_response(self, mind: Mind, with_detailed_data: bool = False) -> MindResponse:
         """Convert Mind database model to MindResponse object."""
         # Get linked datasources through the many-to-many relationship
-        datasources = [relationship.datasource.name for relationship in mind.mind_datasources]
+        datasources = [DatasourceConfig(name=relationship.datasource.name, tables=relationship.tables) for relationship in mind.mind_datasources]
 
         # TODO: add detailed datasource data if with_detailed_data is True, this is the
         # actual DATA value in the integrations e.g without password which should be hashed
@@ -377,14 +377,15 @@ class MindsService:
             updated_at=str(mind.modified_at) if mind.modified_at else "",
         )
 
-    async def _validate_datasources(self, datasource_names: list[str]) -> None:
+    async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:
         """
         Validate that all datasources exist using MindsDB.
 
         Note: MindsDB is still used for datasource validation since datasources
         are managed by MindsDB, not stored in our internal database.
         """
-        for datasource_name in datasource_names:
+        for datasource_config in datasource_configs:
+            datasource_name = datasource_config.name
             try:
                 # Check if datasource exists in MindsDB
                 # Note: Replace with actual MindsDB SDK call
@@ -408,7 +409,7 @@ class MindsService:
             logger.error(f"Error checking datasource connection {datasource_name}: {str(e)}")
             raise MindsServiceError(f"Datasource connection check failed: {str(e)}") from None
 
-    async def _add_datasources_to_mind(self, mind: Mind, datasource_names: list[str]) -> None:
+    async def _add_datasources_to_mind(self, mind: Mind, datasource_configs: list[DatasourceConfig]) -> None:
         """
         Add multiple datasources to a mind by creating MindDatasource relationships.
 
@@ -416,12 +417,13 @@ class MindsService:
             mind (Mind): The mind to add datasources to
             datasource_names (list[str]): List of datasource names to add
         """
-        for datasource_name in datasource_names:
+        for datasource_config in datasource_configs:
             try:
+                datasource_name = datasource_config.name
                 # Find the datasource
                 datasource = self.session.exec(
                     select(Datasource).where(
-                        and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id)
+                        and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
                     )
                 ).first()
 
@@ -432,7 +434,7 @@ class MindsService:
                 # Check if relationship already exists
                 existing_relationship = self.session.exec(
                     select(MindDatasource).where(
-                        and_(MindDatasource.mind_id == mind.id, MindDatasource.datasource_id == datasource.id)
+                        and_(MindDatasource.mind_id == mind.id, MindDatasource.datasource_id == datasource.id, MindDatasource.deleted_at.is_(None))
                     )
                 ).first()
 
@@ -441,7 +443,7 @@ class MindsService:
                     continue
 
                 # Create new relationship
-                mind_datasource = MindDatasource(mind_id=mind.id, datasource_id=datasource.id)
+                mind_datasource = MindDatasource(mind_id=mind.id, datasource_id=datasource.id, tables=datasource_config.tables)
 
                 self.session.add(mind_datasource)
                 logger.debug(f"Added datasource {datasource_name} to mind {mind.name}")
@@ -459,21 +461,23 @@ class MindsService:
             logger.error(f"Error committing datasource relationships: {str(e)}")
             raise
 
-    async def _update_mind_datasources(self, mind: Mind, new_datasource_names: list[str]) -> None:
+    async def _update_mind_datasources(self, mind: Mind, new_datasource_configs: list[DatasourceConfig]) -> None:
         """
         Update the datasources associated with a mind by replacing all relationships.
 
         Args:
             mind (Mind): The mind to update datasources for
-            new_datasource_names (list[str]): New list of datasource names
+            new_datasource_configs (list[DatasourceConfig]): New list of datasource configs
         """
         try:
             # Remove all existing relationships - soft delete only.
             for relationship in mind.mind_datasources:
                 relationship.deleted_at = datetime.now(timezone.utc)
 
+            self.session.flush()
+
             # Add new relationships
-            await self._add_datasources_to_mind(mind, new_datasource_names)
+            await self._add_datasources_to_mind(mind, new_datasource_configs)
 
             logger.debug(f"Updated datasources for mind {mind.name}")
 

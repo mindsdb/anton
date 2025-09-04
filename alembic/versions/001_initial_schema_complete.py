@@ -143,6 +143,7 @@ def upgrade() -> None:
         ),
         sa.Column('mind_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('datasource_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('tables', postgresql.JSON(astext_type=sa.Text()), nullable=True),
         sa.Column('purpose', sa.String(length=255), nullable=True),
         sa.ForeignKeyConstraint(['mind_id'], ['minds.id']),
         sa.ForeignKeyConstraint(['datasource_id'], ['datasources.id']),
