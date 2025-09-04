@@ -330,7 +330,7 @@ class MindsService:
 
             logger.info(f"Deleted mind {mind_name} for user {self.user_id}")
             return True
-        except (MindNotFoundError):
+        except MindNotFoundError:
             self.session.rollback()
             raise
         except Exception as e:
@@ -370,7 +370,13 @@ class MindsService:
     def _mind_to_response(self, mind: Mind, with_detailed_data: bool = False) -> MindResponse:
         """Convert Mind database model to MindResponse object."""
         # Get linked datasources through the many-to-many relationship
-        datasources = [DatasourceConfig(name=relationship.datasource.name, tables=relationship.tables) for relationship in mind.mind_datasources]
+        datasources = [
+            DatasourceConfig(
+                name=relationship.datasource.name,
+                tables=relationship.tables,
+            )
+            for relationship in mind.mind_datasources
+        ]
 
         # TODO: add detailed datasource data if with_detailed_data is True, this is the
         # actual DATA value in the integrations e.g without password which should be hashed
@@ -396,7 +402,11 @@ class MindsService:
                 logger.debug(f"Validating datasource: {datasource_name}")
                 datasource = self.session.exec(
                     select(Datasource).where(
-                        and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
+                        and_(
+                            Datasource.name == datasource_name,
+                            Datasource.user_id == self.user_id,
+                            Datasource.deleted_at.is_(None),
+                        )
                     )
                 ).first()
 
@@ -407,7 +417,7 @@ class MindsService:
                     try:
                         available_tables = self.mindsdb_client.databases.get(datasource_name).tables.list()
                     except AttributeError:
-                        raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found in MindsDB")
+                        raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found in MindsDB") from None
                     available_table_names = [table.name for table in available_tables]
 
                     missing_tables = [table for table in datasource_tables if table not in available_table_names]
@@ -434,7 +444,11 @@ class MindsService:
                 # Find the datasource
                 datasource = self.session.exec(
                     select(Datasource).where(
-                        and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
+                        and_(
+                            Datasource.name == datasource_name,
+                            Datasource.user_id == self.user_id,
+                            Datasource.deleted_at.is_(None),
+                        )
                     )
                 ).first()
 
@@ -445,7 +459,11 @@ class MindsService:
                 # Check if relationship already exists
                 existing_relationship = self.session.exec(
                     select(MindDatasource).where(
-                        and_(MindDatasource.mind_id == mind.id, MindDatasource.datasource_id == datasource.id, MindDatasource.deleted_at.is_(None))
+                        and_(
+                            MindDatasource.mind_id == mind.id,
+                            MindDatasource.datasource_id == datasource.id,
+                            MindDatasource.deleted_at.is_(None),
+                        )
                     )
                 ).first()
 
@@ -454,7 +472,11 @@ class MindsService:
                     continue
 
                 # Create new relationship
-                mind_datasource = MindDatasource(mind_id=mind.id, datasource_id=datasource.id, tables=datasource_config.tables)
+                mind_datasource = MindDatasource(
+                    mind_id=mind.id,
+                    datasource_id=datasource.id,
+                    tables=datasource_config.tables,
+                )
 
                 self.session.add(mind_datasource)
                 logger.debug(f"Added datasource {datasource_name} to mind {mind.name}")

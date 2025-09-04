@@ -32,7 +32,7 @@ class TestMindCreateRequest:
             "parameters": {"temperature": 0.7, "max_tokens": 100},
             "datasources": [
                 DatasourceConfig(name="datasource1", tables=["table1", "table2"]),
-                DatasourceConfig(name="datasource2", tables=None)
+                DatasourceConfig(name="datasource2", tables=None),
             ],
         }
 
@@ -128,8 +128,8 @@ class TestMindCreateRequest:
             [
                 DatasourceConfig(name="datasource1", tables=["table1"]),
                 DatasourceConfig(name="datasource2", tables=None),
-                DatasourceConfig(name="datasource3", tables=["table3a", "table3b"])
-            ]
+                DatasourceConfig(name="datasource3", tables=["table3a", "table3b"]),
+            ],
         ]
 
         for datasources in valid_datasources:

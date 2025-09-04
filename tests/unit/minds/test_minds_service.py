@@ -73,7 +73,7 @@ class TestMindsService:
             parameters={"temperature": 0.8},
             datasources=[
                 DatasourceConfig(name="datasource1", tables=["table1"]),
-                DatasourceConfig(name="datasource2", tables=None)
+                DatasourceConfig(name="datasource2", tables=None),
             ],
         )
 

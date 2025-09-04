@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 class DatasourceConfig(BaseModel):
     """Reference to a datasource with optional table specification."""
+
     name: str = Field(..., description="Name of the datasource")
     tables: list[str] | None = Field(None, description="Specific tables to use (None = all tables)")
 

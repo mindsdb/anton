@@ -84,8 +84,10 @@ class TestMindsAPI:
 
     def test_get_minds_service_dependency(self, mock_request, mock_session):
         """Test the get_minds_service dependency function."""
-        with patch("minds.api.v1.endpoints.minds.extract_context_from_request") as mock_extract, \
-            patch("minds.api.v1.endpoints.minds.create_mindsdb_client_from_request") as mock_create_client:
+        with (
+            patch("minds.api.v1.endpoints.minds.extract_context_from_request") as mock_extract,
+            patch("minds.api.v1.endpoints.minds.create_mindsdb_client_from_request") as mock_create_client,
+        ):
             mock_extract.return_value.user_id = "test-user-123"
             mock_mindsdb_client = Mock()
             mock_create_client.return_value = mock_mindsdb_client
@@ -252,7 +254,12 @@ class TestMindsAPI:
         mock_minds_service.create_mind = AsyncMock(side_effect=MindAlreadyExistsError("Already exists"))
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(
-                mind_data=MindCreateRequest(name="test", provider="openai", datasources=[]), minds_service=mock_minds_service
+                mind_data=MindCreateRequest(
+                    name="test",
+                    provider="openai",
+                    datasources=[],
+                ),
+                minds_service=mock_minds_service,
             )
         assert exc_info.value.status_code == 409
 

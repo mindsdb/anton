@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import JSON, UniqueConstraint
-from sqlmodel import Column as SQLModelColumn, Field, Relationship
+from sqlmodel import Column as SQLModelColumn
+from sqlmodel import Field, Relationship
 
 from minds.model.base import BaseSQLModel
 
