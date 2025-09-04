@@ -168,7 +168,7 @@ class TestDataCatalogLoader:
         # Verify query was constructed correctly
         expected_query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
-        WHERE TABLE_CATALOG = '{mock_datasource.name}'
+        WHERE TABLE_SCHEMA = '{mock_datasource.name}'
         """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
@@ -197,7 +197,7 @@ class TestDataCatalogLoader:
         # Verify query includes filter
         expected_query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
-        WHERE TABLE_CATALOG = '{mock_datasource.name}'
+        WHERE TABLE_SCHEMA = '{mock_datasource.name}'
          AND TABLE_NAME IN ('table1', 'table2')"""
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
@@ -253,7 +253,7 @@ class TestDataCatalogLoader:
 
         expected_query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMNS 
-        WHERE TABLE_CATALOG = '{mock_datasource.name}'
+        WHERE TABLE_SCHEMA = '{mock_datasource.name}'
          AND TABLE_NAME IN ('table1')"""
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
@@ -283,7 +283,7 @@ class TestDataCatalogLoader:
 
         expected_query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMN_STATISTICS 
-        WHERE TABLE_CATALOG = '{mock_datasource.name}'
+        WHERE TABLE_SCHEMA = '{mock_datasource.name}'
         """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
@@ -310,12 +310,12 @@ class TestDataCatalogLoader:
             kcu.CONSTRAINT_NAME
         FROM information_schema.META_KEY_COLUMN_USAGE kcu
         INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
-            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            ON kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+            AND kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
             AND kcu.TABLE_NAME = tc.TABLE_NAME
-            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
-            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
         WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-            AND kcu.CONSTRAINT_CATALOG = '{mock_datasource.name}'
+            AND kcu.TABLE_SCHEMA = '{mock_datasource.name}'
+            AND tc.TABLE_SCHEMA = '{mock_datasource.name}'
         """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
@@ -351,12 +351,12 @@ class TestDataCatalogLoader:
             kcu.REFERENCED_COLUMN_NAME
         FROM information_schema.META_KEY_COLUMN_USAGE kcu
         INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
-            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            ON kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+            AND kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
             AND kcu.TABLE_NAME = tc.TABLE_NAME
-            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
-            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
         WHERE tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
-            AND kcu.CONSTRAINT_CATALOG = '{mock_datasource.name}'
+            AND kcu.TABLE_SCHEMA = '{mock_datasource.name}'
+            AND tc.TABLE_SCHEMA = '{mock_datasource.name}'
         """
         data_catalog_loader._execute_query.assert_called_once()
         call_args = data_catalog_loader._execute_query.call_args[0][0]
