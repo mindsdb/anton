@@ -7,10 +7,8 @@ organized by domain.
 
 from .chat import ChatCompletion, ChatCompletionChunk, Choice, Message, Role, StreamChoice, Usage
 from .minds import (
-    AddDatasourceRequest,
     DeleteMindRequest,
     MindCreateRequest,
-    MindDatasourceResponse,
     MindResponse,
     MindUpdateRequest,
 )
@@ -28,7 +26,5 @@ __all__ = [
     "MindCreateRequest",
     "MindUpdateRequest",
     "MindResponse",
-    "AddDatasourceRequest",
     "DeleteMindRequest",
-    "MindDatasourceResponse",
 ]

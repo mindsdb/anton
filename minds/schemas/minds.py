@@ -42,24 +42,9 @@ class MindResponse(BaseModel):
     updated_at: str | None = Field(None, description="Last update timestamp")
 
 
-class AddDatasourceRequest(BaseModel):
-    """Request model for adding a datasource to a mind."""
-
-    name: str = Field(..., description="Datasource name", min_length=1, max_length=256)
-    tables: list[str] | None = Field(None, description="Specific tables to include from the datasource")
-    check_connection: bool = Field(default=False, description="Whether to test connection before adding")
-
-
 class DeleteMindRequest(BaseModel):
     """Request model for mind deletion with options."""
 
     cascade: bool = Field(
         default=False, description="Whether to delete associated resources that aren't used elsewhere"
     )
-
-
-class MindDatasourceResponse(BaseModel):
-    """Response model for mind-datasource operations."""
-
-    success: bool = Field(..., description="Whether the operation was successful")
-    message: str | None = Field(None, description="Additional information about the operation")

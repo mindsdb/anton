@@ -12,10 +12,8 @@ import pytest
 from pydantic import ValidationError
 
 from minds.schemas.minds import (
-    AddDatasourceRequest,
     DeleteMindRequest,
     MindCreateRequest,
-    MindDatasourceResponse,
     MindResponse,
     MindUpdateRequest,
 )
@@ -223,43 +221,6 @@ class TestMindResponse:
         assert serialized["parameters"] == {"temperature": 0.7}
 
 
-class TestAddDatasourceRequest:
-    """Test suite for AddDatasourceRequest schema."""
-
-    def test_valid_add_datasource_request(self):
-        """Test valid add datasource request."""
-        data = {"name": "test-datasource", "tables": ["table1", "table2"], "check_connection": True}
-
-        request = AddDatasourceRequest(**data)
-
-        assert request.name == "test-datasource"
-        assert request.tables == ["table1", "table2"]
-        assert request.check_connection is True
-
-    def test_add_datasource_request_minimal(self):
-        """Test minimal add datasource request."""
-        request = AddDatasourceRequest(name="minimal-datasource")
-
-        assert request.name == "minimal-datasource"
-        assert request.tables is None
-        assert request.check_connection is False  # Default value
-
-    def test_add_datasource_request_name_constraints(self):
-        """Test datasource name constraints."""
-        # Valid name
-        request = AddDatasourceRequest(name="valid-datasource-123")
-        assert request.name == "valid-datasource-123"
-
-        # Empty name should fail
-        with pytest.raises(ValidationError):
-            AddDatasourceRequest(name="")
-
-        # Too long name (assuming max_length=256)
-        too_long_name = "a" * 257
-        with pytest.raises(ValidationError):
-            AddDatasourceRequest(name=too_long_name)
-
-
 class TestDeleteMindRequest:
     """Test suite for DeleteMindRequest schema."""
 
@@ -274,31 +235,6 @@ class TestDeleteMindRequest:
         request = DeleteMindRequest(cascade=True)
 
         assert request.cascade is True
-
-
-class TestMindDatasourceResponse:
-    """Test suite for MindDatasourceResponse schema."""
-
-    def test_mind_datasource_response_success(self):
-        """Test successful mind datasource response."""
-        response = MindDatasourceResponse(success=True, message="Datasource added successfully")
-
-        assert response.success is True
-        assert response.message == "Datasource added successfully"
-
-    def test_mind_datasource_response_failure(self):
-        """Test failed mind datasource response."""
-        response = MindDatasourceResponse(success=False, message="Failed to add datasource")
-
-        assert response.success is False
-        assert response.message == "Failed to add datasource"
-
-    def test_mind_datasource_response_minimal(self):
-        """Test minimal mind datasource response."""
-        response = MindDatasourceResponse(success=True)
-
-        assert response.success is True
-        assert response.message is None
 
 
 class TestSchemaInteroperability:
