@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from minds.schemas.minds import (
+    DatasourceConfig,
     DeleteMindRequest,
     MindCreateRequest,
     MindResponse,
@@ -29,7 +30,10 @@ class TestMindCreateRequest:
             "provider": "openai",
             "model_name": "gpt-4o",
             "parameters": {"temperature": 0.7, "max_tokens": 100},
-            "datasources": ["datasource1", "datasource2"],
+            "datasources": [
+                DatasourceConfig(name="datasource1", tables=["table1", "table2"]),
+                DatasourceConfig(name="datasource2", tables=None)
+            ],
         }
 
         request = MindCreateRequest(**data)
@@ -38,7 +42,11 @@ class TestMindCreateRequest:
         assert request.provider == "openai"
         assert request.model_name == "gpt-4o"
         assert request.parameters == {"temperature": 0.7, "max_tokens": 100}
-        assert request.datasources == ["datasource1", "datasource2"]
+        assert len(request.datasources) == 2
+        assert request.datasources[0].name == "datasource1"
+        assert request.datasources[0].tables == ["table1", "table2"]
+        assert request.datasources[1].name == "datasource2"
+        assert request.datasources[1].tables is None
 
     def test_minimal_create_request(self):
         """Test minimal valid creation request."""
@@ -114,7 +122,15 @@ class TestMindCreateRequest:
     def test_create_request_datasources_validation(self):
         """Test datasources field validation."""
         # Valid datasources
-        valid_datasources = [[], ["single-datasource"], ["datasource1", "datasource2", "datasource3"]]
+        valid_datasources = [
+            [],
+            [DatasourceConfig(name="single-datasource")],
+            [
+                DatasourceConfig(name="datasource1", tables=["table1"]),
+                DatasourceConfig(name="datasource2", tables=None),
+                DatasourceConfig(name="datasource3", tables=["table3a", "table3b"])
+            ]
+        ]
 
         for datasources in valid_datasources:
             request = MindCreateRequest(name="test", provider="openai", datasources=datasources)
@@ -150,7 +166,7 @@ class TestMindUpdateRequest:
             "provider": "anthropic",
             "model_name": "claude-3",
             "parameters": {"temperature": 0.5},
-            "datasources": ["new-datasource"],
+            "datasources": [DatasourceConfig(name="new-datasource", tables=["table1"])],
         }
 
         request = MindUpdateRequest(**data)
@@ -159,7 +175,9 @@ class TestMindUpdateRequest:
         assert request.provider == "anthropic"
         assert request.model_name == "claude-3"
         assert request.parameters == {"temperature": 0.5}
-        assert request.datasources == ["new-datasource"]
+        assert len(request.datasources) == 1
+        assert request.datasources[0].name == "new-datasource"
+        assert request.datasources[0].tables == ["table1"]
 
 
 class TestMindResponse:
@@ -172,7 +190,7 @@ class TestMindResponse:
             "model_name": "gpt-4o",
             "provider": "openai",
             "parameters": {"temperature": 0.7},
-            "datasources": ["datasource1"],
+            "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
             "created_at": "2024-01-01T00:00:00Z",
             "updated_at": "2024-01-01T12:00:00Z",
         }
@@ -183,7 +201,9 @@ class TestMindResponse:
         assert response.model_name == "gpt-4o"
         assert response.provider == "openai"
         assert response.parameters == {"temperature": 0.7}
-        assert response.datasources == ["datasource1"]
+        assert len(response.datasources) == 1
+        assert response.datasources[0].name == "datasource1"
+        assert response.datasources[0].tables == ["table1"]
         assert response.created_at == "2024-01-01T00:00:00Z"
         assert response.updated_at == "2024-01-01T12:00:00Z"
 
@@ -209,7 +229,7 @@ class TestMindResponse:
             "model_name": "gpt-4o",
             "provider": "openai",
             "parameters": {"temperature": 0.7},
-            "datasources": ["datasource1"],
+            "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
             "created_at": "2024-01-01T00:00:00Z",
         }
 
@@ -247,7 +267,7 @@ class TestSchemaInteroperability:
             "provider": "openai",
             "model_name": "gpt-4o",
             "parameters": {"temperature": 0.7},
-            "datasources": ["datasource1"],
+            "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
         }
 
         create_request = MindCreateRequest(**create_data)
@@ -273,7 +293,7 @@ class TestSchemaInteroperability:
             "model_name": "gpt-4o",
             "provider": "openai",
             "parameters": {"temperature": 0.7},
-            "datasources": ["datasource1"],
+            "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
             "created_at": "2024-01-01T00:00:00Z",
             "updated_at": "2024-01-01T00:00:00Z",
         }

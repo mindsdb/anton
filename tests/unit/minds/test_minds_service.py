@@ -8,13 +8,13 @@ Tests the business logic layer for minds management including:
 - Transaction management
 """
 
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlmodel import Session
 
 from minds.model.mind import Mind
-from minds.schemas.minds import MindCreateRequest, MindUpdateRequest
+from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindUpdateRequest
 from minds.services.minds import (
     MindAlreadyExistsError,
     MindNotFoundError,
@@ -38,9 +38,18 @@ class TestMindsService:
         return session
 
     @pytest.fixture
-    def minds_service(self, mock_session):
+    def mock_mindsdb_client(self):
+        """Mock MindsDB client."""
+        return Mock()
+
+    @pytest.fixture
+    def minds_service(self, mock_session, mock_mindsdb_client):
         """Create MindsService instance with mocked session."""
-        return MindsService(session=mock_session, user_id="test-user-123")
+        # Mock the datasource validation by patching the validation method
+        service = MindsService(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test-user-123")
+        service._validate_datasources = AsyncMock()
+        service._add_datasources_to_mind = AsyncMock()
+        return service
 
     @pytest.fixture
     def sample_mind(self):
@@ -62,7 +71,10 @@ class TestMindsService:
             provider="openai",
             model_name="gpt-4o",
             parameters={"temperature": 0.8},
-            datasources=["datasource1", "datasource2"],
+            datasources=[
+                DatasourceConfig(name="datasource1", tables=["table1"]),
+                DatasourceConfig(name="datasource2", tables=None)
+            ],
         )
 
     @pytest.fixture
@@ -70,19 +82,21 @@ class TestMindsService:
         """Sample mind update request."""
         return MindUpdateRequest(name="updated-mind", parameters={"temperature": 0.9})
 
-    def test_service_initialization(self, mock_session):
+    def test_service_initialization(self, mock_session, mock_mindsdb_client):
         """Test MindsService initialization."""
-        service = MindsService(session=mock_session, user_id="user-123")
+        service = MindsService(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="user-123")
 
         assert service.session == mock_session
+        assert service.mindsdb_client == mock_mindsdb_client
         assert service.user_id == "user-123"
 
-    def test_create_classmethod(self, mock_session):
+    def test_create_classmethod(self, mock_session, mock_mindsdb_client):
         """Test the create classmethod."""
-        service = MindsService.create(session=mock_session, user_id="user-123")
+        service = MindsService.create(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="user-123")
 
         assert isinstance(service, MindsService)
         assert service.session == mock_session
+        assert service.mindsdb_client == mock_mindsdb_client
         assert service.user_id == "user-123"
 
     @pytest.mark.asyncio
@@ -174,8 +188,8 @@ class TestMindsService:
         assert result.name == "new-mind"
         assert result.provider == "openai"
         mock_session.add.assert_called_once()
-        # Commit is called twice: once for mind creation, once for datasource relationships
-        assert mock_session.commit.call_count == 2
+        # Commit is called once for mind creation (datasource addition is mocked)
+        assert mock_session.commit.call_count == 1
 
     @pytest.mark.asyncio
     async def test_create_mind_already_exists(self, minds_service, mock_session, create_request, sample_mind):

@@ -21,7 +21,7 @@ from minds.api.v1.endpoints.minds import (
     list_minds,
     update_mind,
 )
-from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
 from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
 
@@ -59,7 +59,9 @@ class TestMindsAPI:
             model_name="gpt-4o",
             provider="openai",
             parameters={"temperature": 0.7},
-            datasources=["test-datasource"],
+            datasources=[
+                DatasourceConfig(name="test-datasource", tables=["test-table"]),
+            ],
             created_at="2024-01-01T00:00:00Z",
             updated_at="2024-01-01T00:00:00Z",
         )
@@ -72,7 +74,7 @@ class TestMindsAPI:
             "provider": "openai",
             "model_name": "gpt-4o",
             "parameters": {"temperature": 0.8},
-            "datasources": ["datasource1"],
+            "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
         }
 
     @pytest.fixture
@@ -82,14 +84,18 @@ class TestMindsAPI:
 
     def test_get_minds_service_dependency(self, mock_request, mock_session):
         """Test the get_minds_service dependency function."""
-        with patch("minds.api.v1.endpoints.minds.extract_context_from_request") as mock_extract:
+        with patch("minds.api.v1.endpoints.minds.extract_context_from_request") as mock_extract, \
+            patch("minds.api.v1.endpoints.minds.create_mindsdb_client_from_request") as mock_create_client:
             mock_extract.return_value.user_id = "test-user-123"
+            mock_mindsdb_client = Mock()
+            mock_create_client.return_value = mock_mindsdb_client
 
             service = get_minds_service(mock_request, mock_session)
 
             assert isinstance(service, MindsService)
             assert service.session == mock_session
             assert service.user_id == "test-user-123"
+            assert service.mindsdb_client == mock_mindsdb_client
 
     @pytest.mark.asyncio
     async def test_list_minds_success(self, mock_minds_service, sample_mind_response):
@@ -246,7 +252,7 @@ class TestMindsAPI:
         mock_minds_service.create_mind = AsyncMock(side_effect=MindAlreadyExistsError("Already exists"))
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(
-                mind_data=MindCreateRequest(name="test", provider="openai"), minds_service=mock_minds_service
+                mind_data=MindCreateRequest(name="test", provider="openai", datasources=[]), minds_service=mock_minds_service
             )
         assert exc_info.value.status_code == 409
 
@@ -293,7 +299,7 @@ class TestMindsAPIErrorHandling:
         mock_service.user_id = "test-user"
         mock_service.create_mind = AsyncMock(side_effect=MindsServiceError("Validation failed"))
 
-        request = MindCreateRequest(name="test", provider="openai")
+        request = MindCreateRequest(name="test", provider="openai", datasources=[])
 
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(mind_data=request, minds_service=mock_service)
@@ -308,7 +314,7 @@ class TestMindsAPIErrorHandling:
         mock_service.user_id = "test-user"
         mock_service.create_mind = AsyncMock(side_effect=RuntimeError("Database error"))
 
-        request = MindCreateRequest(name="test", provider="openai")
+        request = MindCreateRequest(name="test", provider="openai", datasources=[])
 
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(mind_data=request, minds_service=mock_service)
@@ -379,13 +385,13 @@ class TestMindsAPIValidation:
     def test_mind_create_request_validation(self):
         """Test MindCreateRequest validation."""
         # Valid request
-        valid_data = {"name": "test-mind", "provider": "openai", "model_name": "gpt-4o"}
+        valid_data = {"name": "test-mind", "provider": "openai", "model_name": "gpt-4o", "datasources": []}
         request = MindCreateRequest(**valid_data)
         assert request.name == "test-mind"
         assert request.provider == "openai"
 
         # Valid request - provider has default value, so it's not required
-        request_minimal = MindCreateRequest(name="test")
+        request_minimal = MindCreateRequest(name="test", datasources=[])
         assert request_minimal.name == "test"
         assert request_minimal.provider == "openai"  # Default value
 
