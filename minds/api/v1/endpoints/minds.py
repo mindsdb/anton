@@ -8,6 +8,7 @@ providing a clean v1 API interface for mind management.
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlmodel import Session
 
+from minds.client.mindsdb import create_mindsdb_client_from_request
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.requests.context import extract_context_from_request
@@ -25,7 +26,8 @@ def get_minds_service(request: Request, session: Session = Depends(get_session))
     Dependency function to create MindsService with user context.
     """
     context = extract_context_from_request(request)
-    return MindsService.create(session=session, user_id=context.user_id)
+    mindsdb_client = create_mindsdb_client_from_request(request)
+    return MindsService.create(session=session, mindsdb_client=mindsdb_client, user_id=context.user_id)
 
 
 @router.get("/")

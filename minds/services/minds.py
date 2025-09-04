@@ -8,6 +8,7 @@ MindsDB is only used for datasource validation, not for minds storage.
 
 from datetime import datetime, timezone
 
+from mindsdb_sdk.server import Server
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
@@ -45,6 +46,12 @@ class DatasourceNotFoundError(MindsServiceError):
     pass
 
 
+class DatasourceTableNotFoundError(MindsServiceError):
+    """Raised when a datasource table is not found."""
+
+    pass
+
+
 class MindsService:
     """
     Service class for mind management operations.
@@ -54,7 +61,7 @@ class MindsService:
     only used for datasource validation, not for storing minds data.
     """
 
-    def __init__(self, session: Session, user_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str):
         """
         Initialize the minds service.
 
@@ -63,13 +70,14 @@ class MindsService:
             user_id (str): Current user ID
         """
         self.session = session
+        self.mindsdb_client = mindsdb_client
         self.user_id = user_id
         logger.debug(f"MindsService initialized for user {user_id}")
 
     @classmethod
-    def create(cls, session: Session, user_id: str) -> "MindsService":
+    def create(cls, session: Session, mindsdb_client: Server, user_id: str) -> "MindsService":
         """Factory method to create a MindsService instance."""
-        return cls(session=session, user_id=user_id)
+        return cls(session=session, mindsdb_client=mindsdb_client, user_id=user_id)
 
     async def list_minds(
         self,
@@ -214,7 +222,7 @@ class MindsService:
 
             return self._mind_to_response(new_mind)
 
-        except (MindAlreadyExistsError, DatasourceNotFoundError):
+        except (MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
         except Exception as e:
@@ -276,7 +284,7 @@ class MindsService:
 
             return self._mind_to_response(mind)
 
-        except (MindNotFoundError, MindAlreadyExistsError):
+        except (MindNotFoundError, MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
         except Exception as e:
@@ -322,7 +330,7 @@ class MindsService:
 
             logger.info(f"Deleted mind {mind_name} for user {self.user_id}")
             return True
-        except (MindNotFoundError, DatasourceNotFoundError):
+        except (MindNotFoundError):
             self.session.rollback()
             raise
         except Exception as e:
@@ -379,35 +387,38 @@ class MindsService:
 
     async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:
         """
-        Validate that all datasources exist using MindsDB.
-
-        Note: MindsDB is still used for datasource validation since datasources
-        are managed by MindsDB, not stored in our internal database.
+        Validate that all datasources (and tables if specified) exist in the internal database as well as the MindsDB.
         """
         for datasource_config in datasource_configs:
             datasource_name = datasource_config.name
+            datasource_tables = datasource_config.tables
             try:
-                # Check if datasource exists in MindsDB
-                # Note: Replace with actual MindsDB SDK call
                 logger.debug(f"Validating datasource: {datasource_name}")
-            except Exception as e:
+                datasource = self.session.exec(
+                    select(Datasource).where(
+                        and_(Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None))
+                    )
+                ).first()
+
+                if not datasource:
+                    raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found in database")
+
+                if datasource_tables:
+                    try:
+                        available_tables = self.mindsdb_client.databases.get(datasource_name).tables.list()
+                    except AttributeError:
+                        raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found in MindsDB")
+                    available_table_names = [table.name for table in available_tables]
+
+                    missing_tables = [table for table in datasource_tables if table not in available_table_names]
+                    if missing_tables:
+                        raise DatasourceTableNotFoundError(
+                            f"Tables {missing_tables} not found in datasource '{datasource_name}'. "
+                            f"Available tables: {available_table_names}"
+                        )
+            except (DatasourceNotFoundError, DatasourceTableNotFoundError) as e:
                 logger.error(f"Error validating datasource {datasource_name}: {str(e)}")
-                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' validation failed") from None
-
-    async def _check_datasource_connection(self, datasource_name: str) -> None:
-        """
-        Check if datasource connection is valid using MindsDB.
-
-        Note: MindsDB is still used for connection testing since datasources
-        are managed by MindsDB.
-        """
-        try:
-            # Test datasource connection via MindsDB
-            # Note: Replace with actual MindsDB SDK call when implementing
-            logger.debug(f"Checking connection for datasource: {datasource_name}")
-        except Exception as e:
-            logger.error(f"Error checking datasource connection {datasource_name}: {str(e)}")
-            raise MindsServiceError(f"Datasource connection check failed: {str(e)}") from None
+                raise
 
     async def _add_datasources_to_mind(self, mind: Mind, datasource_configs: list[DatasourceConfig]) -> None:
         """
