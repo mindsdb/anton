@@ -7,7 +7,7 @@ from sqlmodel import Column as SQLModelColumn
 from minds.model.base import BaseSQLModel
 
 if TYPE_CHECKING:
-    from minds.model.datasource import Datasource
+    from minds.model.mind_datasource import MindDatasource
 
 
 class Table(BaseSQLModel, table=True):
@@ -110,24 +110,24 @@ class ForeignKeyConstraint(BaseSQLModel, table=True):
 class DataCatalog(BaseSQLModel, table=False):
     """Data catalog metadata - a helper model for accessing datasource metadata."""
 
-    datasource: "Datasource" = Field(..., description="Datasource")
+    mind_datasource: "MindDatasource" = Field(..., description="MindDatasource")
 
     @classmethod
-    def from_datasource(cls, datasource: "Datasource") -> "DataCatalog":
+    def from_mind_datasource(cls, mind_datasource: "MindDatasource") -> "DataCatalog":
         """Create a DataCatalog instance from a datasource and its tables."""
-        return cls(datasource=datasource)
+        return cls(mind_datasource=mind_datasource)
 
     def _format_header(self) -> list[str]:
         """Format the header section with data source information."""
         lines = []
-        lines.append(f"MindsDB Data Source: {self.datasource.name}")
-        lines.append(f"Engine: {self.datasource.engine}")
+        lines.append(f"MindsDB Data Source: {self.mind_datasource.datasource.name}")
+        lines.append(f"Engine: {self.mind_datasource.datasource.engine}")
 
-        if self.datasource.handler_info:
-            lines.append(f"Handler Info: {self.datasource.handler_info}")
+        if self.mind_datasource.datasource.engine_info:
+            lines.append(f"Engine Info: {self.mind_datasource.datasource.engine_info}")
         lines.append("")
 
-        lines.append(f"Tables: {len(self.datasource.tables)}")
+        lines.append(f"Number of Tables: {len(self.mind_datasource.tables)}")
         lines.append("")
         return lines
 
@@ -136,7 +136,7 @@ class DataCatalog(BaseSQLModel, table=False):
         lines = []
 
         # Table header.
-        qualified_table_name = f"{self.datasource.name}.{table.name}"
+        qualified_table_name = f"{self.mind_datasource.datasource.name}.{table.name}"
         table_header = f"Table: {qualified_table_name}"
         if table.description:
             table_header += f" - {table.description}"
@@ -216,54 +216,44 @@ class DataCatalog(BaseSQLModel, table=False):
         if table.foreign_key_constraints:
             lines.append("  Foreign Keys:")
             for fk in table.foreign_key_constraints:
+                # TODO: Validate these conditions are correct.
+                # Foreign keys will also contain instances where this table is the referenced table.
+                # i.e., the relationship is represented both ways.
+                if fk.referenced_table.name == table.name:
+                    continue
+
+                # Further, foreign keys will also contains instances where the referenced table is not included in the relationship.
+                if fk.referenced_table.name not in self.mind_datasource.tables:
+                    continue
+
                 fk_column_name = fk.column.name
                 ref_column_name = fk.referenced_column.name
-                qualified_fk_table = f"{self.datasource.name}.{fk.referenced_table.name}"
+                qualified_fk_table = f"{self.mind_datasource.datasource.name}.{fk.referenced_table.name}"
                 fk_info = f"    - {fk_column_name} → {qualified_fk_table}({ref_column_name})"
-                # if fk.is_implicit:
-                #     confidence = fk.confidence or 0.0
-                #     fk_info += f" [implicit, confidence: {confidence:.1%}]"
                 lines.append(fk_info)
 
         return lines
 
-    def _format_relationships(self) -> list[str]:
-        """Format the relationships section."""
+    def _format_relationships(self, table: Table) -> list[str]:
+        """Format the relationships section for each table."""
         lines = []
-        relationship_lines = []
 
-        for table in self.datasource.tables:
-            related = self._get_related_tables(table)
-            related = [f"{self.datasource.name}.{n}" for n in related]
-            if related:
-                qualified_table_name = f"{self.datasource.name}.{table.name}"
-                relationship_lines.append(f"{qualified_table_name} is related to: {', '.join(related)}")
-
-        if relationship_lines:
-            lines.append("Relationships:")
-            lines.extend([f"  - {line}" for line in relationship_lines])
-            lines.append("")
-
-        return lines
-
-    def _get_related_tables(self, table: Table) -> list[str]:
-        """Get tables related to the given table through foreign keys."""
         related_tables = []
-
-        # Tables referenced by this table's foreign keys.
         for fk in table.foreign_key_constraints:
-            related_tables.append(fk.referenced_table)
-
-        # Tables that reference this table.
-        for other_table in self.datasource.tables:
-            if other_table.name == table.name:
+            # Same guardrails as the table section.
+            if fk.referenced_table.name == table.name:
                 continue
 
-            for fk in other_table.foreign_key_constraints:
-                if fk.referenced_table == table.name:
-                    related_tables.append(other_table.name)
+            if fk.referenced_table.name not in self.mind_datasource.tables:
+                continue
 
-        return list(set(related_tables))
+            related_tables.append(fk.referenced_table.name)
+
+        if related_tables:
+            qualified_table_name = f"{self.mind_datasource.datasource.name}.{table.name}"
+            lines.append(f"{qualified_table_name} is related to: {', '.join(related_tables)}")
+
+        return lines
 
     def to_context_str(self) -> str:
         """
@@ -276,19 +266,26 @@ class DataCatalog(BaseSQLModel, table=False):
             A formatted string representation of the MindsDB data catalog.
         """
         lines = []
+        relationship_lines = []
 
         lines.extend(self._format_header())
 
-        for table in self.datasource.tables:
-            lines.extend(self._format_table(table))
+        for table in self.mind_datasource.datasource.tables:
+            if table.name in self.mind_datasource.tables:
+                lines.extend(self._format_table(table))
+                # TODO: Is this necessary? We are already adding the foreign keys to the table section.
+                relationship_lines.extend(self._format_relationships(table))
 
-        lines.extend(self._format_relationships())
+        if relationship_lines:
+            lines.append("Relationships:")
+            lines.extend([f"  - {line}" for line in relationship_lines])
+            lines.append("")
 
         return "\n".join(lines)
 
 
 # Resolve forward references after all models are defined
 if not TYPE_CHECKING:
-    from minds.model.datasource import Datasource
+    from minds.model.mind_datasource import MindDatasource
 
     DataCatalog.model_rebuild()

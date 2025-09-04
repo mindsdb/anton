@@ -158,6 +158,11 @@ class MindsService:
 
             mind = await self._get_mind(mind_name)
 
+            from minds.model.data_catalog import DataCatalog
+            for mind_datasource in mind.mind_datasources:
+                data_catalog = DataCatalog.from_mind_datasource(mind_datasource)
+                print(data_catalog.to_context_str())
+
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
@@ -207,7 +212,7 @@ class MindsService:
                 await self._validate_datasources(mind_data.datasources)
 
             for datasource in mind_data.datasources:
-                await data_catalog_loader.load(datasource)
+                await data_catalog_loader.load(datasource.name, datasource.tables)
                 logger.info(f"Loaded datasource {datasource} to the data catalog")
 
             new_mind = Mind(
