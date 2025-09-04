@@ -158,11 +158,6 @@ class MindsService:
 
             mind = await self._get_mind(mind_name)
 
-            from minds.model.data_catalog import DataCatalog
-            for mind_datasource in mind.mind_datasources:
-                data_catalog = DataCatalog.from_mind_datasource(mind_datasource)
-                print(data_catalog.to_context_str())
-
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 

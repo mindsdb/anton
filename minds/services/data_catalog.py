@@ -104,7 +104,7 @@ class DataCatalogLoader:
 
         query = f"""
         SELECT HANDLER_INFO FROM INFORMATION_SCHEMA.META_HANDLER_INFO
-        WHERE TABLE_CATALOG = '{datasource.name}'
+        WHERE TABLE_SCHEMA = '{datasource.name}'
         """
 
         df = self._execute_query(query)
@@ -118,7 +118,7 @@ class DataCatalogLoader:
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
-        WHERE TABLE_CATALOG = '{datasource.name}'
+        WHERE TABLE_SCHEMA = '{datasource.name}'
         """
 
         if table_names:
@@ -146,7 +146,7 @@ class DataCatalogLoader:
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMNS 
-        WHERE TABLE_CATALOG = '{datasource.name}'
+        WHERE TABLE_SCHEMA = '{datasource.name}'
         """
 
         if table_names:
@@ -163,7 +163,7 @@ class DataCatalogLoader:
 
         query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMN_STATISTICS 
-        WHERE TABLE_CATALOG = '{datasource.name}'
+        WHERE TABLE_SCHEMA = '{datasource.name}'
         """
 
         if table_names:
@@ -178,6 +178,7 @@ class DataCatalogLoader:
         """Get primary key information from META_KEY_COLUMN_USAGE with optional filtering."""
         logger.info(f"Getting primary key information for datasource '{datasource.name}' with filter: {table_names}")
 
+         # TODO: This query is hacky. It is written to allow it to run on MindsDB.
         query = f"""
         SELECT 
             kcu.TABLE_NAME,
@@ -186,12 +187,12 @@ class DataCatalogLoader:
             kcu.CONSTRAINT_NAME
         FROM information_schema.META_KEY_COLUMN_USAGE kcu
         INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
-            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            ON kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+            AND kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
             AND kcu.TABLE_NAME = tc.TABLE_NAME
-            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
-            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
         WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-            AND kcu.CONSTRAINT_CATALOG = '{datasource.name}'
+            AND kcu.TABLE_SCHEMA = '{datasource.name}'
+            AND tc.TABLE_SCHEMA = '{datasource.name}'
         """
 
         if table_names:
@@ -206,6 +207,7 @@ class DataCatalogLoader:
         """Get table constraints from META_TABLE_CONSTRAINTS with optional filtering."""
         logger.info(f"Getting foreign key information for datasource '{datasource.name}' with filter: {table_names}")
 
+        # TODO: This query is hacky. It is written to allow it to run on MindsDB.
         query = f"""
         SELECT 
             kcu.TABLE_NAME,
@@ -216,12 +218,12 @@ class DataCatalogLoader:
             kcu.REFERENCED_COLUMN_NAME
         FROM information_schema.META_KEY_COLUMN_USAGE kcu
         INNER JOIN information_schema.META_TABLE_CONSTRAINTS tc 
-            ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            ON kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+            AND kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
             AND kcu.TABLE_NAME = tc.TABLE_NAME
-            AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
-            AND kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
         WHERE tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
-            AND kcu.CONSTRAINT_CATALOG = '{datasource.name}'
+            AND kcu.TABLE_SCHEMA = '{datasource.name}'
+            AND tc.TABLE_SCHEMA = '{datasource.name}'
         """
 
         if table_names:
