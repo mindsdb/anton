@@ -1,110 +1,13 @@
-from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from typing import TYPE_CHECKING
 
-from sqlmodel import JSON, Field, Relationship
-from sqlmodel import Column as SQLModelColumn
+from sqlmodel import Field
 
 from minds.model.base import BaseSQLModel
 
 if TYPE_CHECKING:
+    from minds.model.data_catalog.column import Column
+    from minds.model.data_catalog.table import Table
     from minds.model.mind_datasource import MindDatasource
-
-
-class Table(BaseSQLModel, table=True):
-    """Data source table metadata."""
-
-    __tablename__ = "tables"
-
-    datasource_id: UUID = Field(..., description="Datasource ID", foreign_key="datasources.id")
-    name: str = Field(..., description="Table name")
-    schema: str | None = Field(default=None, description="Schema name")
-    description: str | None = Field(default=None, description="Table description/comment")
-    type: str | None = Field(default=None, description="Table type")
-    row_count: int | None = Field(default=None, description="Row count")
-
-    columns: list["Column"] = Relationship(cascade_delete=True)
-    primary_key_constraints: list["PrimaryKeyConstraint"] = Relationship(cascade_delete=True)
-    foreign_key_constraints: list["ForeignKeyConstraint"] = Relationship(
-        sa_relationship_kwargs={
-            "foreign_keys": "ForeignKeyConstraint.table_id",
-        },
-        cascade_delete=True,
-    )
-
-
-class Column(BaseSQLModel, table=True):
-    """Data source column metadata."""
-
-    __tablename__ = "columns"
-
-    table_id: UUID = Field(..., description="Table ID", foreign_key="tables.id")
-    name: str = Field(..., description="Column name")
-    data_type: str = Field(..., description="Column data type")
-    description: str | None = Field(default=None, description="Column description/comment")
-    default_value: str | None = Field(default=None, description="Column default value")
-    is_nullable: bool = Field(default=True, description="Whether the column is nullable")
-
-    statistics: "ColumnStatistics" = Relationship(cascade_delete=True)
-
-
-class ColumnStatistics(BaseSQLModel, table=True):
-    """Data source column statistics."""
-
-    __tablename__ = "column_statistics"
-
-    column_id: UUID = Field(..., description="Column ID", foreign_key="columns.id")
-    most_common_values: list[Any] | None = Field(
-        default_factory=list, sa_column=SQLModelColumn(JSON), description="List of most common values"
-    )
-    most_common_frequencies: list[float] | None = Field(
-        default_factory=list, sa_column=SQLModelColumn(JSON), description="List of most common frequencies"
-    )
-    null_percentage: float | None = Field(default=None, description="Null percentage")
-    distinct_values_count: int | None = Field(default=None, description="Distinct values count")
-    min_value: str | None = Field(default=None, description="Minimum value")
-    max_value: str | None = Field(default=None, description="Maximum value")
-
-
-class PrimaryKeyConstraint(BaseSQLModel, table=True):
-    """Data source primary key metadata."""
-
-    __tablename__ = "primary_key_constraints"
-
-    table_id: UUID = Field(..., description="Table ID", foreign_key="tables.id")
-    column_id: UUID = Field(..., description="Column ID", foreign_key="columns.id")
-    ordinal_position: int | None = Field(default=None, description="Ordinal position")
-    constraint_name: str | None = Field(default=None, description="Constraint name")
-
-    column: "Column" = Relationship()
-
-
-class ForeignKeyConstraint(BaseSQLModel, table=True):
-    """Data source foreign key metadata."""
-
-    __tablename__ = "foreign_key_constraints"
-
-    table_id: UUID = Field(..., description="Table ID", foreign_key="tables.id")
-    column_id: UUID = Field(..., description="Column ID", foreign_key="columns.id")
-    referenced_table_id: UUID = Field(..., description="Referenced table ID", foreign_key="tables.id")
-    referenced_column_id: UUID = Field(..., description="Referenced column ID", foreign_key="columns.id")
-    constraint_name: str | None = Field(default=None, description="Constraint name")
-    ordinal_position: int | None = Field(default=None, description="Ordinal position")
-
-    column: "Column" = Relationship(
-        sa_relationship_kwargs={
-            "foreign_keys": "ForeignKeyConstraint.column_id",
-        }
-    )
-    referenced_table: "Table" = Relationship(
-        sa_relationship_kwargs={
-            "foreign_keys": "ForeignKeyConstraint.referenced_table_id",
-        }
-    )
-    referenced_column: "Column" = Relationship(
-        sa_relationship_kwargs={
-            "foreign_keys": "ForeignKeyConstraint.referenced_column_id",
-        }
-    )
 
 
 class DataCatalog(BaseSQLModel, table=False):
