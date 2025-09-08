@@ -34,7 +34,7 @@ class DataCatalog(BaseSQLModel, table=False):
         lines.append("")
         return lines
 
-    def _format_table(self, table: Table) -> list[str]:
+    def _format_table(self, table: "Table") -> list[str]:
         """Format a single table's complete information."""
         lines = []
 
@@ -54,7 +54,7 @@ class DataCatalog(BaseSQLModel, table=False):
         lines.append("")  # Blank line between tables.
         return lines
 
-    def _format_column(self, column: Column) -> list[str]:
+    def _format_column(self, column: "Column") -> list[str]:
         """Format a single column's information including statistics and samples."""
         lines = []
 
@@ -76,7 +76,7 @@ class DataCatalog(BaseSQLModel, table=False):
 
         return lines
 
-    def _format_column_statistics(self, column: Column) -> list[str]:
+    def _format_column_statistics(self, column: "Column") -> list[str]:
         """Format column statistics for MindsDB-specific data."""
         lines = []
         if not column.statistics:
@@ -106,7 +106,7 @@ class DataCatalog(BaseSQLModel, table=False):
 
         return lines
 
-    def _format_table_constraints(self, table: Table) -> list[str]:
+    def _format_table_constraints(self, table: "Table") -> list[str]:
         """Format primary keys and foreign keys for a table."""
         lines = []
 
@@ -138,7 +138,7 @@ class DataCatalog(BaseSQLModel, table=False):
 
         return lines
 
-    def _format_relationships(self, table: Table) -> list[str]:
+    def _format_relationships(self, table: "Table") -> list[str]:
         """Format the relationships section for each table."""
         lines = []
 
