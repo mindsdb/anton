@@ -16,6 +16,7 @@ from sqlmodel import Column as SQLModelColumn
 from sqlmodel import Field, Relationship
 
 from minds.model.base import BaseSQLModel
+from minds.model.mind_datasource_table import MindDatasourceTable
 
 if TYPE_CHECKING:
     from minds.model.datasource import Datasource
@@ -45,10 +46,6 @@ class MindDatasource(BaseSQLModel, table=True):
 
     datasource_id: UUID = Field(..., foreign_key="datasources.id", description="ID of the datasource", index=True)
 
-    tables: list[str] | None = Field(
-        default_factory=list, sa_column=SQLModelColumn(JSON), description="Specific tables to use (None = all tables)"
-    )
-
     status: DataCatalogStatus = Field(
         default=DataCatalogStatus.PENDING,
         sa_column=SQLModelColumn(
@@ -60,6 +57,7 @@ class MindDatasource(BaseSQLModel, table=True):
     # Relationships back to parent models
     mind: "Mind" = Relationship(back_populates="mind_datasources")
     datasource: "Datasource" = Relationship(back_populates="mind_datasources")
+    mind_datasource_tables: list["MindDatasourceTable"] = Relationship()
 
     # Ensure each mind-datasource pair is unique
     __table_args__ = (UniqueConstraint("mind_id", "datasource_id", name="unique_mind_datasource_pair"),)
