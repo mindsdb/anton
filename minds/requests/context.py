@@ -24,7 +24,7 @@ def extract_context_from_request(request: Request) -> Context:
     # TODO: Is this needed?
     user_email = request.headers.get("x-user-email", "")
 
-    return Context(user_id=user_id, user_email=user_email)
+    return Context(user_id=user_id, user_email=user_email, tenant_id=tenant_id)
 
 
 class LangfuseContextMetadata(BaseModel):

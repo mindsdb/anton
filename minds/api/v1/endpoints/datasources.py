@@ -40,7 +40,12 @@ def get_datasources_service(request: Request, session: Session = Depends(get_ses
     context = extract_context_from_request(request)
     mindsdb_client = create_mindsdb_client_from_request(request)
 
-    return DatasourcesService(session=session, mindsdb_client=mindsdb_client, user_id=context.user_id)
+    return DatasourcesService(
+        session=session,
+        mindsdb_client=mindsdb_client,
+        user_id=context.user_id,
+        tenant_id=context.tenant_id,
+    )
 
 
 @router.get("/", status_code=200)
