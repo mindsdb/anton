@@ -61,7 +61,7 @@ class MindsService:
     only used for datasource validation, not for storing minds data.
     """
 
-    def __init__(self, session: Session, mindsdb_client: Server, user_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, tenant_id: str):
         """
         Initialize the minds service.
 
@@ -72,12 +72,8 @@ class MindsService:
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
-        logger.debug(f"MindsService initialized for user {user_id}")
-
-    @classmethod
-    def create(cls, session: Session, mindsdb_client: Server, user_id: str) -> "MindsService":
-        """Factory method to create a MindsService instance."""
-        return cls(session=session, mindsdb_client=mindsdb_client, user_id=user_id)
+        self.tenant_id = tenant_id
+        logger.debug(f"MindsService initialized for user {user_id} and tenant {tenant_id}")
 
     async def list_minds(
         self,
@@ -102,12 +98,12 @@ class MindsService:
         """
         try:
             logger.debug(
-                f"Listing minds for user {self.user_id} with filters: "
+                f"Listing minds for user {self.user_id} and tenant {self.tenant_id} with filters: "
                 f"provider={provider}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
             )
 
             # Build query conditions
-            conditions = [Mind.user_id == self.user_id]
+            conditions = [Mind.user_id == self.user_id, Mind.tenant_id == self.tenant_id]
             if provider is not None:
                 conditions.append(Mind.provider == provider)
             # not sure if this is needed initially
@@ -133,10 +129,15 @@ class MindsService:
                 mind_response = self._mind_to_response(mind, with_detailed_data)
                 minds_list.append(mind_response)
 
-            logger.info(f"Retrieved {len(minds_list)} minds for user {self.user_id} (offset={offset}, limit={limit})")
+            logger.info(
+                f"Retrieved {len(minds_list)} minds "
+                f"for user {self.user_id} and tenant {self.tenant_id} (offset={offset}, limit={limit})"
+            )
             return minds_list
         except Exception as e:
-            logger.error(f"Error listing minds for user {self.user_id}: {str(e)}")
+            logger.error(
+                f"Error listing minds for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
 
     async def get_mind(self, mind_name: str, with_detailed_data: bool = False) -> MindResponse:
@@ -167,7 +168,10 @@ class MindsService:
         except MindNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting mind {mind_name}: {str(e)}")
+            logger.error(
+                f"Error getting mind {mind_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
 
     async def create_mind(self, mind_data: MindCreateRequest) -> MindResponse:
@@ -185,12 +189,20 @@ class MindsService:
             DatasourceNotFoundError: If any specified datasource doesn't exist
         """
         try:
-            logger.debug(f"Creating mind {mind_data.name} for user {self.user_id}")
+            logger.debug(
+                f"Creating mind {mind_data.name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}"
+            )
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
                 select(Mind).where(
-                    and_(Mind.name == mind_data.name, Mind.user_id == self.user_id, Mind.deleted_at.is_(None))
+                    and_(
+                        Mind.name == mind_data.name,
+                        Mind.user_id == self.user_id,
+                        Mind.tenant_id == self.tenant_id,
+                        Mind.deleted_at.is_(None),
+                    )
                 )
             ).first()
 
@@ -206,6 +218,7 @@ class MindsService:
                 provider=mind_data.provider,
                 model_name=mind_data.model_name or "gpt-4o",  # Default model
                 user_id=self.user_id,
+                tenant_id=self.tenant_id,
                 parameters=mind_data.parameters or {},
                 deleted_at=None,
             )
@@ -218,7 +231,7 @@ class MindsService:
             if mind_data.datasources:
                 await self._add_datasources_to_mind(new_mind, mind_data.datasources)
 
-            logger.info(f"Created mind {mind_data.name} for user {self.user_id}")
+            logger.info(f"Created mind {mind_data.name} for user {self.user_id} and tenant {self.tenant_id}")
 
             return self._mind_to_response(new_mind)
 
@@ -227,7 +240,10 @@ class MindsService:
             raise
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Error creating mind {mind_data.name}: {str(e)}")
+            logger.error(
+                f"Error creating mind {mind_data.name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
 
     async def update_mind(self, mind_name: str, mind_data: MindUpdateRequest) -> MindResponse:
@@ -245,7 +261,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
-            logger.debug(f"Updating mind {mind_name} for user {self.user_id}")
+            logger.debug(f"Updating mind {mind_name} for user {self.user_id} and tenant {self.tenant_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)
 
@@ -341,7 +357,12 @@ class MindsService:
     async def _get_mind(self, mind_name: str) -> Mind:
         """Utility function to get a specific mind by name."""
         statement = select(Mind).where(
-            and_(Mind.name == mind_name, Mind.user_id == self.user_id, Mind.deleted_at.is_(None))
+            and_(
+                Mind.name == mind_name,
+                Mind.user_id == self.user_id,
+                Mind.tenant_id == self.tenant_id,
+                Mind.deleted_at.is_(None),
+            )
         )
         return self.session.exec(statement).first()
 
@@ -354,6 +375,7 @@ class MindsService:
                     Mind.name == mind_name,
                     Mind.user_id == self.user_id,
                     Mind.deleted_at.is_(None),
+                    Mind.tenant_id == self.tenant_id,
                 )
             )
             .options(
@@ -405,6 +427,7 @@ class MindsService:
                         and_(
                             Datasource.name == datasource_name,
                             Datasource.user_id == self.user_id,
+                            Datasource.tenant_id == self.tenant_id,
                             Datasource.deleted_at.is_(None),
                         )
                     )
@@ -447,6 +470,7 @@ class MindsService:
                         and_(
                             Datasource.name == datasource_name,
                             Datasource.user_id == self.user_id,
+                            Datasource.tenant_id == self.tenant_id,
                             Datasource.deleted_at.is_(None),
                         )
                     )
@@ -462,6 +486,7 @@ class MindsService:
                         and_(
                             MindDatasource.mind_id == mind.id,
                             MindDatasource.datasource_id == datasource.id,
+                            MindDatasource.tenant_id == self.tenant_id,
                             MindDatasource.deleted_at.is_(None),
                         )
                     )

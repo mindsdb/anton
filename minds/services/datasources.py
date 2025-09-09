@@ -62,7 +62,7 @@ class DatasourcesService:
     Follows eager sync pattern - always syncs to MindsDB on create/update/delete.
     """
 
-    def __init__(self, session: Session, mindsdb_client: Server, user_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, tenant_id: str):
         """
         Initialize the datasources service.
 
@@ -74,6 +74,8 @@ class DatasourcesService:
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
+        self.tenant_id = tenant_id
+        logger.debug(f"DatasourcesService initialized for user {user_id} and tenant {tenant_id}")
 
     async def list_datasources(
         self,
@@ -98,12 +100,17 @@ class DatasourcesService:
         """
         try:
             logger.debug(
-                f"Listing datasources for user {self.user_id} with filters: "
+                f"Listing datasources for user {self.user_id} and tenant {self.tenant_id} with filters: "
                 f"engine={engine}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
             )
 
             # Build query with filters
-            statement = select(Datasource).where(Datasource.user_id == self.user_id)
+            statement = select(Datasource).where(
+                and_(
+                    Datasource.user_id == self.user_id,
+                    Datasource.tenant_id == self.tenant_id,
+                )
+            )
 
             if engine is not None:
                 statement = statement.where(Datasource.engine == engine)
@@ -125,11 +132,11 @@ class DatasourcesService:
                     response = self._datasource_to_response(datasource)
                 responses.append(response)
 
-            logger.info(f"Found {len(responses)} datasources for user {self.user_id}")
+            logger.info(f"Found {len(responses)} datasources for user {self.user_id} and tenant {self.tenant_id}")
             return responses
 
         except Exception as e:
-            logger.error(f"Error listing datasources: {str(e)}")
+            logger.error(f"Error listing datasources for user {self.user_id} and tenant {self.tenant_id}: {str(e)}")
             raise DatasourceServiceError(f"Failed to list datasources: {str(e)}") from None
 
     async def get_datasource(
@@ -149,7 +156,7 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
-            logger.debug(f"Getting datasource {datasource_name} for user {self.user_id}")
+            logger.debug(f"Getting datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
 
             datasource = await self._get_datasource(datasource_name)
 
@@ -164,7 +171,10 @@ class DatasourcesService:
         except DatasourceNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting datasource {datasource_name}: {str(e)}")
+            logger.error(
+                f"Error getting datasource {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise DatasourceServiceError(f"Failed to get datasource: {str(e)}") from None
 
     async def create_datasource(self, datasource_data: DatasourceCreateRequest) -> DatasourceResponse:
@@ -182,7 +192,9 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
-            logger.debug(f"Creating datasource {datasource_data.name} for user {self.user_id}")
+            logger.debug(
+                f"Creating datasource {datasource_data.name} for user {self.user_id} and tenant {self.tenant_id}"
+            )
 
             # Check if datasource already exists
             existing = await self._get_datasource(datasource_data.name)
@@ -196,6 +208,7 @@ class DatasourcesService:
                 engine=datasource_data.engine,
                 connection_data=datasource_data.connection_data,
                 user_id=self.user_id,
+                tenant_id=self.tenant_id,
             )
 
             # Save to internal database first
@@ -207,8 +220,7 @@ class DatasourcesService:
                 await self._create_mindsdb_database(datasource)
 
                 logger.info(
-                    f"Created datasource {datasource_data.name} for user \
-                                {self.user_id} (synced to MindsDB)"
+                    f"Created datasource {datasource_data.name} for user {self.user_id} and tenant {self.tenant_id}"
                 )
 
             except DatasourceServiceError:
@@ -224,7 +236,10 @@ class DatasourcesService:
             raise
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Error creating datasource {datasource_data.name}: {str(e)}")
+            logger.error(
+                f"Error creating datasource {datasource_data.name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise DatasourceServiceError(f"Failed to create datasource: {str(e)}") from None
 
     async def update_datasource(
@@ -245,7 +260,7 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
-            logger.debug(f"Updating datasource {datasource_name} for user {self.user_id}")
+            logger.debug(f"Updating datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
 
             # Get existing datasource
             datasource = await self._get_datasource(datasource_name)
@@ -270,7 +285,7 @@ class DatasourcesService:
                 if datasource_data.connection_data is not None:
                     await self._update_mindsdb_database(datasource)
 
-                logger.info(f"Updated datasource {datasource_name} for user {self.user_id} (synced to MindsDB)")
+                logger.info(f"Updated datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
 
             except DatasourceServiceError:
                 # Rollback internal database if MindsDB update fails
@@ -286,7 +301,10 @@ class DatasourcesService:
             raise
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Error updating datasource {datasource_name}: {str(e)}")
+            logger.error(
+                f"Error updating datasource {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise DatasourceServiceError(f"Failed to update datasource: {str(e)}") from None
 
     async def delete_datasource(self, datasource_name: str, cascade: bool = False) -> None:
@@ -301,7 +319,10 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
-            logger.debug(f"Deleting datasource {datasource_name} for user {self.user_id} (cascade={cascade})")
+            logger.debug(
+                f"Deleting datasource {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id} (cascade={cascade})"
+            )
 
             # Get existing datasource
             statement = (
@@ -310,6 +331,7 @@ class DatasourcesService:
                     and_(
                         Datasource.name == datasource_name,
                         Datasource.user_id == self.user_id,
+                        Datasource.tenant_id == self.tenant_id,
                         Datasource.deleted_at.is_(None),
                     )
                 )
@@ -346,14 +368,17 @@ class DatasourcesService:
             self.session.add(datasource)
             self.session.commit()
 
-            logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} (removed from MindsDB)")
+            logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
 
         except DatasourceNotFoundError:
             self.session.rollback()
             raise
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Error deleting datasource {datasource_name}: {str(e)}")
+            logger.error(
+                f"Error deleting datasource {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise DatasourceServiceError(f"Failed to delete datasource: {str(e)}") from None
 
     async def test_connection(self, datasource_name: str) -> DatasourceConnectionStatus:
@@ -367,7 +392,10 @@ class DatasourcesService:
             Connection status result
         """
         try:
-            logger.debug(f"Testing connection for datasource {datasource_name}")
+            logger.debug(
+                f"Testing connection for datasource {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}"
+            )
 
             # Get datasource to verify it exists
             _ = await self.get_datasource(datasource_name)
@@ -393,7 +421,10 @@ class DatasourcesService:
         except DatasourceNotFoundError:
             return DatasourceConnectionStatus(success=False, error_message="Datasource not found")
         except Exception as e:
-            logger.error(f"Connection test failed for {datasource_name}: {str(e)}")
+            logger.error(
+                f"Connection test failed for {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             return DatasourceConnectionStatus(success=False, error_message=str(e))
 
     async def get_datasource_table_sample(
@@ -401,7 +432,8 @@ class DatasourcesService:
     ) -> DatasourceTableSampleResponse:
         """Get a sample of a table from a datasource."""
         logger.debug(
-            f"Getting sample data for table {table_name} of datasource {datasource_name} for user {self.user_id}"
+            f"Getting sample data for table {table_name} of datasource {datasource_name} "
+            f"for user {self.user_id} and tenant {self.tenant_id}"
         )
 
         try:
@@ -423,13 +455,17 @@ class DatasourcesService:
         except DatasourceNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting sample data for table {table_name} of datasource {datasource_name}: {str(e)}")
+            logger.error(
+                f"Error getting sample data for table {table_name} of datasource {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise DatasourceServiceError(f"Failed to get sample data: {str(e)}") from None
 
     async def get_datasource_table_row_count(self, datasource_name: str, table_name: str) -> int:
         """Get the row count of a table from a datasource."""
         logger.debug(
-            f"Getting row count for table {table_name} of datasource {datasource_name} for user {self.user_id}"
+            f"Getting row count for table {table_name} of datasource {datasource_name} "
+            f"for user {self.user_id} and tenant {self.tenant_id}"
         )
 
         try:
@@ -446,7 +482,10 @@ class DatasourcesService:
         except DatasourceNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting row count for table {table_name} of datasource {datasource_name}: {str(e)}")
+            logger.error(
+                f"Error getting row count for table {table_name} of datasource {datasource_name} "
+                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+            )
             raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
 
     async def _get_datasource(self, datasource_name: str) -> Datasource:
@@ -461,7 +500,10 @@ class DatasourcesService:
         """
         statement = select(Datasource).where(
             and_(
-                Datasource.name == datasource_name, Datasource.user_id == self.user_id, Datasource.deleted_at.is_(None)
+                Datasource.name == datasource_name,
+                Datasource.user_id == self.user_id,
+                Datasource.tenant_id == self.tenant_id,
+                Datasource.deleted_at.is_(None),
             )
         )
         result = self.session.exec(statement)
