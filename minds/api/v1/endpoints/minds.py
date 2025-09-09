@@ -178,7 +178,10 @@ async def create_mind(
 
 @router.put("/{mind_name}")
 async def update_mind(
-    mind_name: str, mind_data: MindUpdateRequest, minds_service: MindsService = Depends(get_minds_service)
+    mind_name: str,
+    mind_data: MindUpdateRequest,
+    minds_service: MindsService = Depends(get_minds_service),
+    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader_service),
 ) -> MindResponse:
     """
     Update an existing mind for the authenticated user.

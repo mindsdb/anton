@@ -176,6 +176,7 @@ class MindsService:
 
         Args:
             mind_data (MindCreateRequest): Mind creation data
+            data_catalog_loader (DataCatalogLoader): Data catalog loader
 
         Returns:
             MindResponse: Created mind object
@@ -237,13 +238,16 @@ class MindsService:
             )
             raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
 
-    async def update_mind(self, mind_name: str, mind_data: MindUpdateRequest) -> MindResponse:
+    async def update_mind(
+        self, mind_name: str, mind_data: MindUpdateRequest, data_catalog_loader: DataCatalogLoader
+    ) -> MindResponse:
         """
         Update an existing mind.
 
         Args:
             mind_name (str): Name of the mind to update
             mind_data (MindUpdateRequest): Updated mind data
+            data_catalog_loader (DataCatalogLoader): Data catalog loader
 
         Returns:
             MindResponse: Updated mind object
@@ -281,7 +285,7 @@ class MindsService:
 
             # Handle datasource relationships separately
             if mind_data.datasources is not None:
-                await self._update_mind_datasources(mind, mind_data.datasources)
+                await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
 
             self.session.add(mind)
             self.session.commit()
@@ -550,7 +554,9 @@ class MindsService:
             logger.error(f"Error committing datasource relationships: {str(e)}")
             raise
 
-    async def _update_mind_datasources(self, mind: Mind, new_datasource_configs: list[DatasourceConfig]) -> None:
+    async def _update_mind_datasources(
+        self, mind: Mind, new_datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader
+    ) -> None:
         """
         Update the datasources associated with a mind by replacing all relationships.
 
@@ -566,7 +572,7 @@ class MindsService:
             self.session.flush()
 
             # Add new relationships
-            await self._add_datasources_to_mind(mind, new_datasource_configs)
+            await self._add_datasources_to_mind(mind, new_datasource_configs, data_catalog_loader)
 
             logger.debug(f"Updated datasources for mind {mind.name}")
         except Exception as e:
