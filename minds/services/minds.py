@@ -491,6 +491,7 @@ class MindsService:
 
                 # Create new relationship
                 mind_datasource = MindDatasource(
+                    tenant_id=self.tenant_id,
                     mind_id=mind.id,
                     datasource_id=datasource.id,
                     tables=datasource_config.tables,
