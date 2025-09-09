@@ -53,6 +53,7 @@ class TestDatasourcesService:
         return DatasourcesService(
             session=mock_session,
             user_id="test-user-123",
+            tenant_id="test-tenant-123",
             mindsdb_client=mock_mindsdb_client,
         )
 
@@ -78,7 +79,7 @@ class TestDatasourcesService:
 
     def test_service_initialization(self, mock_session, mock_mindsdb_client):
         """Test service initialization."""
-        service = DatasourcesService(session=mock_session, user_id="test-user", mindsdb_client=mock_mindsdb_client)
+        service = DatasourcesService(session=mock_session, user_id="test-user", tenant_id="test-tenant", mindsdb_client=mock_mindsdb_client)
 
         assert service.session == mock_session
         assert service.user_id == "test-user"
