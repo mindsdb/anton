@@ -15,7 +15,7 @@ from sqlmodel import Session, and_, select
 from minds.common.logger import setup_logging
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
-from minds.model.mind_datasource import MindDatasource
+from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
 from minds.services.data_catalog import DataCatalogLoader
 
@@ -206,10 +206,6 @@ class MindsService:
             if mind_data.datasources:
                 await self._validate_datasources(mind_data.datasources)
 
-            for datasource in mind_data.datasources:
-                await data_catalog_loader.load(datasource.name, datasource.tables)
-                logger.info(f"Loaded datasource {datasource} to the data catalog")
-
             new_mind = Mind(
                 name=mind_data.name,
                 provider=mind_data.provider,
@@ -226,7 +222,7 @@ class MindsService:
 
             # Add datasource relationships if provided
             if mind_data.datasources:
-                await self._add_datasources_to_mind(new_mind, mind_data.datasources)
+                await self._add_datasources_to_mind(new_mind, mind_data.datasources, data_catalog_loader)
 
             logger.info(f"Created mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
 
@@ -451,7 +447,9 @@ class MindsService:
                 )
                 raise
 
-    async def _add_datasources_to_mind(self, mind: Mind, datasource_configs: list[DatasourceConfig]) -> None:
+    async def _add_datasources_to_mind(
+        self, mind: Mind, datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader
+    ) -> None:
         """
         Add multiple datasources to a mind by creating MindDatasource relationships.
 
@@ -513,8 +511,27 @@ class MindsService:
                 )
 
                 self.session.add(mind_datasource)
+                self.session.commit()
+                self.session.refresh(mind_datasource)
                 logger.debug(
                     f"Added datasource {datasource_name} to mind {mind.name} "
+                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                )
+
+                logger.debug(
+                    f"Loading datasource {datasource_name} to the data catalog "
+                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                )
+                mind_datasource.status = DataCatalogStatus.LOADING
+                self.session.add(mind_datasource)
+                self.session.commit()
+
+                await data_catalog_loader.load(datasource_name, datasource_config.tables)
+                mind_datasource.status = DataCatalogStatus.COMPLETED
+                self.session.add(mind_datasource)
+                self.session.commit()
+                logger.info(
+                    f"Loaded datasource {datasource_name} to the data catalog "
                     f"for user {self.user_id} in tenant {self.tenant_id}"
                 )
             except Exception as e:
