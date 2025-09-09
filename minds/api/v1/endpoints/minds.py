@@ -43,7 +43,12 @@ def get_data_catalog_loader_service(request: Request, session: Session = Depends
     context = extract_context_from_request(request)
     mindsdb_client = create_mindsdb_client_from_request(request)
 
-    return DataCatalogLoader(session=session, mindsdb_client=mindsdb_client, user_id=context.user_id)
+    return DataCatalogLoader(
+        session=session,
+        mindsdb_client=mindsdb_client,
+        user_id=context.user_id,
+        tenant_id=context.tenant_id,
+    )
 
 
 @router.get("/")

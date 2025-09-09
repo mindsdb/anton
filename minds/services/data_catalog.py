@@ -14,7 +14,7 @@ logger = setup_logging()
 class DataCatalogLoader:
     """A class for loading data catalogs."""
 
-    def __init__(self, session: Session, mindsdb_client: Server, user_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, tenant_id: str):
         """
         Initialize the MindsDB data catalog loader.
 
@@ -26,6 +26,7 @@ class DataCatalogLoader:
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
+        self.tenant_id = tenant_id
 
     async def load(self, datasource_name: str, table_names: list[str] | None = None) -> None:
         """Load the data catalog."""
@@ -34,6 +35,7 @@ class DataCatalogLoader:
                 and_(
                     Datasource.name == datasource_name,
                     Datasource.user_id == self.user_id,
+                    Datasource.tenant_id == self.tenant_id,
                     Datasource.deleted_at.is_(None),
                 )
             )
@@ -129,7 +131,13 @@ class DataCatalogLoader:
 
         # Check if the returned tables are already in the database.
         existing_tables = self.session.exec(
-            select(Table).where(and_(Table.datasource_id == datasource.id, Table.name.in_(df["TABLE_NAME"])))
+            select(Table).where(
+                and_(
+                    Table.datasource_id == datasource.id,
+                    Table.name.in_(df["TABLE_NAME"]),
+                    Table.tenant_id == self.tenant_id,
+                )
+            )
         ).all()
         logger.info(f"{len(existing_tables)} have already been loaded")
 
@@ -244,6 +252,7 @@ class DataCatalogLoader:
             row_count = int(row_count) if pd.notna(row_count) else None
 
             table = Table(
+                tenant_id=self.tenant_id,
                 datasource_id=datasource.id,
                 name=row["TABLE_NAME"],
                 schema=row["TABLE_SCHEMA"],
@@ -272,6 +281,7 @@ class DataCatalogLoader:
         columns = []
         for _, row in columns_df.iterrows():
             column = Column(
+                tenant_id=self.tenant_id,
                 table_id=row["TABLE_ID"],
                 name=row["COLUMN_NAME"],
                 data_type=row["DATA_TYPE"],
@@ -309,6 +319,7 @@ class DataCatalogLoader:
         for _, row in column_statistics_df.iterrows():
             column_statistics.append(
                 ColumnStatistics(
+                    tenant_id=self.tenant_id,
                     column_id=row["COLUMN_ID"],
                     most_common_values=row["MOST_COMMON_VALS"],
                     most_common_frequencies=row["MOST_COMMON_FREQS"],
@@ -339,6 +350,7 @@ class DataCatalogLoader:
         for _, row in primary_keys_df.iterrows():
             primary_keys.append(
                 PrimaryKeyConstraint(
+                    tenant_id=self.tenant_id,
                     table_id=row["TABLE_ID"],
                     column_id=row["COLUMN_ID"],
                     ordinal_position=row["ORDINAL_POSITION"],
@@ -372,6 +384,7 @@ class DataCatalogLoader:
         for _, row in foreign_keys_df.iterrows():
             foreign_keys.append(
                 ForeignKeyConstraint(
+                    tenant_id=self.tenant_id,
                     table_id=row["TABLE_ID"],
                     column_id=row["COLUMN_ID"],
                     referenced_table_id=row["REFERENCED_TABLE_ID"],
