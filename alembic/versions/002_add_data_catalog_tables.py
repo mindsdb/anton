@@ -12,6 +12,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
+from minds.model.mind_datasource import DataCatalogStatus
+
 # revision identifiers, used by Alembic.
 revision: str = '004_add_data_catalog_tables'
 down_revision: str | None = '001_initial_schema_complete'
@@ -263,6 +265,22 @@ def upgrade() -> None:
 
     # Add a column to the datasources table to store engine info.
     op.add_column('datasources', sa.Column('engine_info', sa.Text(), nullable=True))
+
+    # Add a column to the mind_datasources table to track the status of data catalog loading.
+    status_enum = postgresql.ENUM(
+        *[e.value for e in DataCatalogStatus],
+        name='data_catalog_status'
+    )
+    status_enum.create(op.get_bind())
+    op.add_column(
+        'mind_datasources',
+        sa.Column(
+            'status',
+            status_enum,
+            server_default=DataCatalogStatus.PENDING,
+            nullable=False,
+        )
+    )
 
 
 def downgrade() -> None:
