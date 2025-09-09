@@ -11,6 +11,12 @@ from minds.model.datasource import Datasource
 logger = setup_logging()
 
 
+class DataCatalogLoaderError(Exception):
+    """Base exception for data catalog loader errors."""
+
+    pass
+
+
 class DataCatalogLoader:
     """A class for loading data catalogs."""
 
@@ -74,7 +80,7 @@ class DataCatalogLoader:
             # Rollback all changes if any error occurs
             self.session.rollback()
             logger.error(f"Error loading data catalog: {str(e)}. All changes have been rolled back.")
-            raise
+            raise DataCatalogLoaderError(f"Error loading data catalog: {str(e)}") from None
 
     def _execute_query(self, query: str) -> pd.DataFrame:
         """Execute a SQL query against MindsDB and return DataFrame."""

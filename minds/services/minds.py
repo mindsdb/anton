@@ -17,7 +17,7 @@ from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
-from minds.services.data_catalog import DataCatalogLoader
+from minds.services.data_catalog import DataCatalogLoader, DataCatalogLoaderError
 
 # Set up logging
 logger = setup_logging()
@@ -530,7 +530,15 @@ class MindsService:
                 self.session.add(mind_datasource)
                 self.session.commit()
 
-                await data_catalog_loader.load(datasource_name, datasource_config.tables)
+                try:
+                    await data_catalog_loader.load(datasource_name, datasource_config.tables)
+                except DataCatalogLoaderError as e:
+                    logger.error(f"Error loading datasource {datasource_name} to the data catalog: {str(e)}")
+                    mind_datasource.status = DataCatalogStatus.FAILED
+                    self.session.add(mind_datasource)
+                    self.session.commit()
+                    continue
+
                 mind_datasource.status = DataCatalogStatus.COMPLETED
                 self.session.add(mind_datasource)
                 self.session.commit()
