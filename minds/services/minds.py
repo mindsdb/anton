@@ -135,9 +135,7 @@ class MindsService:
             )
             return minds_list
         except Exception as e:
-            logger.error(
-                f"Error listing minds for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
-            )
+            logger.error(f"Error listing minds for user {self.user_id} and tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
 
     async def get_mind(self, mind_name: str, with_detailed_data: bool = False) -> MindResponse:
@@ -169,8 +167,7 @@ class MindsService:
             raise
         except Exception as e:
             logger.error(
-                f"Error getting mind {mind_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"Error getting mind {mind_name} for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
 
@@ -189,10 +186,7 @@ class MindsService:
             DatasourceNotFoundError: If any specified datasource doesn't exist
         """
         try:
-            logger.debug(
-                f"Creating mind {mind_data.name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}"
-            )
+            logger.debug(f"Creating mind {mind_data.name} for user {self.user_id} and tenant {self.tenant_id}")
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
@@ -241,8 +235,7 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(
-                f"Error creating mind {mind_data.name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"Error creating mind {mind_data.name} for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
 
