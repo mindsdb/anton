@@ -24,12 +24,7 @@ class TestBaseSQLModel:
         test_id = UUID("12345678-1234-5678-1234-567812345678")
         test_datetime = datetime(2023, 1, 1, 12, 0, 0)
 
-        model = BaseSQLModel(
-            id=test_id, 
-            tenant_id="test-tenant", 
-            created_at=test_datetime, 
-            modified_at=test_datetime
-        )
+        model = BaseSQLModel(id=test_id, tenant_id="test-tenant", created_at=test_datetime, modified_at=test_datetime)
 
         assert model.id == test_id
         assert model.tenant_id == "test-tenant"
@@ -78,7 +73,7 @@ class TestBaseSQLModel:
     def test_field_defaults(self):
         """Test that fields have proper default values."""
         from pydantic_core import PydanticUndefined
-        
+
         fields = BaseSQLModel.model_fields
 
         assert fields["id"].default is None

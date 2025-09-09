@@ -46,7 +46,12 @@ class TestMindsService:
     def minds_service(self, mock_session, mock_mindsdb_client):
         """Create MindsService instance with mocked session."""
         # Mock the datasource validation by patching the validation method
-        service = MindsService(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test-user-123", tenant_id="test-tenant-123")
+        service = MindsService(
+            session=mock_session,
+            mindsdb_client=mock_mindsdb_client,
+            user_id="test-user-123",
+            tenant_id="test-tenant-123",
+        )
         service._validate_datasources = AsyncMock()
         service._add_datasources_to_mind = AsyncMock()
         return service
@@ -84,12 +89,13 @@ class TestMindsService:
 
     def test_service_initialization(self, mock_session, mock_mindsdb_client):
         """Test MindsService initialization."""
-        service = MindsService(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="user-123", tenant_id="tenant-123")
+        service = MindsService(
+            session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="user-123", tenant_id="tenant-123"
+        )
 
         assert service.session == mock_session
         assert service.mindsdb_client == mock_mindsdb_client
         assert service.user_id == "user-123"
-
 
     @pytest.mark.asyncio
     async def test_list_minds_success(self, minds_service, mock_session, sample_mind):
