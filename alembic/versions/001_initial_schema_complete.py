@@ -39,8 +39,8 @@ def upgrade() -> None:
         ),
         sa.Column(
             'tenant_id',
-            postgresql.UUID(as_uuid=True),
-            nullable=True,
+            sa.String(length=255),
+            nullable=False,
             comment='Tenant ID'
         ),
         sa.Column(
@@ -90,8 +90,8 @@ def upgrade() -> None:
         ),
         sa.Column(
             'tenant_id',
-            postgresql.UUID(as_uuid=True),
-            nullable=True,
+            sa.String(length=255),
+            nullable=False,
             comment='Tenant ID'
         ),
         sa.Column(
@@ -135,8 +135,8 @@ def upgrade() -> None:
         ),
         sa.Column(
             'tenant_id',
-            postgresql.UUID(as_uuid=True),
-            nullable=True,
+            sa.String(length=255),
+            nullable=False,
             comment='Tenant ID'
         ),
         sa.Column(
