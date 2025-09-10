@@ -16,16 +16,16 @@ class DataCatalogCache(ABC):
     class MindKey:
         """Key class for storing and retrieving data catalogs."""
 
-        def __init__(self, mind_name: str, modified_on: datetime):
+        def __init__(self, mind_name: str, modified_at: datetime):
             """
             Initialize a MindKey.
 
             Args:
                 mind_name: The name of the mind.
-                modified_on: The last updated timestamp of the mind.
+                modified_at: The last updated timestamp of the mind.
             """
             self.mind_name = mind_name
-            self.modified_on = modified_on
+            self.modified_at = modified_at
 
         def to_string(self) -> str:
             """
@@ -34,7 +34,7 @@ class DataCatalogCache(ABC):
             Returns:
                 A string representation of the MindKey.
             """
-            return f"{self.mind_name}:{str(self.modified_on)}"
+            return f"{self.mind_name}:{str(self.modified_at)}"
 
     @abstractmethod
     def load(self, mind: Mind) -> list[DataCatalog]:
@@ -94,7 +94,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         Returns:
             A list of cached data catalogs if found, or newly created ones.
         """
-        key = DataCatalogCache.MindKey(mind_name=mind.name, modified_on=mind.modified_on)
+        key = DataCatalogCache.MindKey(mind_name=mind.name, modified_at=mind.modified_at)
         key_str = key.to_string()
 
         # Check if we have it in the cache.
@@ -109,7 +109,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         data_catalogs = []
         for mind_datasource in mind.mind_datasources:
-            data_catalog = mind_datasource.datasource.get_data_catalog()
+            data_catalog = DataCatalog.from_mind_datasource(mind_datasource)
             data_catalogs.append(data_catalog)
 
         # Cache the catalogs if any were created.
@@ -134,7 +134,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         # Update the last_updated field for all catalogs.
         for catalog in catalogs:
-            catalog.modified_on = datetime.now()
+            catalog.modified_at = datetime.now()
 
         # Add to the cache.
         self.cache[key_str] = catalogs
