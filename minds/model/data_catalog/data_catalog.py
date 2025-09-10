@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlmodel import Field, SQLModel
@@ -12,11 +13,12 @@ class DataCatalog(SQLModel, table=False):
     """Data catalog metadata - a helper model for accessing datasource metadata."""
 
     mind_datasource: "MindDatasource" = Field(..., description="MindDatasource")
+    modified_at: datetime = Field(..., description="Last modified timestamp")
 
     @classmethod
     def from_mind_datasource(cls, mind_datasource: "MindDatasource") -> "DataCatalog":
         """Create a DataCatalog instance from a datasource and its tables."""
-        return cls(mind_datasource=mind_datasource)
+        return cls(mind_datasource=mind_datasource, modified_at=datetime.now())
 
     def _format_header(self) -> list[str]:
         """Format the header section with data source information."""
