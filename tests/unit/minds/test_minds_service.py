@@ -229,7 +229,9 @@ class TestMindsService:
         mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_update_mind_success(self, minds_service, mock_session, update_request, sample_mind, mock_data_catalog_loader):
+    async def test_update_mind_success(
+        self, minds_service, mock_session, update_request, sample_mind, mock_data_catalog_loader
+    ):
         """Test successful mind update."""
         # Mock: First call finds the original mind, second call finds no conflict
         mock_session.exec.return_value.first.side_effect = [

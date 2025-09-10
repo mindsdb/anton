@@ -42,11 +42,21 @@ class TestDataCatalogLoader:
     @pytest.fixture
     def data_catalog_loader(self, mock_session, mock_mindsdb_client):
         """Create DataCatalogLoader instance with mocked dependencies."""
-        return DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123", tenant_id="test_tenant_456")
+        return DataCatalogLoader(
+            session=mock_session,
+            mindsdb_client=mock_mindsdb_client,
+            user_id="test_user_123",
+            tenant_id="test_tenant_456",
+        )
 
     def test_initialization(self, mock_session, mock_mindsdb_client):
         """Test DataCatalogLoader initialization."""
-        loader = DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123", tenant_id="test_tenant_456")
+        loader = DataCatalogLoader(
+            session=mock_session,
+            mindsdb_client=mock_mindsdb_client,
+            user_id="test_user_123",
+            tenant_id="test_tenant_456",
+        )
 
         assert loader.session == mock_session
         assert loader.mindsdb_client == mock_mindsdb_client
@@ -132,7 +142,7 @@ class TestDataCatalogLoader:
         mock_datasource_config = Mock()
         mock_datasource_config.name = "test_datasource"
         mock_datasource_config.tables = ["table1", "table2"]
-        
+
         await data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
 
         # Verify that the method was called and commit was called
@@ -155,7 +165,7 @@ class TestDataCatalogLoader:
         mock_datasource_config = Mock()
         mock_datasource_config.name = "nonexistent_datasource"
         mock_datasource_config.tables = ["table1", "table2"]
-        
+
         with pytest.raises(DataCatalogLoaderError, match="Error loading data catalog: Database connection failed"):
             await data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
 
@@ -396,6 +406,7 @@ class TestDataCatalogLoader:
         # Mock the session to assign IDs to tables after flush
         def mock_add(table):
             table.id = UUID(f"12345678-1234-5678-1234-56781234567{len(data_catalog_loader.session.add.call_args_list)}")
+
         data_catalog_loader.session.add.side_effect = mock_add
 
         # Execute
@@ -590,6 +601,7 @@ class TestDataCatalogLoader:
         # Mock the session to assign IDs to tables after flush
         def mock_add(table):
             table.id = UUID(f"12345678-1234-5678-1234-56781234567{len(data_catalog_loader.session.add.call_args_list)}")
+
         data_catalog_loader.session.add.side_effect = mock_add
 
         # Execute
