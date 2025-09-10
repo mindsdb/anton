@@ -46,9 +46,7 @@ class Datasource(BaseSQLModel, table=True):
     # Database constraints
     __table_args__ = (UniqueConstraint("name", "user_id", name="unique_datasource_name_per_user"),)
 
-    tables: list["Table"] = Relationship(
-        sa_relationship_kwargs={"foreign_keys": "Table.datasource_id"}
-    )
+    tables: list["Table"] = Relationship(sa_relationship_kwargs={"foreign_keys": "Table.datasource_id"})
 
     def get_data_catalog(self) -> "DataCatalog":
         """Get a DataCatalog instance for this datasource."""

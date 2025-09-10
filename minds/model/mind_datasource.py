@@ -11,7 +11,8 @@ from enum import Enum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Enum as SAEnum, JSON, UniqueConstraint
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Column as SQLModelColumn
 from sqlmodel import Field, Relationship
 

@@ -7,10 +7,9 @@ from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
-from minds.model.datasource import Datasource
-from minds.schemas.minds import DatasourceConfig
 from minds.model.mind_datasource import MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
+from minds.schemas.minds import DatasourceConfig
 
 logger = setup_logging()
 
@@ -53,7 +52,7 @@ class DataCatalogLoader:
 
                 engine_info = self._get_engine_info(datasource_name)
                 if engine_info:
-                    datasource.engine_info = engine_info
+                    mind_datasource.datasource.engine_info = engine_info
 
                 columns_df = self._get_columns(datasource_name, table_names)
                 columns = self._load_columns(columns_df, tables)
@@ -118,7 +117,9 @@ class DataCatalogLoader:
 
         return df["HANDLER_INFO"].iloc[0]
 
-    def _get_tables(self, datasource_id: UUID, datasource_name: str, table_names: list[str] | None = None) -> pd.DataFrame:
+    def _get_tables(
+        self, datasource_id: UUID, datasource_name: str, table_names: list[str] | None = None
+    ) -> pd.DataFrame:
         """Get table metadata from META_TABLES with optional filtering."""
         logger.info(f"Getting table metadata for datasource '{datasource_name}' with filter: {table_names}")
 

@@ -11,7 +11,6 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-
 from minds.model.mind_datasource import DataCatalogStatus
 
 # revision identifiers, used by Alembic.

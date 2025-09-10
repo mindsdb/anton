@@ -388,7 +388,9 @@ class MindsService:
         datasources = [
             DatasourceConfig(
                 name=relationship.datasource.name,
-                tables=[mind_datasource_table.table.name for mind_datasource_table in relationship.mind_datasource_tables],
+                tables=[
+                    mind_datasource_table.table.name for mind_datasource_table in relationship.mind_datasource_tables
+                ],
             )
             for relationship in mind.mind_datasources
         ]
