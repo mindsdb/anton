@@ -30,30 +30,30 @@ class TestDataCatalogCacheMindKey:
     def test_mind_key_initialization(self):
         """Test MindKey initialization with valid parameters."""
         mind_name = "test-mind"
-        modified_on = datetime(2024, 1, 1, 12, 0, 0)
+        modified_at = datetime(2024, 1, 1, 12, 0, 0)
 
-        key = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
+        key = DataCatalogCache.MindKey(mind_name=mind_name, modified_at=modified_at)
 
         assert key.mind_name == mind_name
-        assert key.modified_on == modified_on
+        assert key.modified_at == modified_at
 
     def test_mind_key_to_string(self):
         """Test MindKey string representation."""
         mind_name = "test-mind"
-        modified_on = datetime(2024, 1, 1, 12, 0, 0)
+        modified_at = datetime(2024, 1, 1, 12, 0, 0)
 
-        key = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
+        key = DataCatalogCache.MindKey(mind_name=mind_name, modified_at=modified_at)
         key_str = key.to_string()
 
-        expected_str = f"{mind_name}:{str(modified_on)}"
+        expected_str = f"{mind_name}:{str(modified_at)}"
         assert key_str == expected_str
 
     def test_mind_key_to_string_with_different_formats(self):
         """Test MindKey string representation with different datetime formats."""
         mind_name = "test-mind"
-        modified_on = datetime(2024, 12, 31, 23, 59, 59, 999999)
+        modified_at = datetime(2024, 12, 31, 23, 59, 59, 999999)
 
-        key = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
+        key = DataCatalogCache.MindKey(mind_name=mind_name, modified_at=modified_at)
         key_str = key.to_string()
 
         # Should include microseconds in the string representation
@@ -63,11 +63,11 @@ class TestDataCatalogCacheMindKey:
     def test_mind_key_equality_comparison(self):
         """Test MindKey equality comparison."""
         mind_name = "test-mind"
-        modified_on = datetime(2024, 1, 1, 12, 0, 0)
+        modified_at = datetime(2024, 1, 1, 12, 0, 0)
 
-        key1 = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
-        key2 = DataCatalogCache.MindKey(mind_name=mind_name, modified_on=modified_on)
-        key3 = DataCatalogCache.MindKey(mind_name="different-mind", modified_on=modified_on)
+        key1 = DataCatalogCache.MindKey(mind_name=mind_name, modified_at=modified_at)
+        key2 = DataCatalogCache.MindKey(mind_name=mind_name, modified_at=modified_at)
+        key3 = DataCatalogCache.MindKey(mind_name="different-mind", modified_at=modified_at)
 
         # Same key should have same string representation
         assert key1.to_string() == key2.to_string()
@@ -87,7 +87,7 @@ class TestDataCatalogInMemoryCache:
         """Create a mock Mind instance for testing."""
         mind = Mock(spec=Mind)
         mind.name = "test-mind"
-        mind.modified_on = datetime(2024, 1, 1, 12, 0, 0)
+        mind.modified_at = datetime(2024, 1, 1, 12, 0, 0)
         mind.mind_datasources = []
         return mind
 
@@ -95,7 +95,7 @@ class TestDataCatalogInMemoryCache:
     def mock_data_catalog(self):
         """Create a mock DataCatalog instance for testing."""
         catalog = Mock(spec=DataCatalog)
-        catalog.modified_on = datetime(2024, 1, 1, 12, 0, 0)
+        catalog.modified_at = datetime(2024, 1, 1, 12, 0, 0)
         return catalog
 
     def test_cache_initialization(self):
@@ -147,12 +147,12 @@ class TestDataCatalogInMemoryCache:
             mock_datetime.now.return_value = datetime(2024, 2, 1, 12, 0, 0)
             cache.save(key, catalogs)
 
-        # Verify that modified_on was updated
-        mock_data_catalog.modified_on = mock_datetime.now.return_value
+        # Verify that modified_at was updated
+        mock_data_catalog.modified_at = mock_datetime.now.return_value
 
     def test_load_cache_hit(self, cache, mock_mind, mock_data_catalog):
         """Test loading from cache when data exists (cache hit)."""
-        key = DataCatalogCache.MindKey(mock_mind.name, mock_mind.modified_on)
+        key = DataCatalogCache.MindKey(mock_mind.name, mock_mind.modified_at)
         catalogs = [mock_data_catalog]
         cache.cache[key.to_string()] = catalogs
 
@@ -174,21 +174,37 @@ class TestDataCatalogInMemoryCache:
 
     def test_load_cache_miss_with_datasources(self, cache, mock_mind):
         """Test loading from cache when data doesn't exist but datasources exist."""
+        from uuid import UUID
+        from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+        
         # Mock datasource with get_data_catalog method
         mock_datasource = Mock()
         mock_catalog = Mock(spec=DataCatalog)
         mock_datasource.get_data_catalog.return_value = mock_catalog
 
-        mock_mind_datasource = Mock()
+        # Create a proper mock MindDatasource with valid field types
+        mock_mind_datasource = Mock(spec=MindDatasource)
+        mock_mind_datasource.id = UUID("12345678-1234-5678-1234-567812345678")
+        mock_mind_datasource.tenant_id = "test-tenant"
+        mock_mind_datasource.created_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource.modified_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource.deleted_at = None
+        mock_mind_datasource.mind_id = UUID("87654321-4321-8765-4321-876543218765")
+        mock_mind_datasource.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
+        mock_mind_datasource.status = DataCatalogStatus.COMPLETED
         mock_mind_datasource.datasource = mock_datasource
+        mock_mind_datasource.mind_datasource_tables = []
+        
         mock_mind.mind_datasources = [mock_mind_datasource]
 
         result = cache.load(mock_mind)
 
         assert len(result) == 1
-        assert result[0] == mock_catalog
+        # The result should be a real DataCatalog object, not the mock
+        assert isinstance(result[0], DataCatalog)
+        assert result[0].mind_datasource == mock_mind_datasource
         assert cache.size() == 1
-        mock_datasource.get_data_catalog.assert_called_once()
+        # The cache creates DataCatalog directly, not through datasource.get_data_catalog()
 
     def test_load_cache_miss_with_multiple_datasources(self, cache, mock_mind):
         """Test loading from cache with multiple datasources."""
@@ -201,19 +217,46 @@ class TestDataCatalogInMemoryCache:
         mock_catalog2 = Mock(spec=DataCatalog)
         mock_datasource2.get_data_catalog.return_value = mock_catalog2
 
-        mock_mind_datasource1 = Mock()
+        from uuid import UUID
+        from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+        
+        # Create proper mock MindDatasource objects
+        mock_mind_datasource1 = Mock(spec=MindDatasource)
+        mock_mind_datasource1.id = UUID("12345678-1234-5678-1234-567812345678")
+        mock_mind_datasource1.tenant_id = "test-tenant"
+        mock_mind_datasource1.created_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource1.modified_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource1.deleted_at = None
+        mock_mind_datasource1.mind_id = UUID("87654321-4321-8765-4321-876543218765")
+        mock_mind_datasource1.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
+        mock_mind_datasource1.status = DataCatalogStatus.COMPLETED
         mock_mind_datasource1.datasource = mock_datasource1
-        mock_mind_datasource2 = Mock()
+        mock_mind_datasource1.mind_datasource_tables = []
+
+        mock_mind_datasource2 = Mock(spec=MindDatasource)
+        mock_mind_datasource2.id = UUID("22222222-3333-4444-5555-666666666666")
+        mock_mind_datasource2.tenant_id = "test-tenant"
+        mock_mind_datasource2.created_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource2.modified_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource2.deleted_at = None
+        mock_mind_datasource2.mind_id = UUID("87654321-4321-8765-4321-876543218765")
+        mock_mind_datasource2.datasource_id = UUID("33333333-4444-5555-6666-777777777777")
+        mock_mind_datasource2.status = DataCatalogStatus.COMPLETED
         mock_mind_datasource2.datasource = mock_datasource2
+        mock_mind_datasource2.mind_datasource_tables = []
 
         mock_mind.mind_datasources = [mock_mind_datasource1, mock_mind_datasource2]
 
         result = cache.load(mock_mind)
 
         assert len(result) == 2
-        assert result[0] == mock_catalog1
-        assert result[1] == mock_catalog2
+        # The results should be real DataCatalog objects, not mocks
+        assert isinstance(result[0], DataCatalog)
+        assert isinstance(result[1], DataCatalog)
+        assert result[0].mind_datasource == mock_mind_datasource1
+        assert result[1].mind_datasource == mock_mind_datasource2
         assert cache.size() == 1
+        # The cache creates DataCatalog directly, not through datasource.get_data_catalog()
 
     def test_invalidate_existing_key(self, cache, mock_data_catalog):
         """Test invalidating an existing cache entry."""
@@ -454,17 +497,49 @@ class TestDataCatalogCacheIntegration:
         mock_mind_datasource2 = Mock()
         mock_mind_datasource2.datasource = mock_datasource2
 
+        from uuid import UUID
+        from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+        
         mock_mind = Mock(spec=Mind)
         mock_mind.name = "analytics-mind"
-        mock_mind.modified_on = datetime(2024, 1, 15, 14, 30, 0)
+        mock_mind.modified_at = datetime(2024, 1, 15, 14, 30, 0)
+        
+        # Create proper mock MindDatasource objects
+        mock_mind_datasource1 = Mock(spec=MindDatasource)
+        mock_mind_datasource1.id = UUID("11111111-2222-3333-4444-555555555555")
+        mock_mind_datasource1.tenant_id = "test-tenant"
+        mock_mind_datasource1.created_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource1.modified_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource1.deleted_at = None
+        mock_mind_datasource1.mind_id = UUID("87654321-4321-8765-4321-876543218765")
+        mock_mind_datasource1.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
+        mock_mind_datasource1.status = DataCatalogStatus.COMPLETED
+        mock_mind_datasource1.datasource = mock_datasource1
+        mock_mind_datasource1.mind_datasource_tables = []
+
+        mock_mind_datasource2 = Mock(spec=MindDatasource)
+        mock_mind_datasource2.id = UUID("22222222-3333-4444-5555-666666666666")
+        mock_mind_datasource2.tenant_id = "test-tenant"
+        mock_mind_datasource2.created_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource2.modified_at = datetime(2024, 1, 1, 12, 0, 0)
+        mock_mind_datasource2.deleted_at = None
+        mock_mind_datasource2.mind_id = UUID("87654321-4321-8765-4321-876543218765")
+        mock_mind_datasource2.datasource_id = UUID("33333333-4444-5555-6666-777777777777")
+        mock_mind_datasource2.status = DataCatalogStatus.COMPLETED
+        mock_mind_datasource2.datasource = mock_datasource2
+        mock_mind_datasource2.mind_datasource_tables = []
+        
         mock_mind.mind_datasources = [mock_mind_datasource1, mock_mind_datasource2]
 
         # Load data (cache miss)
         result = cache.load(mock_mind)
 
         assert len(result) == 2
-        assert result[0] == mock_catalog1
-        assert result[1] == mock_catalog2
+        # The results should be real DataCatalog objects, not mocks
+        assert isinstance(result[0], DataCatalog)
+        assert isinstance(result[1], DataCatalog)
+        assert result[0].mind_datasource == mock_mind_datasource1
+        assert result[1].mind_datasource == mock_mind_datasource2
         assert cache.size() == 1
 
         # Load again (cache hit)

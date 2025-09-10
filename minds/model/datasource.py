@@ -48,12 +48,6 @@ class Datasource(BaseSQLModel, table=True):
 
     tables: list["Table"] = Relationship(sa_relationship_kwargs={"foreign_keys": "Table.datasource_id"})
 
-    def get_data_catalog(self) -> "DataCatalog":
-        """Get a DataCatalog instance for this datasource."""
-        from minds.model.data_catalog import DataCatalog
-
-        return DataCatalog.from_datasource(self)
-
     def __repr__(self) -> str:
         """String representation of the datasource."""
         return f"Datasource(name='{self.name}', engine='{self.engine}', user_id='{self.user_id}')"

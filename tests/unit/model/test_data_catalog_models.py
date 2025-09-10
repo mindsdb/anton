@@ -711,9 +711,11 @@ class TestDataCatalog:
 
     def test_data_catalog_initialization(self, mock_mind_datasource):
         """Test DataCatalog initialization."""
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        from datetime import datetime
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
 
         assert catalog.mind_datasource is not None
+        assert catalog.modified_at is not None
 
     def test_data_catalog_from_mind_datasource_class_method(self, mock_mind_datasource):
         """Test DataCatalog.from_mind_datasource class method."""
@@ -803,7 +805,7 @@ class TestDataCatalog:
 
     def test_format_column_basic(self, sample_column, mock_mind_datasource):
         """Test _format_column method with basic column."""
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
 
         column_lines = catalog._format_column(sample_column)
 
@@ -820,7 +822,7 @@ class TestDataCatalog:
         column.description = "User status"
         column.statistics = None
 
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
         column_lines = catalog._format_column(column)
 
         assert "    - status (VARCHAR) DEFAULT active - User status" in column_lines[0]
@@ -835,7 +837,7 @@ class TestDataCatalog:
         column.description = "User notes"
         column.statistics = None
 
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
         column_lines = catalog._format_column(column)
 
         # Should not include DEFAULT [NULL] in output
@@ -852,7 +854,7 @@ class TestDataCatalog:
         column.description = None
         column.statistics = None
 
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
         column_lines = catalog._format_column(column)
 
         assert "    - email (VARCHAR)" in column_lines[0]
@@ -861,7 +863,7 @@ class TestDataCatalog:
 
     def test_format_column_statistics(self, sample_column_with_stats, mock_mind_datasource):
         """Test _format_column_statistics method."""
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
 
         stats_lines = catalog._format_column_statistics(sample_column_with_stats)
 
@@ -873,7 +875,7 @@ class TestDataCatalog:
 
     def test_format_column_statistics_no_stats(self, sample_column, mock_mind_datasource):
         """Test _format_column_statistics method with no statistics."""
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
 
         stats_lines = catalog._format_column_statistics(sample_column)
 
@@ -890,7 +892,7 @@ class TestDataCatalog:
         column.statistics.most_common_values = [""]  # Empty string
         column.statistics.most_common_frequencies = [""]  # Empty string
 
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
         stats_lines = catalog._format_column_statistics(column)
 
         # Should not include Most Common line for empty values
@@ -909,7 +911,7 @@ class TestDataCatalog:
         pk_constraint.column.name = "id"
         table.primary_key_constraints = [pk_constraint]
 
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
         constraint_lines = catalog._format_table_constraints(table)
 
         assert len(constraint_lines) == 1
@@ -954,7 +956,7 @@ class TestDataCatalog:
         table.primary_key_constraints = []
         table.foreign_key_constraints = []
 
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
         constraint_lines = catalog._format_table_constraints(table)
 
         assert len(constraint_lines) == 0
@@ -1051,7 +1053,7 @@ class TestDataCatalog:
         table.foreign_key_constraints = []
         mock_mind_datasource.datasource.tables = [table]
 
-        catalog = DataCatalog(mind_datasource=mock_mind_datasource)
+        catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
         relationship_lines = catalog._format_relationships(table)
 
         assert len(relationship_lines) == 0
