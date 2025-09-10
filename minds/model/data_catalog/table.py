@@ -23,11 +23,10 @@ class Table(BaseSQLModel, table=True):
     type: str | None = Field(default=None, description="Table type")
     row_count: int | None = Field(default=None, description="Row count")
 
-    columns: list["Column"] = Relationship(cascade_delete=True)
-    primary_key_constraints: list["PrimaryKeyConstraint"] = Relationship(cascade_delete=True)
+    columns: list["Column"] = Relationship()
+    primary_key_constraints: list["PrimaryKeyConstraint"] = Relationship()
     foreign_key_constraints: list["ForeignKeyConstraint"] = Relationship(
         sa_relationship_kwargs={
             "foreign_keys": "ForeignKeyConstraint.table_id",
-        },
-        cascade_delete=True,
+        }
     )

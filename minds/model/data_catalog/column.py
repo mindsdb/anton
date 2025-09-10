@@ -21,4 +21,4 @@ class Column(BaseSQLModel, table=True):
     default_value: str | None = Field(default=None, description="Column default value")
     is_nullable: bool = Field(default=True, description="Whether the column is nullable")
 
-    statistics: "ColumnStatistics" = Relationship(cascade_delete=True)
+    statistics: "ColumnStatistics" = Relationship()

@@ -140,6 +140,7 @@ class DataCatalogLoader:
                     Table.datasource_id == datasource_id,
                     Table.name.in_(df["TABLE_NAME"]),
                     Table.tenant_id == self.tenant_id,
+                    Table.deleted_at.is_(None),
                 )
             )
         ).all()

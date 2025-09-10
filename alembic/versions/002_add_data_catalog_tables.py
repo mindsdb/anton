@@ -108,7 +108,7 @@ def upgrade() -> None:
     sa.Column('description', sa.Text(), nullable=True),
     sa.Column('default_value', sa.String(length=500), nullable=True),
     sa.Column('is_nullable', sa.Boolean(), nullable=True),
-    sa.ForeignKeyConstraint(['table_id'], ['tables.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['table_id'], ['tables.id']),
     sa.PrimaryKeyConstraint('id')
     )
 
@@ -154,7 +154,7 @@ def upgrade() -> None:
     sa.Column('distinct_values_count', sa.Integer(), nullable=True),
     sa.Column('min_value', sa.String(length=500), nullable=True),
     sa.Column('max_value', sa.String(length=500), nullable=True),
-    sa.ForeignKeyConstraint(['column_id'], ['columns.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['column_id'], ['columns.id']),
     sa.PrimaryKeyConstraint('id')
     )
 
@@ -197,8 +197,8 @@ def upgrade() -> None:
     sa.Column('column_id', sa.UUID(), nullable=False),
     sa.Column('ordinal_position', sa.Integer(), nullable=True),
     sa.Column('constraint_name', sa.String(length=255), nullable=True),
-    sa.ForeignKeyConstraint(['column_id'], ['columns.id'], ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['table_id'], ['tables.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['column_id'], ['columns.id']),
+    sa.ForeignKeyConstraint(['table_id'], ['tables.id']),
     sa.PrimaryKeyConstraint('id')
     )
 
@@ -243,10 +243,10 @@ def upgrade() -> None:
     sa.Column('referenced_column_id', sa.UUID(), nullable=False),
     sa.Column('constraint_name', sa.String(length=255), nullable=True),
     sa.Column('ordinal_position', sa.Integer(), nullable=True),
-    sa.ForeignKeyConstraint(['column_id'], ['columns.id'], ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['referenced_column_id'], ['columns.id'], ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['referenced_table_id'], ['tables.id'], ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['table_id'], ['tables.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['column_id'], ['columns.id']),
+    sa.ForeignKeyConstraint(['referenced_column_id'], ['columns.id']),
+    sa.ForeignKeyConstraint(['referenced_table_id'], ['tables.id']),
+    sa.ForeignKeyConstraint(['table_id'], ['tables.id']),
     sa.PrimaryKeyConstraint('id')
     )
 
@@ -288,7 +288,7 @@ def upgrade() -> None:
     sa.Column('mind_datasource_id', sa.UUID(), nullable=False),
     sa.Column('table_id', sa.UUID(), nullable=False),
     sa.ForeignKeyConstraint(['mind_datasource_id'], ['mind_datasources.id']),
-    sa.ForeignKeyConstraint(['table_id'], ['tables.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['table_id'], ['tables.id']),
     sa.PrimaryKeyConstraint('id')
     )
 
@@ -304,6 +304,8 @@ def upgrade() -> None:
     op.create_index('ix_foreign_key_constraints_column_id', 'foreign_key_constraints', ['column_id'])
     op.create_index('ix_foreign_key_constraints_referenced_table_id', 'foreign_key_constraints', ['referenced_table_id'])
     op.create_index('ix_foreign_key_constraints_referenced_column_id', 'foreign_key_constraints', ['referenced_column_id'])
+    op.create_index('ix_mind_datasource_tables_mind_datasource_id', 'mind_datasource_tables', ['mind_datasource_id'])
+    op.create_index('ix_mind_datasource_tables_table_id', 'mind_datasource_tables', ['table_id'])
 
     # Add a column to the datasources table to store engine info.
     op.add_column('datasources', sa.Column('engine_info', sa.Text(), nullable=True))
@@ -324,8 +326,243 @@ def upgrade() -> None:
         )
     )
 
+    # Create triggers for automatically updating modified_at timestamps
+    # Using the function update_modified_at_column from the initial schema
+    op.execute('''
+        CREATE TRIGGER update_mind_datasource_tables_modified_at
+        BEFORE UPDATE ON mind_datasource_tables
+        FOR EACH ROW EXECUTE FUNCTION update_modified_at_column();
+    ''')
+    op.execute('''
+        CREATE TRIGGER update_tables_modified_at
+        BEFORE UPDATE ON tables
+        FOR EACH ROW EXECUTE FUNCTION update_modified_at_column();
+    ''')
+    op.execute('''
+        CREATE TRIGGER update_columns_modified_at
+        BEFORE UPDATE ON columns
+        FOR EACH ROW EXECUTE FUNCTION update_modified_at_column();
+    ''')
+    op.execute('''
+        CREATE TRIGGER update_column_statistics_modified_at
+        BEFORE UPDATE ON column_statistics
+        FOR EACH ROW EXECUTE FUNCTION update_modified_at_column();
+    ''')
+    op.execute('''
+        CREATE TRIGGER update_primary_key_constraints_modified_at
+        BEFORE UPDATE ON primary_key_constraints
+        FOR EACH ROW EXECUTE FUNCTION update_modified_at_column();
+    ''')
+    op.execute('''
+        CREATE TRIGGER update_foreign_key_constraints_modified_at
+        BEFORE UPDATE ON foreign_key_constraints
+        FOR EACH ROW EXECUTE FUNCTION update_modified_at_column();
+    ''')
+
+    # Create function to handle soft deletes for mind_datasource_tables
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_mind_datasource_tables()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            UPDATE mind_datasource_tables
+            SET deleted_at = NEW.deleted_at
+            WHERE mind_datasource_id = NEW.id
+            AND deleted_at IS NULL;
+            
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # Create trigger to handle soft deletes for mind_datasource_tables
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_mind_datasource_tables
+        AFTER UPDATE OF deleted_at ON mind_datasources
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_mind_datasource_tables();
+    ''')
+
+    # Create function to handle soft deletes for tables
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_tables()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            UPDATE tables
+            SET deleted_at = NEW.deleted_at
+            WHERE datasource_id = NEW.id
+            AND deleted_at IS NULL;
+            
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # Create trigger to handle soft deletes for tables
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_tables
+        AFTER UPDATE OF deleted_at ON datasources
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_tables();
+    ''')
+
+    # Create function to handle soft deletes for columns
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_columns()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            UPDATE columns
+            SET deleted_at = NEW.deleted_at
+            WHERE table_id = NEW.id
+            AND deleted_at IS NULL;
+            
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # Create trigger to handle soft deletes for columns
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_columns
+        AFTER UPDATE OF deleted_at ON tables
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_columns();
+    ''')
+
+    # Create function to handle soft deletes for column_statistics
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_column_statistics()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            UPDATE column_statistics
+            SET deleted_at = NEW.deleted_at
+            WHERE column_id = NEW.id
+            AND deleted_at IS NULL;
+            
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # Create trigger to handle soft deletes for column_statistics
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_column_statistics
+        AFTER UPDATE OF deleted_at ON columns
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_column_statistics();
+    ''')
+
+    # Create function to handle soft deletes for primary_key_constraints
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_primary_key_constraints()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            -- Case 1: Triggered by tables table
+            IF TG_TABLE_NAME = 'tables' THEN
+                UPDATE primary_key_constraints
+                SET deleted_at = NEW.deleted_at
+                WHERE table_id = NEW.id
+                AND deleted_at IS NULL;
+
+            -- Case 2: Triggered by columns table
+            ELSIF TG_TABLE_NAME = 'columns' THEN
+                UPDATE primary_key_constraints
+                SET deleted_at = NEW.deleted_at
+                WHERE column_id = NEW.id
+                AND deleted_at IS NULL;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # Create triggers to handle soft deletes for primary_key_constraints
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_primary_key_constraints_from_tables
+        AFTER UPDATE OF deleted_at ON tables
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_primary_key_constraints();
+    ''')
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_primary_key_constraints_from_columns
+        AFTER UPDATE OF deleted_at ON columns
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_primary_key_constraints();
+    ''')
+
+    # Create function to handle soft deletes for foreign_key_constraints
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_foreign_key_constraints()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            -- Case 1: Triggered by tables table (affects both source and referenced tables)
+            IF TG_TABLE_NAME = 'tables' THEN
+                UPDATE foreign_key_constraints
+                SET deleted_at = NEW.deleted_at
+                WHERE (table_id = NEW.id OR referenced_table_id = NEW.id)
+                AND deleted_at IS NULL;
+
+            -- Case 2: Triggered by columns table (affects both source and referenced columns)
+            ELSIF TG_TABLE_NAME = 'columns' THEN
+                UPDATE foreign_key_constraints
+                SET deleted_at = NEW.deleted_at
+                WHERE (column_id = NEW.id OR referenced_column_id = NEW.id)
+                AND deleted_at IS NULL;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # Create triggers to handle soft deletes for foreign_key_constraints
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_foreign_key_constraints_from_tables
+        AFTER UPDATE OF deleted_at ON tables
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_foreign_key_constraints();
+    ''')
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_foreign_key_constraints_from_columns
+        AFTER UPDATE OF deleted_at ON columns
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_foreign_key_constraints();
+    ''')
+
 
 def downgrade() -> None:
+    # Drop triggers
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_foreign_key_constraints_from_columns ON columns;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_foreign_key_constraints_from_tables ON tables;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_primary_key_constraints_from_columns ON columns;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_primary_key_constraints_from_tables ON tables;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_column_statistics ON columns;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_columns ON tables;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_tables ON datasources;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_mind_datasource_tables ON mind_datasources;')
+    op.execute('DROP TRIGGER IF EXISTS update_mind_datasource_tables_modified_at ON mind_datasource_tables;')
+    op.execute('DROP TRIGGER IF EXISTS update_tables_modified_at ON tables;')
+    op.execute('DROP TRIGGER IF EXISTS update_columns_modified_at ON columns;')
+    op.execute('DROP TRIGGER IF EXISTS update_column_statistics_modified_at ON column_statistics;')
+    op.execute('DROP TRIGGER IF EXISTS update_primary_key_constraints_modified_at ON primary_key_constraints;')
+    op.execute('DROP TRIGGER IF EXISTS update_foreign_key_constraints_modified_at ON foreign_key_constraints;')
+    
+    # Drop functions
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_foreign_key_constraints();')
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_primary_key_constraints();')
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_column_statistics();')
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_columns();')
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_tables();')
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_mind_datasource_tables();')
+    
     op.drop_index('ix_foreign_key_constraints_referenced_column_id', table_name='foreign_key_constraints')
     op.drop_index('ix_foreign_key_constraints_referenced_table_id', table_name='foreign_key_constraints')
     op.drop_index('ix_foreign_key_constraints_column_id', table_name='foreign_key_constraints')
@@ -337,7 +574,8 @@ def downgrade() -> None:
     op.drop_index('ix_columns_table_id', table_name='columns')
     op.drop_index('ix_tables_name', table_name='tables')
     op.drop_index('ix_tables_datasource_id', table_name='tables')
-
+    op.drop_index('ix_mind_datasource_tables_table_id', table_name='mind_datasource_tables')
+    op.drop_index('ix_mind_datasource_tables_mind_datasource_id', table_name='mind_datasource_tables')
     op.drop_table('foreign_key_constraints')
     op.drop_table('primary_key_constraints')
     op.drop_table('column_statistics')
