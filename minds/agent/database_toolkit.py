@@ -220,7 +220,7 @@ class DatabaseToolkit:
         )
 
         # Extract engine types from data catalogs (same as generate_sql)
-        engines = {catalog.datasource.engine for catalog in data_catalogs_filtered}
+        engines = {catalog.mind_datasource.datasource.engine for catalog in data_catalogs_filtered}
         logger.info(f"Engine types detected for retry in agent '{self.mind.name}': {engines}")
 
         # Convert data catalogs to context strings (same as generate_sql)
@@ -303,7 +303,7 @@ class DatabaseToolkit:
         )
 
         # Extract engine types from filtered data catalogs
-        engines = {catalog.datasource.engine for catalog in data_catalogs_filtered}
+        engines = {catalog.mind_datasource.datasource.engine for catalog in data_catalogs_filtered}
         logger.info(f"Engine types detected for agent '{self.mind.name}' after planning: {engines}")
 
         # Convert data catalogs to context strings
