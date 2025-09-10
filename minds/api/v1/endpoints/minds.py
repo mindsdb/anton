@@ -56,21 +56,25 @@ async def list_minds(
     Returns:
         List[MindResponse]: List of mind objects
     """
-    logger.debug(f"List minds requested (v1) for user {minds_service.user_id}")
+    logger.debug(f"List minds requested (v1) for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
 
     try:
         minds = await minds_service.list_minds(
             provider=provider, include_deleted=include_deleted, limit=limit, offset=offset
         )
 
-        logger.info(f"Retrieved {len(minds)} minds for user {minds_service.user_id}")
+        logger.info(f"Listed minds for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
         return minds
-
     except MindsServiceError as e:
-        logger.error(f"Service error listing minds: {e}")
+        logger.error(
+            f"Service error listing minds for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error listing minds: {e}", exc_info=True)
+        logger.error(
+            f"Unexpected error listing minds for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -90,20 +94,28 @@ async def get_mind(
     Returns:
         MindResponse: Mind object with full details
     """
-    logger.debug(f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id}")
+    logger.debug(
+        f"Get mind requested: {mind_name} (v1) for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+    )
 
     try:
         mind = await minds_service.get_mind(mind_name=mind_name, with_detailed_data=with_detailed_data)
-        logger.info(f"Retrieved mind {mind_name} for user {minds_service.user_id}")
+        logger.info(f"Retrieved mind {mind_name} for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
         return mind
     except MindNotFoundError as e:
-        logger.warning(f"Mind not found: {e}")
+        logger.warning(f"Mind not found for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}")
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MindsServiceError as e:
-        logger.error(f"Service error getting mind: {e}")
+        logger.error(
+            f"Service error getting mind for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error getting mind {mind_name}: {e}", exc_info=True)
+        logger.error(
+            f"Unexpected error getting mind {mind_name} "
+            f"for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -120,21 +132,31 @@ async def create_mind(
     Returns:
         MindResponse: Created mind object with generated ID and timestamps
     """
-    logger.debug(f"Create mind requested: {mind_data.name} (v1) for user {minds_service.user_id}")
+    logger.debug(
+        f"Create mind requested: {mind_data.name} (v1) "
+        f"for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+    )
 
     try:
         mind = await minds_service.create_mind(mind_data)
-        logger.info(f"Created mind {mind_data.name} for user {minds_service.user_id}")
+        logger.info(
+            f"Created mind {mind_data.name} for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+        )
         return mind
-
     except MindAlreadyExistsError as e:
-        logger.warning(f"Mind already exists: {e}")
+        logger.warning(f"Mind already exists for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}")
         raise HTTPException(status_code=409, detail=str(e)) from None
     except MindsServiceError as e:
-        logger.error(f"Service error creating mind: {e}")
+        logger.error(
+            f"Service error creating mind for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error creating mind {mind_data.name}: {e}", exc_info=True)
+        logger.error(
+            f"Unexpected error creating mind {mind_data.name} "
+            f"for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -152,21 +174,31 @@ async def update_mind(
     Returns:
         MindResponse: Updated mind object with new values
     """
-    logger.debug(f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id}")
+    logger.debug(
+        f"Update mind requested: {mind_name} (v1) for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+    )
 
     try:
         mind = await minds_service.update_mind(mind_name, mind_data)
-        logger.info(f"Updated mind {mind_name} for user {minds_service.user_id}")
+        logger.info(f"Updated mind {mind_name} for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
         return mind
 
     except MindNotFoundError as e:
-        logger.warning(f"Mind not found for update: {e}")
+        logger.warning(
+            f"Mind not found for update for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MindsServiceError as e:
-        logger.error(f"Service error updating mind: {e}")
+        logger.error(
+            f"Service error updating mind for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error updating mind {mind_name}: {e}", exc_info=True)
+        logger.error(
+            f"Unexpected error updating mind {mind_name} "
+            f"for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -181,19 +213,29 @@ async def delete_mind(mind_name: str, minds_service: MindsService = Depends(get_
     Returns:
         None: 204 No Content on successful deletion
     """
-    logger.debug(f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id}")
+    logger.debug(
+        f"Delete mind requested: {mind_name} (v1) for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+    )
 
     try:
         await minds_service.delete_mind(mind_name)
-        logger.info(f"Deleted mind {mind_name} for user {minds_service.user_id}")
+        logger.info(f"Deleted mind {mind_name} for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
         # Return nothing for 204 No Content
 
     except MindNotFoundError as e:
-        logger.warning(f"Mind not found for deletion: {e}")
+        logger.warning(
+            f"Mind not found for deletion for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MindsServiceError as e:
-        logger.error(f"Service error deleting mind: {e}")
+        logger.error(
+            f"Service error deleting mind for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error deleting mind {mind_name}: {e}", exc_info=True)
+        logger.error(
+            f"Unexpected error deleting mind {mind_name} "
+            f"for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None

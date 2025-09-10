@@ -100,7 +100,7 @@ class DatasourcesService:
         """
         try:
             logger.debug(
-                f"Listing datasources for user {self.user_id} and tenant {self.tenant_id} with filters: "
+                f"Listing datasources for user {self.user_id} in tenant {self.tenant_id} with filters: "
                 f"engine={engine}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
             )
 
@@ -135,7 +135,7 @@ class DatasourcesService:
             logger.info(f"Found {len(responses)} datasources for user {self.user_id} and tenant {self.tenant_id}")
             return responses
         except Exception as e:
-            logger.error(f"Error listing datasources for user {self.user_id} and tenant {self.tenant_id}: {str(e)}")
+            logger.error(f"Error listing datasources for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise DatasourceServiceError(f"Failed to list datasources: {str(e)}") from None
 
     async def get_datasource(
@@ -155,7 +155,7 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
-            logger.debug(f"Getting datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.debug(f"Getting datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             datasource = await self._get_datasource(datasource_name)
 
@@ -172,7 +172,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Error getting datasource {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to get datasource: {str(e)}") from None
 
@@ -192,7 +192,7 @@ class DatasourcesService:
         """
         try:
             logger.debug(
-                f"Creating datasource {datasource_data.name} for user {self.user_id} and tenant {self.tenant_id}"
+                f"Creating datasource {datasource_data.name} for user {self.user_id} in tenant {self.tenant_id}"
             )
 
             # Check if datasource already exists
@@ -219,7 +219,7 @@ class DatasourcesService:
                 await self._create_mindsdb_database(datasource)
 
                 logger.info(
-                    f"Created datasource {datasource_data.name} for user {self.user_id} and tenant {self.tenant_id}"
+                    f"Created datasource {datasource_data.name} for user {self.user_id} in tenant {self.tenant_id}"
                 )
 
             except DatasourceServiceError:
@@ -237,7 +237,7 @@ class DatasourcesService:
             self.session.rollback()
             logger.error(
                 f"Error creating datasource {datasource_data.name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to create datasource: {str(e)}") from None
 
@@ -259,7 +259,7 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
-            logger.debug(f"Updating datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.debug(f"Updating datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             # Get existing datasource
             datasource = await self._get_datasource(datasource_name)
@@ -284,7 +284,7 @@ class DatasourcesService:
                 if datasource_data.connection_data is not None:
                     await self._update_mindsdb_database(datasource)
 
-                logger.info(f"Updated datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
+                logger.info(f"Updated datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             except DatasourceServiceError:
                 # Rollback internal database if MindsDB update fails
@@ -302,7 +302,7 @@ class DatasourcesService:
             self.session.rollback()
             logger.error(
                 f"Error updating datasource {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to update datasource: {str(e)}") from None
 
@@ -320,7 +320,7 @@ class DatasourcesService:
         try:
             logger.debug(
                 f"Deleting datasource {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id} (cascade={cascade})"
+                f"for user {self.user_id} in tenant {self.tenant_id} (cascade={cascade})"
             )
 
             # Get existing datasource
@@ -360,7 +360,7 @@ class DatasourcesService:
             self.session.add(datasource)
             self.session.commit()
 
-            logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
         except DatasourceNotFoundError:
             self.session.rollback()
             raise
@@ -368,7 +368,7 @@ class DatasourcesService:
             self.session.rollback()
             logger.error(
                 f"Error deleting datasource {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to delete datasource: {str(e)}") from None
 
@@ -385,7 +385,7 @@ class DatasourcesService:
         try:
             logger.debug(
                 f"Testing connection for datasource {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}"
+                f"for user {self.user_id} in tenant {self.tenant_id}"
             )
 
             # Get datasource to verify it exists
@@ -423,7 +423,7 @@ class DatasourcesService:
         """Get a sample of a table from a datasource."""
         logger.debug(
             f"Getting sample data for table {table_name} of datasource {datasource_name} "
-            f"for user {self.user_id} and tenant {self.tenant_id}"
+            f"for user {self.user_id} in tenant {self.tenant_id}"
         )
 
         try:
@@ -447,7 +447,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Error getting sample data for table {table_name} of datasource {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to get sample data: {str(e)}") from None
 
@@ -455,7 +455,7 @@ class DatasourcesService:
         """Get the row count of a table from a datasource."""
         logger.debug(
             f"Getting row count for table {table_name} of datasource {datasource_name} "
-            f"for user {self.user_id} and tenant {self.tenant_id}"
+            f"for user {self.user_id} in tenant {self.tenant_id}"
         )
 
         try:
@@ -474,7 +474,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Error getting row count for table {table_name} of datasource {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
 

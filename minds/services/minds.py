@@ -98,7 +98,7 @@ class MindsService:
         """
         try:
             logger.debug(
-                f"Listing minds for user {self.user_id} and tenant {self.tenant_id} with filters: "
+                f"Listing minds for user {self.user_id} in tenant {self.tenant_id} with filters: "
                 f"provider={provider}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
             )
 
@@ -131,11 +131,11 @@ class MindsService:
 
             logger.info(
                 f"Retrieved {len(minds_list)} minds "
-                f"for user {self.user_id} and tenant {self.tenant_id} (offset={offset}, limit={limit})"
+                f"for user {self.user_id} in tenant {self.tenant_id} (offset={offset}, limit={limit})"
             )
             return minds_list
         except Exception as e:
-            logger.error(f"Error listing minds for user {self.user_id} and tenant {self.tenant_id}: {str(e)}")
+            logger.error(f"Error listing minds for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
 
     async def get_mind(self, mind_name: str, with_detailed_data: bool = False) -> MindResponse:
@@ -153,7 +153,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
-            logger.debug(f"Getting mind {mind_name} for user {self.user_id}")
+            logger.debug(f"Getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             mind = await self._get_mind(mind_name)
 
@@ -161,14 +161,12 @@ class MindsService:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
             mind_response = self._mind_to_response(mind, with_detailed_data)
-            logger.info(f"Retrieved mind {mind_name} for user {self.user_id}")
+            logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return mind_response
         except MindNotFoundError:
             raise
         except Exception as e:
-            logger.error(
-                f"Error getting mind {mind_name} for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
-            )
+            logger.error(f"Error getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
 
     async def create_mind(self, mind_data: MindCreateRequest) -> MindResponse:
@@ -186,7 +184,7 @@ class MindsService:
             DatasourceNotFoundError: If any specified datasource doesn't exist
         """
         try:
-            logger.debug(f"Creating mind {mind_data.name} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.debug(f"Creating mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
@@ -225,17 +223,16 @@ class MindsService:
             if mind_data.datasources:
                 await self._add_datasources_to_mind(new_mind, mind_data.datasources)
 
-            logger.info(f"Created mind {mind_data.name} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.info(f"Created mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
 
             return self._mind_to_response(new_mind)
-
         except (MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
         except Exception as e:
             self.session.rollback()
             logger.error(
-                f"Error creating mind {mind_data.name} for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"Error creating mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
 
@@ -254,7 +251,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
-            logger.debug(f"Updating mind {mind_name} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.debug(f"Updating mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)
 
@@ -289,7 +286,7 @@ class MindsService:
             self.session.commit()
             self.session.refresh(mind)
 
-            logger.info(f"Updated mind {mind_name} for user {self.user_id}")
+            logger.info(f"Updated mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             return self._mind_to_response(mind)
         except (MindNotFoundError, MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
@@ -297,7 +294,9 @@ class MindsService:
             raise
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Error updating mind {mind_name}: {str(e)}")
+            logger.error(
+                f"Error updating mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to update mind: {str(e)}") from None
 
     async def delete_mind(self, mind_name: str, cascade: bool = False) -> bool:
@@ -315,7 +314,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
-            logger.debug(f"Deleting mind {mind_name} for user {self.user_id}")
+            logger.debug(f"Deleting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)
 
@@ -331,14 +330,16 @@ class MindsService:
             self.session.add(mind)
             self.session.commit()
 
-            logger.info(f"Deleted mind {mind_name} for user {self.user_id}")
+            logger.info(f"Deleted mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return True
         except MindNotFoundError:
             self.session.rollback()
             raise
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Error deleting mind {mind_name}: {str(e)}")
+            logger.error(
+                f"Error deleting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to delete mind: {str(e)}") from None
 
     async def _get_mind(self, mind_name: str) -> Mind:
@@ -408,7 +409,9 @@ class MindsService:
             datasource_name = datasource_config.name
             datasource_tables = datasource_config.tables
             try:
-                logger.debug(f"Validating datasource: {datasource_name}")
+                logger.debug(
+                    f"Validating datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}"
+                )
                 datasource = self.session.exec(
                     select(Datasource).where(
                         and_(
@@ -437,7 +440,10 @@ class MindsService:
                             f"Available tables: {available_table_names}"
                         )
             except (DatasourceNotFoundError, DatasourceTableNotFoundError) as e:
-                logger.error(f"Error validating datasource {datasource_name}: {str(e)}")
+                logger.error(
+                    f"Error validating datasource {datasource_name} "
+                    f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                )
                 raise
 
     async def _add_datasources_to_mind(self, mind: Mind, datasource_configs: list[DatasourceConfig]) -> None:
@@ -450,6 +456,10 @@ class MindsService:
         """
         for datasource_config in datasource_configs:
             try:
+                logger.debug(
+                    f"Adding datasource {datasource_config.name} to mind {mind.name} "
+                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                )
                 datasource_name = datasource_config.name
                 # Find the datasource
                 datasource = self.session.exec(
@@ -464,7 +474,10 @@ class MindsService:
                 ).first()
 
                 if not datasource:
-                    logger.warning(f"Datasource '{datasource_name}' not found in database, skipping")
+                    logger.warning(
+                        f"Datasource '{datasource_name}' not found in database "
+                        f"for user {self.user_id} in tenant {self.tenant_id}, skipping"
+                    )
                     continue
 
                 # Check if relationship already exists
@@ -480,7 +493,10 @@ class MindsService:
                 ).first()
 
                 if existing_relationship:
-                    logger.debug(f"Datasource {datasource_name} already linked to mind {mind.name}")
+                    logger.debug(
+                        f"Datasource {datasource_name} already linked to mind {mind.name} "
+                        f"for user {self.user_id} in tenant {self.tenant_id}"
+                    )
                     continue
 
                 # Create new relationship
@@ -492,10 +508,15 @@ class MindsService:
                 )
 
                 self.session.add(mind_datasource)
-                logger.debug(f"Added datasource {datasource_name} to mind {mind.name}")
-
+                logger.debug(
+                    f"Added datasource {datasource_name} to mind {mind.name} "
+                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                )
             except Exception as e:
-                logger.error(f"Error adding datasource {datasource_name} to mind {mind.name}: {str(e)}")
+                logger.error(
+                    f"Error adding datasource {datasource_name} to mind {mind.name} "
+                    f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                )
                 # Continue with other datasources even if one fails
                 continue
 
@@ -526,7 +547,6 @@ class MindsService:
             await self._add_datasources_to_mind(mind, new_datasource_configs)
 
             logger.debug(f"Updated datasources for mind {mind.name}")
-
         except Exception as e:
             self.session.rollback()
             logger.error(f"Error updating datasources for mind {mind.name}: {str(e)}")

@@ -72,19 +72,31 @@ async def list_datasources(
         List of datasource objects matching the specified criteria
     """
     try:
-        logger.debug(f"List datasources requested (v1) for user {datasources_service.user_id} ")
+        logger.debug(
+            f"List datasources requested (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
 
         datasources = await datasources_service.list_datasources(
             engine=engine, limit=limit, offset=offset, with_detailed_data=with_detailed_data
         )
 
+        logger.info(
+            f"Listed {len(datasources)} datasources "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
         return datasources
-
     except DatasourceServiceError as e:
-        logger.error(f"Service error in list_datasources: {str(e)}")
+        logger.error(
+            f"Service error in list_datasources "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error in list_datasources: {str(e)}")
+        logger.error(
+            f"Unexpected error in list_datasources "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -105,22 +117,34 @@ async def get_datasource(
         Datasource details object
     """
     try:
-        logger.debug(f"Get datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}")
+        logger.debug(
+            f"Get datasource requested: {datasource_name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
 
         datasource = await datasources_service.get_datasource(
             datasource_name=datasource_name, with_detailed_data=with_detailed_data
         )
 
+        logger.info(
+            f"Retrieved datasource {datasource_name} "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
         return datasource
-
     except DatasourceServiceError as e:
-        logger.error(f"Service error in get_datasource: {str(e)}")
+        logger.error(
+            f"Service error in get_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e)) from None
         else:
             raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error in get_datasource: {str(e)}")
+        logger.error(
+            f"Unexpected error in get_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -139,21 +163,34 @@ async def create_datasource(
     """
     try:
         logger.debug(
-            f"Create datasource requested: {datasource_data.name} (v1) for user {datasources_service.user_id}, "
+            f"Create datasource requested: {datasource_data.name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
         )
 
         datasource = await datasources_service.create_datasource(datasource_data)
 
+        logger.info(
+            f"Created datasource {datasource_data.name} "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
         return datasource
-
     except DatasourceAlreadyExistsError as e:
-        logger.error(f"Datasource already exists: {str(e)}")
+        logger.error(
+            f"Datasource already exists "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=409, detail=str(e)) from None
     except DatasourceServiceError as e:
-        logger.error(f"Service error in create_datasource: {str(e)}")
+        logger.error(
+            f"Service error in create_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error in create_datasource: {str(e)}")
+        logger.error(
+            f"Unexpected error in create_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -174,20 +211,35 @@ async def update_datasource(
         Updated datasource details
     """
     try:
-        logger.debug(f"Update datasource requested: {datasource_name} (v1) for user {datasources_service.user_id}")
+        logger.debug(
+            f"Update datasource requested: {datasource_name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
 
         datasource = await datasources_service.update_datasource(datasource_name, datasource_data)
 
+        logger.info(
+            f"Updated datasource {datasource_name} "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
         return datasource
-
     except DatasourceNotFoundError as e:
-        logger.error(f"Datasource not found: {str(e)}")
+        logger.error(
+            f"Datasource not found "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except DatasourceServiceError as e:
-        logger.error(f"Service error in update_datasource: {str(e)}")
+        logger.error(
+            f"Service error in update_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error in update_datasource: {str(e)}")
+        logger.error(
+            f"Unexpected error in update_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -209,23 +261,35 @@ async def delete_datasource(
     """
     try:
         logger.debug(
-            f"Delete datasource requested: {datasource_name} (v1) \
-                for user {datasources_service.user_id}, cascade={cascade}"
+            f"Delete datasource requested: {datasource_name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}, cascade={cascade}"
         )
 
         await datasources_service.delete_datasource(datasource_name, cascade=cascade)
 
+        logger.info(
+            f"Deleted datasource {datasource_name} "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
         # Return 204 No Content on successful deletion
         return None
-
     except DatasourceNotFoundError as e:
-        logger.error(f"Datasource not found: {str(e)}")
+        logger.error(
+            f"Datasource not found "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except DatasourceServiceError as e:
-        logger.error(f"Service error in delete_datasource: {str(e)}")
+        logger.error(
+            f"Service error in delete_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error in delete_datasource: {str(e)}")
+        logger.error(
+            f"Unexpected error in delete_datasource "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -243,14 +307,23 @@ async def check_datasource_connection(
         Connection status with success/failure and error details
     """
     try:
-        logger.debug(f"Test connection requested: {datasource_name} (v1) for user {datasources_service.user_id}")
+        logger.debug(
+            f"Test connection requested: {datasource_name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
 
         result = await datasources_service.test_connection(datasource_name)
 
+        logger.info(
+            f"Test connection for datasource {datasource_name} "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
         return result
-
     except Exception as e:
-        logger.error(f"Unexpected error in check_datasource_connection: {str(e)}")
+        logger.error(
+            f"Unexpected error in check_datasource_connection "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         return DatasourceConnectionStatus(success=False, error_message=f"Connection test failed: {str(e)}")
 
 
@@ -274,19 +347,34 @@ async def get_datasource_table_sample(
     """
     try:
         logger.debug(
-            f"Get table sample requested: {datasource_name}.{table_name} (v1) for user {datasources_service.user_id}"
+            f"Get table sample requested: {datasource_name}.{table_name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
         )
 
         sample_response = await datasources_service.get_datasource_table_sample(datasource_name, table_name, limit)
+
+        logger.info(
+            f"Get table sample for datasource {datasource_name}.{table_name} "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
         return sample_response
     except DatasourceNotFoundError as e:
-        logger.error(f"Datasource not found: {str(e)}")
+        logger.error(
+            f"Datasource not found "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except DatasourceServiceError as e:
-        logger.error(f"Service error in get_datasource_table_sample: {str(e)}")
+        logger.error(
+            f"Service error in get_datasource_table_sample "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error in get_datasource_table_sample: {str(e)}")
+        logger.error(
+            f"Unexpected error in get_datasource_table_sample "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
@@ -306,18 +394,32 @@ async def get_datasource_table_row_count(
     """
     try:
         logger.debug(
-            f"Get table row count requested: {datasource_name}.{table_name} (v1) for user {datasources_service.user_id}"
+            f"Get table row count requested: {datasource_name}.{table_name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
         )
 
         row_count = await datasources_service.get_datasource_table_row_count(datasource_name, table_name)
-        return row_count
 
+        logger.info(
+            f"Get table row count for datasource {datasource_name}.{table_name} "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
+        return row_count
     except DatasourceNotFoundError as e:
-        logger.error(f"Datasource not found: {str(e)}")
+        logger.error(
+            f"Datasource not found "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except DatasourceServiceError as e:
-        logger.error(f"Service error in get_datasource_table_row_count: {str(e)}")
+        logger.error(
+            f"Service error in get_datasource_table_row_count "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
-        logger.error(f"Unexpected error in get_datasource_table_row_count: {str(e)}")
+        logger.error(
+            f"Unexpected error in get_datasource_table_row_count "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
         raise HTTPException(status_code=500, detail="Internal server error") from None
