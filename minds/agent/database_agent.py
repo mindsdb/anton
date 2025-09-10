@@ -1,6 +1,6 @@
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, List, Optional
 
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai import RunContext
@@ -11,7 +11,6 @@ from minds.common.logger import setup_logging
 from minds.model.mind import Mind
 from minds.schemas.chat import Message
 
-
 logger = setup_logging()
 
 PydanticAIAgent.instrument_all()
@@ -20,8 +19,9 @@ PydanticAIAgent.instrument_all()
 @dataclass
 class DatabaseDeps:
     """Dependencies for the database agent."""
+
     toolkit: DatabaseToolkit
-    conversation_context: Optional[str] = None
+    conversation_context: str | None = None
 
 
 class DatabaseAgent:
@@ -32,10 +32,10 @@ class DatabaseAgent:
     """
 
     def __init__(
-        self, 
-        mind: Mind, 
+        self,
+        mind: Mind,
         database_toolkit: DatabaseToolkit,
-        ):
+    ):
         """Initialize the PydanticAgent.
 
         Args:
@@ -55,22 +55,25 @@ class DatabaseAgent:
         """
         llm_model = get_llm_config(self.mind.provider, self.mind.model_name)
 
-        base_prompt = "You are a helpful database assistant created by MindsDB that can query databases and provide insights."
+        base_prompt = (
+            "You are a helpful database assistant created by MindsDB that can query databases and provide insights."
+        )
 
         current_date = datetime.now().strftime("%Y-%m-%d")
         current_time = datetime.now().strftime("%H:%M:%S")
 
         system_prompt = f"{base_prompt}\n\nCurrent date: {current_date}\nCurrent time: {current_time}"
-        
+
         agent = PydanticAIAgent(
             model=llm_model,
             system_prompt=system_prompt,
             deps_type=DatabaseDeps,
         )
+
         @agent.tool
         async def generate_and_execute_sql(ctx: RunContext[DatabaseDeps]) -> str:
             """Generate and execute SQL to answer the user's question.
-            
+
             This tool does not require any input parameters. The user's question is already available
             through the context dependencies and will be used to generate appropriate SQL.
             Do not pass any parameters to this tool.
@@ -84,7 +87,7 @@ class DatabaseAgent:
 
         return agent
 
-    def _build_conversation_context(self, messages: List[Message]) -> str:
+    def _build_conversation_context(self, messages: list[Message]) -> str:
         """Build a conversation context string from messages.
 
         Args:
@@ -92,7 +95,7 @@ class DatabaseAgent:
 
         Returns:
             Formatted conversation context string.
-        """       
+        """
         if not messages:
             return ""
 
@@ -105,22 +108,25 @@ class DatabaseAgent:
             role = msg.role.name if msg.role else "user"
             content = msg.content if msg.content else ""
 
-            if role == 'user':
+            if role == "user":
                 context_parts.append(f"User: {content}")
-            elif role == 'assistant':
+            elif role == "assistant":
                 context_parts.append(f"Assistant: {content}")
-            elif role == 'system':
+            elif role == "system":
                 context_parts.append(f"System: {content}")
 
         conversation_context = "\n\n".join(context_parts)
 
         # Add instruction for the agent to understand this is a conversation
         if len(messages) > 1:
-            conversation_context = f"This is a conversation history. Please respond to the most recent user message while considering the full context:\n\n{conversation_context}"
+            conversation_context = (
+                "This is a conversation history. Please respond to the most recent user message "
+                f"while considering the full context:\n\n{conversation_context}"
+            )
 
         return conversation_context
 
-    async def get_completion(self, messages: List[Message], stream: bool = False) -> AsyncGenerator[str, None]:
+    async def get_completion(self, messages: list[Message], stream: bool = False) -> AsyncGenerator[str, None]:
         """Get completion from the Pydantic-based agent.
 
         Args:
@@ -140,9 +146,7 @@ class DatabaseAgent:
         self.deps.conversation_context = conversation_context
 
         if stream:
-            async with agent.run_stream(
-            conversation_context, deps=self.deps
-            ) as result:
+            async with agent.run_stream(conversation_context, deps=self.deps) as result:
                 async for chunk in result.stream_text(delta=True):
                     yield chunk
         else:

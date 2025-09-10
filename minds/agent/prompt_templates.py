@@ -445,10 +445,10 @@ DEFAULT_ENGINE_INSTRUCTIONS = SQL_GENERATION_INSTRUCTIONS
 def build_dynamic_prompt_template(engines: set) -> str:
     """
     Build a dynamic prompt template based on the available engines.
-    
+
     Args:
         engines: Set of engine types from data catalogs
-        
+
     Returns:
         Dynamically composed prompt template string
     """
@@ -464,20 +464,20 @@ def build_dynamic_prompt_template(engines: set) -> str:
 Based on the user's question and the available databases, determine which database contains the data needed to answer the question, then generate the appropriate query type.
 
 """
-    
+
     # Add engine-specific instructions
     for engine in sorted(engines):  # Sort for consistent ordering
         if engine in ENGINE_INSTRUCTIONS:
             template += ENGINE_INSTRUCTIONS[engine] + "\n\n"
         else:
             template += DEFAULT_ENGINE_INSTRUCTIONS + "\n\n"
-    
+
     # Add output instructions
     template += """**OUTPUT**
 After laying out your plan, synthesize all these considerations into a single optimized query that accurately answers the user's question while being efficient and following the appropriate query language best practices.
 You must output the final query only and nothing else.
 """
-    
+
     return template
 
 
@@ -539,10 +539,10 @@ Generate a corrected SQL query that addresses the specific error while maintaini
 def get_prompt_template_for_engines(engines: set) -> str:
     """
     Get the appropriate prompt template based on engine types.
-    
+
     Args:
         engines: Set of engine types from data catalogs
-        
+
     Returns:
         The appropriate prompt template string
     """
@@ -552,6 +552,6 @@ def get_prompt_template_for_engines(engines: set) -> str:
         if engine == "salesforce":
             return SOQL_PROMPT_TEMPLATE
         return QUERY_PLAN_PROMPT_TEMPLATE
-    
+
     # Multiple engines - build dynamic template
     return build_dynamic_prompt_template(engines)
