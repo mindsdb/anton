@@ -30,7 +30,7 @@ class DataCatalog(BaseSQLModel, table=False):
             lines.append(f"Engine Info: {self.mind_datasource.datasource.engine_info}")
         lines.append("")
 
-        lines.append(f"Number of Tables: {len(self.mind_datasource.tables)}")
+        lines.append(f"Number of Tables: {len(self.mind_datasource.mind_datasource_tables)}")
         lines.append("")
         return lines
 
@@ -127,7 +127,7 @@ class DataCatalog(BaseSQLModel, table=False):
 
                 # Further, foreign keys will also contains instances where the referenced table is
                 # not included in the relationship.
-                if fk.referenced_table.name not in self.mind_datasource.tables:
+                if fk.referenced_table.name not in self.mind_datasource.mind_datasource_tables:
                     continue
 
                 fk_column_name = fk.column.name
@@ -148,7 +148,7 @@ class DataCatalog(BaseSQLModel, table=False):
             if fk.referenced_table.name == table.name:
                 continue
 
-            if fk.referenced_table.name not in self.mind_datasource.tables:
+            if fk.referenced_table.name not in self.mind_datasource.mind_datasource_tables:
                 continue
 
             related_tables.append(fk.referenced_table.name)
@@ -175,7 +175,7 @@ class DataCatalog(BaseSQLModel, table=False):
         lines.extend(self._format_header())
 
         for table in self.mind_datasource.datasource.tables:
-            if table.name in self.mind_datasource.tables:
+            if table.name in self.mind_datasource.mind_datasource_tables:
                 lines.extend(self._format_table(table))
                 # TODO: Is this necessary? We are already adding the foreign keys to the table section.
                 relationship_lines.extend(self._format_relationships(table))

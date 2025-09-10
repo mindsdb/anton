@@ -388,7 +388,7 @@ class MindsService:
         datasources = [
             DatasourceConfig(
                 name=relationship.datasource.name,
-                tables=relationship.tables,
+                tables=[mind_datasource_table.table.name for mind_datasource_table in relationship.mind_datasource_tables],
             )
             for relationship in mind.mind_datasources
         ]
@@ -531,7 +531,7 @@ class MindsService:
                 self.session.commit()
 
                 try:
-                    await data_catalog_loader.load(datasource_name, datasource_config.tables)
+                    await data_catalog_loader.load(mind_datasource, datasource_config)
                 except DataCatalogLoaderError as e:
                     logger.error(f"Error loading datasource {datasource_name} to the data catalog: {str(e)}")
                     mind_datasource.status = DataCatalogStatus.FAILED
