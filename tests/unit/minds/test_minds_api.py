@@ -49,6 +49,7 @@ class TestMindsAPI:
         """Mock MindsService instance."""
         service = Mock(spec=MindsService)
         service.user_id = "test-user-123"
+        service.tenant_id = "test-tenant-456"
         return service
 
     @pytest.fixture
@@ -278,6 +279,7 @@ class TestMindsAPIErrorHandling:
         """Test get_mind with MindsServiceError (lines 112-114)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.get_mind = AsyncMock(side_effect=MindsServiceError("Database connection failed"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -291,6 +293,7 @@ class TestMindsAPIErrorHandling:
         """Test get_mind with unexpected Exception (lines 115-117)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.get_mind = AsyncMock(side_effect=ValueError("Unexpected error"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -304,6 +307,7 @@ class TestMindsAPIErrorHandling:
         """Test create_mind with MindsServiceError (lines 147-149)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.create_mind = AsyncMock(side_effect=MindsServiceError("Validation failed"))
 
         request = MindCreateRequest(name="test", provider="openai", datasources=[])
@@ -319,6 +323,7 @@ class TestMindsAPIErrorHandling:
         """Test create_mind with unexpected Exception (lines 150-152)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.create_mind = AsyncMock(side_effect=RuntimeError("Database error"))
 
         request = MindCreateRequest(name="test", provider="openai", datasources=[])
@@ -334,6 +339,7 @@ class TestMindsAPIErrorHandling:
         """Test update_mind with MindsServiceError (lines 184-186)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.update_mind = AsyncMock(side_effect=MindsServiceError("Invalid parameters"))
 
         request = MindUpdateRequest(name="updated-test")
@@ -349,6 +355,7 @@ class TestMindsAPIErrorHandling:
         """Test update_mind with unexpected Exception (lines 187-189)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.update_mind = AsyncMock(side_effect=KeyError("Missing key"))
 
         request = MindUpdateRequest(name="updated-test")
@@ -364,6 +371,7 @@ class TestMindsAPIErrorHandling:
         """Test delete_mind with MindsServiceError (lines 219-221)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.delete_mind = AsyncMock(side_effect=MindsServiceError("Cannot delete mind"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -377,6 +385,7 @@ class TestMindsAPIErrorHandling:
         """Test delete_mind with unexpected Exception (lines 222-224)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
+        mock_service.tenant_id = "test-tenant"
         mock_service.delete_mind = AsyncMock(side_effect=OSError("File system error"))
 
         with pytest.raises(HTTPException) as exc_info:

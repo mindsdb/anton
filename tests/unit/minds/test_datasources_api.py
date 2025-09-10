@@ -61,6 +61,7 @@ class TestDatasourcesAPI:
         """Mock DatasourcesService instance."""
         service = Mock(spec=DatasourcesService)
         service.user_id = "test-user-123"
+        service.tenant_id = "test-tenant-456"
         return service
 
     @pytest.fixture
