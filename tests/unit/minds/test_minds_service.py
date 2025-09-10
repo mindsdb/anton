@@ -229,7 +229,7 @@ class TestMindsService:
         mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_update_mind_success(self, minds_service, mock_session, update_request, sample_mind):
+    async def test_update_mind_success(self, minds_service, mock_session, update_request, sample_mind, mock_data_catalog_loader):
         """Test successful mind update."""
         # Mock: First call finds the original mind, second call finds no conflict
         mock_session.exec.return_value.first.side_effect = [
@@ -237,25 +237,25 @@ class TestMindsService:
             None,  # No name conflict
         ]
 
-        result = await minds_service.update_mind("test-mind", update_request)
+        result = await minds_service.update_mind("test-mind", update_request, mock_data_catalog_loader)
 
         assert result.name == "updated-mind"  # Should be updated
         mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_update_mind_not_found(self, minds_service, mock_session, update_request):
+    async def test_update_mind_not_found(self, minds_service, mock_session, update_request, mock_data_catalog_loader):
         """Test mind update when mind doesn't exist."""
         mock_session.exec.return_value.first.return_value = None
 
         with pytest.raises(MindNotFoundError) as exc_info:
-            await minds_service.update_mind("nonexistent-mind", update_request)
+            await minds_service.update_mind("nonexistent-mind", update_request, mock_data_catalog_loader)
 
         assert "Mind 'nonexistent-mind' not found" in str(exc_info.value)
         mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_update_mind_name_conflict(self, minds_service, mock_session, sample_mind):
+    async def test_update_mind_name_conflict(self, minds_service, mock_session, sample_mind, mock_data_catalog_loader):
         """Test mind update with name conflict."""
         # Mock: Original mind exists
         mock_session.exec.return_value.first.side_effect = [
@@ -266,7 +266,7 @@ class TestMindsService:
         update_request = MindUpdateRequest(name="conflicting-name")
 
         with pytest.raises(MindAlreadyExistsError) as exc_info:
-            await minds_service.update_mind("test-mind", update_request)
+            await minds_service.update_mind("test-mind", update_request, mock_data_catalog_loader)
 
         assert "Mind with name 'conflicting-name' already exists" in str(exc_info.value)
 

@@ -658,6 +658,8 @@ class TestDataCatalog:
         mind_datasource.deleted_at = None
         mind_datasource.mind_id = uuid4()
         mind_datasource.datasource_id = uuid4()
+        mind_datasource.tenant_id = "test-tenant-456"
+        mind_datasource.status = "COMPLETED"
         mind_datasource.datasource = mock_datasource
         mind_datasource.tables = ["table1", "table2"]
         return mind_datasource
@@ -712,16 +714,12 @@ class TestDataCatalog:
         catalog = DataCatalog(mind_datasource=mock_mind_datasource)
 
         assert catalog.mind_datasource is not None
-        assert catalog.created_at is None  # Not set until saved to database
-        assert catalog.modified_at is None  # Not set until saved to database
 
     def test_data_catalog_from_mind_datasource_class_method(self, mock_mind_datasource):
         """Test DataCatalog.from_mind_datasource class method."""
         catalog = DataCatalog.from_mind_datasource(mock_mind_datasource)
 
         assert catalog.mind_datasource is not None
-        assert catalog.created_at is None  # Not set until saved to database
-        assert catalog.modified_at is None  # Not set until saved to database
 
     def test_data_catalog_is_not_table_model(self):
         """Test that DataCatalog is not configured as a table model."""
@@ -1139,23 +1137,11 @@ class TestDataCatalog:
         """Test that DataCatalog fields have proper descriptions."""
         fields = DataCatalog.model_fields
 
-        assert (
-            fields["created_at"].description
-            == "The date and time the record was created. Field is optional and not needed when "
-            "instantiating a new record. It will be automatically set when the record is created in the database."
-        )
-        assert (
-            fields["modified_at"].description
-            == "The date and time the record was updated. Field is optional and not needed when "
-            "instantiating a new record. It will be automatically set when the record is created in the database."
-        )
         assert fields["mind_datasource"].description == "MindDatasource"
 
     def test_data_catalog_field_types(self):
         """Test that DataCatalog fields have correct types."""
         fields = DataCatalog.model_fields
 
-        assert fields["created_at"].annotation == datetime | None
-        assert fields["modified_at"].annotation == datetime | None
         # Datasource field type is complex due to forward reference
         assert "MindDatasource" in str(fields["mind_datasource"].annotation)

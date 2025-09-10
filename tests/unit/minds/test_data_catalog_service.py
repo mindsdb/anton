@@ -7,7 +7,7 @@ from sqlmodel import Session
 
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
 from minds.model.datasource import Datasource
-from minds.services.data_catalog import DataCatalogLoader
+from minds.services.data_catalog import DataCatalogLoader, DataCatalogLoaderError
 
 
 class TestDataCatalogLoader:
@@ -42,11 +42,11 @@ class TestDataCatalogLoader:
     @pytest.fixture
     def data_catalog_loader(self, mock_session, mock_mindsdb_client):
         """Create DataCatalogLoader instance with mocked dependencies."""
-        return DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123")
+        return DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123", tenant_id="test_tenant_456")
 
     def test_initialization(self, mock_session, mock_mindsdb_client):
         """Test DataCatalogLoader initialization."""
-        loader = DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123")
+        loader = DataCatalogLoader(session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="test_user_123", tenant_id="test_tenant_456")
 
         assert loader.session == mock_session
         assert loader.mindsdb_client == mock_mindsdb_client
@@ -118,7 +118,7 @@ class TestDataCatalogLoader:
         mock_result.first.return_value = mock_datasource
         data_catalog_loader.session.exec.return_value = mock_result
 
-        # Mock all the _get_* methods to return empty DataFrames
+        # Mock all the _get_* methods to return empty DataFrames (no data to process)
         data_catalog_loader._get_tables = Mock(return_value=pd.DataFrame())
         data_catalog_loader._get_columns = Mock(return_value=pd.DataFrame())
         data_catalog_loader._get_column_statistics = Mock(return_value=pd.DataFrame())
@@ -126,10 +126,16 @@ class TestDataCatalogLoader:
         data_catalog_loader._get_foreign_keys = Mock(return_value=pd.DataFrame())
 
         # Execute load
-        await data_catalog_loader.load("test_datasource")
+        mock_mind_datasource = Mock()
+        mock_mind_datasource.id = UUID("12345678-1234-5678-1234-567812345678")
+        mock_mind_datasource.datasource_id = UUID("87654321-4321-8765-4321-876543218765")
+        mock_datasource_config = Mock()
+        mock_datasource_config.name = "test_datasource"
+        mock_datasource_config.tables = ["table1", "table2"]
+        
+        await data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
 
-        # Verify
-        data_catalog_loader.session.exec.assert_called_once()
+        # Verify that the method was called and commit was called
         data_catalog_loader.session.commit.assert_called_once()
 
     async def test_load_with_error_and_rollback(self, data_catalog_loader):
@@ -139,9 +145,19 @@ class TestDataCatalogLoader:
         mock_result.first.return_value = None
         data_catalog_loader.session.exec.return_value = mock_result
 
-        # Execute load and expect exception (datasource is None, so accessing .name will fail)
-        with pytest.raises(AttributeError, match="'NoneType' object has no attribute 'name'"):
-            await data_catalog_loader.load("nonexistent_datasource")
+        # Mock _get_tables to raise an exception
+        data_catalog_loader._get_tables = Mock(side_effect=Exception("Database connection failed"))
+
+        # Execute load and expect exception
+        mock_mind_datasource = Mock()
+        mock_mind_datasource.id = UUID("12345678-1234-5678-1234-567812345678")
+        mock_mind_datasource.datasource_id = UUID("87654321-4321-8765-4321-876543218765")
+        mock_datasource_config = Mock()
+        mock_datasource_config.name = "nonexistent_datasource"
+        mock_datasource_config.tables = ["table1", "table2"]
+        
+        with pytest.raises(DataCatalogLoaderError, match="Error loading data catalog: Database connection failed"):
+            await data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
 
         # Verify rollback was called
         data_catalog_loader.session.rollback.assert_called_once()
@@ -163,7 +179,7 @@ class TestDataCatalogLoader:
         data_catalog_loader.session.exec.return_value.all.return_value = []
 
         # Execute
-        result = data_catalog_loader._get_tables(mock_datasource)
+        result = data_catalog_loader._get_tables(mock_datasource.id, "test_datasource")
 
         # Verify query was constructed correctly
         expected_query = f"""
@@ -192,7 +208,7 @@ class TestDataCatalogLoader:
         data_catalog_loader.session.exec.return_value.all.return_value = []
 
         # Execute with filter
-        result = data_catalog_loader._get_tables(mock_datasource, ["table1", "table2"])
+        result = data_catalog_loader._get_tables(mock_datasource.id, mock_datasource.name, ["table1", "table2"])
 
         # Verify query includes filter
         expected_query = f"""
@@ -225,7 +241,7 @@ class TestDataCatalogLoader:
         data_catalog_loader.session.exec.return_value.all.return_value = [existing_table]
 
         # Execute
-        result = data_catalog_loader._get_tables(mock_datasource)
+        result = data_catalog_loader._get_tables(mock_datasource.id, "test_datasource")
 
         # Verify result excludes existing table
         assert len(result) == 2
@@ -249,7 +265,7 @@ class TestDataCatalogLoader:
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
-        result = data_catalog_loader._get_columns(mock_datasource, ["table1"])
+        result = data_catalog_loader._get_columns(mock_datasource.name, ["table1"])
 
         expected_query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMNS 
@@ -279,7 +295,7 @@ class TestDataCatalogLoader:
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
-        result = data_catalog_loader._get_column_statistics(mock_datasource)
+        result = data_catalog_loader._get_column_statistics(mock_datasource.name, None)
 
         expected_query = f"""
         SELECT * FROM INFORMATION_SCHEMA.META_COLUMN_STATISTICS 
@@ -300,7 +316,7 @@ class TestDataCatalogLoader:
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
-        result = data_catalog_loader._get_primary_keys(mock_datasource)
+        result = data_catalog_loader._get_primary_keys(mock_datasource.name, None)
 
         expected_query = f"""
         SELECT 
@@ -339,7 +355,7 @@ class TestDataCatalogLoader:
         data_catalog_loader._execute_query = Mock(return_value=mock_df)
 
         # Execute
-        result = data_catalog_loader._get_foreign_keys(mock_datasource)
+        result = data_catalog_loader._get_foreign_keys(mock_datasource.name, None)
 
         expected_query = f"""
         SELECT 
@@ -377,16 +393,23 @@ class TestDataCatalogLoader:
             }
         )
 
+        # Mock the session to assign IDs to tables after flush
+        def mock_add(table):
+            table.id = UUID(f"12345678-1234-5678-1234-56781234567{len(data_catalog_loader.session.add.call_args_list)}")
+        data_catalog_loader.session.add.side_effect = mock_add
+
         # Execute
-        result = data_catalog_loader._load_tables(mock_datasource, tables_df)
+        result = data_catalog_loader._load_tables(mock_datasource.id, mock_datasource.id, tables_df)
 
         # Verify
         assert len(result) == 2
-        data_catalog_loader.session.add_all.assert_called_once()
-        data_catalog_loader.session.flush.assert_called_once()
+        assert data_catalog_loader.session.add.call_count == 2  # Two for tables
+        assert data_catalog_loader.session.add_all.call_count == 1  # One for mind_datasource_tables
+        assert data_catalog_loader.session.flush.call_count == 3  # Two for tables + one for add_all
+        assert data_catalog_loader.session.refresh.call_count == 2  # One for each table
 
         # Verify table objects were created correctly
-        added_tables = data_catalog_loader.session.add_all.call_args[0][0]
+        added_tables = [call[0][0] for call in data_catalog_loader.session.add.call_args_list]
         assert len(added_tables) == 2
         assert all(isinstance(table, Table) for table in added_tables)
         assert added_tables[0].name == "table1"
@@ -564,11 +587,16 @@ class TestDataCatalogLoader:
             }
         )
 
+        # Mock the session to assign IDs to tables after flush
+        def mock_add(table):
+            table.id = UUID(f"12345678-1234-5678-1234-56781234567{len(data_catalog_loader.session.add.call_args_list)}")
+        data_catalog_loader.session.add.side_effect = mock_add
+
         # Execute
-        data_catalog_loader._load_tables(mock_datasource, tables_df)
+        data_catalog_loader._load_tables(mock_datasource.id, mock_datasource.id, tables_df)
 
         # Verify
-        added_tables = data_catalog_loader.session.add_all.call_args[0][0]
+        added_tables = [call[0][0] for call in data_catalog_loader.session.add.call_args_list]
         assert added_tables[0].row_count is None
         assert len(added_tables) == 1
 
