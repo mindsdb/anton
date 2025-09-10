@@ -207,6 +207,47 @@ def upgrade() -> None:
         FOR EACH ROW EXECUTE FUNCTION update_modified_at_column();
     ''')
 
+    # 7. Create function to handle soft deletes for mind_datasources
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_mind_datasources()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            -- Case 1: Triggered by minds table
+            IF TG_TABLE_NAME = 'minds' THEN
+                UPDATE mind_datasources
+                SET deleted_at = NEW.deleted_at
+                WHERE mind_id = NEW.id
+                AND deleted_at IS NULL;
+
+            -- Case 2: Triggered by datasources table
+            ELSIF TG_TABLE_NAME = 'datasources' THEN
+                UPDATE mind_datasources
+                SET deleted_at = NEW.deleted_at
+                WHERE datasource_id = NEW.id
+                AND deleted_at IS NULL;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # 8. Create triggers for soft deletes for mind_datasources
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_mind_datasources_from_minds
+        AFTER UPDATE OF deleted_at ON minds
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_mind_datasources();
+    ''')
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_mind_datasources_from_datasources
+        AFTER UPDATE OF deleted_at ON datasources
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_mind_datasources();
+    ''')
+
 
 def downgrade() -> None:
     """Drop all tables and functions."""
@@ -215,9 +256,11 @@ def downgrade() -> None:
     op.execute('DROP TRIGGER IF EXISTS update_mind_datasources_modified_at ON mind_datasources;')
     op.execute('DROP TRIGGER IF EXISTS update_datasources_modified_at ON datasources;')
     op.execute('DROP TRIGGER IF EXISTS update_minds_modified_at ON minds;')
-    
-    # Drop function
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_mind_datasources_from_minds ON minds;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_mind_datasources_from_datasources ON datasources;')
+    # Drop functions
     op.execute('DROP FUNCTION IF EXISTS update_modified_at_column();')
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_mind_datasources();')
     
     # Drop tables (in reverse order due to foreign keys)
     op.drop_table('mind_datasources')

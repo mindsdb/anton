@@ -292,7 +292,6 @@ class MindsService:
             logger.info(f"Updated mind {mind_name} for user {self.user_id}")
 
             return self._mind_to_response(mind)
-
         except (MindNotFoundError, MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
@@ -323,16 +322,11 @@ class MindsService:
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
+            # TODO: If cascade is True, delete all datasources associated with the mind
             if cascade:
-                logger.debug(f"Cascade deletion requested for mind {mind_name}")
+                logger.debug(f"Cascade deletion requested for mind {mind_name} - implement datasource deletion")
 
-            deleted_at = datetime.now(timezone.utc)
-
-            mind.deleted_at = deleted_at
-
-            # Remove datasource relationships - soft delete only.
-            for relationship in mind.mind_datasources:
-                relationship.deleted_at = deleted_at
+            mind.deleted_at = datetime.now(timezone.utc)
 
             self.session.add(mind)
             self.session.commit()

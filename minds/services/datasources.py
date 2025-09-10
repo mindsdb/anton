@@ -134,7 +134,6 @@ class DatasourcesService:
 
             logger.info(f"Found {len(responses)} datasources for user {self.user_id} and tenant {self.tenant_id}")
             return responses
-
         except Exception as e:
             logger.error(f"Error listing datasources for user {self.user_id} and tenant {self.tenant_id}: {str(e)}")
             raise DatasourceServiceError(f"Failed to list datasources: {str(e)}") from None
@@ -352,24 +351,16 @@ class DatasourcesService:
 
             # TODO: If cascade is True, remove from all minds that use this datasource
             if cascade:
-                logger.debug(f"Cascade deletion for datasource {datasource_name} - implement mind updates")
+                logger.debug(f"Cascade deletion for datasource {datasource_name} - implement mind deletion")
 
             await self._delete_mindsdb_database(datasource_name)
 
-            deleted_at = datetime.now(timezone.utc)
-
-            # Then delete from internal database
-            datasource.deleted_at = deleted_at
-
-            # Remove relationships with minds - soft delete only.
-            for relationship in datasource.mind_datasources:
-                relationship.deleted_at = deleted_at
+            datasource.deleted_at = datetime.now(timezone.utc)
 
             self.session.add(datasource)
             self.session.commit()
 
             logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} and tenant {self.tenant_id}")
-
         except DatasourceNotFoundError:
             self.session.rollback()
             raise
@@ -417,7 +408,6 @@ class DatasourcesService:
                 return DatasourceConnectionStatus(
                     success=False, error_message=f"Connection test failed: {str(db_error)}"
                 )
-
         except DatasourceNotFoundError:
             return DatasourceConnectionStatus(success=False, error_message="Datasource not found")
         except Exception as e:
@@ -555,7 +545,6 @@ class DatasourcesService:
             )
 
             logger.info(f"Updated MindsDB database {datasource.name}")
-
         except Exception as e:
             logger.error(f"Failed to update MindsDB database {datasource.name}: {str(e)}")
             raise DatasourceServiceError(f"MindsDB database update failed: {str(e)}") from None
@@ -574,7 +563,6 @@ class DatasourcesService:
             except Exception:
                 # Database might not exist in MindsDB, which is fine
                 logger.debug(f"MindsDB database {datasource_name} was not found for deletion")
-
         except Exception as e:
             logger.error(f"Failed to delete MindsDB database {datasource_name}: {str(e)}")
             raise DatasourceServiceError(f"MindsDB database deletion failed: {str(e)}") from None
