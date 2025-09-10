@@ -56,7 +56,14 @@ class ChatCompletionsHandler:
         statement = (
             select(Mind)
             .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
-            .where(and_(Mind.name == self.model, Mind.user_id == self.context.user_id, Mind.is_active))
+            .where(
+                and_(
+                    Mind.name == self.model,
+                    Mind.user_id == self.context.user_id,
+                    Mind.tenant_id == self.context.tenant_id,
+                    Mind.deleted_at.is_(None),
+                )
+            )
         )
         mind = self.session.exec(statement).first()
 
