@@ -6,6 +6,7 @@ from minds.common.logger import setup_logging
 from minds.common.vars import DATA_CATALOG_CACHE_MAX_SIZE, DATA_CATALOG_CACHE_TYPE
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
+from minds.model.mind_datasource import DataCatalogStatus
 
 logger = setup_logging()
 
@@ -109,6 +110,13 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         data_catalogs = []
         for mind_datasource in mind.mind_datasources:
+            if mind_datasource.status != DataCatalogStatus.COMPLETED:
+                logger.info(
+                    f"Skipping data catalog for mind datasource {mind_datasource.id} "
+                    f"for mind {mind.name} because it is in status {mind_datasource.status}"
+                )
+                continue
+
             data_catalog = DataCatalog.from_mind_datasource(mind_datasource)
             data_catalogs.append(data_catalog)
 

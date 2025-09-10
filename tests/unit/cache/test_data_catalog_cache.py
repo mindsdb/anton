@@ -175,8 +175,9 @@ class TestDataCatalogInMemoryCache:
     def test_load_cache_miss_with_datasources(self, cache, mock_mind):
         """Test loading from cache when data doesn't exist but datasources exist."""
         from uuid import UUID
+
         from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
-        
+
         # Mock datasource with get_data_catalog method
         mock_datasource = Mock()
         mock_catalog = Mock(spec=DataCatalog)
@@ -194,7 +195,7 @@ class TestDataCatalogInMemoryCache:
         mock_mind_datasource.status = DataCatalogStatus.COMPLETED
         mock_mind_datasource.datasource = mock_datasource
         mock_mind_datasource.mind_datasource_tables = []
-        
+
         mock_mind.mind_datasources = [mock_mind_datasource]
 
         result = cache.load(mock_mind)
@@ -218,8 +219,9 @@ class TestDataCatalogInMemoryCache:
         mock_datasource2.get_data_catalog.return_value = mock_catalog2
 
         from uuid import UUID
+
         from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
-        
+
         # Create proper mock MindDatasource objects
         mock_mind_datasource1 = Mock(spec=MindDatasource)
         mock_mind_datasource1.id = UUID("12345678-1234-5678-1234-567812345678")
@@ -498,12 +500,13 @@ class TestDataCatalogCacheIntegration:
         mock_mind_datasource2.datasource = mock_datasource2
 
         from uuid import UUID
+
         from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
-        
+
         mock_mind = Mock(spec=Mind)
         mock_mind.name = "analytics-mind"
         mock_mind.modified_at = datetime(2024, 1, 15, 14, 30, 0)
-        
+
         # Create proper mock MindDatasource objects
         mock_mind_datasource1 = Mock(spec=MindDatasource)
         mock_mind_datasource1.id = UUID("11111111-2222-3333-4444-555555555555")
@@ -528,7 +531,7 @@ class TestDataCatalogCacheIntegration:
         mock_mind_datasource2.status = DataCatalogStatus.COMPLETED
         mock_mind_datasource2.datasource = mock_datasource2
         mock_mind_datasource2.mind_datasource_tables = []
-        
+
         mock_mind.mind_datasources = [mock_mind_datasource1, mock_mind_datasource2]
 
         # Load data (cache miss)

@@ -712,6 +712,7 @@ class TestDataCatalog:
     def test_data_catalog_initialization(self, mock_mind_datasource):
         """Test DataCatalog initialization."""
         from datetime import datetime
+
         catalog = DataCatalog(mind_datasource=mock_mind_datasource, modified_at=datetime.now())
 
         assert catalog.mind_datasource is not None

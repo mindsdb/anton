@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 if TYPE_CHECKING:
-    from minds.model.data_catalog import DataCatalog, Table
+    from minds.model.data_catalog import Table
 
 
 class Datasource(BaseSQLModel, table=True):
