@@ -1,8 +1,6 @@
 from typing import TYPE_CHECKING
 
-from sqlmodel import Field
-
-from minds.model.base import BaseSQLModel
+from sqlmodel import Field, SQLModel
 
 if TYPE_CHECKING:
     from minds.model.data_catalog.column import Column
@@ -10,7 +8,7 @@ if TYPE_CHECKING:
     from minds.model.mind_datasource import MindDatasource
 
 
-class DataCatalog(BaseSQLModel, table=False):
+class DataCatalog(SQLModel, table=False):
     """Data catalog metadata - a helper model for accessing datasource metadata."""
 
     mind_datasource: "MindDatasource" = Field(..., description="MindDatasource")
@@ -127,7 +125,8 @@ class DataCatalog(BaseSQLModel, table=False):
 
                 # Further, foreign keys will also contains instances where the referenced table is
                 # not included in the relationship.
-                if fk.referenced_table.name not in self.mind_datasource.mind_datasource_tables:
+                valid_tables = [mind_datasource_table.table.name for mind_datasource_table in self.mind_datasource.mind_datasource_tables]
+                if fk.referenced_table.name not in valid_tables:
                     continue
 
                 fk_column_name = fk.column.name
@@ -148,7 +147,8 @@ class DataCatalog(BaseSQLModel, table=False):
             if fk.referenced_table.name == table.name:
                 continue
 
-            if fk.referenced_table.name not in self.mind_datasource.mind_datasource_tables:
+            valid_tables = [mind_datasource_table.table.name for mind_datasource_table in self.mind_datasource.mind_datasource_tables]
+            if fk.referenced_table.name not in valid_tables:
                 continue
 
             related_tables.append(fk.referenced_table.name)
@@ -174,11 +174,11 @@ class DataCatalog(BaseSQLModel, table=False):
 
         lines.extend(self._format_header())
 
-        for table in self.mind_datasource.datasource.tables:
-            if table.name in self.mind_datasource.mind_datasource_tables:
-                lines.extend(self._format_table(table))
-                # TODO: Is this necessary? We are already adding the foreign keys to the table section.
-                relationship_lines.extend(self._format_relationships(table))
+        for mind_datasource_table in self.mind_datasource.mind_datasource_tables:
+            table = mind_datasource_table.table
+            lines.extend(self._format_table(table))
+            # TODO: Is this necessary? We are already adding the foreign keys to the table section.
+            relationship_lines.extend(self._format_relationships(table))
 
         if relationship_lines:
             lines.append("Relationships:")

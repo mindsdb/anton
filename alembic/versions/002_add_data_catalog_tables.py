@@ -287,7 +287,7 @@ def upgrade() -> None:
     ),
     sa.Column('mind_datasource_id', sa.UUID(), nullable=False),
     sa.Column('table_id', sa.UUID(), nullable=False),
-    sa.ForeignKeyConstraint(['mind_datasource_id'], ['mind_datasources.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['mind_datasource_id'], ['mind_datasources.id']),
     sa.ForeignKeyConstraint(['table_id'], ['tables.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )
