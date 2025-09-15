@@ -37,7 +37,7 @@ class DataCatalogLoader:
         self.user_id = user_id
         self.tenant_id = tenant_id
 
-    async def load(self, mind_datasource: MindDatasource, datasource_config: DatasourceConfig) -> None:
+    def load(self, mind_datasource: MindDatasource, datasource_config: DatasourceConfig) -> None:
         """Load the data catalog."""
         try:
             mind_datasource_id = mind_datasource.id
