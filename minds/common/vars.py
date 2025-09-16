@@ -50,3 +50,28 @@ OPEN_AI_MODEL_NAME = os.getenv("OPEN_AI_MODEL_NAME", "gpt-4o")
 
 MINDSDB_URL = os.getenv("MINDSDB_URL", "http://localhost:47334")
 MINDSDB_API_KEY = os.getenv("MINDSDB_API_KEY", "not set")
+MINDSDB_LOGIN = os.getenv("MINDSDB_LOGIN", "mindsdb")
+MINDSDB_PASSWORD = os.getenv("MINDSDB_PASSWORD", "")
+
+# ====================================
+# Data Catalog
+# ====================================
+
+DATA_CATALOG_CACHE_TYPE = os.getenv("DATA_CATALOG_CACHE_TYPE", "in_memory")
+DATA_CATALOG_CACHE_MAX_SIZE = int(os.getenv("DATA_CATALOG_CACHE_MAX_SIZE", 100))
+
+# ====================================
+# Default Models
+# ====================================
+
+# TODO: Use better names.
+DEFAULT_MIND_MODEL = os.getenv("DEFAULT_MIND_MODEL", "gpt-4o")
+DEFAULT_GOOGLE_MODEL = os.getenv("DEFAULT_GOOGLE_MODEL", "gemini-2.5-pro")
+
+# ====================================
+# Minds
+# ====================================
+
+MAX_DISPLAY_ROWS = int(os.getenv("MAX_DISPLAY_ROWS", 100))
+MAX_COLUMN_WIDTH = int(os.getenv("MAX_COLUMN_WIDTH", 300))
+MAX_SQL_RETRIES = int(os.getenv("MAX_SQL_RETRIES", 4))

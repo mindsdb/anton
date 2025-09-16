@@ -20,10 +20,17 @@ class TestCreateMindsdbClientFromEnv:
         assert result is not None
 
     @patch("minds.client.mindsdb.MINDSDB_API_KEY", None)
-    def test_create_mindsdb_client_from_env_none_api_key(self):
-        """Test client creation with None API key."""
-        with pytest.raises(ValueError, match="API key is required"):
-            create_mindsdb_client_from_env()
+    @patch("minds.client.mindsdb.connect")
+    def test_create_mindsdb_client_from_env_none_api_key(self, mock_connect):
+        """Test client creation with None API key connects without auth."""
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
+
+        result = create_mindsdb_client_from_env()
+
+        # Should connect without authentication when no API key
+        mock_connect.assert_called_once()
+        assert result == mock_client
 
 
 class TestCreateMindsdbClientFromRequest:
@@ -50,30 +57,40 @@ class TestCreateMindsdbClientFromRequest:
         assert result == mock_client
 
     @patch("minds.client.mindsdb.get_authorization_bearer_token")
-    def test_create_mindsdb_client_from_request_no_token(self, mock_get_token):
-        """Test client creation when no token is found."""
+    @patch("minds.client.mindsdb.connect")
+    def test_create_mindsdb_client_from_request_no_token(self, mock_connect, mock_get_token):
+        """Test client creation when no token is found connects without auth."""
         # Arrange
         mock_request = Mock(spec=Request)
         mock_get_token.return_value = None
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
 
-        # Act & Assert
-        with pytest.raises(ValueError, match="API key is required"):
-            create_mindsdb_client_from_request(mock_request)
+        # Act
+        result = create_mindsdb_client_from_request(mock_request)
 
+        # Assert
         mock_get_token.assert_called_once_with(mock_request)
+        mock_connect.assert_called_once()  # Should connect without auth
+        assert result == mock_client
 
     @patch("minds.client.mindsdb.get_authorization_bearer_token")
-    def test_create_mindsdb_client_from_request_empty_token(self, mock_get_token):
-        """Test client creation when token is empty string."""
+    @patch("minds.client.mindsdb.connect")
+    def test_create_mindsdb_client_from_request_empty_token(self, mock_connect, mock_get_token):
+        """Test client creation when token is empty string connects without auth."""
         # Arrange
         mock_request = Mock(spec=Request)
         mock_get_token.return_value = ""
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
 
-        # Act & Assert
-        with pytest.raises(ValueError, match="API key is required"):
-            create_mindsdb_client_from_request(mock_request)
+        # Act
+        result = create_mindsdb_client_from_request(mock_request)
 
+        # Assert
         mock_get_token.assert_called_once_with(mock_request)
+        mock_connect.assert_called_once()  # Should connect without auth
+        assert result == mock_client
 
     @patch("minds.client.mindsdb.get_authorization_bearer_token")
     def test_create_mindsdb_client_from_request_auth_exception(self, mock_get_token):
@@ -122,16 +139,19 @@ class TestCreateMindsdbClientFromRequest:
 
     @patch("minds.client.mindsdb.connect")
     def test_full_flow_missing_auth_header(self, mock_connect):
-        """Test the full flow with missing authorization header."""
+        """Test the full flow with missing authorization header connects without auth."""
         # Arrange
         mock_request = Mock(spec=Request)
         mock_request.headers = {}
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
 
-        # Act & Assert
-        with pytest.raises(ValueError, match="API key is required"):
-            create_mindsdb_client_from_request(mock_request)
+        # Act
+        result = create_mindsdb_client_from_request(mock_request)
 
-        mock_connect.assert_not_called()
+        # Assert - should connect without auth when no header
+        mock_connect.assert_called_once()
+        assert result == mock_client
 
 
 class TestCreateMindsdbClient:
@@ -155,30 +175,44 @@ class TestCreateMindsdbClient:
 
     @patch("minds.client.mindsdb.connect")
     def test_create_mindsdb_client_none_api_key(self, mock_connect):
-        """Test client creation with None API key."""
-        # Act & Assert
-        with pytest.raises(ValueError, match="API key is required"):
-            create_mindsdb_client(None)
+        """Test client creation with None API key connects without auth."""
+        # Arrange
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
 
-        mock_connect.assert_not_called()
+        # Act
+        result = create_mindsdb_client(None)
+
+        # Assert - should connect without auth when no API key
+        mock_connect.assert_called_once()
+        assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
     def test_create_mindsdb_client_empty_api_key(self, mock_connect):
-        """Test client creation with empty API key."""
-        # Act & Assert
-        with pytest.raises(ValueError, match="API key is required"):
-            create_mindsdb_client("")
+        """Test client creation with empty API key connects without auth."""
 
-        mock_connect.assert_not_called()
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
+
+        result = create_mindsdb_client("")
+
+        # Assert - should connect without auth when empty API key
+        mock_connect.assert_called_once()
+        assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
     def test_create_mindsdb_client_whitespace_api_key(self, mock_connect):
-        """Test client creation with whitespace-only API key."""
-        # Act & Assert
-        with pytest.raises(ValueError, match="API key is required"):
-            create_mindsdb_client("   ")
+        """Test client creation with whitespace-only API key connects without auth."""
+        # Arrange
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
 
-        mock_connect.assert_not_called()
+        # Act
+        result = create_mindsdb_client("   ")
+
+        # Assert - should connect without auth when whitespace API key
+        mock_connect.assert_called_once()
+        assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
     @patch("minds.client.mindsdb.MINDSDB_URL", "https://production-server.com")

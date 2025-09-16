@@ -6,7 +6,6 @@ import pytest
 import minds.requests.stream as mod
 
 
-# --- module fixture: neutralize langfuse.observe and reload SUT ---
 @pytest.fixture()
 def streaming_mod(monkeypatch):
     # Make observe a no-op BEFORE importing/reloading the module

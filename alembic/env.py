@@ -1,9 +1,9 @@
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import create_engine, pool
 from sqlmodel import SQLModel
 
+from alembic import context
 from minds.common.vars import DATABASE_URI
 
 # Import all models so they are registered with SQLModel.metadata

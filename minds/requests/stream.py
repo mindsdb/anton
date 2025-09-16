@@ -1,5 +1,4 @@
 import asyncio
-import json
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
@@ -9,7 +8,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.requests.schemas import (
+from minds.schemas.chat import (
     ChatCompletion,
     ChatCompletionChunk,
     Choice,
@@ -22,37 +21,8 @@ from minds.requests.schemas import (
 logger = setup_logging()
 
 
-def sanitize_content_for_observation(content: Any) -> str:
-    """
-    Sanitize content for Langfuse observation to prevent base64 data URI parsing errors.
-
-    Args:
-        content: Any content that needs to be serialized for observation
-
-    Returns:
-        str: A safely serialized string representation of the content
-    """
-    try:
-        if content is None:
-            return ""
-        elif isinstance(content, str):
-            return content
-        elif isinstance(content, list | dict):
-            # For complex objects like citations, convert to JSON string
-            # This prevents Langfuse from trying to interpret them as media content
-            return json.dumps(content, default=lambda x: x.model_dump() if hasattr(x, "model_dump") else str(x))
-        else:
-            # For other types, convert to string
-            return str(content)
-    except Exception as e:
-        logger.warning(f"Failed to serialize content for observation: {e}")
-        return f"<serialization_error: {type(content).__name__}>"
-
-
-class StreamMessage(BaseModel):
+class StreamMessage(Message):
     id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4()}")
-    role: Role
-    content: str | list[Any] | None = None
 
 
 def create_stream_message(role: Role, content: Any, request_id: str) -> StreamMessage:
@@ -94,6 +64,8 @@ class Streamer(MessageStreamer):
     async def push(self, role: Role, content: Any) -> None:
         message = create_stream_message(role=role, content=content, request_id=self.request_id)
         await self._queue.put(message)
+        # Give event loop a chance to process the queue
+        await asyncio.sleep(0)
 
     async def close(self) -> None:
         await self._queue.put(None)
@@ -138,24 +110,23 @@ async def format_messages_for_streaming(
     """
     async_index = 0
     async for search_message in message_generator:
-        # Sanitize content for Langfuse observation to prevent parsing errors
-        sanitized_content = sanitize_content_for_observation(search_message.content)
+        # Properly serialize BaseModel content
+        content = search_message.content
+        if isinstance(content, BaseModel):
+            content = content.model_dump()
 
-        # Create chunk with original content for streaming
+        # Create chunk with serialized content for streaming
         chunk = ChatCompletionChunk(
             id=search_message.id,
             model=model,
             choices=[
                 StreamChoice(
                     index=async_index,
-                    delta=Message(role=search_message.role, content=search_message.content),
+                    delta=Message(role=search_message.role, content=content),
                 )
             ],
         )
         async_index += 1
-
-        # Log sanitized content to avoid issues with complex objects
-        logger.debug(f"Streaming message {async_index}: {search_message.role} - {sanitized_content[:100]}...")
 
         yield f"data: {chunk.model_dump_json()}\n\n"
 
@@ -195,9 +166,7 @@ async def process_streaming_producer(
         @observe(name=trace_name)
         async def run_producer():
             try:
-                await producer(
-                    streamer,
-                )
+                await producer(streamer)
             finally:
                 # Ensure the sentinel is always sent so the consumer loop terminates
                 await streamer.close()
@@ -245,9 +214,14 @@ async def _build_json_response_from_messages(messages: list[StreamMessage], mode
     message_id = messages[-1].id if messages else ""
     choices = []
     for index, search_message in enumerate(messages):
+        # Properly serialize BaseModel content
+        content = search_message.content
+        if isinstance(content, BaseModel):
+            content = content.model_dump()
+
         choice = Choice(
             index=index,
-            message=Message(role=search_message.role, content=search_message.content),
+            message=Message(role=search_message.role, content=content),
         )
         choices.append(choice)
 
