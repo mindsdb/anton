@@ -59,3 +59,19 @@ MINDSDB_PASSWORD = os.getenv("MINDSDB_PASSWORD", "")
 
 DATA_CATALOG_CACHE_TYPE = os.getenv("DATA_CATALOG_CACHE_TYPE", "in_memory")
 DATA_CATALOG_CACHE_MAX_SIZE = int(os.getenv("DATA_CATALOG_CACHE_MAX_SIZE", 100))
+
+# ====================================
+# Default Models
+# ====================================
+
+# TODO: Use better names.
+DEFAULT_MIND_MODEL = os.getenv("DEFAULT_MIND_MODEL", "gpt-4o")
+DEFAULT_GOOGLE_MODEL = os.getenv("DEFAULT_GOOGLE_MODEL", "gemini-2.5-pro")
+
+# ====================================
+# Minds
+# ====================================
+
+MAX_DISPLAY_ROWS = int(os.getenv("MAX_DISPLAY_ROWS", 100))
+MAX_COLUMN_WIDTH = int(os.getenv("MAX_COLUMN_WIDTH", 300))
+MAX_SQL_RETRIES = int(os.getenv("MAX_SQL_RETRIES", 4))

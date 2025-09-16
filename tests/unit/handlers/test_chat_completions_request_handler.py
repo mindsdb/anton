@@ -9,6 +9,7 @@ from minds.requests.chat_completions_request import (
     ChatCompletionRequestMetadata,
     ChatCompletionsRequest,
 )
+from minds.requests.context import Context
 from minds.schemas.chat import Message, Role
 
 
@@ -39,6 +40,12 @@ def mock_session():
 def mock_mindsdb_client():
     """Mock MindsDB client."""
     return Mock(spec=["connect"])
+
+
+@pytest.fixture
+def mock_context():
+    """Mock Context."""
+    return Context(user_id="test_user", tenant_id="test_tenant", user_email="test@example.com")
 
 
 @pytest.fixture
@@ -80,6 +87,7 @@ class TestChatCompletionsRequestHandler:
         mock_session,
         mock_mindsdb_client,
         sample_streaming_chat_request,
+        mock_context,
     ):
         """Test streaming chat completions request handling."""
         request_id = "test-request-123"
@@ -98,6 +106,7 @@ class TestChatCompletionsRequestHandler:
             result = await handler_mod.chat_completions_request_handler(
                 request_id=request_id,
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 chat_completions_request=sample_streaming_chat_request,
             )
@@ -105,6 +114,7 @@ class TestChatCompletionsRequestHandler:
             # Verify ChatCompletionsHandler was created with correct parameters
             mock_handler_class.assert_called_once_with(
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 messages=sample_streaming_chat_request.messages,
                 model=sample_streaming_chat_request.model,
@@ -128,7 +138,7 @@ class TestChatCompletionsRequestHandler:
 
     @pytest.mark.asyncio
     async def test_chat_completions_request_handler_non_streaming(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request
+        self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request, mock_context
     ):
         """Test non-streaming chat completions request handling."""
         request_id = "test-request-456"
@@ -149,6 +159,7 @@ class TestChatCompletionsRequestHandler:
             result = await handler_mod.chat_completions_request_handler(
                 request_id=request_id,
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 chat_completions_request=sample_chat_request,
             )
@@ -156,6 +167,7 @@ class TestChatCompletionsRequestHandler:
             # Verify ChatCompletionsHandler was created with correct parameters
             mock_handler_class.assert_called_once_with(
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 messages=sample_chat_request.messages,
                 model=sample_chat_request.model,
@@ -179,7 +191,7 @@ class TestChatCompletionsRequestHandler:
 
     @pytest.mark.asyncio
     async def test_chat_completions_request_handler_stream_none(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_messages
+        self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
     ):
         """Test chat completions request when stream parameter is None (should default to False)."""
         request_id = "test-request-789"
@@ -208,6 +220,7 @@ class TestChatCompletionsRequestHandler:
             result = await handler_mod.chat_completions_request_handler(
                 request_id=request_id,
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 chat_completions_request=chat_request,
             )
@@ -215,6 +228,7 @@ class TestChatCompletionsRequestHandler:
             # Verify ChatCompletionsHandler was created with stream=False (default)
             mock_handler_class.assert_called_once_with(
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 messages=chat_request.messages,
                 model=chat_request.model,
@@ -229,7 +243,7 @@ class TestChatCompletionsRequestHandler:
 
     @pytest.mark.asyncio
     async def test_chat_completions_request_handler_logging(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request
+        self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request, mock_context
     ):
         """Test that logging calls are made correctly."""
         request_id = "test-request-logging"
@@ -252,6 +266,7 @@ class TestChatCompletionsRequestHandler:
                 request_id=request_id,
                 mindsdb_client=mock_mindsdb_client,
                 session=mock_session,
+                context=mock_context,
                 chat_completions_request=sample_chat_request,
             )
 
@@ -270,7 +285,7 @@ class TestChatCompletionsRequestHandler:
 
     @pytest.mark.asyncio
     async def test_chat_completions_request_handler_parameter_extraction(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_messages
+        self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
     ):
         """Test that parameters are correctly extracted from the request."""
         request_id = "test-request-params"
@@ -299,6 +314,7 @@ class TestChatCompletionsRequestHandler:
             await handler_mod.chat_completions_request_handler(
                 request_id=request_id,
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 chat_completions_request=chat_request,
             )
@@ -306,6 +322,7 @@ class TestChatCompletionsRequestHandler:
             # Verify parameters were extracted and passed correctly
             mock_handler_class.assert_called_once_with(
                 session=mock_session,
+                context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 messages=sample_messages,  # Original messages
                 model="custom-model-v1",  # Custom model
