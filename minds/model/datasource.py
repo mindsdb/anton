@@ -16,6 +16,10 @@ if TYPE_CHECKING:
     from minds.model.mind_datasource import MindDatasource
 
 
+if TYPE_CHECKING:
+    from minds.model.data_catalog import Table
+
+
 class Datasource(BaseSQLModel, table=True):
     """
     Datasource model matching MindsDB schema with user attribution.
@@ -34,12 +38,15 @@ class Datasource(BaseSQLModel, table=True):
     )
 
     user_id: str = Field(..., max_length=255, description="ID of the user who created this datasource")
+    engine_info: str | None = Field(None, description="Engine information")
 
     # Relationships - Many-to-many with minds through junction table
     mind_datasources: list["MindDatasource"] = Relationship(back_populates="datasource")
 
     # Database constraints
     __table_args__ = (UniqueConstraint("name", "user_id", name="unique_datasource_name_per_user"),)
+
+    tables: list["Table"] = Relationship(sa_relationship_kwargs={"foreign_keys": "Table.datasource_id"})
 
     def __repr__(self) -> str:
         """String representation of the datasource."""

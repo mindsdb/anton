@@ -13,6 +13,7 @@ from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.requests.context import extract_context_from_request
 from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.services.data_catalog import DataCatalogLoader
 from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
 # Set up logging
@@ -28,6 +29,21 @@ def get_minds_service(request: Request, session: Session = Depends(get_session))
     context = extract_context_from_request(request)
     mindsdb_client = create_mindsdb_client_from_request(request)
     return MindsService(
+        session=session,
+        mindsdb_client=mindsdb_client,
+        user_id=context.user_id,
+        tenant_id=context.tenant_id,
+    )
+
+
+def get_data_catalog_loader_service(request: Request, session: Session = Depends(get_session)) -> DataCatalogLoader:
+    """
+    Dependency function to create DataCatalogLoader with user context and MindsDB client.
+    """
+    context = extract_context_from_request(request)
+    mindsdb_client = create_mindsdb_client_from_request(request)
+
+    return DataCatalogLoader(
         session=session,
         mindsdb_client=mindsdb_client,
         user_id=context.user_id,
@@ -121,7 +137,9 @@ async def get_mind(
 
 @router.post("/", status_code=201)
 async def create_mind(
-    mind_data: MindCreateRequest, minds_service: MindsService = Depends(get_minds_service)
+    mind_data: MindCreateRequest,
+    minds_service: MindsService = Depends(get_minds_service),
+    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader_service),
 ) -> MindResponse:
     """
     Create a new mind for the authenticated user.
@@ -138,10 +156,8 @@ async def create_mind(
     )
 
     try:
-        mind = await minds_service.create_mind(mind_data)
-        logger.info(
-            f"Created mind {mind_data.name} for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
-        )
+        mind = await minds_service.create_mind(mind_data, data_catalog_loader)
+        logger.info(f"Created mind {mind_data.name} for user {minds_service.user_id}")
         return mind
     except MindAlreadyExistsError as e:
         logger.warning(f"Mind already exists for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}")
@@ -162,7 +178,10 @@ async def create_mind(
 
 @router.put("/{mind_name}")
 async def update_mind(
-    mind_name: str, mind_data: MindUpdateRequest, minds_service: MindsService = Depends(get_minds_service)
+    mind_name: str,
+    mind_data: MindUpdateRequest,
+    minds_service: MindsService = Depends(get_minds_service),
+    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader_service),
 ) -> MindResponse:
     """
     Update an existing mind for the authenticated user.
