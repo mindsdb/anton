@@ -50,7 +50,7 @@ jobs:
     needs: [build]
     environment:
       name: prod
-      url: ${{ vars.ENV_URL }}
+      url: ${{ vars.MDB_ENV_URL }}
     steps:
       - uses: actions/checkout@v4
       - name: Pull MindsDB Github Actions
@@ -67,7 +67,7 @@ jobs:
           status: "started"
           color: "#0099CC"
           env-name: "prod"
-          env-url: ${{ vars.ENV_URL }}
+          env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
         with:
@@ -84,7 +84,7 @@ jobs:
           status: "${{ job.status == 'success' && 'finished' || 'failed' }}"
           color: "${{ job.status == 'success' && '#00C851' || '#FF4444' }}"
           env-name: "prod"
-          env-url: ${{ vars.ENV_URL }}
+          env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
           update-message-id: ${{ steps.slack.outputs.ts }}
 
