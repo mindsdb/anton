@@ -67,14 +67,14 @@ jobs:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
     environment:
       name: ${{ matrix.deploy-env }}
-      url: ${{ vars.ENV_URL }}
+      url: ${{ vars.MDB_ENV_URL }}
     # We only want to run one deploy job for an env at a time
     # Don't cancel in progress jobs because it may be for a different PR
     concurrency:
       group: deploy-${{ matrix.deploy-env }}
       cancel-in-progress: false
     env:
-      DATABASE_URI: ${{ secrets.DATABASE_URI }}
+      DATABASE_URI: ${{ secrets.MINDS_DB_URI }}
       UV_LINK_MODE: "symlink"
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
     environment:
       name: ${{ matrix.deploy-env }}
-      url: ${{ vars.ENV_URL }}
+      url: ${{ vars.MDB_ENV_URL }}
     # We only want to run one deploy job for an env at a time
     # Don't cancel in progress jobs because it may be for a different PR
     concurrency:
@@ -122,7 +122,7 @@ jobs:
           status: "started"
           color: "#0099CC"
           env-name: ${{ matrix.deploy-env }}
-          env-url: ${{ vars.ENV_URL }}
+          env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
         with:
@@ -139,6 +139,6 @@ jobs:
           status: "${{ job.status == 'success' && 'finished' || 'failed' }}"
           color: "${{ job.status == 'success' && '#00C851' || '#FF4444' }}"
           env-name: ${{ matrix.deploy-env }}
-          env-url: ${{ vars.ENV_URL }}
+          env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
           update-message-id: ${{ steps.slack.outputs.ts }}
