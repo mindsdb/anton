@@ -5,9 +5,22 @@ This module aggregates all v1 endpoints into a single router
 that can be included in the main FastAPI application.
 """
 
-from fastapi import APIRouter
+from collections.abc import Callable
+from typing import Any
+
+from fastapi import APIRouter as FastAPIRouter
 
 from minds.api.v1.endpoints import chat, datasources, health, minds, tree
+
+
+class APIRouter(FastAPIRouter):
+    def add_api_route(
+        self, path: str, endpoint: Callable[..., Any], *, include_in_schema: bool = True, **kwargs: Any
+    ) -> None:
+        alternate_path = path[:-1] if path.endswith("/") else path + "/"
+        super().add_api_route(alternate_path, endpoint, include_in_schema=False, **kwargs)
+        return super().add_api_route(path, endpoint, include_in_schema=include_in_schema, **kwargs)
+
 
 # Create the v1 API router
 api_router = APIRouter(prefix="/api/v1")
