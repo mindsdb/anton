@@ -65,7 +65,6 @@ def run_migrations_online() -> None:
     """
     # Use the PostgreSQL URI directly, falling back to config if needed
     url = DATABASE_URI or config.get_main_option("sqlalchemy.url", DATABASE_URI)
-    print(f"Running migrations online with URL: {url}")
     connectable = create_engine(url, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
