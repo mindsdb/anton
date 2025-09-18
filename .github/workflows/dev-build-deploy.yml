@@ -146,60 +146,22 @@ jobs:
 
   run-evals:
     runs-on: mdb-dev
-    # needs: [ get-deploy-labels, deploy ]
-    # strategy:
-    #   matrix:
-    #     deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
-    # environment:
-    #   name: ${{ matrix.deploy-env }}
-    #   url: ${{ vars.MDB_ENV_URL }}
-    # # We want other deployments to wait while we test
-    # # Don't cancel in progress jobs because it may be for a different PR
-    # concurrency:
-    #   group: deploy-${{ matrix.deploy-env }}
-    #   cancel-in-progress: false
+    needs: [ get-deploy-labels, deploy ]
+    strategy:
+      matrix:
+        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+    environment:
+      name: ${{ matrix.deploy-env }}
+      url: ${{ vars.MDB_ENV_URL }}
+    # We want other deployments to wait while we test
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-${{ matrix.deploy-env }}
+      cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
       - name: Run evals
         run: |
-          echo "
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: minds-langfuse-benchmarks
-spec:
-  backoffLimit: 0
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: minds-langfuse-benchmarks
-          image: 168681354662.dkr.ecr.us-east-1.amazonaws.com/minds-langfuse-benchmarks:latest
-          imagePullPolicy: Always
-          command: [\"/bin/sh\", \"-c\"]
-          args:
-            - >
-              python scripts/run_dataset_evaluations.py \
-                --minds-api-key \"$MINDS_API_KEY\" \
-                --minds-base-url \"${MINDS_BASE_URL}\" \
-                --langfuse-secret-key \"$LANGFUSE_SECRET_KEY\" \
-                --langfuse-public-key \"$LANGFUSE_PUBLIC_KEY\" \
-                --langfuse-host \"https://langfuse.dev.mindsdb.com\"
-          env:
-            - name: MINDS_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mindsdb-secrets
-                  key: MINDSDB_API_KEY
-            - name: LANGFUSE_PUBLIC_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mindsdb-secrets
-                  key: LANGFUSE_PUBLIC_KEY
-            - name: LANGFUSE_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mindsdb-secrets
-                  key: LANGFUSE_SECRET_KEY
-          "
-
-
+          NAMESPACE=${{ matrix.deploy-env }}
+          MINDS_BASE_URL=${{ vars.MDB_ENV_URL }}
+          envsubst < deployment/eval-job.yaml
