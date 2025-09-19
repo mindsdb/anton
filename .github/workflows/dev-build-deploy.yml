@@ -162,6 +162,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run evals
         run: |
-          export NAMESPACE=${{ matrix.deploy-env }}
-          export MINDS_BASE_URL=${{ vars.MDB_ENV_URL }}
+          export NAMESPACE=${{matrix.deploy-env}}
+          export MINDS_BASE_URL=${{vars.MDB_ENV_URL}}
           envsubst '${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
