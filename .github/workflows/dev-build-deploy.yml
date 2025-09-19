@@ -164,5 +164,27 @@ jobs:
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
           export MINDS_BASE_URL=${{vars.MDB_ENV_URL}}
-          kubectl delete job minds-langfuse-benchmarks || true
+
+          kubectl -n $NAMESPACE delete job --ignore-not-found minds-langfuse-benchmarks
           envsubst '${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
+
+          echo "Waiting for eval job to start..."
+          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
+          kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
+
+          # Check job status
+          SUCCEEDED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{.status.succeeded}')
+          FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{.status.failed}')
+
+          # Exit appropriately for CI
+          if [[ "${SUCCEEDED:-0}" -ge 1 ]]; then
+            echo "Job succeeded"
+            exit 0
+          elif [[ "${FAILED:-0}" -ge 1 ]]; then
+            echo "Job failed"
+            exit 1
+          else
+            echo "Job neither succeeded nor failed (timeout?)"
+            exit 1
+          fi
+
