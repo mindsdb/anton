@@ -164,4 +164,5 @@ jobs:
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
           export MINDS_BASE_URL=${{vars.MDB_ENV_URL}}
-          envsubst '${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml #| kubectl apply -f -
+          kubectl delete job minds-langfuse-benchmarks
+          envsubst '${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
