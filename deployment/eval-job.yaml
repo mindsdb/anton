@@ -26,7 +26,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mindsdb-secrets
-                  key: MINDSDB_API_KEY
+                  key: MINDS_API_KEY
             - name: LANGFUSE_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:
