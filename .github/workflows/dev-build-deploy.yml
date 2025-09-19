@@ -176,16 +176,10 @@ jobs:
           SUCCEEDED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{.status.succeeded}')
           FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{.status.failed}')
 
-          echo "========="
-          echo $SUCCEEDED
-          echo $FAILED
-          echo "========="
-
-          # Exit appropriately for CI
-          if [[ "${SUCCEEDED:-0}" -ge 1 ]]; then
+          if (( SUCCEEDED >= 1 )); then
             echo "Job succeeded"
             exit 0
-          elif [[ "${FAILED:-0}" -ge 1 ]]; then
+          elif (( FAILED >= 1 )); then
             echo "Job failed"
             exit 1
           else
