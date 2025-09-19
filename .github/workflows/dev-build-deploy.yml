@@ -172,21 +172,21 @@ jobs:
           kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
           kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
 
-          # Check job status
-          SUCCEEDED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{.status.succeeded}')
-          FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{.status.failed}')
-          # Default empty strings to 0
-          SUCCEEDED=${SUCCEEDED:-0}
-          FAILED=${FAILED:-0}
+          # Read conditions directly (True/False/empty)
+          IS_COMPLETE=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Complete")]}{.status}{end}')
+          IS_FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Failed")]}{.status}{end}')
 
-          if (( SUCCEEDED >= 1 )); then
-            echo "Job succeeded"
+
+
+          if [[ "$IS_COMPLETE" == "True" ]]; then
+            echo "Job completed successfully."
             exit 0
-          elif (( FAILED >= 1 )); then
-            echo "Job failed"
+          elif [[ "$IS_FAILED" == "True" ]]; then
+            echo "Job failed."
             exit 1
           else
-            echo "Job neither succeeded nor failed (timeout?)"
+            echo "Job neither reported Complete nor Failed (likely timeout)."
+            kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o yaml || true
             exit 1
           fi
 
