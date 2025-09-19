@@ -205,24 +205,36 @@ class TestMindsAPI:
         assert "Mind already exists" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_update_mind_success(self, mock_minds_service, update_request_data, sample_mind_response):
+    async def test_update_mind_success(
+        self, mock_minds_service, mock_data_catalog_loader, update_request_data, sample_mind_response
+    ):
         """Test successful mind update."""
         mock_minds_service.update_mind = AsyncMock(return_value=sample_mind_response)
         request = MindUpdateRequest(**update_request_data)
 
-        result = await update_mind(mind_name="test-mind", mind_data=request, minds_service=mock_minds_service)
+        result = await update_mind(
+            mind_name="test-mind",
+            mind_data=request,
+            minds_service=mock_minds_service,
+            data_catalog_loader=mock_data_catalog_loader,
+        )
 
         assert result.name == "test-mind"
-        mock_minds_service.update_mind.assert_called_once_with("test-mind", request)
+        mock_minds_service.update_mind.assert_called_once_with("test-mind", request, mock_data_catalog_loader)
 
     @pytest.mark.asyncio
-    async def test_update_mind_not_found(self, mock_minds_service, update_request_data):
+    async def test_update_mind_not_found(self, mock_minds_service, mock_data_catalog_loader, update_request_data):
         """Test mind update when mind doesn't exist."""
         mock_minds_service.update_mind = AsyncMock(side_effect=MindNotFoundError("Mind not found"))
         request = MindUpdateRequest(**update_request_data)
 
         with pytest.raises(HTTPException) as exc_info:
-            await update_mind(mind_name="nonexistent", mind_data=request, minds_service=mock_minds_service)
+            await update_mind(
+                mind_name="nonexistent",
+                mind_data=request,
+                minds_service=mock_minds_service,
+                data_catalog_loader=mock_data_catalog_loader,
+            )
 
         assert exc_info.value.status_code == 404
         assert "Mind not found" in exc_info.value.detail
@@ -367,9 +379,16 @@ class TestMindsAPIErrorHandling:
         mock_service.update_mind = AsyncMock(side_effect=MindsServiceError("Invalid parameters"))
 
         request = MindUpdateRequest(name="updated-test")
+        mock_data_catalog_loader = Mock()
+        mock_data_catalog_loader.load = AsyncMock()
 
         with pytest.raises(HTTPException) as exc_info:
-            await update_mind(mind_name="test", mind_data=request, minds_service=mock_service)
+            await update_mind(
+                mind_name="test",
+                mind_data=request,
+                minds_service=mock_service,
+                data_catalog_loader=mock_data_catalog_loader,
+            )
 
         assert exc_info.value.status_code == 400
         assert "Invalid parameters" in exc_info.value.detail
@@ -383,9 +402,16 @@ class TestMindsAPIErrorHandling:
         mock_service.update_mind = AsyncMock(side_effect=KeyError("Missing key"))
 
         request = MindUpdateRequest(name="updated-test")
+        mock_data_catalog_loader = Mock()
+        mock_data_catalog_loader.load = AsyncMock()
 
         with pytest.raises(HTTPException) as exc_info:
-            await update_mind(mind_name="test", mind_data=request, minds_service=mock_service)
+            await update_mind(
+                mind_name="test",
+                mind_data=request,
+                minds_service=mock_service,
+                data_catalog_loader=mock_data_catalog_loader,
+            )
 
         assert exc_info.value.status_code == 500
         assert "Internal server error" in exc_info.value.detail
