@@ -5,10 +5,11 @@ This module aggregates all v1 endpoints into a single router
 that can be included in the main FastAPI application.
 """
 
-from collections.abc import Callable
-from typing import Any
+# from collections.abc import Callable
+# from typing import Any
 
-from fastapi import APIRouter as FastAPIRouter
+# from fastapi import APIRouter as FastAPIRouter
+from fastapi import APIRouter
 
 from minds.api.v1.endpoints import chat, datasources, health, minds, tree
 
