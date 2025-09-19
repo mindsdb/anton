@@ -198,7 +198,7 @@ async def update_mind(
     )
 
     try:
-        mind = await minds_service.update_mind(mind_name, mind_data)
+        mind = await minds_service.update_mind(mind_name, mind_data, data_catalog_loader)
         logger.info(f"Updated mind {mind_name} for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
         return mind
 
