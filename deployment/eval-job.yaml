@@ -15,7 +15,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - >
-              python src/scripts/run_langfuse_experiments.py \
+              python -m src.scripts.run_langfuse_experiments \
                 --minds-api-key "$MINDS_API_KEY" \
                 --minds-base-url "${MINDS_BASE_URL}" \
                 --langfuse-secret-key "$LANGFUSE_SECRET_KEY" \
