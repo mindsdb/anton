@@ -15,13 +15,12 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - >
-              python scripts/run_dataset_evaluations.py \
+              python src/scripts/run_langfuse_experiments.py \
                 --minds-api-key "$MINDS_API_KEY" \
                 --minds-base-url "${MINDS_BASE_URL}" \
                 --langfuse-secret-key "$LANGFUSE_SECRET_KEY" \
                 --langfuse-public-key "$LANGFUSE_PUBLIC_KEY" \
-                --langfuse-host "https://langfuse.dev.mindsdb.com" \
-                --filter "postgres"
+                --langfuse-host "https://langfuse.dev.mindsdb.com"
           env:
             - name: MINDS_API_KEY
               valueFrom:
