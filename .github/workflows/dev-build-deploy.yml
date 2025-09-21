@@ -146,7 +146,7 @@ jobs:
 
   run-evals:
     runs-on: mdb-dev
-    needs: [ get-deploy-labels, deploy ]
+    needs: [ get-deploy-labels ]
     strategy:
       matrix:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
@@ -164,9 +164,10 @@ jobs:
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
           export MINDS_BASE_URL=${{vars.MDB_ENV_URL}}
+          export PR_NUMBER=${{github.event.pull_request.number}}
 
           kubectl -n $NAMESPACE delete job --ignore-not-found minds-langfuse-benchmarks
-          envsubst '${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
+          envsubst '${PR_NUMBER} ${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
 
           echo "Waiting for eval job to start..."
           kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks

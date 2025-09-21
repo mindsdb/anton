@@ -20,7 +20,8 @@ spec:
                 --minds-base-url "${MINDS_BASE_URL}" \
                 --langfuse-secret-key "$LANGFUSE_SECRET_KEY" \
                 --langfuse-public-key "$LANGFUSE_PUBLIC_KEY" \
-                --langfuse-host "https://langfuse.dev.mindsdb.com"
+                --langfuse-host "https://langfuse.dev.mindsdb.com" \
+                --pr-number "${PR_NUMBER}"
           env:
             - name: MINDS_API_KEY
               valueFrom:
