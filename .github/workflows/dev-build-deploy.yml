@@ -172,11 +172,12 @@ jobs:
           kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
           kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
 
-          # Read conditions directly (True/False/empty)
+          # Pod should already be complete but just in case
+          kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=1m "job/minds-langfuse-benchmarks"
+
+          # Read completion state
           IS_COMPLETE=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Complete")]}{.status}{end}')
           IS_FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Failed")]}{.status}{end}')
-
-
 
           if [[ "$IS_COMPLETE" == "True" ]]; then
             echo "Job completed successfully."
