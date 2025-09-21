@@ -146,7 +146,7 @@ jobs:
 
   run-evals:
     runs-on: mdb-dev
-    needs: [ get-deploy-labels ]
+    needs: [ get-deploy-labels, deploy ]
     strategy:
       matrix:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
