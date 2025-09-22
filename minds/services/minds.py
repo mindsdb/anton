@@ -13,11 +13,16 @@ from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
+from minds.common.vars import DATA_CATALOG_EXECUTION_MODE
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
-from minds.services.data_catalog import DataCatalogLoader, DataCatalogLoaderError
+from minds.services.data_catalog.data_catalog_loader import (
+    DataCatalogLoaderError,
+    load_data_catalog_async,
+    load_data_catalog_sync,
+)
 
 # Set up logging
 logger = setup_logging()
@@ -170,7 +175,7 @@ class MindsService:
             logger.error(f"Error getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
 
-    async def create_mind(self, mind_data: MindCreateRequest, data_catalog_loader: DataCatalogLoader) -> MindResponse:
+    async def create_mind(self, mind_data: MindCreateRequest) -> MindResponse:
         """
         Create a new mind.
 
@@ -223,7 +228,7 @@ class MindsService:
 
             # Add datasource relationships if provided
             if mind_data.datasources:
-                await self._add_datasources_to_mind(new_mind, mind_data.datasources, data_catalog_loader)
+                await self._add_datasources_to_mind(new_mind, mind_data.datasources)
 
             logger.info(f"Created mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
 
@@ -238,9 +243,7 @@ class MindsService:
             )
             raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
 
-    async def update_mind(
-        self, mind_name: str, mind_data: MindUpdateRequest, data_catalog_loader: DataCatalogLoader
-    ) -> MindResponse:
+    async def update_mind(self, mind_name: str, mind_data: MindUpdateRequest) -> MindResponse:
         """
         Update an existing mind.
 
@@ -285,7 +288,7 @@ class MindsService:
 
             # Handle datasource relationships separately
             if mind_data.datasources is not None:
-                await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
+                await self._update_mind_datasources(mind, mind_data.datasources)
 
             self.session.add(mind)
             self.session.commit()
@@ -454,7 +457,7 @@ class MindsService:
                 raise
 
     async def _add_datasources_to_mind(
-        self, mind: Mind, datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader
+        self, mind: Mind, datasource_configs: list[DatasourceConfig]
     ) -> None:
         """
         Add multiple datasources to a mind by creating MindDatasource relationships.
@@ -470,6 +473,7 @@ class MindsService:
                     f"for user {self.user_id} in tenant {self.tenant_id}"
                 )
                 datasource_name = datasource_config.name
+                table_names = datasource_config.tables
                 # Find the datasource
                 datasource = self.session.exec(
                     select(Datasource).where(
@@ -513,7 +517,7 @@ class MindsService:
                     tenant_id=self.tenant_id,
                     mind_id=mind.id,
                     datasource_id=datasource.id,
-                    tables=datasource_config.tables,
+                    tables=table_names,
                 )
 
                 self.session.add(mind_datasource)
@@ -528,26 +532,24 @@ class MindsService:
                     f"Loading datasource {datasource_name} to the data catalog "
                     f"for user {self.user_id} in tenant {self.tenant_id}"
                 )
-                mind_datasource.status = DataCatalogStatus.LOADING
-                self.session.add(mind_datasource)
-                self.session.commit()
 
                 try:
-                    data_catalog_loader.load(mind_datasource, datasource_config)
+                    if DATA_CATALOG_EXECUTION_MODE == "asynchronous":
+                        # Session and client are not passed because Prefect requires serializable objects.
+                        await load_data_catalog_async(
+                            # MindDatasource object is also serialized to support Prefect.
+                            mind_datasource=mind_datasource.model_dump(),
+                            table_names=table_names,
+                        )
+                    else:
+                        load_data_catalog_sync(
+                            self.session,
+                            self.mindsdb_client,
+                            mind_datasource,
+                            table_names,
+                        )
                 except DataCatalogLoaderError as e:
-                    logger.error(f"Error loading datasource {datasource_name} to the data catalog: {str(e)}")
-                    mind_datasource.status = DataCatalogStatus.FAILED
-                    self.session.add(mind_datasource)
-                    self.session.commit()
                     continue
-
-                mind_datasource.status = DataCatalogStatus.COMPLETED
-                self.session.add(mind_datasource)
-                self.session.commit()
-                logger.info(
-                    f"Loaded datasource {datasource_name} to the data catalog "
-                    f"for user {self.user_id} in tenant {self.tenant_id}"
-                )
             except Exception as e:
                 logger.error(
                     f"Error adding datasource {datasource_name} to mind {mind.name} "
@@ -565,7 +567,7 @@ class MindsService:
             raise
 
     async def _update_mind_datasources(
-        self, mind: Mind, new_datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader
+        self, mind: Mind, new_datasource_configs: list[DatasourceConfig]
     ) -> None:
         """
         Update the datasources associated with a mind by replacing all relationships.
@@ -582,7 +584,7 @@ class MindsService:
             self.session.flush()
 
             # Add new relationships
-            await self._add_datasources_to_mind(mind, new_datasource_configs, data_catalog_loader)
+            await self._add_datasources_to_mind(mind, new_datasource_configs)
 
             logger.debug(f"Updated datasources for mind {mind.name}")
         except Exception as e:
