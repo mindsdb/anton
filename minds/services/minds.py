@@ -456,9 +456,7 @@ class MindsService:
                 )
                 raise
 
-    async def _add_datasources_to_mind(
-        self, mind: Mind, datasource_configs: list[DatasourceConfig]
-    ) -> None:
+    async def _add_datasources_to_mind(self, mind: Mind, datasource_configs: list[DatasourceConfig]) -> None:
         """
         Add multiple datasources to a mind by creating MindDatasource relationships.
 
@@ -566,9 +564,7 @@ class MindsService:
             logger.error(f"Error committing datasource relationships: {str(e)}")
             raise
 
-    async def _update_mind_datasources(
-        self, mind: Mind, new_datasource_configs: list[DatasourceConfig]
-    ) -> None:
+    async def _update_mind_datasources(self, mind: Mind, new_datasource_configs: list[DatasourceConfig]) -> None:
         """
         Update the datasources associated with a mind by replacing all relationships.
 
