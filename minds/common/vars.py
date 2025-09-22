@@ -49,7 +49,7 @@ OPEN_AI_MODEL_NAME = os.getenv("OPEN_AI_MODEL_NAME", "gpt-4o")
 # ====================================
 
 MINDSDB_URL = os.getenv("MINDSDB_URL", "http://localhost:47334")
-MINDSDB_API_KEY = os.getenv("MINDSDB_API_KEY", "not set")
+MINDSDB_API_KEY = os.getenv("MINDSDB_API_KEY", "")
 MINDSDB_LOGIN = os.getenv("MINDSDB_LOGIN", "mindsdb")
 MINDSDB_PASSWORD = os.getenv("MINDSDB_PASSWORD", "")
 
@@ -57,6 +57,9 @@ MINDSDB_PASSWORD = os.getenv("MINDSDB_PASSWORD", "")
 # Data Catalog
 # ====================================
 
+DATA_CATALOG_EXECUTION_MODE = os.getenv("DATA_CATALOG_EXECUTION_MODE", "asynchronous")
+DATA_CATALOG_JOB_NAME = os.getenv("DATA_CATALOG_JOB_NAME", "load-data-catalog")
+DATA_CATALOG_JOB_DEPLOYMENT_NAME = os.getenv("DATA_CATALOG_JOB_DEPLOYMENT_NAME", "dev")
 DATA_CATALOG_CACHE_TYPE = os.getenv("DATA_CATALOG_CACHE_TYPE", "in_memory")
 DATA_CATALOG_CACHE_MAX_SIZE = int(os.getenv("DATA_CATALOG_CACHE_MAX_SIZE", 100))
 
