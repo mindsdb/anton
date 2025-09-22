@@ -1,6 +1,0 @@
-dependencies:
-- name: deployment
-  repository: https://devops-nirvana.s3.amazonaws.com/helm-charts/
-  version: 1.0.47
-digest: sha256:f59366ddeebaa94d793097c8b084e52fb9008d44c15b626baca81d361ac0a8f3
-generated: "2025-06-24T16:32:53.767557+12:00"

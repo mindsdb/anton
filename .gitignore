@@ -214,3 +214,6 @@ __marimo__/
 
 # Misc
 .DS_Store
+
+deployment/**/charts
+deployment/**/requirements.lock

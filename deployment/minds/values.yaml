@@ -89,3 +89,6 @@ deployment:
         secretKeyRef:
           name: mindsdb-secrets
           key: LANGFUSE_HOST
+
+    - name: MINDSDB_URL
+      value: "http://mindsdb:80"
