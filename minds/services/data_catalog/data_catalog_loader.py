@@ -73,16 +73,16 @@ def load_data_catalog_sync(
     Raises:
         DataCatalogLoaderError: If there is an error during the loading process.
     """
-    mind_datasource_id = mind_datasource.id
-    datasource_id = mind_datasource.datasource_id
-    datasource_name = mind_datasource.datasource.name
-    tenant_id = mind_datasource.tenant_id
-
-    mind_datasource.status = DataCatalogStatus.LOADING
-    session.add(mind_datasource)
-    session.commit()
-
     try:
+        mind_datasource_id = mind_datasource.id
+        datasource_id = mind_datasource.datasource_id
+        datasource_name = mind_datasource.datasource.name
+        tenant_id = mind_datasource.tenant_id
+
+        mind_datasource.status = DataCatalogStatus.LOADING
+        session.add(mind_datasource)
+        session.commit()
+
         tables_df = get_tables(mindsdb_client, datasource_name, table_names)
         tables_df = filter_loaded_tables(session, tables_df, datasource_id, tenant_id)
 
