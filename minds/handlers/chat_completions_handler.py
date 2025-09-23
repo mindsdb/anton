@@ -1,15 +1,14 @@
 from langfuse import observe
 from mindsdb_sdk.server import Server
-from sqlalchemy.orm import selectinload
-from sqlmodel import Session, and_, select
+from sqlmodel import Session
 
 from minds.agent.database_agent import DatabaseAgent
 from minds.agent.database_toolkit import DatabaseToolkit
 from minds.common.logger import setup_logging
-from minds.model.mind import Mind
-from minds.model.mind_datasource import MindDatasource
+from minds.model.mind_datasource import DataCatalogStatus
 from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
+from minds.services.minds import MindsService
 from minds.schemas.chat import Message, Role
 
 # Set up logging
@@ -46,26 +45,25 @@ class ChatCompletionsHandler:
     @observe(name="Chat Completions Handler")
     async def chat_completions(self, streamer: MessageStreamer) -> str | None:
         """
-        Dummy chat completions method.
+        OpenAI compatible chat completions handler.
 
         Args:
             streamer (MessageStreamer): The streamer to push messages to.
+
         Returns:
             str | None: A string response or None if no response is generated.
         """
-        statement = (
-            select(Mind)
-            .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
-            .where(
-                and_(
-                    Mind.name == self.model,
-                    Mind.user_id == self.context.user_id,
-                    Mind.tenant_id == self.context.tenant_id,
-                    Mind.deleted_at.is_(None),
-                )
+        minds_service = MindsService(session=self.session, mindsdb_client=self.mindsdb_client, user_id=self.context.user_id, tenant_id=self.context.tenant_id)
+        mind = await minds_service.get_mind_model(self.model)
+
+        # If the Mind has datasources that are currently loading, inform the user
+        # and complete the request
+        if any(relationship.status in [DataCatalogStatus.LOADING, DataCatalogStatus.PENDING] for relationship in mind.mind_datasources):
+            await streamer.push(
+                role=Role.assistant,
+                content="The Mind is not ready yet. Please try again later.",
             )
-        )
-        mind = self.session.exec(statement).first()
+            return None
 
         database_toolkit = DatabaseToolkit(mind=mind, mindsdb_client=self.mindsdb_client)
         database_agent = DatabaseAgent(mind=mind, database_toolkit=database_toolkit)
