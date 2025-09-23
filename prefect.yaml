@@ -23,8 +23,8 @@ deployments:
   version: null
   tags: []
   concurrency_limit: null
-  description: Prefect flow version of load_data_catalog that uses task-wrapped functions.
-  entrypoint: minds/jobs/data_catalog_loader_job.py:load_data_catalog
+  description: Load data catalog information from MindsDB into the local database.
+  entrypoint: minds/jobs/data_catalog_loader_flow.py:load_data_catalog
   parameters: {}
   work_pool:
     name: worker-pool
