@@ -43,7 +43,7 @@ class DataCatalogLoader:
             tenant_id (str): The ID of the tenant.
             table_names (list[str] | None): Optional list of table names to filter by. If None, load all tables.
         """
-        if DATA_CATALOG_EXECUTION_MODE not in DataCatalogExecutionMode.__members__:
+        if DATA_CATALOG_EXECUTION_MODE not in [mode.value for mode in DataCatalogExecutionMode]:
             raise ValueError(f"Invalid data catalog execution mode: {DATA_CATALOG_EXECUTION_MODE}")
 
         logger.debug(f"Running the data catalog loader flow in {DATA_CATALOG_EXECUTION_MODE} mode")
