@@ -9,12 +9,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from minds.model.mind_datasource import DataCatalogStatus
+
 
 class DatasourceConfig(BaseModel):
     """Reference to a datasource with optional table specification."""
 
     name: str = Field(..., description="Name of the datasource")
     tables: list[str] | None = Field(None, description="Specific tables to use (None = all tables)")
+    status: DataCatalogStatus | None = Field(None, description="Data catalog loading status of the datasource")
 
 
 class MindCreateRequest(BaseModel):
