@@ -1,4 +1,5 @@
 from typing import Any, Dict
+from uuid import UUID
 
 from prefect import flow, task
 from sqlalchemy.orm import selectinload
@@ -42,7 +43,11 @@ load_foreign_keys = task(load_foreign_keys)
 
 
 @flow
-def load_data_catalog(mind_datasource: Dict[str, Any], table_names: list[str] | None = None) -> None:
+def load_data_catalog(
+    mind_datasource_id: UUID,
+    tenant_id: str,
+    table_names: list[str] | None = None,
+) -> None:
     """
     Prefect flow version of load_data_catalog that uses task-wrapped functions.
 
@@ -60,8 +65,8 @@ def load_data_catalog(mind_datasource: Dict[str, Any], table_names: list[str] | 
             select(MindDatasource)
             .where(
                 and_(
-                    MindDatasource.id == mind_datasource["id"],
-                    MindDatasource.tenant_id == mind_datasource["tenant_id"],
+                    MindDatasource.id == mind_datasource_id,
+                    MindDatasource.tenant_id == tenant_id,
                 )
             )
             .options(
@@ -70,10 +75,8 @@ def load_data_catalog(mind_datasource: Dict[str, Any], table_names: list[str] | 
         )
         mind_datasource = session.exec(statement).first()
 
-        mind_datasource_id = mind_datasource.id
         datasource_id = mind_datasource.datasource_id
         datasource_name = mind_datasource.datasource.name
-        tenant_id = mind_datasource.tenant_id
 
         mind_datasource.status = DataCatalogStatus.LOADING
         session.add(mind_datasource)

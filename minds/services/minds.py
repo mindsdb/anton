@@ -566,10 +566,10 @@ class MindsService:
 
                 try:
                     if DATA_CATALOG_EXECUTION_MODE == "asynchronous":
-                        # Session and client are not passed because Prefect requires serializable objects.
+                        # Session, client and the MindDatasource object are not passed because Prefect requires serializable objects.
                         await load_data_catalog_async(
-                            # MindDatasource object is also serialized to support Prefect.
-                            mind_datasource=mind_datasource.model_dump(),
+                            mind_datasource_id=mind_datasource.id,
+                            tenant_id=self.tenant_id,
                             table_names=table_names,
                         )
                     else:
