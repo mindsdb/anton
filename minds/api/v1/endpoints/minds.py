@@ -36,12 +36,13 @@ def get_minds_service(request: Request, session: Session = Depends(get_session))
     )
 
 
-def get_data_catalog_loader() -> DataCatalogLoader:
+def get_data_catalog_loader(request: Request, session: Session = Depends(get_session)) -> DataCatalogLoader:
     """
     Dependency function to create DataCatalogLoader.
     No parameters needed - it's a stateless service.
     """
-    return DataCatalogLoader()
+    context = extract_context_from_request(request)
+    return DataCatalogLoader(session=session, tenant_id=context.tenant_id)
 
 
 @router.get("/")
