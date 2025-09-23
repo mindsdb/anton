@@ -118,6 +118,28 @@ def load_data_catalog(
         raise DataCatalogLoaderError(f"Failed to load data catalog: {err_message}")
 
 
+def _execute_mindsdb_query(mindsdb_client: Server, query: str) -> pd.DataFrame:
+    """
+    Execute a SQL query against MindsDB and return DataFrame.
+
+    Args:
+        mindsdb_client (Server): MindsDB client for executing queries.
+        query (str): The SQL query to execute.
+
+    Returns:
+        pd.DataFrame: The result of the query as a DataFrame.
+    """
+    try:
+        logger.info(f"Executing MindsDB query: {query}")
+        query_result = mindsdb_client.query(query)
+        df = query_result.fetch()
+        logger.info(f"MindsDB query returned {len(df)} rows")
+        return df
+    except Exception as e:
+        logger.error(f"Failed to execute MindsDB query: {query}. Error: {str(e)}")
+        raise
+
+
 @task
 def get_tables(mindsdb_client: Server, datasource_name: str, table_names: list[str] | None = None) -> pd.DataFrame:
     """
@@ -348,18 +370,7 @@ def load_tables(
     tables = []
     mind_datasource_tables = []
     for _, row in tables_df.iterrows():
-        row_count = row.get("ROW_COUNT")
-        row_count = int(row_count) if pd.notna(row_count) else None
-
-        table = Table(
-            tenant_id=tenant_id,
-            datasource_id=datasource_id,
-            name=row["TABLE_NAME"],
-            schema=row["TABLE_SCHEMA"],
-            description=row["TABLE_DESCRIPTION"],
-            type=row["TABLE_TYPE"],
-            row_count=row_count,
-        )
+        table = _convert_row_to_table(row, tenant_id, datasource_id)
         session.add(table)
         session.flush()
         session.refresh(table)
@@ -377,6 +388,34 @@ def load_tables(
     logger.info(f"Loaded {len(tables)} tables into the database")
 
     return tables
+
+
+def _convert_row_to_table(row: pd.Series, tenant_id: UUID, datasource_id: UUID) -> Table:
+    """
+    Convert a metadata row to a Table object.
+
+    Args:
+        row (pd.Series): The metadata row to convert.
+        tenant_id (UUID): The ID of the tenant.
+        datasource_id (UUID): The ID of the datasource.
+
+    Returns:
+        Table: The Table object.
+    """
+    row_count = row.get("ROW_COUNT")
+    row_count = int(row_count) if pd.notna(row_count) else None
+
+    table = Table(
+        tenant_id=tenant_id,
+        datasource_id=datasource_id,
+        name=row["TABLE_NAME"],
+        schema=row["TABLE_SCHEMA"],
+        description=row["TABLE_DESCRIPTION"],
+        type=row["TABLE_TYPE"],
+        row_count=row_count,
+    )
+
+    return table
 
 
 @task(cache_policy=NO_CACHE)
@@ -401,22 +440,50 @@ def load_columns(session: Session, columns_df: pd.DataFrame, tables: list[Table]
     columns = []
     for _, row in columns_df.iterrows():
         table_id = table_name_to_id.get(row["TABLE_NAME"])
-        column = Column(
-            tenant_id=tenant_id,
-            table_id=table_id,
-            name=row["COLUMN_NAME"],
-            data_type=row["DATA_TYPE"],
-            description=row["COLUMN_DESCRIPTION"],
-            default_value=_normalize_null_value(row["COLUMN_DEFAULT"]),
-            is_nullable=_normalize_boolean(row["IS_NULLABLE"]),
-        )
-
+        column = _convert_row_to_column(row, tenant_id, table_id)
         columns.append(column)
 
     session.add_all(columns)
     session.flush()  # Generate IDs but don't commit yet
     logger.info(f"Loaded {len(columns)} columns into the database")
     return columns
+
+
+def _normalize_boolean(value: Any) -> bool:
+    """Convert MindsDB YES/NO strings to boolean."""
+    if isinstance(value, str):
+        return value.upper() == "YES"
+    return bool(value)
+
+
+def _normalize_null_value(value: Any) -> Any | None:
+    """Convert MindsDB [NULL] strings to None."""
+    if value == "[NULL]" or value is None:
+        return None
+    return value
+
+
+def _convert_row_to_column(row: pd.Series, tenant_id: UUID, table_id: UUID) -> Column:
+    """
+    Convert a metadata row to a Column object.
+
+    Args:
+        row (pd.Series): The metadata row to convert.
+        tenant_id (UUID): The ID of the tenant.
+        table_id (UUID): The ID of the table.
+
+    Returns:
+        Column: The Column object.
+    """
+    return Column(
+        tenant_id=tenant_id,
+        table_id=table_id,
+        name=row["COLUMN_NAME"],
+        data_type=row["DATA_TYPE"],
+        description=row["COLUMN_DESCRIPTION"],
+        default_value=_normalize_null_value(row["COLUMN_DEFAULT"]),
+        is_nullable=_normalize_boolean(row["IS_NULLABLE"]),
+    )
 
 
 @task(cache_policy=NO_CACHE)
@@ -440,34 +507,49 @@ def load_column_statistics(
     # Create lookup dictionary for column name to ID
     column_name_to_id = {column.name: column.id for column in columns}
 
-    def normalize_distinct_count(val: Any) -> int | None:
-        """Convert distinct values count to proper integer or None."""
-        if pd.isna(val):
-            return None
-        try:
-            return int(val) if val is not None else None
-        except (ValueError, TypeError):
-            return None
-
     column_statistics = []
     for _, row in column_statistics_df.iterrows():
         column_id = column_name_to_id.get(row["COLUMN_NAME"])
-        column_statistics.append(
-            ColumnStatistics(
-                tenant_id=tenant_id,
-                column_id=column_id,
-                most_common_values=row["MOST_COMMON_VALS"],
-                most_common_frequencies=row["MOST_COMMON_FREQS"],
-                null_percentage=row["NULL_FRAC"],
-                distinct_values_count=normalize_distinct_count(row["N_DISTINCT"]),
-                min_value=row["MIN_VALUE"],
-                max_value=row["MAX_VALUE"],
-            )
-        )
+        column_statistics_obj = _convert_row_to_column_statistics(row, tenant_id, column_id)
+        column_statistics.append(column_statistics_obj)
 
     session.add_all(column_statistics)
     session.flush()  # Generate IDs but don't commit yet
     logger.info(f"Loaded {len(column_statistics)} column statistics into the database")
+
+
+def normalize_distinct_count(val: Any) -> int | None:
+    """Convert distinct values count to proper integer or None."""
+    if pd.isna(val):
+        return None
+    try:
+        return int(val) if val is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _convert_row_to_column_statistics(row: pd.Series, tenant_id: UUID, column_id: UUID) -> ColumnStatistics:
+    """
+    Convert a metadata row to a ColumnStatistics object.
+
+    Args:
+        row (pd.Series): The metadata row to convert.
+        tenant_id (UUID): The ID of the tenant.
+        column_id (UUID): The ID of the column.
+
+    Returns:
+        ColumnStatistics: The ColumnStatistics object.
+    """
+    return ColumnStatistics(
+        tenant_id=tenant_id,
+        column_id=column_id,
+        most_common_values=row["MOST_COMMON_VALS"],
+        most_common_frequencies=row["MOST_COMMON_FREQS"],
+        null_percentage=row["NULL_FRAC"],
+        distinct_values_count=normalize_distinct_count(row["N_DISTINCT"]),
+        min_value=row["MIN_VALUE"],
+        max_value=row["MAX_VALUE"],
+    )
 
 
 @task(cache_policy=NO_CACHE)
@@ -497,19 +579,34 @@ def load_primary_keys(
     for _, row in primary_keys_df.iterrows():
         table_id = table_name_to_id.get(row["TABLE_NAME"])
         column_id = column_name_to_id.get(row["COLUMN_NAME"])
-        primary_keys.append(
-            PrimaryKeyConstraint(
-                tenant_id=tenant_id,
-                table_id=table_id,
-                column_id=column_id,
-                ordinal_position=row["ORDINAL_POSITION"],
-                constraint_name=row["CONSTRAINT_NAME"],
-            )
-        )
+        primary_key = _convert_row_to_primary_key(row, tenant_id, table_id, column_id)
+        primary_keys.append(primary_key)
 
     session.add_all(primary_keys)
     session.flush()  # Generate IDs but don't commit yet
     logger.info(f"Loaded {len(primary_keys)} primary keys into the database")
+
+
+def _convert_row_to_primary_key(row: pd.Series, tenant_id: UUID, table_id: UUID, column_id: UUID) -> PrimaryKeyConstraint:
+    """
+    Convert a metadata row to a PrimaryKeyConstraint object.
+
+    Args:
+        row (pd.Series): The metadata row to convert.
+        tenant_id (UUID): The ID of the tenant.
+        table_id (UUID): The ID of the table.
+        column_id (UUID): The ID of the column.
+
+    Returns:
+        PrimaryKeyConstraint: The PrimaryKeyConstraint object.
+    """
+    return PrimaryKeyConstraint(
+        tenant_id=tenant_id,
+        table_id=table_id,
+        column_id=column_id,
+        ordinal_position=row["ORDINAL_POSITION"],
+        constraint_name=row["CONSTRAINT_NAME"],
+    )
 
 
 @task(cache_policy=NO_CACHE)
@@ -541,54 +638,35 @@ def load_foreign_keys(
         column_id = column_name_to_id.get(row["COLUMN_NAME"])
         referenced_table_id = table_name_to_id.get(row["REFERENCED_TABLE_NAME"])
         referenced_column_id = column_name_to_id.get(row["REFERENCED_COLUMN_NAME"])
-        foreign_keys.append(
-            ForeignKeyConstraint(
-                tenant_id=tenant_id,
-                table_id=table_id,
-                column_id=column_id,
-                referenced_table_id=referenced_table_id,
-                referenced_column_id=referenced_column_id,
-                constraint_name=row["CONSTRAINT_NAME"],
-                ordinal_position=row["ORDINAL_POSITION"],
-            )
-        )
+        foreign_key = _convert_row_to_foreign_key(row, tenant_id, table_id, column_id, referenced_table_id, referenced_column_id)
+        foreign_keys.append(foreign_key)
 
     session.add_all(foreign_keys)
     session.flush()
     logger.info(f"Loaded {len(foreign_keys)} foreign keys into the database")
 
 
-def _execute_mindsdb_query(mindsdb_client: Server, query: str) -> pd.DataFrame:
+def _convert_row_to_foreign_key(row: pd.Series, tenant_id: UUID, table_id: UUID, column_id: UUID, referenced_table_id: UUID, referenced_column_id: UUID) -> ForeignKeyConstraint:
     """
-    Execute a SQL query against MindsDB and return DataFrame.
+    Convert a metadata row to a ForeignKeyConstraint object.
 
     Args:
-        mindsdb_client (Server): MindsDB client for executing queries.
-        query (str): The SQL query to execute.
+        row (pd.Series): The metadata row to convert.
+        tenant_id (UUID): The ID of the tenant.
+        table_id (UUID): The ID of the table.
+        column_id (UUID): The ID of the column.
+        referenced_table_id (UUID): The ID of the referenced table.
+        referenced_column_id (UUID): The ID of the referenced column.
 
     Returns:
-        pd.DataFrame: The result of the query as a DataFrame.
+        ForeignKeyConstraint: The ForeignKeyConstraint object.
     """
-    try:
-        logger.info(f"Executing MindsDB query: {query}")
-        query_result = mindsdb_client.query(query)
-        df = query_result.fetch()
-        logger.info(f"MindsDB query returned {len(df)} rows")
-        return df
-    except Exception as e:
-        logger.error(f"Failed to execute MindsDB query: {query}. Error: {str(e)}")
-        raise
-
-
-def _normalize_boolean(value: Any) -> bool:
-    """Convert MindsDB YES/NO strings to boolean."""
-    if isinstance(value, str):
-        return value.upper() == "YES"
-    return bool(value)
-
-
-def _normalize_null_value(value: Any) -> Any | None:
-    """Convert MindsDB [NULL] strings to None."""
-    if value == "[NULL]" or value is None:
-        return None
-    return value
+    return ForeignKeyConstraint(
+        tenant_id=tenant_id,
+        table_id=table_id,
+        column_id=column_id,
+        referenced_table_id=referenced_table_id,
+        referenced_column_id=referenced_column_id,
+        constraint_name=row["CONSTRAINT_NAME"],
+        ordinal_position=row["ORDINAL_POSITION"],
+    )
