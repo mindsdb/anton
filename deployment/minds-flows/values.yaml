@@ -1,0 +1,108 @@
+globalEnvsAlias: &globalEnvsYamlAlias
+  globalEnvs:
+
+    # ====================================
+    # GENERAL SETTINGS
+    # ====================================
+
+    - name: LOG_LEVEL
+      value: "INFO"    
+      
+    - name: IMAGE_TAG
+      value: "latest"
+
+
+    # ====================================
+    # PREFECT SETTINGS (for ETL flows)
+    # ====================================
+    - name: PREFECT_API_URL
+      value: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
+    
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+    - name: LANGFUSE_PUBLIC_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: LANGFUSE_PUBLIC_KEY
+
+    - name: LANGFUSE_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: LANGFUSE_SECRET_KEY
+
+    - name: LANGFUSE_HOST
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: LANGFUSE_HOST
+
+    # ====================================
+    # DATABASE SETTINGS
+    # ====================================
+
+    - name: DATABASE__URI
+      valueFrom:
+        secretKeyRef:
+          name: minds-db
+          key: database_uri
+
+    # ====================================
+    # MINDSDB SETTINGS
+    # ====================================
+
+    - name: MINDSDB__API_URL
+      value: http://mindsdb-gateway
+
+    - name: MINDSDB__API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: MINDSDB_API_KEY
+
+    - name: MINDSDB__PROJECT
+      value: mindsdb
+      
+    # ====================================
+    # OPEN AI SETTINGS
+    # ====================================
+
+    - name: OPENAI__API_URL
+      value: https://api.openai.com/v1
+
+    - name: OPENAI__API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: OPENAI_API_KEY
+
+    - name: OPENAI__MODEL
+      value: "gpt-4o"
+
+job:
+  # Job configuration
+  <<: *globalEnvsYamlAlias
+
+  name: minds-jobs
+
+  image:
+    repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
+    command: ["make"]
+    args: ["prefect/deploy/full"]
+
+  # Job timeout (in seconds) - how long the job is allowed to run
+  activeDeadlineSeconds: 3600
+
+  # Auto-cleanup completed jobs after 2 hours (7200 seconds)
+  ttlSecondsAfterFinished: 7200
+
+  # Resource limits for the job
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
