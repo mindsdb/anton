@@ -566,7 +566,7 @@ class MindsService:
                         f"Loading datasource {datasource_name} to the data catalog "
                         f"for user {self.user_id} in tenant {self.tenant_id}"
                     )
-                    await data_catalog_loader.load(mind_datasource.id, self.tenant_id, table_names)
+                    await data_catalog_loader.load(mind_datasource, table_names)
                 except DataCatalogLoaderError as e:
                     continue
             except Exception as e:

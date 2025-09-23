@@ -10,10 +10,12 @@ from enum import Enum
 from uuid import UUID
 
 from prefect.deployments import run_deployment
+from sqlmodel import Session
 
 from minds.common.logger import setup_logging
 from minds.common.vars import DATA_CATALOG_EXECUTION_MODE, DATA_CATALOG_JOB_NAME, DATA_CATALOG_JOB_DEPLOYMENT_NAME
 from minds.jobs.data_catalog_loader_flow import load_data_catalog
+from minds.model.mind_datasource import MindDatasource
 
 
 logger = setup_logging()
@@ -28,11 +30,13 @@ class DataCatalogLoader:
     """
     Service class for loading the data catalog.
     """
+    def __init__(self, session: Session, tenant_id: str):
+        self.session = session
+        self.tenant_id = tenant_id
 
     async def load(
         self,
-        mind_datasource_id: UUID,
-        tenant_id: str,
+        mind_datasource: MindDatasource,
         table_names: list[str] | None = None,
     ) -> None:
         """
@@ -52,17 +56,19 @@ class DataCatalogLoader:
                 name=f"{DATA_CATALOG_JOB_NAME}/{DATA_CATALOG_JOB_DEPLOYMENT_NAME}",
                 timeout=0,
                 parameters={
-                    "mind_datasource_id": mind_datasource_id,
-                    "tenant_id": tenant_id,
+                    "mind_datasource_id": mind_datasource.id,
+                    "tenant_id": self.tenant_id,
                     "table_names": table_names,
                 },
             )
             logger.debug(f"Data catalog loader flow run started: {flow_run.id}")
-            # TODO: Store the flow run id in the database.
+            mind_datasource.flow_run_id = flow_run.id
+            self.session.add(mind_datasource)
+            self.session.commit()
+
         else:
             load_data_catalog(
-                mind_datasource_id=mind_datasource_id,
-                tenant_id=tenant_id,
+                mind_datasource_id=mind_datasource.id,
+                tenant_id=self.tenant_id,
                 table_names=table_names,
             )
-            return None
