@@ -12,11 +12,12 @@ from mindsdb_sdk.server import Server
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
+from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
 from minds.model.datasource import Datasource
 from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
 from minds.model.mind import Mind
-from minds.model.mind_datasource import MindDatasource
+from minds.model.mind_datasource import MindDatasource, DataCatalogStatus
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 
@@ -300,9 +301,13 @@ class MindsService:
                 if existing_mind:
                     raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
 
-            # Validate new datasources if provided
-            if mind_data.datasources is not None:
+            if mind_data.datasources:
+                # Validate new datasources if provided
                 await self._validate_datasources(mind_data.datasources)
+                # Cancel any running data catalog loader flows for the mind
+                await self._cancel_data_catalog_loader_flows_for_mind(mind)
+                # Update the datasources associated with the mind
+                await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
 
             # Update mind fields
             if mind_data.name is not None:
@@ -313,10 +318,6 @@ class MindsService:
                 mind.model_name = mind_data.model_name
             if mind_data.parameters is not None:
                 mind.parameters = mind_data.parameters
-
-            # Handle datasource relationships separately
-            if mind_data.datasources is not None:
-                await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
 
             self.session.add(mind)
             self.session.commit()
@@ -360,6 +361,9 @@ class MindsService:
             # TODO: If cascade is True, delete all datasources associated with the mind
             if cascade:
                 logger.debug(f"Cascade deletion requested for mind {mind_name} - implement datasource deletion")
+
+            # Cancel any running data catalog loader flows for the mind
+            await self._cancel_data_catalog_loader_flows_for_mind(mind)
 
             mind.deleted_at = datetime.now(timezone.utc)
 
@@ -608,3 +612,15 @@ class MindsService:
             self.session.rollback()
             logger.error(f"Error updating datasources for mind {mind.name}: {str(e)}")
             raise
+
+    async def _cancel_data_catalog_loader_flows_for_mind(self, mind: Mind) -> None:
+        """
+        Cancel all data catalog loader flows for a mind.
+
+        Args:
+            mind (Mind): The mind to cancel data catalog loader flows for
+        """
+        prefect_client = PrefectClient()
+        for relationship in mind.mind_datasources:
+            if relationship.status == DataCatalogStatus.LOADING and relationship.flow_run_id:
+                await prefect_client.cancel_flow_run(relationship.flow_run_id)
