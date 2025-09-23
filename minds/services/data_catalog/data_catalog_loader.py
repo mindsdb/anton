@@ -1,7 +1,12 @@
 """
-Data catalog loader service.
+Data catalog loader service layer for loading metadata from MindsDB into the local database.
+
+This module contains the DataCatalogLoader class that handles all business logic
+related to loading the data catalog, including asynchronous and synchronous execution modes.
+Both execution modes are handled by Prefect.
 """
 
+from enum import Enum
 from uuid import UUID
 
 from prefect.deployments import run_deployment
@@ -14,17 +19,35 @@ from minds.jobs.data_catalog_loader_flow import load_data_catalog
 logger = setup_logging()
 
 
+class DataCatalogExecutionMode(str, Enum):
+    ASYNC = "asynchronous"
+    SYNC = "synchronous"
+
+
 class DataCatalogLoader:
+    """
+    Service class for loading the data catalog.
+    """
+
     async def load(
         self,
         mind_datasource_id: UUID,
         tenant_id: str,
         table_names: list[str] | None = None,
     ) -> None:
-        logger.debug(
-            f"Running the data catalog loader flow in {DATA_CATALOG_EXECUTION_MODE} mode"
-        )
-        if DATA_CATALOG_EXECUTION_MODE == "asynchronous":
+        """
+        Load the data catalog for a given mind-datasource relationship.
+
+        Args:
+            mind_datasource_id (UUID): The ID of the mind-datasource relationship.
+            tenant_id (str): The ID of the tenant.
+            table_names (list[str] | None): Optional list of table names to filter by. If None, load all tables.
+        """
+        if DATA_CATALOG_EXECUTION_MODE not in DataCatalogExecutionMode.__members__:
+            raise ValueError(f"Invalid data catalog execution mode: {DATA_CATALOG_EXECUTION_MODE}")
+
+        logger.debug(f"Running the data catalog loader flow in {DATA_CATALOG_EXECUTION_MODE} mode")
+        if DATA_CATALOG_EXECUTION_MODE == DataCatalogExecutionMode.ASYNC.value:
             flow_run = await run_deployment(
                 name=f"{DATA_CATALOG_JOB_NAME}/{DATA_CATALOG_JOB_DEPLOYMENT_NAME}",
                 timeout=0,
@@ -34,9 +57,7 @@ class DataCatalogLoader:
                     "table_names": table_names,
                 },
             )
-            logger.debug(
-                f"Data catalog loader flow run started: {flow_run.id}"
-            )
+            logger.debug(f"Data catalog loader flow run started: {flow_run.id}")
             # TODO: Store the flow run id in the database.
         else:
             load_data_catalog(
