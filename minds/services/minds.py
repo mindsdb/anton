@@ -14,10 +14,10 @@ from sqlmodel import Session, and_, select
 
 from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
-from minds.model.datasource import Datasource
 from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
+from minds.model.datasource import Datasource
 from minds.model.mind import Mind
-from minds.model.mind_datasource import MindDatasource, DataCatalogStatus
+from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 
@@ -175,7 +175,7 @@ class MindsService:
     async def get_mind_model(self, mind_name: str) -> Mind:
         """
         Get a specific mind by name as a Mind database model object.
-        
+
         This method is intended for internal use when you need the actual Mind
         database model rather than the API response schema.
 
@@ -201,7 +201,9 @@ class MindsService:
         except MindNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error getting mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to get mind model: {str(e)}") from None
 
     async def create_mind(self, mind_data: MindCreateRequest, data_catalog_loader: DataCatalogLoader) -> MindResponse:
@@ -272,7 +274,9 @@ class MindsService:
             )
             raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
 
-    async def update_mind(self, mind_name: str, mind_data: MindUpdateRequest, data_catalog_loader: DataCatalogLoader) -> MindResponse:
+    async def update_mind(
+        self, mind_name: str, mind_data: MindUpdateRequest, data_catalog_loader: DataCatalogLoader
+    ) -> MindResponse:
         """
         Update an existing mind.
 
@@ -490,7 +494,8 @@ class MindsService:
                 raise
 
     async def _add_datasources_to_mind(
-        self, mind: Mind, datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader) -> None:
+        self, mind: Mind, datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader
+    ) -> None:
         """
         Add multiple datasources to a mind by creating MindDatasource relationships.
 
@@ -571,7 +576,7 @@ class MindsService:
                         f"for user {self.user_id} in tenant {self.tenant_id}"
                     )
                     await data_catalog_loader.load(mind_datasource, table_names)
-                except DataCatalogLoaderError as e:
+                except DataCatalogLoaderError:
                     continue
             except Exception as e:
                 logger.error(
@@ -589,7 +594,9 @@ class MindsService:
             logger.error(f"Error committing datasource relationships: {str(e)}")
             raise
 
-    async def _update_mind_datasources(self, mind: Mind, new_datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader) -> None:
+    async def _update_mind_datasources(
+        self, mind: Mind, new_datasource_configs: list[DatasourceConfig], data_catalog_loader: DataCatalogLoader
+    ) -> None:
         """
         Update the datasources associated with a mind by replacing all relationships.
 

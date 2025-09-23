@@ -7,16 +7,14 @@ Both execution modes are handled by Prefect.
 """
 
 from enum import Enum
-from uuid import UUID
 
 from prefect.deployments import run_deployment
 from sqlmodel import Session
 
 from minds.common.logger import setup_logging
-from minds.common.vars import DATA_CATALOG_EXECUTION_MODE, DATA_CATALOG_JOB_NAME, DATA_CATALOG_JOB_DEPLOYMENT_NAME
+from minds.common.vars import DATA_CATALOG_EXECUTION_MODE, DATA_CATALOG_JOB_DEPLOYMENT_NAME, DATA_CATALOG_JOB_NAME
 from minds.jobs.data_catalog_loader_flow import load_data_catalog
 from minds.model.mind_datasource import MindDatasource
-
 
 logger = setup_logging()
 
@@ -30,6 +28,7 @@ class DataCatalogLoader:
     """
     Service class for loading the data catalog.
     """
+
     def __init__(self, session: Session, tenant_id: str):
         self.session = session
         self.tenant_id = tenant_id
@@ -51,7 +50,7 @@ class DataCatalogLoader:
             raise ValueError(f"Invalid data catalog execution mode: {DATA_CATALOG_EXECUTION_MODE}")
 
         logger.debug(f"Running the data catalog loader flow in {DATA_CATALOG_EXECUTION_MODE} mode")
-        if DATA_CATALOG_EXECUTION_MODE == DataCatalogExecutionMode.ASYNC.value:
+        if DataCatalogExecutionMode.ASYNC.value == DATA_CATALOG_EXECUTION_MODE:
             flow_run = await run_deployment(
                 name=f"{DATA_CATALOG_JOB_NAME}/{DATA_CATALOG_JOB_DEPLOYMENT_NAME}",
                 timeout=0,

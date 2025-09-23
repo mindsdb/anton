@@ -8,8 +8,8 @@ from minds.common.logger import setup_logging
 from minds.model.mind_datasource import DataCatalogStatus
 from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
-from minds.services.minds import MindsService
 from minds.schemas.chat import Message, Role
+from minds.services.minds import MindsService
 
 # Set up logging
 logger = setup_logging()
@@ -53,12 +53,20 @@ class ChatCompletionsHandler:
         Returns:
             str | None: A string response or None if no response is generated.
         """
-        minds_service = MindsService(session=self.session, mindsdb_client=self.mindsdb_client, user_id=self.context.user_id, tenant_id=self.context.tenant_id)
+        minds_service = MindsService(
+            session=self.session,
+            mindsdb_client=self.mindsdb_client,
+            user_id=self.context.user_id,
+            tenant_id=self.context.tenant_id,
+        )
         mind = await minds_service.get_mind_model(self.model)
 
         # If the Mind has datasources that are currently loading, inform the user
         # and complete the request
-        if any(relationship.status in [DataCatalogStatus.LOADING, DataCatalogStatus.PENDING] for relationship in mind.mind_datasources):
+        if any(
+            relationship.status in [DataCatalogStatus.LOADING, DataCatalogStatus.PENDING]
+            for relationship in mind.mind_datasources
+        ):
             await streamer.push(
                 role=Role.assistant,
                 content="The Mind is not ready yet. Please try again later.",

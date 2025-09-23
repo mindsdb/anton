@@ -6,15 +6,15 @@ synchronous and asynchronous execution modes.
 Asynchronous executions are run via Prefect.
 """
 
-import pandas as pd
 from typing import Any
 from uuid import UUID
 
+import pandas as pd
+from mindsdb_sdk.server import Server
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
 from sqlalchemy.orm import selectinload
-from sqlmodel import select, and_, Session
-from mindsdb_sdk.server import Server
+from sqlmodel import Session, and_, select
 
 from minds.client.mindsdb import create_mindsdb_client_from_env
 from minds.common.logger import setup_logging
@@ -22,7 +22,6 @@ from minds.db.pg_session import get_session
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
-
 
 logger = setup_logging()
 
@@ -115,7 +114,7 @@ def load_data_catalog(
         session.commit()
         err_message = f"Failed to load data catalog for MindDatasource ID {mind_datasource_id}: {str(e)}"
         logger.error(f"Failed to load data catalog: {err_message}")
-        raise DataCatalogLoaderError(f"Failed to load data catalog: {err_message}")
+        raise DataCatalogLoaderError(f"Failed to load data catalog: {err_message}") from e
 
 
 def _execute_mindsdb_query(mindsdb_client: Server, query: str) -> pd.DataFrame:
@@ -587,7 +586,9 @@ def load_primary_keys(
     logger.info(f"Loaded {len(primary_keys)} primary keys into the database")
 
 
-def _convert_row_to_primary_key(row: pd.Series, tenant_id: UUID, table_id: UUID, column_id: UUID) -> PrimaryKeyConstraint:
+def _convert_row_to_primary_key(
+    row: pd.Series, tenant_id: UUID, table_id: UUID, column_id: UUID
+) -> PrimaryKeyConstraint:
     """
     Convert a metadata row to a PrimaryKeyConstraint object.
 
@@ -638,7 +639,9 @@ def load_foreign_keys(
         column_id = column_name_to_id.get(row["COLUMN_NAME"])
         referenced_table_id = table_name_to_id.get(row["REFERENCED_TABLE_NAME"])
         referenced_column_id = column_name_to_id.get(row["REFERENCED_COLUMN_NAME"])
-        foreign_key = _convert_row_to_foreign_key(row, tenant_id, table_id, column_id, referenced_table_id, referenced_column_id)
+        foreign_key = _convert_row_to_foreign_key(
+            row, tenant_id, table_id, column_id, referenced_table_id, referenced_column_id
+        )
         foreign_keys.append(foreign_key)
 
     session.add_all(foreign_keys)
@@ -646,7 +649,14 @@ def load_foreign_keys(
     logger.info(f"Loaded {len(foreign_keys)} foreign keys into the database")
 
 
-def _convert_row_to_foreign_key(row: pd.Series, tenant_id: UUID, table_id: UUID, column_id: UUID, referenced_table_id: UUID, referenced_column_id: UUID) -> ForeignKeyConstraint:
+def _convert_row_to_foreign_key(
+    row: pd.Series,
+    tenant_id: UUID,
+    table_id: UUID,
+    column_id: UUID,
+    referenced_table_id: UUID,
+    referenced_column_id: UUID,
+) -> ForeignKeyConstraint:
     """
     Convert a metadata row to a ForeignKeyConstraint object.
 

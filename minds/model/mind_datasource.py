@@ -55,7 +55,9 @@ class MindDatasource(BaseSQLModel, table=True):
         description="Status of the data catalog loading",
     )
 
-    flow_run_id: UUID | None = Field(default=None, description="ID of the flow run of the Prefect deployment for loading the data catalog")
+    flow_run_id: UUID | None = Field(
+        default=None, description="ID of the flow run of the Prefect deployment for loading the data catalog"
+    )
 
     # Relationships back to parent models
     mind: "Mind" = Relationship(back_populates="mind_datasources")
