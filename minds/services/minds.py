@@ -533,7 +533,7 @@ class MindsService:
                 self.session.commit()
 
                 try:
-                    await data_catalog_loader.load(mind_datasource, datasource_config)
+                    data_catalog_loader.load(mind_datasource, datasource_config)
                 except DataCatalogLoaderError as e:
                     logger.error(f"Error loading datasource {datasource_name} to the data catalog: {str(e)}")
                     mind_datasource.status = DataCatalogStatus.FAILED

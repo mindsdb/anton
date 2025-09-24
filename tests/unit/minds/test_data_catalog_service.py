@@ -121,7 +121,7 @@ class TestDataCatalogLoader:
         with pytest.raises(Exception, match="Query failed"):
             data_catalog_loader._execute_query("SELECT * FROM test")
 
-    async def test_load_success(self, data_catalog_loader, mock_datasource):
+    def test_load_success(self, data_catalog_loader, mock_datasource):
         """Test successful load operation."""
         # Setup mock for database query
         mock_result = Mock()
@@ -143,12 +143,12 @@ class TestDataCatalogLoader:
         mock_datasource_config.name = "test_datasource"
         mock_datasource_config.tables = ["table1", "table2"]
 
-        await data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
+        data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
 
         # Verify that the method was called and commit was called
         data_catalog_loader.session.commit.assert_called_once()
 
-    async def test_load_with_error_and_rollback(self, data_catalog_loader):
+    def test_load_with_error_and_rollback(self, data_catalog_loader):
         """Test load operation with error and rollback."""
         # Setup mock for database query that returns None (datasource not found)
         mock_result = Mock()
@@ -167,7 +167,7 @@ class TestDataCatalogLoader:
         mock_datasource_config.tables = ["table1", "table2"]
 
         with pytest.raises(DataCatalogLoaderError, match="Error loading data catalog: Database connection failed"):
-            await data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
+            data_catalog_loader.load(mock_mind_datasource, mock_datasource_config)
 
         # Verify rollback was called
         data_catalog_loader.session.rollback.assert_called_once()

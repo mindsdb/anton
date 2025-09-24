@@ -1,7 +1,7 @@
 """add_data_catalog_tables
 
-Revision ID: 005_add_data_catalog_tables
-Revises: c617e589a92e
+Revision ID: 002_add_data_catalog_tables
+Revises: 001_initial_schema_complete
 Create Date: 2025-01-27 10:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from alembic import op
 from minds.model.mind_datasource import DataCatalogStatus
 
 # revision identifiers, used by Alembic.
-revision: str = '004_add_data_catalog_tables'
+revision: str = '002_add_data_catalog_tables'
 down_revision: str | None = '001_initial_schema_complete'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

@@ -37,7 +37,7 @@ class DataCatalogLoader:
         self.user_id = user_id
         self.tenant_id = tenant_id
 
-    async def load(self, mind_datasource: MindDatasource, datasource_config: DatasourceConfig) -> None:
+    def load(self, mind_datasource: MindDatasource, datasource_config: DatasourceConfig) -> None:
         """Load the data catalog."""
         try:
             mind_datasource_id = mind_datasource.id
@@ -365,7 +365,7 @@ class DataCatalogLoader:
                     tenant_id=self.tenant_id,
                     table_id=table_id,
                     column_id=column_id,
-                    ordinal_position=row["ORDINAL_POSITION"],
+                    ordinal_position=int(row["ORDINAL_POSITION"]) if pd.notna(row["ORDINAL_POSITION"]) else None,
                     constraint_name=row["CONSTRAINT_NAME"],
                 )
             )
