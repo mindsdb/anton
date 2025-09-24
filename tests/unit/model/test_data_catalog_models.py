@@ -660,6 +660,7 @@ class TestDataCatalog:
         mind_datasource.datasource_id = uuid4()
         mind_datasource.tenant_id = "test-tenant-456"
         mind_datasource.status = "COMPLETED"
+        mind_datasource.flow_run_id = None  # Set to None instead of Mock
         mind_datasource.datasource = mock_datasource
         mind_datasource.tables = ["table1", "table2"]
         return mind_datasource
