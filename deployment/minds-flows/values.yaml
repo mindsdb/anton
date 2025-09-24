@@ -11,7 +11,6 @@ globalEnvsAlias: &globalEnvsYamlAlias
     - name: IMAGE_TAG
       value: "latest"
 
-
     # ====================================
     # PREFECT SETTINGS (for ETL flows)
     # ====================================
@@ -43,43 +42,37 @@ globalEnvsAlias: &globalEnvsYamlAlias
     # DATABASE SETTINGS
     # ====================================
 
-    - name: DATABASE__URI
+    - name: DATABASE_URI
       valueFrom:
         secretKeyRef:
           name: minds-db
           key: database_uri
 
     # ====================================
-    # MINDSDB SETTINGS
+    # REDIS SETTINGS
     # ====================================
 
-    - name: MINDSDB__API_URL
-      value: http://mindsdb-gateway
+    - name: REDIS_HOST
+      value: "redis-master"
 
-    - name: MINDSDB__API_KEY
-      valueFrom:
-        secretKeyRef:
-          name: mindsdb-secrets
-          key: MINDSDB_API_KEY
+    - name: REDIS_PORT
+      value: "6379"
 
-    - name: MINDSDB__PROJECT
-      value: mindsdb
+    - name: REDIS_DB
+      value: "0"
+
+    - name: REDIS_CACHE_TTL
+      value: "3600"
       
     # ====================================
-    # OPEN AI SETTINGS
+    # OPENAI SETTINGS
     # ====================================
 
-    - name: OPENAI__API_URL
-      value: https://api.openai.com/v1
-
-    - name: OPENAI__API_KEY
+    - name: OPENAI_API_KEY
       valueFrom:
         secretKeyRef:
           name: mindsdb-secrets
           key: OPENAI_API_KEY
-
-    - name: OPENAI__MODEL
-      value: "gpt-4o"
 
 job:
   # Job configuration
