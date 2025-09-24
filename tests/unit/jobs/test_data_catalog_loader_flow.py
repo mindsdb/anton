@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import Mock, patch
 from uuid import UUID
 
@@ -5,7 +6,43 @@ import pandas as pd
 import pytest
 from sqlmodel import Session
 
-from minds.jobs.data_catalog_loader_flow import (
+# Store original modules to restore later
+original_prefect = sys.modules.get("prefect")
+original_prefect_flow = sys.modules.get("prefect.flow")
+original_prefect_task = sys.modules.get("prefect.task")
+original_prefect_cache_policies = sys.modules.get("prefect.cache_policies")
+
+# Mock Prefect modules to prevent Prefect initialization during import
+prefect_mock = Mock()
+prefect_mock.cache_policies = Mock()
+prefect_mock.cache_policies.NO_CACHE = Mock()
+
+
+# Create pass-through decorators that don't modify the functions
+def mock_task(func=None, **kwargs):
+    """Mock task decorator that passes through the function unchanged."""
+    if func is None:
+        return lambda f: f
+    return func
+
+
+def mock_flow(func=None, **kwargs):
+    """Mock flow decorator that passes through the function unchanged."""
+    if func is None:
+        return lambda f: f
+    return func
+
+
+prefect_mock.flow = mock_flow
+prefect_mock.task = mock_task
+
+sys.modules["prefect"] = prefect_mock
+sys.modules["prefect.flow"] = prefect_mock.flow
+sys.modules["prefect.task"] = prefect_mock.task
+sys.modules["prefect.cache_policies"] = prefect_mock.cache_policies
+
+# Import after mocking Prefect modules
+from minds.jobs.data_catalog_loader_flow import (  # noqa: E402
     _convert_row_to_column,
     _convert_row_to_column_statistics,
     _convert_row_to_foreign_key,
@@ -27,9 +64,36 @@ from minds.jobs.data_catalog_loader_flow import (
     load_tables,
     normalize_distinct_count,
 )
-from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
-from minds.model.datasource import Datasource
-from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+from minds.model.data_catalog import (  # noqa: E402
+    Column,
+    ColumnStatistics,
+    ForeignKeyConstraint,
+    PrimaryKeyConstraint,
+    Table,
+)
+from minds.model.datasource import Datasource  # noqa: E402
+from minds.model.mind_datasource import DataCatalogStatus, MindDatasource  # noqa: E402
+
+# Restore original modules
+if original_prefect is not None:
+    sys.modules["prefect"] = original_prefect
+else:
+    sys.modules.pop("prefect", None)
+
+if original_prefect_flow is not None:
+    sys.modules["prefect.flow"] = original_prefect_flow
+else:
+    sys.modules.pop("prefect.flow", None)
+
+if original_prefect_task is not None:
+    sys.modules["prefect.task"] = original_prefect_task
+else:
+    sys.modules.pop("prefect.task", None)
+
+if original_prefect_cache_policies is not None:
+    sys.modules["prefect.cache_policies"] = original_prefect_cache_policies
+else:
+    sys.modules.pop("prefect.cache_policies", None)
 
 
 class TestDataCatalogLoaderFlow:
