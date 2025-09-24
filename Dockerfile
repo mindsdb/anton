@@ -25,6 +25,7 @@ RUN --mount=target=/var/lib/apt,type=cache,sharing=locked \
     apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     freetds-dev \
+    make \
     unixodbc-dev \
     curl libexpat1 \
     && apt-get clean
