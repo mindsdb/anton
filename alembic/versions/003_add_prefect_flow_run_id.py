@@ -1,7 +1,7 @@
 """add_prefect_flow_run_id
 
 Revision ID: 003_add_prefect_flow_run_id
-Revises: 004_add_data_catalog_tables
+Revises: 002_add_data_catalog_tables
 Create Date: 2025-09-23 20:52:31.195811
 
 """
@@ -14,7 +14,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '003_add_prefect_flow_run_id'
-down_revision: str | None = '004_add_data_catalog_tables'
+down_revision: str | None = '002_add_data_catalog_tables'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
