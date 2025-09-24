@@ -34,7 +34,7 @@ definitions:
           
 # the deployments section allows you to provide configuration for deploying flows
 deployments:
-- name: dev
+- name: load_data_catalog
   version: null
   tags: []
   concurrency_limit: null
