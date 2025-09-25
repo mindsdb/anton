@@ -41,8 +41,5 @@ deployments:
   description: Load data catalog information from MindsDB into the local database.
   entrypoint: minds/jobs/data_catalog_loader_flow.py:load_data_catalog
   parameters: {}
-  work_pool:
-    name: worker-pool
-    work_queue_name: null
-    job_variables: {}
+  work_pool: *default_work_pool
   schedules: []
