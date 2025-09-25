@@ -142,4 +142,4 @@ prefect/set-config: ## Set image, environment, and API URL if provided (usage: m
 		$(MAKE) prefect/set-env; \
 	fi
 
-prefect/deploy/full: activate prefect/secrets prefect/set-config prefect/deploy ## Deploy secrets, set config (image/API URL if provided), and then deploy all flows
+prefect/deploy/full: activate prefect/set-config prefect/deploy ## Set config (image/API URL if provided), and then deploy all flows
