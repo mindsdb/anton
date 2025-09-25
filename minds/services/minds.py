@@ -9,6 +9,7 @@ MindsDB is only used for datasource validation, not for minds storage.
 from datetime import datetime, timezone
 
 from mindsdb_sdk.server import Server
+from prefect.exceptions import PrefectException
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
@@ -578,6 +579,11 @@ class MindsService:
                     await data_catalog_loader.load(mind_datasource, table_names)
                 except DataCatalogLoaderError:
                     continue
+                except PrefectException:
+                    # This occurs when the flow is submitted but fails immediately.
+                    mind_datasource.status = DataCatalogStatus.FAILED
+                    self.session.add(mind_datasource)
+                    self.session.commit()
             except Exception as e:
                 logger.error(
                     f"Error adding datasource {datasource_name} to mind {mind.name} "

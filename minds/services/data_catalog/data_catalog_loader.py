@@ -9,6 +9,7 @@ Both execution modes are handled by Prefect.
 from enum import Enum
 
 from prefect.deployments import run_deployment
+from prefect.exceptions import PrefectException
 from sqlmodel import Session
 
 from minds.common.logger import setup_logging
@@ -60,6 +61,15 @@ class DataCatalogLoader:
                     "table_names": table_names,
                 },
             )
+            if not (flow_run.state.is_scheduled() or flow_run.state.is_pending() or flow_run.state.is_running()):
+                error_msg = (
+                    f"Failed to start data catalog loader flow run. "
+                    f"Flow run is in '{flow_run.state.type}' state"
+                    + (f" with error: {flow_run.state.message}" if flow_run.state.message else "")
+                )
+                logger.error(error_msg)
+                raise PrefectException(error_msg)
+
             logger.debug(f"Data catalog loader flow run started: {flow_run.id}")
             mind_datasource.flow_run_id = flow_run.id
             self.session.add(mind_datasource)
