@@ -54,7 +54,6 @@ class DataCatalogLoader:
         if DataCatalogExecutionMode.ASYNC.value == DATA_CATALOG_EXECUTION_MODE:
             flow_run = await run_deployment(
                 name=f"{DATA_CATALOG_JOB_NAME}/{DATA_CATALOG_JOB_DEPLOYMENT_NAME}",
-                timeout=0,
                 parameters={
                     "mind_datasource_id": mind_datasource.id,
                     "tenant_id": self.tenant_id,
