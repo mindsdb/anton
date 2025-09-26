@@ -21,7 +21,7 @@ class PrefectSettings(BaseModel):
     database_uri: str = DATABASE_URI
 
 
-def create_prefect_app_settings() -> None:
+def create_prefect_settings() -> None:
     """
     Create/update the Prefect Secret block from variables in the environment.
     Safe to call multiple times.
@@ -31,7 +31,7 @@ def create_prefect_app_settings() -> None:
 
 
 @lru_cache
-def get_prefect_app_settings() -> PrefectSettings:
+def get_prefect_settings() -> PrefectSettings:
     """
     Load the Prefect Secret block; if missing, return default PrefectSettings.
     This allows decorators to work with defaults while still loading from secrets at runtime.

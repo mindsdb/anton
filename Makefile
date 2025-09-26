@@ -95,6 +95,9 @@ format/check: activate ## Format code with ruff
 format: activate ## Format code with ruff
 	$(PYTHON) -m ruff format minds tests
 
+prefect/secrets: ## Deploy Prefect secrets from local settings
+	$(PYTHON) -c "from minds.jobs.settings import create_prefect_settings; create_prefect_settings(); print('✓ Prefect secrets deployed successfully')"
+
 prefect/deploy: ## Deploy all flows to Prefect (requires secrets to be deployed first)
 	@echo "Deploying all flows..."
 	@echo "Auto-rejecting all deployment prompts..."
@@ -142,4 +145,4 @@ prefect/set-config: ## Set image, environment, and API URL if provided (usage: m
 		$(MAKE) prefect/set-env; \
 	fi
 
-prefect/deploy/full: activate prefect/set-config prefect/deploy ## Set config (image/API URL if provided), and then deploy all flows
+prefect/deploy/full: activate prefect/secrets prefect/set-config prefect/deploy ## Set config (image/API URL if provided), and then deploy all flows

@@ -59,6 +59,7 @@ class DataCatalogLoader:
                     "tenant_id": self.tenant_id,
                     "table_names": table_names,
                 },
+                timeout=0
             )
             if not (flow_run.state.is_scheduled() or flow_run.state.is_pending() or flow_run.state.is_running()):
                 error_msg = (
