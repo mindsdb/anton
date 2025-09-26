@@ -1,7 +1,5 @@
 """Database connection and session management for PostgreSQL using SQLAlchemy"""
 
-from enum import Enum
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session as SQLModelSession
@@ -23,13 +21,7 @@ _engines = {}
 _session_factories = {}
 
 
-class DatabaseURI(str, Enum):
-    """Enum for database URIs."""
-
-    DEFAULT = DATABASE_URI
-
-
-def _create_engine(db_uri: DatabaseURI):
+def _create_engine(db_uri: str):
     """Create a proper SQLAlchemy engine that connects to a PostgreSQL database.
 
     Args:
@@ -39,10 +31,8 @@ def _create_engine(db_uri: DatabaseURI):
         SQLAlchemy engine instance
     """
     # Log connection string with a hidden password
-    name = db_uri.name
-
     hidden_uri = db_uri.replace(":", ":*****@", 1) if "@" in db_uri else db_uri
-    logger.debug(f"Creating PostgreSQL engine '{name}' with: {hidden_uri}")
+    logger.debug(f"Creating PostgreSQL engine with: {hidden_uri}")
 
     try:
         # Create a regular SQLAlchemy engine
@@ -54,15 +44,15 @@ def _create_engine(db_uri: DatabaseURI):
             pool_recycle=DB_POOL_RECYCLE,
             pool_pre_ping=DB_POOL_PRE_PING,
         )
-        # logger.info(f"PostgreSQL engine '{name}' created successfully")
+        # logger.info(f"PostgreSQL engine created successfully")
         return engine
     except Exception as e:
         error_msg = str(e).lower()
-        logger.error(f"Failed to create PostgreSQL engine '{name}': {error_msg}")
+        logger.error(f"Failed to create PostgreSQL engine: {error_msg}")
         raise RuntimeError(f"PostgreSQL engine creation failed: {error_msg}") from e
 
 
-def get_engine(db_uri: DatabaseURI):
+def get_engine(db_uri: str):
     """Get or create a database engine for the specified connection URI.
 
     Args:
@@ -71,10 +61,9 @@ def get_engine(db_uri: DatabaseURI):
     Returns:
         SQLAlchemy engine instance
     """
-    name = db_uri.name
-    if name not in _engines:
-        _engines[name] = _create_engine(db_uri=db_uri)
-    return _engines[name]
+    if db_uri not in _engines:
+        _engines[db_uri] = _create_engine(db_uri=db_uri)
+    return _engines[db_uri]
 
 
 def get_session_factory(engine):
@@ -98,7 +87,7 @@ def get_session_factory(engine):
     return _session_factories[engine_id]
 
 
-def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT):
+def get_session(db_uri: str = DATABASE_URI):
     """
     FastAPI dependency that provides a database session with automatic cleanup.
 
@@ -122,12 +111,12 @@ def get_session(db_uri: DatabaseURI = DatabaseURI.DEFAULT):
 
     db = session_factory()
     try:
-        logger.debug(f"🔗 Created database session for '{db_uri.name}'")
+        logger.debug(f"🔗 Created database session")
         yield db
     except Exception as e:
-        logger.error(f"❌ Session error for '{db_uri.name}': {str(e)}")
+        logger.error(f"❌ Session error: {str(e)}")
         db.rollback()
         raise
     finally:
-        logger.debug(f"🔒 Closing database session for '{db_uri.name}'")
+        logger.debug(f"🔒 Closing database session")
         db.close()

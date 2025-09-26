@@ -3,8 +3,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from minds.db.pg_session import DatabaseURI
-
 
 @pytest.fixture
 def mod(monkeypatch):
@@ -37,7 +35,7 @@ def test__create_engine_happy_path_calls_sqlalchemy_with_pooling(monkeypatch, mo
     monkeypatch.setattr(mod, "DB_POOL_PRE_PING", True)
     monkeypatch.setattr(mod, "create_engine", create_engine_mock)
 
-    uri = DatabaseURI.DEFAULT
+    uri = "postgresql://test:test@localhost:5432/test"
 
     # Act
     engine = mod._create_engine(uri)  # type: ignore[arg-type]
@@ -59,7 +57,7 @@ def test__create_engine_wraps_errors_as_runtimeerror(monkeypatch, mod):
     monkeypatch.setattr(mod, "create_engine", MagicMock(side_effect=Exception("Kaboom!")))
 
     with pytest.raises(RuntimeError) as ei:
-        mod._create_engine(DatabaseURI.DEFAULT)  # type: ignore[arg-type]
+        mod._create_engine("postgresql://test:test@localhost:5432/test")  # type: ignore[arg-type]
 
     # message is lower-cased in the wrapper
     assert "creation failed" in str(ei.value)
