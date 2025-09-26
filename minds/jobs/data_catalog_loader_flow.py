@@ -19,11 +19,15 @@ from sqlmodel import Session, and_, select
 from minds.client.mindsdb import create_mindsdb_client_from_env
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
+from minds.jobs.settings import get_prefect_app_settings
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
 
+
 logger = setup_logging()
+
+prefect_settings = get_prefect_app_settings()
 
 
 class DataCatalogLoaderError(Exception):
@@ -51,7 +55,7 @@ def load_data_catalog(
     """
     try:
         # Create a database session
-        session_generator = get_session()
+        session_generator = get_session(prefect_settings.database_uri)
         session = next(session_generator)
 
         # Create a MindsDB client
