@@ -3,9 +3,7 @@ import os
 import json
 
 from prefect.blocks.system import Secret
-from pydantic import BaseModel
-
-from minds.common.vars import DATABASE_URI
+from pydantic import BaseModel, Field
 
 
 _SETTINGS_PREFIX = "prefect-flow-settings"
@@ -18,7 +16,7 @@ def _block_name(env: str) -> str:
 
 
 class PrefectSettings(BaseModel):
-    database_uri: str = DATABASE_URI
+    database_uri: str = Field(default_factory=lambda: os.environ.get("DATABASE_URI", "postgresql://minds:minds@localhost:35432/minds"))
 
 
 def create_prefect_settings() -> None:
