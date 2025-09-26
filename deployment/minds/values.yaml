@@ -45,6 +45,9 @@ deployment:
     targetPort: 9010
 
   globalEnvs:
+    - name: LOG_LEVEL
+      value: "DEBUG"
+
     - name: REDIS_HOST
       value: "redis-master"
     - name: REDIS_PORT
