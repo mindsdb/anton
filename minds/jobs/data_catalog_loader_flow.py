@@ -27,8 +27,6 @@ from minds.model.mind_datasource_table import MindDatasourceTable
 
 logger = setup_logging()
 
-prefect_settings = get_prefect_settings()
-
 
 class DataCatalogLoaderError(Exception):
     """Base exception for data catalog loader errors."""
@@ -54,6 +52,7 @@ def load_data_catalog(
         DataCatalogLoaderError: If there is an error during the loading process.
     """
     try:
+        prefect_settings = get_prefect_settings()
         # Create a database session
         session_generator = get_session(prefect_settings.database_uri)
         session = next(session_generator)
