@@ -45,6 +45,9 @@ deployment:
     targetPort: 9010
 
   globalEnvs:
+    - name: LOG_LEVEL
+      value: "DEBUG"
+
     - name: REDIS_HOST
       value: "redis-master"
     - name: REDIS_PORT
@@ -53,6 +56,12 @@ deployment:
       value: "0"
     - name: REDIS_CACHE_TTL
       value: "3600"
+
+    # ====================================
+    # PREFECT SETTINGS (for ETL flows)
+    # ====================================
+    - name: PREFECT_API_URL
+      value: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
 
     # DB settings for sqlalchemy
     - name: DATABASE_URI

@@ -1,0 +1,10 @@
+job:
+
+  extraEnvs:
+
+    # ====================================
+    # GENERAL SETTINGS
+    # ====================================
+
+    - name: ENV
+      value: "terabase-dev"

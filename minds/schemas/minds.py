@@ -7,7 +7,9 @@ including creation, updates, and relationship management.
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
+
+from minds.model.mind_datasource import DataCatalogStatus
 
 
 class DatasourceConfig(BaseModel):
@@ -15,6 +17,7 @@ class DatasourceConfig(BaseModel):
 
     name: str = Field(..., description="Name of the datasource")
     tables: list[str] | None = Field(None, description="Specific tables to use (None = all tables)")
+    status: DataCatalogStatus | None = Field(None, description="Data catalog loading status of the datasource")
 
 
 class MindCreateRequest(BaseModel):
@@ -47,6 +50,21 @@ class MindResponse(BaseModel):
     datasources: list[DatasourceConfig] = Field(..., description="Attached datasource names")
     created_at: str | None = Field(None, description="Creation timestamp")
     updated_at: str | None = Field(None, description="Last update timestamp")
+
+    @computed_field
+    @property
+    def status(self) -> DataCatalogStatus:
+        """
+        Status of the mind based on loading status of the attached datasources.
+        """
+        # TODO: Is this correct? We could have a failed load and others that are running?
+        for datasource in self.datasources:
+            if (
+                datasource.status in [DataCatalogStatus.PENDING, DataCatalogStatus.LOADING]
+                or datasource.status == DataCatalogStatus.FAILED
+            ):
+                return datasource.status
+        return DataCatalogStatus.COMPLETED
 
 
 class DeleteMindRequest(BaseModel):

@@ -9,15 +9,18 @@ MindsDB is only used for datasource validation, not for minds storage.
 from datetime import datetime, timezone
 
 from mindsdb_sdk.server import Server
+from prefect.exceptions import PrefectException
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
+from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
+from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
-from minds.services.data_catalog import DataCatalogLoader, DataCatalogLoaderError
+from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 
 # Set up logging
 logger = setup_logging()
@@ -170,6 +173,40 @@ class MindsService:
             logger.error(f"Error getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
 
+    async def get_mind_model(self, mind_name: str) -> Mind:
+        """
+        Get a specific mind by name as a Mind database model object.
+
+        This method is intended for internal use when you need the actual Mind
+        database model rather than the API response schema.
+
+        Args:
+            mind_name (str): Name of the mind
+
+        Returns:
+            Mind: Mind database model object
+
+        Raises:
+            MindNotFoundError: If the mind doesn't exist
+        """
+        try:
+            logger.debug(f"Getting mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+
+            mind = await self._get_mind(mind_name)
+
+            if not mind:
+                raise MindNotFoundError(f"Mind '{mind_name}' not found")
+
+            logger.info(f"Retrieved mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            return mind
+        except MindNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error getting mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
+            raise MindsServiceError(f"Failed to get mind model: {str(e)}") from None
+
     async def create_mind(self, mind_data: MindCreateRequest, data_catalog_loader: DataCatalogLoader) -> MindResponse:
         """
         Create a new mind.
@@ -269,9 +306,13 @@ class MindsService:
                 if existing_mind:
                     raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
 
-            # Validate new datasources if provided
-            if mind_data.datasources is not None:
+            if mind_data.datasources:
+                # Validate new datasources if provided
                 await self._validate_datasources(mind_data.datasources)
+                # Cancel any running data catalog loader flows for the mind
+                await self._cancel_data_catalog_loader_flows_for_mind(mind)
+                # Update the datasources associated with the mind
+                await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
 
             # Update mind fields
             if mind_data.name is not None:
@@ -282,10 +323,6 @@ class MindsService:
                 mind.model_name = mind_data.model_name
             if mind_data.parameters is not None:
                 mind.parameters = mind_data.parameters
-
-            # Handle datasource relationships separately
-            if mind_data.datasources is not None:
-                await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
 
             self.session.add(mind)
             self.session.commit()
@@ -330,6 +367,9 @@ class MindsService:
             if cascade:
                 logger.debug(f"Cascade deletion requested for mind {mind_name} - implement datasource deletion")
 
+            # Cancel any running data catalog loader flows for the mind
+            await self._cancel_data_catalog_loader_flows_for_mind(mind)
+
             mind.deleted_at = datetime.now(timezone.utc)
 
             self.session.add(mind)
@@ -360,7 +400,7 @@ class MindsService:
         return self.session.exec(statement).first()
 
     async def _get_mind_with_datasources(self, mind_name: str) -> Mind:
-        """Utility function to get a specific mind by name."""
+        """Utility function to get a specific mind by name with datasources eagerly loaded."""
         statement = (
             select(Mind)
             .where(
@@ -391,6 +431,7 @@ class MindsService:
                 tables=[
                     mind_datasource_table.table.name for mind_datasource_table in relationship.mind_datasource_tables
                 ],
+                status=relationship.status,
             )
             for relationship in mind.mind_datasources
         ]
@@ -470,6 +511,7 @@ class MindsService:
                     f"for user {self.user_id} in tenant {self.tenant_id}"
                 )
                 datasource_name = datasource_config.name
+                table_names = datasource_config.tables
                 # Find the datasource
                 datasource = self.session.exec(
                     select(Datasource).where(
@@ -513,7 +555,7 @@ class MindsService:
                     tenant_id=self.tenant_id,
                     mind_id=mind.id,
                     datasource_id=datasource.id,
-                    tables=datasource_config.tables,
+                    tables=table_names,
                 )
 
                 self.session.add(mind_datasource)
@@ -528,26 +570,20 @@ class MindsService:
                     f"Loading datasource {datasource_name} to the data catalog "
                     f"for user {self.user_id} in tenant {self.tenant_id}"
                 )
-                mind_datasource.status = DataCatalogStatus.LOADING
-                self.session.add(mind_datasource)
-                self.session.commit()
 
                 try:
-                    data_catalog_loader.load(mind_datasource, datasource_config)
-                except DataCatalogLoaderError as e:
-                    logger.error(f"Error loading datasource {datasource_name} to the data catalog: {str(e)}")
+                    logger.debug(
+                        f"Loading datasource {datasource_name} to the data catalog "
+                        f"for user {self.user_id} in tenant {self.tenant_id}"
+                    )
+                    await data_catalog_loader.load(mind_datasource, table_names)
+                except DataCatalogLoaderError:
+                    continue
+                except PrefectException:
+                    # This occurs when the flow is submitted but fails immediately.
                     mind_datasource.status = DataCatalogStatus.FAILED
                     self.session.add(mind_datasource)
                     self.session.commit()
-                    continue
-
-                mind_datasource.status = DataCatalogStatus.COMPLETED
-                self.session.add(mind_datasource)
-                self.session.commit()
-                logger.info(
-                    f"Loaded datasource {datasource_name} to the data catalog "
-                    f"for user {self.user_id} in tenant {self.tenant_id}"
-                )
             except Exception as e:
                 logger.error(
                     f"Error adding datasource {datasource_name} to mind {mind.name} "
@@ -589,3 +625,15 @@ class MindsService:
             self.session.rollback()
             logger.error(f"Error updating datasources for mind {mind.name}: {str(e)}")
             raise
+
+    async def _cancel_data_catalog_loader_flows_for_mind(self, mind: Mind) -> None:
+        """
+        Cancel all data catalog loader flows for a mind.
+
+        Args:
+            mind (Mind): The mind to cancel data catalog loader flows for
+        """
+        prefect_client = PrefectClient()
+        for relationship in mind.mind_datasources:
+            if relationship.status == DataCatalogStatus.LOADING and relationship.flow_run_id:
+                await prefect_client.cancel_flow_run(relationship.flow_run_id)

@@ -13,7 +13,7 @@ from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.requests.context import extract_context_from_request
 from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
-from minds.services.data_catalog import DataCatalogLoader
+from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
 # Set up logging
@@ -36,19 +36,12 @@ def get_minds_service(request: Request, session: Session = Depends(get_session))
     )
 
 
-def get_data_catalog_loader_service(request: Request, session: Session = Depends(get_session)) -> DataCatalogLoader:
+def get_data_catalog_loader(request: Request, session: Session = Depends(get_session)) -> DataCatalogLoader:
     """
-    Dependency function to create DataCatalogLoader with user context and MindsDB client.
+    Dependency function to create DataCatalogLoader.
     """
     context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request)
-
-    return DataCatalogLoader(
-        session=session,
-        mindsdb_client=mindsdb_client,
-        user_id=context.user_id,
-        tenant_id=context.tenant_id,
-    )
+    return DataCatalogLoader(session=session, tenant_id=context.tenant_id)
 
 
 @router.get("/")
@@ -139,7 +132,7 @@ async def get_mind(
 async def create_mind(
     mind_data: MindCreateRequest,
     minds_service: MindsService = Depends(get_minds_service),
-    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader_service),
+    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader),
 ) -> MindResponse:
     """
     Create a new mind for the authenticated user.
@@ -181,7 +174,7 @@ async def update_mind(
     mind_name: str,
     mind_data: MindUpdateRequest,
     minds_service: MindsService = Depends(get_minds_service),
-    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader_service),
+    data_catalog_loader: DataCatalogLoader = Depends(get_data_catalog_loader),
 ) -> MindResponse:
     """
     Update an existing mind for the authenticated user.

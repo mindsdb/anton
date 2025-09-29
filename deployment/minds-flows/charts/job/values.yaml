@@ -1,0 +1,200 @@
+# Default values for single job.
+
+# REQUIRED for you to set a value here, name of your service
+name: ""
+
+# To change the securityContext for the pod.
+# Everything under 'podSecurityContext' will be copied as-is under the 'securityContext' key for the pod spec
+# https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod
+# NOTE: this replaces the old "security" key, which is now deprecated
+#
+# podSecurityContext:
+#   runAsNonRoot: true
+#   runAsUser: 1000
+#   fsGroup: 1000
+
+# DEPRECATED / DO NOT USE, use podSecurityContext instead, this will be removed in a future release
+security:
+  runAsNonRoot: false
+  runAsUser: 1000
+  fsGroup: 1000
+
+# To change the securityContext for the container. There are some different options k8s allows here vs at the pod level above.
+# Everything under 'containerSecurityContext' will be copied as-is under the 'securityContext' key for the container spec
+# https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-container
+#
+# containerSecurityContext:
+#   capabilities:
+#     add:
+#     - SYS_ADMIN
+#   privileged: true
+
+# Ensures we don't try to restart, by default, will just complete after running
+restartPolicy: "Never"  # This can also be OnFailure
+
+# The number of seconds this job is allowed to run before it's considered failed
+# This needs to be long enough for your job to complete
+activeDeadlineSeconds: null
+
+# The number of seconds after job completion before the job is automatically deleted
+# Set to 7200 (2 hours) by default to clean up completed jobs
+ttlSecondsAfterFinished: 7200
+
+# The pod priority, to make things more critical
+# See: https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/
+priorityClassName: ""
+
+# Share process namespace to allow sidecars to see each others processes.  You can use this feature to configure
+#    cooperating containers, such as a log handler sidecar container, or to troubleshoot container images that don't
+#    include debugging utilities like a shell.
+#
+# NOTE/WARNING: Enabling this may break certain containers that expect/demand their main process to be process #1.
+# See: https://kubernetes.io/docs/tasks/configure-pod-container/share-process-namespace/
+shareProcessNamespace: false
+
+# How many retries this job will have by default
+backoffLimit: 0
+
+# How many to run in parallel, don't use this unless you know what you're doing
+parallelism: 1
+
+# How many to run in parallel, don't use this unless you know what you're doing
+completions: 1
+
+# Image repository location (override if needed)
+image:
+  # Which image to release (NOTE: ONLY SPECIFY IF YOU ARE DEPLOYING EXTERNALLY, eg from dockerhub)
+  tag: ""
+  # Which repo to use (NOTE: ONLY SPECIFY IF YOU ARE DEPLOYING EXTERNALLY)
+  repository: ""
+  # Which command to run (NOTE: ONLY SPECIFY IF YOU NEED, IF NOT SPECIFIED WILL USE DOCKER DEFAULT)
+  command: []
+  # What args to pass to the command (NOTE: ONLY SPECIFY IF YOU NEED, IF NOT SPECIFIED WILL USE DOCKER DEFAULT)
+  args: []
+  # Image pull policy: IfNotPresent / Always
+  imagePullPolicy: IfNotPresent
+  ## Optionally specify an array of imagePullSecrets.
+  ## Secrets must be manually created in the namespace.
+  ## ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+  ## e.g:
+  ## imagePullSecrets:
+  ##   - name: myRegistryKeySecretName
+  ##
+  imagePullSecrets: []
+
+# Additional pod annotations
+podAnnotations: {}
+  # tick: "1528451892"
+
+# Environment variables (for globals, all deployments)
+globalEnvs: []
+
+# Secondary environment variables (for globals, all deployments, to help with multi-inheritance)
+globalEnvsSecondary: []
+
+# A tertiary source for env variables (eg: used for a specific env (eg: dev, or staging))
+extraEnvs: []
+
+# Additional labels put onto anything that can be labelled
+labels: {}
+# This enables the "default" label we automatically put everywhere (app: <name>)
+labelsEnableDefault: true
+
+# A way to pull secondary env variables from configmaps and secrets
+envFrom: []
+
+# This enables the deprecated memory kibibytes env variables for backwards compatibility. TODO: Remove from future release.
+usingMemoryKibiBytesEnvs: false
+
+# Lower the ndots value, to reduce the search path expansion of DNS queries
+# https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#pod-s-dns-config
+dnsConfig:
+  enabled: false
+  ndots: 2
+
+# container resource requests/limits
+# this is set VERY low by default, to be aggressive above resource limiting, please override this if necessary
+# Note: Limits are HARD Limits
+#       Requests are "soft" limits and are what affects HPA (autoscaling) aggressiveness and are what is guaranteed
+resources: {}
+# limits:
+#  cpu: 100m
+#  memory: 64Mi
+# requests:
+#  cpu: 50m
+#  memory: 32Mi
+
+# Assign pods to nodes based on nodeSelector labels, define a default here if desired
+nodeSelector: {}
+# purpose: node-feature-name
+
+# Assign pods to nodes based on tolerations and taints on the nodes
+tolerations: []
+# - key: "key1"
+#   operator: "Equal"
+#   value: "value1"
+#   effect: "NoSchedule"
+
+# Init container(s)
+initContainers: []
+  # - name: volume-mount-hack
+  #   image: busybox
+  #   command: ["sh", "-c", "chown -R 1000:1000 /var/chaindata"]
+  #   volumeMounts:
+  #    - name: data
+  #      mountPath: /var/chaindata
+
+# Volumes added to the pod eg: for cloudsql
+volumes: []
+volumeMounts: []
+
+# In case you want to change the securityContext for the job
+# containerSecurityContext:
+#   capabilities:
+#     add:
+#     - SYS_ADMIN
+#   privileged: true
+
+# For AWS Security Groups
+securityGroupIDs: []
+
+# This is so we can use the same tag on various different objects (eg: statefulsets, jobs, etc) via our Gitlab CI Automation
+global:
+  image:
+    tag: ""
+  # This can be used with CI systems and helm automatically to set our URIs based on namespace
+  namespace: ""
+
+# Additional containers to be added to the pod which do not need the env vars/secrets (eg: add a cloudsql proxy)
+extraContainers: []
+
+# This is for service accounts
+serviceAccount:
+  # Disabled by default, set to true if you want
+  enabled: false
+  # Add annotations if desired,
+  annotations: {}
+    # Here's an example of assigning an IAM role to a pod in EKS
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123123123:role/role-name-goes-here
+
+# If we want a hostname set for this job
+hostname: ""
+
+## For RBAC support, enable if you want, and set the rules you wish, examples below
+rbac:
+  create: false
+  rules:
+    ## Define specific rbac permissions.
+    # Eg: This grants all on API groups
+    # - apiGroups: ['*']
+    #   resources: ['*']
+    #   verbs: ['*']
+    # Eg: This grants all on non resource URLs
+    # - nonResourceURLs: ['*']
+    #   verbs: ['*']
+    # Eg: This is "readonly" for common resources
+    # - resources: ["deployments", "configmaps", "pods", "pods/log", "services", "jobs", "jobs/status", "nodes", "serviceaccount", "namespaces"]
+    #   verbs: ["get", "list", "watch"]
+
+  ## Make this into a clusterwide role to give access to all namespaces if desired, disabled by default for more security
+  clusterWideAccess: false
