@@ -1,6 +1,8 @@
 from functools import lru_cache
 import os
 import json
+import socket
+from urllib.parse import urlparse, urlunparse
 
 from prefect.blocks.system import Secret
 from pydantic import BaseModel, Field
@@ -15,9 +17,35 @@ def _block_name(env: str) -> str:
 	return f"{env}--{_SETTINGS_PREFIX}"
 
 
+# TODO: Is this resoltuion really needed?
+def _resolve_service_url(url: str) -> str:
+    """
+    Resolve service names in URLs to their actual IP addresses.
+    For example: http://mindsdb:80 -> http://10.96.123.45:80
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.hostname and not parsed.hostname.replace('.', '').isdigit():
+            # Only resolve if hostname is not already an IP address
+            resolved_ip = socket.gethostbyname(parsed.hostname)
+            resolved_url = urlunparse((
+                parsed.scheme,
+                f"{resolved_ip}:{parsed.port}" if parsed.port else resolved_ip,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment
+            ))
+            return resolved_url
+    except (socket.gaierror, socket.herror):
+        # If resolution fails, return original URL
+        pass
+    return url
+
+
 class PrefectSettings(BaseModel):
     database_uri: str = Field(default_factory=lambda: os.environ.get("DATABASE_URI", "postgresql://minds:minds@localhost:35432/minds"))
-    mindsdb_url: str = Field(default_factory=lambda: os.environ.get("MINDSDB_URL", "http://localhost:47334"))
+    mindsdb_url: str = Field(default_factory=lambda: _resolve_service_url(os.environ.get("MINDSDB_URL", "http://localhost:47334")))
     mindsdb_api_key: str = Field(default_factory=lambda: os.environ.get("MINDSDB_API_KEY", ""))
     mindsdb_login: str = Field(default_factory=lambda: os.environ.get("MINDSDB_LOGIN", "mindsdb"))
     mindsdb_password: str = Field(default_factory=lambda: os.environ.get("MINDSDB_PASSWORD", ""))
