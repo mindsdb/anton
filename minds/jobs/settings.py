@@ -1,12 +1,11 @@
-from functools import lru_cache
-import os
 import json
+import os
 import socket
+from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
 
 from prefect.blocks.system import Secret
 from pydantic import BaseModel, Field
-
 
 _SETTINGS_PREFIX = "prefect-flow-settings"
 
@@ -14,7 +13,7 @@ _ENV = os.environ.get("ENV", "local").lower()
 
 
 def _block_name(env: str) -> str:
-	return f"{env}--{_SETTINGS_PREFIX}"
+    return f"{env}--{_SETTINGS_PREFIX}"
 
 
 # TODO: Is this resoltuion really needed?
@@ -25,17 +24,19 @@ def _resolve_service_url(url: str) -> str:
     """
     try:
         parsed = urlparse(url)
-        if parsed.hostname and not parsed.hostname.replace('.', '').isdigit():
+        if parsed.hostname and not parsed.hostname.replace(".", "").isdigit():
             # Only resolve if hostname is not already an IP address
             resolved_ip = socket.gethostbyname(parsed.hostname)
-            resolved_url = urlunparse((
-                parsed.scheme,
-                f"{resolved_ip}:{parsed.port}" if parsed.port else resolved_ip,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                parsed.fragment
-            ))
+            resolved_url = urlunparse(
+                (
+                    parsed.scheme,
+                    f"{resolved_ip}:{parsed.port}" if parsed.port else resolved_ip,
+                    parsed.path,
+                    parsed.params,
+                    parsed.query,
+                    parsed.fragment,
+                )
+            )
             return resolved_url
     except (socket.gaierror, socket.herror):
         # If resolution fails, return original URL
@@ -44,8 +45,12 @@ def _resolve_service_url(url: str) -> str:
 
 
 class PrefectSettings(BaseModel):
-    database_uri: str = Field(default_factory=lambda: os.environ.get("DATABASE_URI", "postgresql://minds:minds@localhost:35432/minds"))
-    mindsdb_url: str = Field(default_factory=lambda: _resolve_service_url(os.environ.get("MINDSDB_URL", "http://localhost:47334")))
+    database_uri: str = Field(
+        default_factory=lambda: os.environ.get("DATABASE_URI", "postgresql://minds:minds@localhost:35432/minds")
+    )
+    mindsdb_url: str = Field(
+        default_factory=lambda: _resolve_service_url(os.environ.get("MINDSDB_URL", "http://localhost:47334"))
+    )
     mindsdb_api_key: str = Field(default_factory=lambda: os.environ.get("MINDSDB_API_KEY", ""))
     mindsdb_login: str = Field(default_factory=lambda: os.environ.get("MINDSDB_LOGIN", "mindsdb"))
     mindsdb_password: str = Field(default_factory=lambda: os.environ.get("MINDSDB_PASSWORD", ""))

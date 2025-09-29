@@ -111,12 +111,12 @@ def get_session(db_uri: str = DATABASE_URI):
 
     db = session_factory()
     try:
-        logger.debug(f"🔗 Created database session")
+        logger.debug("🔗 Created database session")
         yield db
     except Exception as e:
         logger.error(f"❌ Session error: {str(e)}")
         db.rollback()
         raise
     finally:
-        logger.debug(f"🔒 Closing database session")
+        logger.debug("🔒 Closing database session")
         db.close()

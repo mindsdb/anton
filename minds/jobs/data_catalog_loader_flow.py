@@ -24,7 +24,6 @@ from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstra
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
 
-
 logger = setup_logging()
 
 
