@@ -51,12 +51,11 @@ def load_data_catalog(
     Raises:
         DataCatalogLoaderError: If there is an error during the loading process.
     """
+    prefect_settings = get_prefect_settings()
+    # Create a database session
+    session_generator = get_session(prefect_settings.database_uri)
+    session = next(session_generator)
     try:
-        prefect_settings = get_prefect_settings()
-        # Create a database session
-        session_generator = get_session(prefect_settings.database_uri)
-        session = next(session_generator)
-
         # Create a MindsDB client
         mindsdb_client = create_mindsdb_client_from_env()
 
