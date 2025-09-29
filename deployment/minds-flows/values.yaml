@@ -74,6 +74,13 @@ globalEnvsAlias: &globalEnvsYamlAlias
           name: mindsdb-secrets
           key: OPENAI_API_KEY
 
+    # ====================================
+    # MINDSDB SETTINGS
+    # ====================================
+
+    - name: MINDSDB_URL
+      value: "http://mindsdb:80"
+
 job:
   # Job configuration
   <<: *globalEnvsYamlAlias
