@@ -55,6 +55,22 @@ def load_data_catalog(
     # Create a database session
     session_generator = get_session(prefect_settings.database_uri)
     session = next(session_generator)
+
+    # Get the MindDatasource object from the database
+    statement = (
+        select(MindDatasource)
+        .where(
+            and_(
+                MindDatasource.id == mind_datasource_id,
+                MindDatasource.tenant_id == tenant_id,
+            )
+        )
+        .options(
+            selectinload(MindDatasource.datasource),
+        )
+    )
+    mind_datasource = session.exec(statement).first()
+
     try:
         # Create a MindsDB client
         mindsdb_client = create_mindsdb_client_with_credentials(
@@ -63,21 +79,6 @@ def load_data_catalog(
             login=prefect_settings.mindsdb_login,
             password=prefect_settings.mindsdb_password,
         )
-
-        # Get the MindDatasource object from the database
-        statement = (
-            select(MindDatasource)
-            .where(
-                and_(
-                    MindDatasource.id == mind_datasource_id,
-                    MindDatasource.tenant_id == tenant_id,
-                )
-            )
-            .options(
-                selectinload(MindDatasource.datasource),
-            )
-        )
-        mind_datasource = session.exec(statement).first()
 
         datasource_id = mind_datasource.datasource_id
         datasource_name = mind_datasource.datasource.name

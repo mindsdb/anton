@@ -57,6 +57,8 @@ def create_mindsdb_client(api_key: str | None) -> Server:
     )
 
 
+# This is used in the data catalog loader flow
+# TODO: Remove thise once the settings are configured better
 def create_mindsdb_client_with_credentials(
     url: str,
     api_key: str | None = None,
@@ -68,23 +70,30 @@ def create_mindsdb_client_with_credentials(
 
     Args:
       url: The MindsDB server URL.
-      api_key: The API key to use for authentication. If provided, takes precedence over login/password.
+      api_key: The API key to use for the client. Can be None if MindsDB doesn't require auth.
       login: The login username for authentication.
       password: The password for authentication.
 
     Returns:
       A MindsDB client.
-
-    Raises:
-      ValueError: If neither api_key nor login/password are provided for authentication.
     """
-    # If API key is provided, use it for authentication
-    if api_key is not None and api_key.strip():
-        return connect(url=url, api_key=api_key)
-    
-    # If login and password are provided, use them for authentication
-    if login is not None and password is not None:
-        return connect(url=url, login=login, password=password)
-    
-    # If no credentials are provided, try connecting without authentication
-    return connect(url=url)
+
+    # If no API key is provided, try connecting without authentication
+    if api_key is None or not api_key or not api_key.strip():
+        # For MindsDB without authentication, don't pass login/password at all
+        if not password:
+            return connect(url=url)
+        else:
+            return connect(
+                url=url,
+                login=login,
+                password=password,
+            )
+
+    if not isinstance(api_key, str):
+        raise ValueError("API key must be a string")
+
+    return connect(
+        url=url,
+        api_key=api_key,
+    )
