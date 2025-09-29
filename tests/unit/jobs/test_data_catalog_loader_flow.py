@@ -11,11 +11,21 @@ original_prefect = sys.modules.get("prefect")
 original_prefect_flow = sys.modules.get("prefect.flow")
 original_prefect_task = sys.modules.get("prefect.task")
 original_prefect_cache_policies = sys.modules.get("prefect.cache_policies")
+original_prefect_blocks_system = sys.modules.get("prefect.blocks.system")
+original_prefect_exceptions = sys.modules.get("prefect.exceptions")
 
 # Mock Prefect modules to prevent Prefect initialization during import
 prefect_mock = Mock()
 prefect_mock.cache_policies = Mock()
 prefect_mock.cache_policies.NO_CACHE = Mock()
+
+# Mock prefect.blocks.system
+prefect_blocks_system_mock = Mock()
+prefect_blocks_system_mock.Secret = Mock()
+
+# Mock prefect.exceptions
+prefect_exceptions_mock = Mock()
+prefect_exceptions_mock.PrefectException = Exception
 
 
 # Create pass-through decorators that don't modify the functions
@@ -40,6 +50,8 @@ sys.modules["prefect"] = prefect_mock
 sys.modules["prefect.flow"] = prefect_mock.flow
 sys.modules["prefect.task"] = prefect_mock.task
 sys.modules["prefect.cache_policies"] = prefect_mock.cache_policies
+sys.modules["prefect.blocks.system"] = prefect_blocks_system_mock
+sys.modules["prefect.exceptions"] = prefect_exceptions_mock
 
 # Import after mocking Prefect modules
 from minds.jobs.data_catalog_loader_flow import (  # noqa: E402
@@ -94,6 +106,16 @@ if original_prefect_cache_policies is not None:
     sys.modules["prefect.cache_policies"] = original_prefect_cache_policies
 else:
     sys.modules.pop("prefect.cache_policies", None)
+
+if original_prefect_blocks_system is not None:
+    sys.modules["prefect.blocks.system"] = original_prefect_blocks_system
+else:
+    sys.modules.pop("prefect.blocks.system", None)
+
+if original_prefect_exceptions is not None:
+    sys.modules["prefect.exceptions"] = original_prefect_exceptions
+else:
+    sys.modules.pop("prefect.exceptions", None)
 
 
 class TestDataCatalogLoaderFlow:

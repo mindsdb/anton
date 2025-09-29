@@ -73,18 +73,19 @@ def test_get_engine_caches_by_enum_name(monkeypatch, mod):
     create_engine_mock = MagicMock(side_effect=[engine_a, engine_b])
     monkeypatch.setattr(mod, "_create_engine", create_engine_mock)
 
-    A = types.SimpleNamespace(name="A")
-    B = types.SimpleNamespace(name="B")
+    # Use string URIs instead of SimpleNamespace objects
+    uri_a = "postgresql://test:test@localhost:5432/db_a"
+    uri_b = "postgresql://test:test@localhost:5432/db_b"
 
-    e1 = mod.get_engine(A)
-    e2 = mod.get_engine(A)
-    e3 = mod.get_engine(B)
+    e1 = mod.get_engine(uri_a)
+    e2 = mod.get_engine(uri_a)
+    e3 = mod.get_engine(uri_b)
 
-    assert e1 is e2  # same name -> cached
-    assert e1 is not e3  # different name -> different engine
-    assert create_engine_mock.call_count == 2  # created once per unique name
-    assert create_engine_mock.call_args_list[0].kwargs["db_uri"] is A
-    assert create_engine_mock.call_args_list[1].kwargs["db_uri"] is B
+    assert e1 is e2  # same uri -> cached
+    assert e1 is not e3  # different uri -> different engine
+    assert create_engine_mock.call_count == 2  # created once per unique uri
+    assert create_engine_mock.call_args_list[0].kwargs["db_uri"] == uri_a
+    assert create_engine_mock.call_args_list[1].kwargs["db_uri"] == uri_b
 
 
 # ---------- get_session_factory (cache by engine id) ----------
