@@ -16,7 +16,7 @@ from prefect.cache_policies import NO_CACHE
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, select
 
-from minds.client.mindsdb import create_mindsdb_client_from_env
+from minds.client.mindsdb import create_mindsdb_client_with_credentials
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
@@ -57,7 +57,12 @@ def load_data_catalog(
     session = next(session_generator)
     try:
         # Create a MindsDB client
-        mindsdb_client = create_mindsdb_client_from_env()
+        mindsdb_client = create_mindsdb_client_with_credentials(
+            url=prefect_settings.mindsdb_url,
+            api_key=prefect_settings.mindsdb_api_key,
+            login=prefect_settings.mindsdb_login,
+            password=prefect_settings.mindsdb_password,
+        )
 
         # Get the MindDatasource object from the database
         statement = (

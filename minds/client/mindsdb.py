@@ -55,3 +55,36 @@ def create_mindsdb_client(api_key: str | None) -> Server:
         url=MINDSDB_URL,
         api_key=api_key,
     )
+
+
+def create_mindsdb_client_with_credentials(
+    url: str,
+    api_key: str | None = None,
+    login: str | None = None,
+    password: str | None = None,
+) -> Server:
+    """
+    Create a MindsDB client with explicit credentials.
+
+    Args:
+      url: The MindsDB server URL.
+      api_key: The API key to use for authentication. If provided, takes precedence over login/password.
+      login: The login username for authentication.
+      password: The password for authentication.
+
+    Returns:
+      A MindsDB client.
+
+    Raises:
+      ValueError: If neither api_key nor login/password are provided for authentication.
+    """
+    # If API key is provided, use it for authentication
+    if api_key is not None and api_key.strip():
+        return connect(url=url, api_key=api_key)
+    
+    # If login and password are provided, use them for authentication
+    if login is not None and password is not None:
+        return connect(url=url, login=login, password=password)
+    
+    # If no credentials are provided, try connecting without authentication
+    return connect(url=url)
