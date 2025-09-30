@@ -181,6 +181,7 @@ def filter_loaded_tables(
 ) -> pd.DataFrame:
     """
     Filter out tables that have already been loaded.
+    If the loaded tables exist but are not associated with the mind_datasource, associate them.
 
     Args:
         session (Session): Database session for querying existing tables.

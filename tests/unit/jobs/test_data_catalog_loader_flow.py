@@ -237,7 +237,11 @@ class TestDataCatalogLoaderFlow:
         mock_session.exec.return_value.all.return_value = [existing_table]
 
         result = filter_loaded_tables(
-            mock_session, tables_df, UUID("87654321-4321-8765-4321-876543218765"), "test_tenant_456"
+            mock_session,
+            tables_df,
+            UUID("87654321-4321-8765-4321-876543218765"),
+            UUID("12345678-1234-5678-1234-567812345678"),
+            "test_tenant_456",
         )
 
         # Verify result excludes existing table
@@ -729,7 +733,11 @@ class TestDataCatalogLoaderFlow:
         mock_session.exec.return_value.all.return_value = []
 
         result = filter_loaded_tables(
-            mock_session, empty_df, UUID("87654321-4321-8765-4321-876543218765"), "test_tenant_456"
+            mock_session,
+            empty_df,
+            UUID("87654321-4321-8765-4321-876543218765"),
+            UUID("12345678-1234-5678-1234-567812345678"),
+            "test_tenant_456",
         )
 
         assert len(result) == 0

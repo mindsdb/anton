@@ -1,4 +1,4 @@
-"""remove_legacy_mind_datasources_cols
+"""drop_legacy_mind_ds_cols
 
 Revision ID: 004_drop_legacy_mind_ds_cols
 Revises: 003_add_prefect_flow_run_id
