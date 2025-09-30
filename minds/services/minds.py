@@ -159,7 +159,7 @@ class MindsService:
         try:
             logger.debug(f"Getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            mind = await self._get_mind(mind_name)
+            mind = await self._get_mind_with_datasources(mind_name)
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
@@ -573,7 +573,6 @@ class MindsService:
                     tenant_id=self.tenant_id,
                     mind_id=mind.id,
                     datasource_id=datasource.id,
-                    tables=table_names,
                 )
 
                 self.session.add(mind_datasource)
