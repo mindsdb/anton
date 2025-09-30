@@ -17,7 +17,9 @@ class DatasourceConfig(BaseModel):
 
     name: str = Field(..., description="Name of the datasource")
     tables: list[str] | None = Field(None, description="Specific tables to use (None = all tables)")
-    status: DataCatalogStatus | None = Field(None, description="Data catalog loading status of the datasource")
+    status: DataCatalogStatus | None = Field(
+        default=DataCatalogStatus.PENDING, description="Data catalog loading status of the datasource"
+    )
 
 
 class MindCreateRequest(BaseModel):
