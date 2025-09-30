@@ -423,7 +423,7 @@ class MindsService:
         return self.session.exec(statement).first()
 
     def _mind_to_response(
-        self, mind: Mind, datasource_configs: list[DatasourceConfig] = [], with_detailed_data: bool = False
+        self, mind: Mind, datasource_configs: list[DatasourceConfig] = None, with_detailed_data: bool = False
     ) -> MindResponse:
         """
         Convert Mind database model to MindResponse object.
