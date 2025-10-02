@@ -28,6 +28,22 @@ class TestDatasourceCreateRequest:
         assert request.name == "test-db"
         assert request.engine == "postgres"
         assert request.connection_data == {"host": "localhost", "port": 5432}
+        assert request.description is None
+
+    def test_create_request_with_description(self):
+        """Test valid datasource creation request with description."""
+        data = {
+            "name": "test-db",
+            "description": "A test database for development",
+            "engine": "postgres",
+            "connection_data": {"host": "localhost", "port": 5432},
+        }
+        request = DatasourceCreateRequest(**data)
+
+        assert request.name == "test-db"
+        assert request.description == "A test database for development"
+        assert request.engine == "postgres"
+        assert request.connection_data == {"host": "localhost", "port": 5432}
 
     def test_create_request_missing_required_fields(self):
         """Test validation error for missing required fields."""
@@ -42,6 +58,7 @@ class TestDatasourceUpdateRequest:
         """Test update request with no fields (all optional)."""
         request = DatasourceUpdateRequest()
 
+        assert request.description is None
         assert request.connection_data is None
 
     def test_update_request_partial(self):
@@ -49,7 +66,24 @@ class TestDatasourceUpdateRequest:
         data = {"connection_data": {"host": "new-host"}}
         request = DatasourceUpdateRequest(**data)
 
+        assert request.description is None
         assert request.connection_data == {"host": "new-host"}
+
+    def test_update_request_with_description(self):
+        """Test update request with description field."""
+        data = {"description": "Updated description"}
+        request = DatasourceUpdateRequest(**data)
+
+        assert request.description == "Updated description"
+        assert request.connection_data is None
+
+    def test_update_request_full(self):
+        """Test update request with all fields."""
+        data = {"description": "Updated test database", "connection_data": {"host": "new-host", "port": 3306}}
+        request = DatasourceUpdateRequest(**data)
+
+        assert request.description == "Updated test database"
+        assert request.connection_data == {"host": "new-host", "port": 3306}
 
 
 class TestDatasourceResponse:
@@ -62,6 +96,7 @@ class TestDatasourceResponse:
 
         assert response.name == "test-db"
         assert response.id == test_uuid
+        assert response.description is None
         assert response.engine is None
         assert response.connection_data is None
         assert response.created_at is None
@@ -72,6 +107,7 @@ class TestDatasourceResponse:
         data = {
             "id": test_uuid,
             "name": "test-db",
+            "description": "A comprehensive test database",
             "engine": "postgres",
             "connection_data": {"host": "localhost"},
             "created_at": "2023-01-01T00:00:00Z",
@@ -80,6 +116,7 @@ class TestDatasourceResponse:
         response = DatasourceResponse(**data)
 
         assert response.name == "test-db"
+        assert response.description == "A comprehensive test database"
         assert response.engine == "postgres"
         assert response.is_demo is True
 
@@ -114,10 +151,17 @@ class TestDatasourceDetailedResponse:
 
     def test_detailed_response_inheritance(self, test_uuid):
         """Test that detailed response inherits from base response."""
-        data = {"id": test_uuid, "name": "test-db", "engine": "mysql", "connection_status": {"success": True}}
+        data = {
+            "id": test_uuid,
+            "name": "test-db",
+            "description": "Detailed response test",
+            "engine": "mysql",
+            "connection_status": {"success": True},
+        }
         response = DatasourceDetailedResponse(**data)
 
         assert response.name == "test-db"
+        assert response.description == "Detailed response test"
         assert response.engine == "mysql"
         assert response.connection_status.success is True
 
@@ -127,6 +171,7 @@ class TestDatasourceDetailedResponse:
         response = DatasourceDetailedResponse(**data)
 
         assert response.name == "test-db"
+        assert response.description is None
         assert response.connection_status is None
 
 
@@ -152,13 +197,19 @@ class TestSchemaIntegration:
 
     def test_schemas_json_serialization(self, test_uuid):
         """Test that all schemas can be serialized to JSON."""
-        create_req = DatasourceCreateRequest(name="test", engine="postgres", connection_data={"host": "localhost"})
+        create_req = DatasourceCreateRequest(
+            name="test", description="Test datasource", engine="postgres", connection_data={"host": "localhost"}
+        )
         create_json = create_req.model_dump()
         assert "name" in create_json
+        assert "description" in create_json
+        assert create_json["description"] == "Test datasource"
 
-        response = DatasourceResponse(id=test_uuid, name="test")
+        response = DatasourceResponse(id=test_uuid, name="test", description="Response test")
         response_json = response.model_dump()
         assert "name" in response_json
+        assert "description" in response_json
+        assert response_json["description"] == "Response test"
 
         # Connection status
         status = DatasourceConnectionStatus(success=True)
@@ -170,7 +221,12 @@ class TestSchemaIntegration:
         # Check a few key field descriptions
         create_fields = DatasourceCreateRequest.model_fields
         assert "Datasource name" in create_fields["name"].description
+        assert "Description of the datasource" in create_fields["description"].description
         assert "Database engine" in create_fields["engine"].description
 
         response_fields = DatasourceResponse.model_fields
         assert "Datasource name" in response_fields["name"].description
+        assert "Description of the datasource" in response_fields["description"].description
+
+        update_fields = DatasourceUpdateRequest.model_fields
+        assert "Updated description of the datasource" in update_fields["description"].description
