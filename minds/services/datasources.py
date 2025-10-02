@@ -584,6 +584,7 @@ class DatasourcesService:
         return DatasourceResponse(
             id=datasource.id,
             name=datasource.name,
+            description=datasource.description,
             engine=datasource.engine,
             connection_data=datasource.connection_data,
             created_at=datasource.created_at.isoformat() if datasource.created_at else None,
