@@ -204,6 +204,7 @@ class DatasourcesService:
             # Create datasource record (matching MindsDB schema)
             datasource = Datasource(
                 name=datasource_data.name,
+                description=datasource_data.description,
                 engine=datasource_data.engine,
                 connection_data=datasource_data.connection_data,
                 user_id=self.user_id,
@@ -272,6 +273,8 @@ class DatasourcesService:
 
             # Update fields (using simplified schema)
             if datasource_data.connection_data is not None:
+                if datasource.description is not None:
+                    datasource.description = datasource_data.description
                 datasource.connection_data = datasource_data.connection_data
 
             # Save to internal database first
