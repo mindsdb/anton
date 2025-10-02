@@ -1,14 +1,16 @@
-import logging, os
+import logging
 import time
+
 import pytest
-from requests import Session
+
 from .config import MINDS_API_BASE_URL
-from .conftest import poll_mind_transitions, DATASOURCE_CONFIGS
+from .conftest import poll_mind_transitions
+
 # States we expect a mind to pass through before completion
+
 
 @pytest.mark.happy_path
 class TestMindsAPI:
-
     def test_mind_crud_workflow(self, api_client, temporary_mind):
         """
         Tests the full CRUD lifecycle of a Mind.
@@ -73,8 +75,9 @@ class TestMindsAPI:
                 logging.info(f"VERIFIED: Found '{mind_name}' in the list on attempt {attempt + 1}.")
                 return
 
-            logging.warning(f"Attempt {attempt + 1}/{max_retries}: Mind '{mind_name}' not found. Retrying in {delay_seconds}s...")
+            logging.warning(
+                f"Attempt {attempt + 1}/{max_retries}: Mind '{mind_name}' not found. Retrying in {delay_seconds}s..."
+            )
             time.sleep(delay_seconds)
 
         pytest.fail(f"Mind '{mind_name}' was not found in the list after {max_retries} attempts.")
-

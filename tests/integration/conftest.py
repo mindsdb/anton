@@ -1,10 +1,13 @@
-import logging, os
+import logging
+import os
 import time
 import uuid
+
 import pytest
-from requests import Session
 import requests
-from .config import MINDS_API_BASE_URL, DATASOURCE_CONFIGS, AUTH_TOKEN
+from requests import Session
+
+from .config import AUTH_TOKEN, DATASOURCE_CONFIGS, MINDS_API_BASE_URL
 
 # ----------------------------------
 # Constants
@@ -13,6 +16,7 @@ MAX_RETRIES = 60
 POLL_INTERVAL = 2
 REQUIRED_STATUSES = ["PENDING"]
 OPTIONAL_STATUSES = ["LOADING"]
+
 
 # ----------------------------------
 # API client fixture
@@ -28,12 +32,14 @@ def api_client():
     yield session
     session.close()
 
+
 # ----------------------------------
 # Polling function
 # ----------------------------------
 IN_PROGRESS_STATUSES = ["PENDING", "LOADING"]
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 60))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 2))  # seconds
+
 
 def poll_mind_transitions(api_client: Session, mind_name: str) -> dict:
     """
@@ -61,21 +67,19 @@ def poll_mind_transitions(api_client: Session, mind_name: str) -> dict:
         if status == "COMPLETED":
             missing = [s for s in IN_PROGRESS_STATUSES if s not in observed_states]
             if missing:
-                logging.warning(
-                    f"Mind '{mind_name}' reached COMPLETED but skipped states: {missing}"
-                )
+                logging.warning(f"Mind '{mind_name}' reached COMPLETED but skipped states: {missing}")
             logging.info(f"SUCCESS: Mind '{mind_name}' reached COMPLETED with states: {observed_states}")
             return data
 
         if status == "FAILED":
             pytest.fail(
-                f"Mind '{mind_name}' FAILED after {attempt} attempts. "
-                f"Error: {data.get('error_message', 'N/A')}"
+                f"Mind '{mind_name}' FAILED after {attempt} attempts. Error: {data.get('error_message', 'N/A')}"
             )
 
         time.sleep(POLL_INTERVAL)
 
     pytest.fail(f"Mind '{mind_name}' did not reach COMPLETED within {MAX_RETRIES * POLL_INTERVAL} seconds")
+
 
 # ----------------------------------
 # Datasource fixture
@@ -90,11 +94,7 @@ def temporary_datasource(request, api_client: Session):
     unique_name = f"{config['name_prefix']}-{uuid.uuid4()}"
     logging.info(f"SETUP: Creating {config['engine']} datasource '{unique_name}'...")
 
-    payload = {
-        "name": unique_name,
-        "engine": config["engine"],
-        "connection_data": config["connection_data"]
-    }
+    payload = {"name": unique_name, "engine": config["engine"], "connection_data": config["connection_data"]}
     create_resp = api_client.post(f"{MINDS_API_BASE_URL}/api/v1/datasources/", json=payload)
     assert create_resp.status_code == 201, f"FIXTURE FAILED: Could not create datasource. Response: {create_resp.text}"
 
@@ -103,6 +103,7 @@ def temporary_datasource(request, api_client: Session):
     logging.info(f"TEARDOWN: Deleting datasource '{unique_name}'...")
     delete_resp = api_client.delete(f"{MINDS_API_BASE_URL}/api/v1/datasources/{unique_name}")
     assert delete_resp.status_code in [204, 404], "FIXTURE FAILED: Could not delete datasource."
+
 
 # ----------------------------------
 # Mind fixture
@@ -121,9 +122,9 @@ def temporary_mind(api_client: Session, temporary_datasource):
         "datasources": [
             {
                 "name": ds_name,
-                "tables": [config["sample_table"]]  # Must exist in the datasource
+                "tables": [config["sample_table"]],  # Must exist in the datasource
             }
-        ]
+        ],
     }
 
     create_resp = api_client.post(f"{MINDS_API_BASE_URL}/api/v1/minds/", json=payload)
