@@ -21,7 +21,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     """Upgrade schema."""
     with op.batch_alter_table('datasources') as batch_op:
-        batch_op.add_column(sa.Column('description', sa.String(length=255), nullable=True))
+        batch_op.add_column(sa.Column('description', sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
