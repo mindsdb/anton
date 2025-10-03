@@ -87,7 +87,7 @@ def load_data_catalog(
         session.commit()
 
         tables_df = get_tables(mindsdb_client, datasource_name, table_names)
-        tables_df = filter_loaded_tables(session, tables_df, datasource_id, tenant_id)
+        tables_df = filter_loaded_tables(session, tables_df, mind_datasource_id, datasource_id, tenant_id)
 
         if len(tables_df) > 0:
             tables = load_tables(session, tables_df, mind_datasource_id, datasource_id, tenant_id)
@@ -177,10 +177,11 @@ def get_tables(mindsdb_client: Server, datasource_name: str, table_names: list[s
 
 @task(cache_policy=NO_CACHE)
 def filter_loaded_tables(
-    session: Session, tables_df: pd.DataFrame, datasource_id: UUID, tenant_id: UUID
+    session: Session, tables_df: pd.DataFrame, mind_datasource_id: UUID, datasource_id: UUID, tenant_id: UUID
 ) -> pd.DataFrame:
     """
     Filter out tables that have already been loaded.
+    If the loaded tables exist but are not associated with the mind_datasource, associate them.
 
     Args:
         session (Session): Database session for querying existing tables.
@@ -202,6 +203,35 @@ def filter_loaded_tables(
         )
     ).all()
     logger.info(f"{len(existing_tables)} have already been loaded")
+
+    # Check if the existing tables are associated with the mind_datasource
+    if existing_tables:
+        mind_datasource_tables = []
+        for table in existing_tables:
+            mind_datasource_table = session.exec(
+                select(MindDatasourceTable).where(
+                    and_(
+                        MindDatasourceTable.mind_datasource_id == mind_datasource_id,
+                        MindDatasourceTable.table_id == table.id,
+                        MindDatasourceTable.tenant_id == tenant_id,
+                        MindDatasourceTable.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            if mind_datasource_table:
+                logger.info(f"Table '{table.name}' is already associated with the mind datasource")
+            else:
+                logger.info(f"Table '{table.name}' is not associated with the mind datasource. Associating now.")
+                # Associate the existing table with the mind_datasource
+                mind_datasource_table = MindDatasourceTable(
+                    tenant_id=tenant_id, mind_datasource_id=mind_datasource_id, table_id=table.id
+                )
+                mind_datasource_tables.append(mind_datasource_table)
+
+        if mind_datasource_tables:
+            session.add_all(mind_datasource_tables)
+            session.commit()
+
     existing_tables_names = [table.name for table in existing_tables]
     return tables_df[~tables_df["TABLE_NAME"].isin(existing_tables_names)]
 

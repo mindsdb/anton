@@ -159,7 +159,7 @@ class MindsService:
         try:
             logger.debug(f"Getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            mind = await self._get_mind(mind_name)
+            mind = await self._get_mind_with_datasources(mind_name)
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
@@ -264,7 +264,7 @@ class MindsService:
 
             logger.info(f"Created mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            return self._mind_to_response(new_mind)
+            return self._mind_to_response(new_mind, datasource_configs=mind_data.datasources)
         except (MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
@@ -422,19 +422,37 @@ class MindsService:
         )
         return self.session.exec(statement).first()
 
-    def _mind_to_response(self, mind: Mind, with_detailed_data: bool = False) -> MindResponse:
-        """Convert Mind database model to MindResponse object."""
+    def _mind_to_response(
+        self, mind: Mind, datasource_configs: list[DatasourceConfig] = None, with_detailed_data: bool = False
+    ) -> MindResponse:
+        """
+        Convert Mind database model to MindResponse object.
+
+        Args:
+            mind (Mind): Mind database model
+            datasource_configs (list[DatasourceConfig]): Optional explicit datasource configs
+            with_detailed_data (bool): Include detailed datasource/knowledge base data
+
+        Returns:
+            MindResponse: Mind response object
+        """
+        # If datasource configs are explicitly provided (e.g. on creation), use those
+        # On creation, the relationships may not be fully populated yet
+        if datasource_configs:
+            datasources = datasource_configs
         # Get linked datasources through the many-to-many relationship
-        datasources = [
-            DatasourceConfig(
-                name=relationship.datasource.name,
-                tables=[
-                    mind_datasource_table.table.name for mind_datasource_table in relationship.mind_datasource_tables
-                ],
-                status=relationship.status,
-            )
-            for relationship in mind.mind_datasources
-        ]
+        else:
+            datasources = [
+                DatasourceConfig(
+                    name=relationship.datasource.name,
+                    tables=[
+                        mind_datasource_table.table.name
+                        for mind_datasource_table in relationship.mind_datasource_tables
+                    ],
+                    status=relationship.status,
+                )
+                for relationship in mind.mind_datasources
+            ]
 
         # TODO: add detailed datasource data if with_detailed_data is True, this is the
         # actual DATA value in the integrations e.g without password which should be hashed
@@ -555,7 +573,6 @@ class MindsService:
                     tenant_id=self.tenant_id,
                     mind_id=mind.id,
                     datasource_id=datasource.id,
-                    tables=table_names,
                 )
 
                 self.session.add(mind_datasource)
