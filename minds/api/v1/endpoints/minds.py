@@ -52,6 +52,7 @@ async def list_minds(
     include_deleted: bool = Query(False, description="Filter by deleted status"),
     limit: int = Query(50, le=100, ge=1, description="Maximum number of minds to return"),
     offset: int = Query(0, ge=0, description="Number of minds to skip for pagination"),
+    with_detailed_data: bool = Query(False, description="Include detailed datasource information"),
 ) -> list[MindResponse]:
     """
     List minds for the authenticated user with optional filtering and pagination.
@@ -69,7 +70,11 @@ async def list_minds(
 
     try:
         minds = await minds_service.list_minds(
-            provider=provider, include_deleted=include_deleted, limit=limit, offset=offset
+            provider=provider,
+            include_deleted=include_deleted,
+            limit=limit,
+            offset=offset,
+            with_detailed_data=with_detailed_data,
         )
 
         logger.info(f"Listed minds for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
