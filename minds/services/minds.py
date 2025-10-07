@@ -136,7 +136,7 @@ class MindsService:
 
             minds_list = []
             for mind in minds:
-                mind_response = self._mind_to_response(mind, with_detailed_data)
+                mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
                 minds_list.append(mind_response)
 
             logger.info(
@@ -170,7 +170,7 @@ class MindsService:
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
-            mind_response = self._mind_to_response(mind, with_detailed_data)
+            mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
             logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return mind_response
         except MindNotFoundError:
