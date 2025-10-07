@@ -19,7 +19,13 @@ from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
-from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.schemas.minds import (
+    DatasourceConfig,
+    DetailedDatasourceConfig,
+    MindCreateRequest,
+    MindResponse,
+    MindUpdateRequest,
+)
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 
 # Set up logging
@@ -436,27 +442,40 @@ class MindsService:
         Returns:
             MindResponse: Mind response object
         """
-        # If datasource configs are explicitly provided (e.g. on creation), use those
-        # On creation, the relationships may not be fully populated yet
+        # If datasource configs are explicitly provided, i.e., on creation, use those
+        # On creation, the relationships are not fully populated yet
         if datasource_configs:
             datasources = datasource_configs
         # Get linked datasources through the many-to-many relationship
         else:
-            datasources = [
-                DatasourceConfig(
-                    name=relationship.datasource.name,
-                    tables=[
-                        mind_datasource_table.table.name
-                        for mind_datasource_table in relationship.mind_datasource_tables
-                    ],
-                    status=relationship.status,
-                )
-                for relationship in mind.mind_datasources
-            ]
+            if with_detailed_data:
+                datasources = [
+                    DetailedDatasourceConfig(
+                        name=relationship.datasource.name,
+                        engine=relationship.datasource.engine,
+                        description=relationship.datasource.description,
+                        connection_data=relationship.datasource.connection_data,
+                        tables=[
+                            mind_datasource_table.table.name
+                            for mind_datasource_table in relationship.mind_datasource_tables
+                        ],
+                        status=relationship.status,
+                    )
+                    for relationship in mind.mind_datasources
+                ]
+            else:
+                datasources = [
+                    DatasourceConfig(
+                        name=relationship.datasource.name,
+                        tables=[
+                            mind_datasource_table.table.name
+                            for mind_datasource_table in relationship.mind_datasource_tables
+                        ],
+                        status=relationship.status,
+                    )
+                    for relationship in mind.mind_datasources
+                ]
 
-        # TODO: add detailed datasource data if with_detailed_data is True, this is the
-        # actual DATA value in the integrations e.g without password which should be hashed
-        # {"user": "", "password": "", "host": ".com", "port": "5432", "database": "demo", "schema": "demo_data"}
         return MindResponse(
             name=mind.name,
             model_name=mind.model_name,
