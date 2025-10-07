@@ -22,6 +22,14 @@ class DatasourceConfig(BaseModel):
     )
 
 
+class DetailedDatasourceConfig(DatasourceConfig):
+    """Extended datasource config with connection details."""
+
+    engine: str | None = Field(None, description="Database engine (postgres, mysql, etc.)")
+    description: str | None = Field(None, description="Description of the datasource")
+    connection_data: dict[str, Any] | None = Field(None, description="Connection parameters")
+
+
 class MindCreateRequest(BaseModel):
     """Request model for creating a new mind."""
 
@@ -49,7 +57,9 @@ class MindResponse(BaseModel):
     provider: str = Field(..., description="AI provider")
     model_name: str = Field(..., description="Model name")
     parameters: dict[str, Any] = Field(..., description="Mind parameters and configuration")
-    datasources: list[DatasourceConfig] = Field(..., description="Attached datasource names")
+    datasources: list[DatasourceConfig] | list[DetailedDatasourceConfig] = Field(
+        ..., description="List of attached datasources"
+    )
     created_at: str | None = Field(None, description="Creation timestamp")
     updated_at: str | None = Field(None, description="Last update timestamp")
 
