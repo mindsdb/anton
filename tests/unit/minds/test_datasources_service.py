@@ -2,7 +2,7 @@
 Unit tests for DatasourcesService.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -66,8 +66,9 @@ class TestDatasourcesService:
             engine="postgres",
             connection_data={"host": "localhost", "port": 5432, "user": "test"},
             user_id="test-user-123",
-            created_at=datetime(2023, 1, 1, 12, 0, 0),
-            modified_at=datetime(2023, 1, 1, 12, 0, 0),
+            tenant_id="test-tenant-123",
+            created_at=datetime.now(timezone.utc),
+            modified_at=datetime.now(timezone.utc),
         )
 
     @pytest.fixture
@@ -177,15 +178,15 @@ class TestDatasourcesService:
     @pytest.mark.asyncio
     async def test_create_datasource_success(self, service, mock_session, mock_mindsdb_client, sample_create_request):
         """Test successful datasource creation."""
-        from uuid import uuid4
-
         mock_result = Mock()
         mock_result.first.return_value = None
         mock_session.exec.return_value = mock_result
 
-        # Mock the refresh method to set an id on the datasource
+        # Mock the refresh method to set an id and datetime fields on the datasource
         def mock_refresh(datasource):
             datasource.id = uuid4()
+            datasource.created_at = datetime.now(timezone.utc)
+            datasource.modified_at = datetime.now(timezone.utc)
 
         mock_session.refresh.side_effect = mock_refresh
 

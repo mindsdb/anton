@@ -484,8 +484,8 @@ class MindsService:
             provider=mind.provider,
             parameters=mind.parameters or {},
             datasources=datasources,
-            created_at=str(mind.created_at) if mind.created_at else "",
-            modified_at=str(mind.modified_at) if mind.modified_at else "",
+            created_at=mind.created_at.isoformat(),
+            modified_at=mind.modified_at.isoformat(),
         )
 
     async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:
