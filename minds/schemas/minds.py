@@ -28,6 +28,8 @@ class DetailedDatasourceConfig(DatasourceConfig):
     engine: str | None = Field(None, description="Database engine (postgres, mysql, etc.)")
     description: str | None = Field(None, description="Description of the datasource")
     connection_data: dict[str, Any] | None = Field(None, description="Connection parameters")
+    created_at: str | None = Field(None, description="Creation timestamp")
+    modified_at: str | None = Field(None, description="Last update timestamp")
 
 
 class MindCreateRequest(BaseModel):
@@ -61,7 +63,7 @@ class MindResponse(BaseModel):
         ..., description="List of attached datasources"
     )
     created_at: str | None = Field(None, description="Creation timestamp")
-    updated_at: str | None = Field(None, description="Last update timestamp")
+    modified_at: str | None = Field(None, description="Last update timestamp")
 
     @computed_field
     @property

@@ -192,7 +192,7 @@ class TestMindResponse:
             "parameters": {"temperature": 0.7},
             "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
             "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T12:00:00Z",
+            "modified_at": "2024-01-01T12:00:00Z",
         }
 
         response = MindResponse(**data)
@@ -205,7 +205,7 @@ class TestMindResponse:
         assert response.datasources[0].name == "datasource1"
         assert response.datasources[0].tables == ["table1"]
         assert response.created_at == "2024-01-01T00:00:00Z"
-        assert response.updated_at == "2024-01-01T12:00:00Z"
+        assert response.modified_at == "2024-01-01T12:00:00Z"
 
     def test_mind_response_with_optional_fields(self):
         """Test mind response with optional fields."""
@@ -220,7 +220,7 @@ class TestMindResponse:
         response = MindResponse(**data)
 
         assert response.created_at is None
-        assert response.updated_at is None
+        assert response.modified_at is None
 
     def test_mind_response_serialization(self):
         """Test mind response serialization to dict."""
@@ -273,7 +273,7 @@ class TestSchemaInteroperability:
         create_request = MindCreateRequest(**create_data)
 
         # Simulate what happens in the service layer
-        response_data = {**create_data, "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"}
+        response_data = {**create_data, "created_at": "2024-01-01T00:00:00Z", "modified_at": "2024-01-01T00:00:00Z"}
 
         response = MindResponse(**response_data)
 
@@ -295,7 +295,7 @@ class TestSchemaInteroperability:
             "parameters": {"temperature": 0.7},
             "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
             "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-01T00:00:00Z",
         }
 
         # Simulate update merge

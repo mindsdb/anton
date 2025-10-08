@@ -460,6 +460,8 @@ class MindsService:
                             for mind_datasource_table in relationship.mind_datasource_tables
                         ],
                         status=relationship.status,
+                        created_at=str(relationship.datasource.created_at),
+                        modified_at=str(relationship.datasource.modified_at),
                     )
                     for relationship in mind.mind_datasources
                 ]
@@ -483,7 +485,7 @@ class MindsService:
             parameters=mind.parameters or {},
             datasources=datasources,
             created_at=str(mind.created_at) if mind.created_at else "",
-            updated_at=str(mind.modified_at) if mind.modified_at else "",
+            modified_at=str(mind.modified_at) if mind.modified_at else "",
         )
 
     async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:
