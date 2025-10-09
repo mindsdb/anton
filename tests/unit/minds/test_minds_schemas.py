@@ -11,9 +11,11 @@ Tests the Pydantic models used for minds API including:
 import pytest
 from pydantic import ValidationError
 
+from minds.model.mind_datasource import DataCatalogStatus
 from minds.schemas.minds import (
     DatasourceConfig,
     DeleteMindRequest,
+    DetailedDatasourceConfig,
     MindCreateRequest,
     MindResponse,
     MindUpdateRequest,
@@ -239,6 +241,108 @@ class TestMindResponse:
         assert isinstance(serialized, dict)
         assert serialized["name"] == "serializable-mind"
         assert serialized["parameters"] == {"temperature": 0.7}
+
+    def test_mind_response_with_detailed_datasource_configs(self):
+        """Test mind response with DetailedDatasourceConfig objects."""
+        detailed_datasource = DetailedDatasourceConfig(
+            name="detailed-datasource",
+            tables=["users", "orders"],
+            status=DataCatalogStatus.COMPLETED,
+            engine="postgres",
+            description="Production database",
+            connection_data={"host": "prod.db.com", "port": 5432},
+            created_at="2024-01-01T00:00:00Z",
+            modified_at="2024-01-01T12:00:00Z",
+        )
+
+        data = {
+            "name": "response-with-detailed",
+            "model_name": "gpt-4o",
+            "provider": "openai",
+            "parameters": {"temperature": 0.7},
+            "datasources": [detailed_datasource],
+        }
+
+        response = MindResponse(**data)
+
+        assert response.name == "response-with-detailed"
+        assert len(response.datasources) == 1
+        assert response.datasources[0].name == "detailed-datasource"
+        assert response.datasources[0].tables == ["users", "orders"]
+        assert response.datasources[0].engine == "postgres"
+        assert response.datasources[0].description == "Production database"
+        assert response.datasources[0].connection_data == {"host": "prod.db.com", "port": 5432}
+
+    def test_mind_response_serialization_with_detailed_datasources(self):
+        """Test serialization with DetailedDatasourceConfig objects."""
+        detailed_datasource = DetailedDatasourceConfig(
+            name="serializable-detailed",
+            tables=["table1"],
+            status=DataCatalogStatus.LOADING,
+            engine="postgres",
+            description="Test datasource",
+            connection_data={"host": "localhost", "port": 5432},
+            created_at="2024-01-01T00:00:00Z",
+        )
+
+        data = {
+            "name": "serializable-mind",
+            "model_name": "gpt-4o",
+            "provider": "openai",
+            "parameters": {"temperature": 0.7},
+            "datasources": [detailed_datasource],
+        }
+
+        response = MindResponse(**data)
+        serialized = response.model_dump()
+
+        assert isinstance(serialized, dict)
+        assert "datasources" in serialized
+        assert len(serialized["datasources"]) == 1
+
+        ds_serialized = serialized["datasources"][0]
+        assert ds_serialized["name"] == "serializable-detailed"
+        assert ds_serialized["engine"] == "postgres"
+        assert ds_serialized["description"] == "Test datasource"
+        assert ds_serialized["connection_data"] == {"host": "localhost", "port": 5432}
+        assert ds_serialized["status"] == "LOADING"
+
+    def test_mind_response_status_computation(self):
+        """Test status computation based on datasource statuses."""
+        # Test with all completed datasources
+        completed_datasource = DatasourceConfig(name="completed-ds", status=DataCatalogStatus.COMPLETED)
+        data = {
+            "name": "test-mind",
+            "model_name": "gpt-4o",
+            "provider": "openai",
+            "parameters": {},
+            "datasources": [completed_datasource],
+        }
+        response = MindResponse(**data)
+        assert response.status == DataCatalogStatus.COMPLETED
+
+        # Test with pending datasource
+        pending_datasource = DatasourceConfig(name="pending-ds", status=DataCatalogStatus.PENDING)
+        data["datasources"] = [completed_datasource, pending_datasource]
+        response = MindResponse(**data)
+        assert response.status == DataCatalogStatus.PENDING
+
+        # Test with loading datasource
+        loading_datasource = DatasourceConfig(name="loading-ds", status=DataCatalogStatus.LOADING)
+        data["datasources"] = [completed_datasource, loading_datasource]
+        response = MindResponse(**data)
+        assert response.status == DataCatalogStatus.LOADING
+
+        # Test with failed datasource (should take precedence)
+        failed_datasource = DatasourceConfig(name="failed-ds", status=DataCatalogStatus.FAILED)
+        data["datasources"] = [completed_datasource, failed_datasource]
+        response = MindResponse(**data)
+        assert response.status == DataCatalogStatus.FAILED
+
+        # Test with empty datasources list
+        data["datasources"] = []
+        response = MindResponse(**data)
+        assert response.status == DataCatalogStatus.COMPLETED
 
 
 class TestDeleteMindRequest:
