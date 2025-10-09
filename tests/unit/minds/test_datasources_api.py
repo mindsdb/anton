@@ -70,6 +70,7 @@ class TestDatasourcesAPI:
         return DatasourceResponse(
             id=test_uuid,
             name="test_postgres",
+            description="Test PostgreSQL datasource for API testing",
             engine="postgres",
             connection_data={"host": "localhost", "port": 5432},
             created_at="2023-01-01T12:00:00",
@@ -180,7 +181,10 @@ class TestDatasourcesAPI:
         mock_datasources_service.create_datasource = AsyncMock(return_value=sample_datasource_response)
 
         create_request = DatasourceCreateRequest(
-            name="test_postgres", engine="postgres", connection_data={"host": "localhost", "port": 5432}
+            name="test_postgres",
+            description="New test PostgreSQL datasource",
+            engine="postgres",
+            connection_data={"host": "localhost", "port": 5432},
         )
 
         result = await create_datasource(datasource_data=create_request, datasources_service=mock_datasources_service)
@@ -198,7 +202,10 @@ class TestDatasourcesAPI:
         )
 
         create_request = DatasourceCreateRequest(
-            name="test_postgres", engine="postgres", connection_data={"host": "localhost", "port": 5432}
+            name="test_postgres",
+            description="Duplicate test PostgreSQL datasource",
+            engine="postgres",
+            connection_data={"host": "localhost", "port": 5432},
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -212,7 +219,9 @@ class TestDatasourcesAPI:
         """Test successful datasource update."""
         mock_datasources_service.update_datasource = AsyncMock(return_value=sample_datasource_response)
 
-        update_request = DatasourceUpdateRequest(connection_data={"host": "newhost", "port": 5432})
+        update_request = DatasourceUpdateRequest(
+            description="Updated test PostgreSQL datasource", connection_data={"host": "newhost", "port": 5432}
+        )
 
         result = await update_datasource(
             datasource_name="test_postgres",
@@ -232,7 +241,9 @@ class TestDatasourcesAPI:
             side_effect=DatasourceNotFoundError("Datasource not found")
         )
 
-        update_request = DatasourceUpdateRequest(connection_data={"host": "newhost"})
+        update_request = DatasourceUpdateRequest(
+            description="Updated description for non-existent datasource", connection_data={"host": "newhost"}
+        )
 
         with pytest.raises(HTTPException) as exc_info:
             await update_datasource(

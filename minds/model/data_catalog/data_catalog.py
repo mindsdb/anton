@@ -25,6 +25,8 @@ class DataCatalog(SQLModel, table=False):
         lines = []
         lines.append(f"MindsDB Data Source: {self.mind_datasource.datasource.name}")
         lines.append(f"Engine: {self.mind_datasource.datasource.engine}")
+        if self.mind_datasource.datasource.description:
+            lines.append(f"Description: {self.mind_datasource.datasource.description}")
 
         if self.mind_datasource.datasource.engine_info:
             lines.append(f"Engine Info: {self.mind_datasource.datasource.engine_info}")
