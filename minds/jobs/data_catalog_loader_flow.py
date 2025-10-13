@@ -91,19 +91,20 @@ def load_data_catalog(
 
         if len(tables_df) > 0:
             tables = load_tables(session, tables_df, mind_datasource_id, datasource_id, tenant_id)
+            loaded_table_names = [table.name for table in tables]
 
-            columns_df = get_columns(mindsdb_client, datasource_name, table_names)
+            columns_df = get_columns(mindsdb_client, datasource_name, loaded_table_names)
             columns = load_columns(session, columns_df, tables, tenant_id)
 
-            column_statistics_df = get_column_statistics(mindsdb_client, datasource_name, table_names)
+            column_statistics_df = get_column_statistics(mindsdb_client, datasource_name, loaded_table_names)
             if len(column_statistics_df) > 0:
                 load_column_statistics(session, column_statistics_df, columns, tenant_id)
 
-            primary_keys_df = get_primary_keys(mindsdb_client, datasource_name, table_names)
+            primary_keys_df = get_primary_keys(mindsdb_client, datasource_name, loaded_table_names)
             if len(primary_keys_df) > 0:
                 load_primary_keys(session, primary_keys_df, tables, columns, tenant_id)
 
-            foreign_keys_df = get_foreign_keys(mindsdb_client, datasource_name, table_names)
+            foreign_keys_df = get_foreign_keys(mindsdb_client, datasource_name, loaded_table_names)
             if len(foreign_keys_df) > 0:
                 load_foreign_keys(session, foreign_keys_df, tables, columns, tenant_id)
 
