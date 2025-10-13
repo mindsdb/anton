@@ -251,6 +251,7 @@ async def _build_json_response_from_messages(messages: list[StreamMessage], mode
         choice = Choice(
             index=index,
             message=Message(role=search_message.role, content=content),
+            finish_reason="stop",  # Set finish_reason to "stop" for successful completion
         )
         choices.append(choice)
 
