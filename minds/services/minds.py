@@ -116,14 +116,15 @@ class MindsService:
 
             statement = (
                 select(Mind)
-                .join(Mind.mind_datasources)
-                .join(MindDatasource.datasource)
-                .where(MindDatasource.deleted_at.is_(None))
-                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
                 .where(and_(*conditions))
                 .order_by(Mind.created_at.desc())
                 .offset(offset)
                 .limit(limit)
+                .options(
+                    selectinload(
+                        Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))
+                    ).selectinload(MindDatasource.datasource)
+                )
             )
 
             minds = self.session.exec(statement).all()
