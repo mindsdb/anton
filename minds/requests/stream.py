@@ -109,26 +109,55 @@ async def format_messages_for_streaming(
             An async generator yielding SSE formatted events
     """
     async_index = 0
-    async for search_message in message_generator:
-        # Properly serialize BaseModel content
-        content = search_message.content
-        if isinstance(content, BaseModel):
-            content = content.model_dump()
+    message_iterator = message_generator.__aiter__()
+    current_message = None
 
-        # Create chunk with serialized content for streaming
-        chunk = ChatCompletionChunk(
-            id=search_message.id,
-            model=model,
-            choices=[
-                StreamChoice(
-                    index=async_index,
-                    delta=Message(role=search_message.role, content=content),
-                )
-            ],
-        )
-        async_index += 1
+    try:
+        current_message = await message_iterator.__anext__()
 
-        yield f"data: {chunk.model_dump_json()}\n\n"
+        while True:
+            # Try to get the next message to see if current is the last one
+            try:
+                next_message = await message_iterator.__anext__()
+                is_last = False
+            except StopAsyncIteration:
+                # Current message is the last one
+                is_last = True
+                next_message = None
+
+            # Properly serialize BaseModel content
+            content = current_message.content
+            if isinstance(content, BaseModel):
+                content = content.model_dump()
+
+            # Create chunk with serialized content for streaming
+            chunk = ChatCompletionChunk(
+                id=current_message.id,
+                model=model,
+                choices=[
+                    StreamChoice(
+                        index=async_index,
+                        delta=Message(role=current_message.role, content=content),
+                    )
+                ],
+            )
+
+            # Add finish_reason if this is the last message
+            if is_last:
+                chunk.choices[0].finish_reason = "stop"
+
+            async_index += 1
+            yield f"data: {chunk.model_dump_json()}\n\n"
+
+            if is_last:
+                break
+
+            # Move to next message
+            current_message = next_message
+
+    except StopAsyncIteration:
+        # No messages at all
+        pass
 
 
 @observe(name="Process Streaming Producer")
