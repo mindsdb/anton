@@ -121,9 +121,9 @@ class MindsService:
                 .offset(offset)
                 .limit(limit)
                 .options(
-                    selectinload(
-                        Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))
-                    ).selectinload(MindDatasource.datasource)
+                    selectinload(Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))).selectinload(
+                        MindDatasource.datasource
+                    )
                 )
             )
 
