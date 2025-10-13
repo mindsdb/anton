@@ -122,14 +122,15 @@ class MindsService:
 
             statement = (
                 select(Mind)
-                .join(Mind.mind_datasources)
-                .join(MindDatasource.datasource)
-                .where(MindDatasource.deleted_at.is_(None))
-                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
                 .where(and_(*conditions))
                 .order_by(Mind.created_at.desc())
                 .offset(offset)
                 .limit(limit)
+                .options(
+                    selectinload(Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))).selectinload(
+                        MindDatasource.datasource
+                    )
+                )
             )
 
             minds = self.session.exec(statement).all()
@@ -312,7 +313,8 @@ class MindsService:
                 if existing_mind:
                     raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
 
-            if mind_data.datasources:
+            datasource_configs = mind_data.datasources
+            if datasource_configs:
                 # Validate new datasources if provided
                 await self._validate_datasources(mind_data.datasources)
                 # Cancel any running data catalog loader flows for the mind
@@ -336,7 +338,7 @@ class MindsService:
 
             logger.info(f"Updated mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            return self._mind_to_response(mind)
+            return self._mind_to_response(mind, datasource_configs=datasource_configs)
         except (MindNotFoundError, MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
@@ -442,8 +444,8 @@ class MindsService:
         Returns:
             MindResponse: Mind response object
         """
-        # If datasource configs are explicitly provided, i.e., on creation, use those
-        # On creation, the relationships are not fully populated yet
+        # If datasource configs are explicitly provided (e.g. on creation), use those
+        # On create and update, the relationships may not be fully populated yet
         if datasource_configs:
             datasources = datasource_configs
         # Get linked datasources through the many-to-many relationship
