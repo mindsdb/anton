@@ -19,7 +19,13 @@ from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
-from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.schemas.minds import (
+    DatasourceConfig,
+    DetailedDatasourceConfig,
+    MindCreateRequest,
+    MindResponse,
+    MindUpdateRequest,
+)
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 
 # Set up logging
@@ -131,7 +137,7 @@ class MindsService:
 
             minds_list = []
             for mind in minds:
-                mind_response = self._mind_to_response(mind, with_detailed_data)
+                mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
                 minds_list.append(mind_response)
 
             logger.info(
@@ -165,7 +171,7 @@ class MindsService:
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
-            mind_response = self._mind_to_response(mind, with_detailed_data)
+            mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
             logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return mind_response
         except MindNotFoundError:
@@ -444,29 +450,44 @@ class MindsService:
             datasources = datasource_configs
         # Get linked datasources through the many-to-many relationship
         else:
-            datasources = [
-                DatasourceConfig(
-                    name=relationship.datasource.name,
-                    tables=[
-                        mind_datasource_table.table.name
-                        for mind_datasource_table in relationship.mind_datasource_tables
-                    ],
-                    status=relationship.status,
-                )
-                for relationship in mind.mind_datasources
-            ]
+            if with_detailed_data:
+                datasources = [
+                    DetailedDatasourceConfig(
+                        name=relationship.datasource.name,
+                        engine=relationship.datasource.engine,
+                        description=relationship.datasource.description,
+                        connection_data=relationship.datasource.connection_data,
+                        tables=[
+                            mind_datasource_table.table.name
+                            for mind_datasource_table in relationship.mind_datasource_tables
+                        ],
+                        status=relationship.status,
+                        created_at=str(relationship.datasource.created_at),
+                        modified_at=str(relationship.datasource.modified_at),
+                    )
+                    for relationship in mind.mind_datasources
+                ]
+            else:
+                datasources = [
+                    DatasourceConfig(
+                        name=relationship.datasource.name,
+                        tables=[
+                            mind_datasource_table.table.name
+                            for mind_datasource_table in relationship.mind_datasource_tables
+                        ],
+                        status=relationship.status,
+                    )
+                    for relationship in mind.mind_datasources
+                ]
 
-        # TODO: add detailed datasource data if with_detailed_data is True, this is the
-        # actual DATA value in the integrations e.g without password which should be hashed
-        # {"user": "", "password": "", "host": ".com", "port": "5432", "database": "demo", "schema": "demo_data"}
         return MindResponse(
             name=mind.name,
             model_name=mind.model_name,
             provider=mind.provider,
             parameters=mind.parameters or {},
             datasources=datasources,
-            created_at=str(mind.created_at) if mind.created_at else "",
-            updated_at=str(mind.modified_at) if mind.modified_at else "",
+            created_at=mind.created_at.isoformat(),
+            modified_at=mind.modified_at.isoformat(),
         )
 
     async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:

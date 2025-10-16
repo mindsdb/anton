@@ -36,6 +36,7 @@ class DatasourceResponse(BaseModel):
     engine: str | None = Field(None, description="Database engine")
     connection_data: dict[str, Any] | None = Field(None, description="Connection parameters")
     created_at: str | None = Field(None, description="Creation timestamp")
+    modified_at: str | None = Field(None, description="Last update timestamp")
     is_demo: bool | None = Field(None, description="Whether this is a demo datasource")
 
 
