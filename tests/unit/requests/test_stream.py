@@ -79,6 +79,9 @@ async def test_format_messages_for_streaming_emits_sse(streaming_mod):
     assert payload0["choices"][0]["delta"]["content"] == "hello"
     assert payload1["choices"][0]["delta"]["role"] == streaming_mod.Role.assistant
     assert payload1["choices"][0]["delta"]["content"] == "test"
+    # finish_reason should be None (or absent) on non-final chunks and 'stop' on the last chunk
+    assert payload0["choices"][0].get("finish_reason") is None
+    assert payload1["choices"][0]["finish_reason"] == "stop"
 
 
 # ---------- Streamer (queue-based) ----------
@@ -124,7 +127,8 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
     model = "model_test_process_streaming_producer_emits_sse"
     trace_name = "trace_name_test_process_streaming_producer_emits_sse"
 
-    async def producer(streamer: streaming_mod.MessageStreamer):
+    # type: ignore - avoid module attribute in type annotation in test-local function
+    async def producer(streamer):
         await streamer.push(streaming_mod.Role.user, "hello")
         await streamer.push(streaming_mod.Role.assistant, "world")
         # close() is guaranteed by the wrapper even if we forget it
@@ -156,13 +160,17 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
         "world",
     ]
     assert all(p["id"].startswith("chatcmpl-777") or p["id"] == "chatcmpl-777" for p in payloads)
+    # The final streamed choice should include finish_reason == 'stop'
+    assert payloads[0]["choices"][0].get("finish_reason") is None
+    assert payloads[-1]["choices"][0]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio
 async def test_process_non_streaming_producer_returns_json(streaming_mod):
     model = "model_test_process_non_streaming_producer_returns_json"
 
-    async def producer(collector: streaming_mod.MessageStreamer):
+    # type: ignore - avoid module attribute in type annotation in test-local function
+    async def producer(collector):
         await collector.push(streaming_mod.Role.user, "u")
         await collector.push(streaming_mod.Role.assistant, "a")
 
@@ -173,3 +181,5 @@ async def test_process_non_streaming_producer_returns_json(streaming_mod):
     assert len(data["choices"]) == 2
     assert data["choices"][0]["message"]["content"] == "u"
     assert data["choices"][1]["message"]["content"] == "a"
+    # Non-streaming responses should include finish_reason == 'stop' for each choice
+    assert all(c.get("finish_reason") == "stop" for c in data["choices"])
