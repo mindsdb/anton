@@ -7,7 +7,6 @@ spec:
   backoffLimit: 0
   template:
     spec:
-      activeDeadlineSeconds: 900
       restartPolicy: Never
       containers:
         - name: minds-langfuse-benchmarks
