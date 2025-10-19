@@ -542,8 +542,8 @@ CHART_GENERATION_INSTRUCTIONS = """
   - Inline formulas: `$expression$`
   - Block formulas: `$$expression$$`
   - Examples:
-    - Instead of: \text{pe c} =\frac{R}{B}, write: `$$\text{pe c} =\frac{R}{B}$$`
-    - Instead of: where ( \Delta U ) is the change, write: where ($\Delta U$) is the change.
+    - Instead of: \\text{pe c} =\\frac{R}{B}, write: `$$\\text{pe c} =\\frac{R}{B}$$`
+    - Instead of: where ( \\Delta U ) is the change, write: where ($\\Delta U$) is the change.
 
 - When presenting or visualizing data:
   - Use `ORDER BY` to sort information wherever possible and relevant.
@@ -551,8 +551,8 @@ CHART_GENERATION_INSTRUCTIONS = """
 
 - Aliasing conventions:
   - Avoid using double quotes for aliases.
-  - Use backticks (\`) for aliases, except when the alias is in lower-case underscore notation, in which case do not use quotes or backticks.
-    - Example: Instead of `SELECT COUNT(*) AS \`count\``, use `SELECT COUNT(*) AS count`.
+  - Use backticks (\\`) for aliases, except when the alias is in lower-case underscore notation, in which case do not use quotes or backticks.
+    - Example: Instead of `SELECT COUNT(*) AS \\`count\\``, use `SELECT COUNT(*) AS count`.
   - Always use lower-case underscore notation for aliases where possible.
 
 - Calculation guidance:
