@@ -1,7 +1,8 @@
 from pydantic_ai.models.gemini import GeminiModel
 from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
-from minds.common.vars import DEFAULT_GOOGLE_MODEL, DEFAULT_MIND_MODEL
+from minds.common.vars import DEFAULT_GOOGLE_MODEL, DEFAULT_MIND_MODEL, OPEN_AI_API_KEY
 
 
 def get_llm_config(provider: str, model_name: str | None = None) -> OpenAIModel | GeminiModel:
@@ -18,7 +19,8 @@ def get_llm_config(provider: str, model_name: str | None = None) -> OpenAIModel 
         # Use default if no model specified
         if not model_name:
             model_name = DEFAULT_MIND_MODEL
-        return OpenAIModel(model_name=model_name)
+        openai_provider = OpenAIProvider(api_key=OPEN_AI_API_KEY)
+        return OpenAIModel(model_name=model_name, provider=openai_provider)
     elif provider in ["google", "gemini"]:
         # Use Google default if no model specified
         if not model_name:

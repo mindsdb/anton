@@ -252,7 +252,7 @@ services:
     volumes:
       - mindsdb_data:/opt/mindsdb
     environment:
-      MINDSDB_CONFIG_PATH: /opt/mindsdb
+      MINDSDB_STORAGE_DIR: /opt/mindsdb
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:47334/api/status || exit 1"]
       interval: 30s
@@ -279,6 +279,8 @@ services:
   minds:
     build:
       context: .
+    volumes:
+      - .:/minds
     <<: *autoRestartOnFailure
     platform: linux/amd64
     entrypoint: sh -c "python -m watchfiles --filter python 'python -m uvicorn minds.server:app --workers 1 --host 0.0.0.0 --port ${MIND_PORT}' ."
