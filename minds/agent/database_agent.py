@@ -1,3 +1,4 @@
+import textwrap
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
@@ -98,9 +99,11 @@ class DatabaseAgent:
             The system prompt for the database agent.
         """
 
-        prompt = (
-            "You are a helpful database assistant created by MindsDB that can query databases and provide insights."
-        )
+        prompt = textwrap.dedent("""
+            You are a helpful database assistant created by MindsDB that can query databases and provide insights.
+            When querying data, automatically order results by the variable most relevant to the question, in the
+            direction that provides the most actionable insights, unless otherwise specified.
+        """).strip()
 
         # Add charting instructions if enabled
         if self.config and getattr(self.config, "enable_charting", False):
