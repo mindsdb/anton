@@ -9,6 +9,7 @@ Tests the SQLModel Mind class including:
 """
 
 from datetime import datetime
+from uuid import UUID
 
 import pytest
 
@@ -25,7 +26,8 @@ class TestMindModel:
             "name": "test-mind",
             "provider": "openai",
             "model_name": "gpt-4o",
-            "user_id": "user-123",
+            "user_id": UUID("00000000-0000-0000-0000-000000000123"),
+            "tenant_id": UUID("00000000-0000-0000-0000-000000000456"),
             "parameters": {"temperature": 0.7, "max_tokens": 100},
             "description": "Test mind for unit tests",
             "deleted_at": None,
@@ -38,7 +40,7 @@ class TestMindModel:
         assert mind.name == "test-mind"
         assert mind.provider == "openai"
         assert mind.model_name == "gpt-4o"
-        assert mind.user_id == "user-123"
+        assert mind.user_id == UUID("00000000-0000-0000-0000-000000000123")
         assert mind.parameters == {"temperature": 0.7, "max_tokens": 100}
         assert mind.mind_datasources == []  # No relationships set in this basic test
         assert mind.description == "Test mind for unit tests"
@@ -46,12 +48,17 @@ class TestMindModel:
 
     def test_mind_creation_with_minimal_fields(self):
         """Test creating a Mind with minimal required fields."""
-        mind = Mind(name="minimal-mind", provider="openai", model_name="gpt-4o", user_id="user-123")
+        mind = Mind(
+            name="minimal-mind",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
+        )
 
         assert mind.name == "minimal-mind"
         assert mind.provider == "openai"
         assert mind.model_name == "gpt-4o"
-        assert mind.user_id == "user-123"
+        assert mind.user_id == UUID("00000000-0000-0000-0000-000000000123")
 
         # Test default values
         assert mind.parameters == {}
@@ -61,14 +68,24 @@ class TestMindModel:
 
     def test_mind_default_values(self):
         """Test Mind model default values."""
-        mind = Mind(name="default-test", provider="openai", model_name="gpt-4o", user_id="user-123")
+        mind = Mind(
+            name="default-test",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
+        )
 
         # Test that default factories create new instances
         assert isinstance(mind.parameters, dict)
         assert isinstance(mind.mind_datasources, list)
         assert mind.deleted_at is None
 
-        mind2 = Mind(name="default-test-2", provider="openai", model_name="gpt-4o", user_id="user-123")
+        mind2 = Mind(
+            name="default-test-2",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
+        )
 
         mind.parameters["test"] = "value"
         # mind_datasources is managed through relationships, not direct list manipulation
@@ -78,7 +95,9 @@ class TestMindModel:
 
     def test_mind_datasources_relationship_exists(self):
         """Test that mind_datasources relationship is properly configured."""
-        mind = Mind(name="test", provider="openai", model_name="gpt-4o", user_id="user-123")
+        mind = Mind(
+            name="test", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000123")
+        )
 
         # Test that the relationship exists and is empty by default
         assert hasattr(mind, "mind_datasources")
@@ -87,8 +106,12 @@ class TestMindModel:
 
     def test_mind_parameters_default_factory(self):
         """Test that parameters field has proper default factory."""
-        mind1 = Mind(name="test1", provider="openai", model_name="gpt-4o", user_id="user-123")
-        mind2 = Mind(name="test2", provider="openai", model_name="gpt-4o", user_id="user-123")
+        mind1 = Mind(
+            name="test1", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000123")
+        )
+        mind2 = Mind(
+            name="test2", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000456")
+        )
 
         # Test that each instance gets its own parameters dict
         mind1.parameters["test"] = "value1"
@@ -99,25 +122,33 @@ class TestMindModel:
 
     def test_active_mind_field_types(self):
         """Test active Mind field types and validation."""
-        mind = Mind(name="test", provider="openai", model_name="gpt-4o", user_id="user-123")
+        mind = Mind(
+            name="test", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000123")
+        )
 
         # Test field types
         assert isinstance(mind.name, str)
         assert isinstance(mind.provider, str)
         assert isinstance(mind.model_name, str)
-        assert isinstance(mind.user_id, str)
+        assert isinstance(mind.user_id, UUID)
         assert isinstance(mind.parameters, dict)
         assert mind.deleted_at is None
 
     def test_inactive_mind_field_types(self):
         """Test inactive Mind field types and validation."""
-        mind = Mind(name="test", provider="openai", model_name="gpt-4o", user_id="user-123", deleted_at=datetime.now())
+        mind = Mind(
+            name="test",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
+            deleted_at=datetime.now(),
+        )
 
         # Test field types
         assert isinstance(mind.name, str)
         assert isinstance(mind.provider, str)
         assert isinstance(mind.model_name, str)
-        assert isinstance(mind.user_id, str)
+        assert isinstance(mind.user_id, UUID)
         assert isinstance(mind.parameters, dict)
         assert isinstance(mind.deleted_at, datetime)
 
@@ -161,7 +192,7 @@ class TestMindModel:
             name="a" * 256,  # Max length
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
         )
         assert len(mind.name) == 256
 
@@ -170,7 +201,7 @@ class TestMindModel:
             name="test",
             provider="a" * 50,  # Max length
             model_name="gpt-4o",
-            user_id="user-123",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
         )
         assert len(mind.provider) == 50
 
@@ -179,28 +210,9 @@ class TestMindModel:
             name="test",
             provider="openai",
             model_name="a" * 256,  # Max length
-            user_id="user-123",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
         )
         assert len(mind.model_name) == 256
-
-        # Test user_id field constraints
-        mind = Mind(
-            name="test",
-            provider="openai",
-            model_name="gpt-4o",
-            user_id="a" * 256,  # Max length
-        )
-        assert len(mind.user_id) == 256
-
-        # Test user_id field constraints with actual long string
-        long_user_id = "a" * 256
-        mind = Mind(
-            name="test",
-            provider="openai",
-            model_name="gpt-4o",
-            user_id=long_user_id,
-        )
-        assert len(mind.user_id) == 256
 
     def test_mind_unique_constraint(self):
         """Test Mind unique constraint configuration."""
@@ -233,7 +245,7 @@ class TestMindModel:
             name="json-test",
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
             parameters={"nested": {"deep": {"value": 42}}},
         )
 
@@ -251,7 +263,7 @@ class TestMindModel:
             name="text-test",
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
             description=long_description,
         )
 
@@ -265,7 +277,7 @@ class TestMindModel:
             name="active-mind",
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
             deleted_at=None,
         )
         assert mind_active.deleted_at is None
@@ -275,7 +287,7 @@ class TestMindModel:
             name="inactive-mind",
             provider="openai",
             model_name="gpt-4o",
-            user_id="user-123",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
             deleted_at=datetime.now(),
         )
         assert mind_inactive.deleted_at is not None

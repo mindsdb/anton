@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from sqlalchemy import Text, UniqueConstraint
 from sqlmodel import JSON, Column, Field, Relationship
@@ -18,7 +19,7 @@ class Mind(BaseSQLModel, table=True):
     model_name: str = Field(description="Model name to use", max_length=256)
 
     # User ownership
-    user_id: str = Field(description="ID of the user who owns this mind", max_length=256, index=True)
+    user_id: UUID = Field(description="ID of the user who owns this mind", index=True)
 
     # Configuration
     parameters: dict[str, Any] | None = Field(

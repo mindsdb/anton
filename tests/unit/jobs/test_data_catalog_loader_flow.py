@@ -341,7 +341,11 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        table = _convert_row_to_table(row, "test_tenant_456", UUID("87654321-4321-8765-4321-876543218765"))
+        table = _convert_row_to_table(
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+        )
 
         assert isinstance(table, Table)
         assert table.name == "table1"
@@ -349,7 +353,7 @@ class TestDataCatalogLoaderFlow:
         assert table.description == "Test table"
         assert table.type == "BASE TABLE"
         assert table.row_count == 100
-        assert table.tenant_id == "test_tenant_456"
+        assert table.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
         assert table.datasource_id == UUID("87654321-4321-8765-4321-876543218765")
 
     def test_convert_row_to_table_with_nan_row_count(self):
@@ -364,7 +368,11 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        table = _convert_row_to_table(row, "test_tenant_456", UUID("87654321-4321-8765-4321-876543218765"))
+        table = _convert_row_to_table(
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+        )
 
         assert table.row_count is None
 
@@ -391,7 +399,7 @@ class TestDataCatalogLoaderFlow:
             tables_df,
             UUID("12345678-1234-5678-1234-567812345678"),
             UUID("87654321-4321-8765-4321-876543218765"),
-            "test_tenant_456",
+            UUID("11111111-1111-1111-1111-111111111111"),
         )
 
         assert len(result) == 2
@@ -421,7 +429,11 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        column = _convert_row_to_column(row, "test_tenant_456", UUID("11111111-1111-1111-1111-111111111111"))
+        column = _convert_row_to_column(
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            table_id=UUID("22222222-2222-2222-2222-222222222222"),
+        )
 
         assert isinstance(column, Column)
         assert column.name == "col1"
@@ -429,8 +441,8 @@ class TestDataCatalogLoaderFlow:
         assert column.description == "Test column"
         assert column.default_value == "default_value"
         assert column.is_nullable is True
-        assert column.tenant_id == "test_tenant_456"
-        assert column.table_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert column.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert column.table_id == UUID("22222222-2222-2222-2222-222222222222")
 
     def test_convert_row_to_column_with_null_default(self):
         """Test _convert_row_to_column function with [NULL] default."""
@@ -445,7 +457,11 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        column = _convert_row_to_column(row, "test_tenant_456", UUID("11111111-1111-1111-1111-111111111111"))
+        column = _convert_row_to_column(
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            table_id=UUID("22222222-2222-2222-2222-222222222222"),
+        )
 
         assert column.default_value is None
         assert column.is_nullable is False
@@ -473,7 +489,7 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        result = load_columns(mock_session, columns_df, tables, "test_tenant_456")
+        result = load_columns(mock_session, columns_df, tables, UUID("11111111-1111-1111-1111-111111111111"))
 
         assert len(result) == 2
         mock_session.add_all.assert_called_once()
@@ -550,17 +566,21 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        stats = _convert_row_to_column_statistics(row, "test_tenant_456", UUID("11111111-1111-1111-1111-111111111111"))
+        stats = _convert_row_to_column_statistics(
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            column_id=UUID("22222222-2222-2222-2222-222222222222"),
+        )
 
         assert isinstance(stats, ColumnStatistics)
-        assert stats.column_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert stats.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert stats.column_id == UUID("22222222-2222-2222-2222-222222222222")
         assert stats.most_common_values == ["val1", "val2"]
         assert stats.most_common_frequencies == [0.5, 0.3]
         assert stats.null_percentage == 0.1
         assert stats.distinct_values_count == 10
         assert stats.min_value == "min_val"
         assert stats.max_value == "max_val"
-        assert stats.tenant_id == "test_tenant_456"
 
     def test_load_column_statistics(self, mock_session):
         """Test load_column_statistics function."""
@@ -583,7 +603,9 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        load_column_statistics(mock_session, column_statistics_df, columns, "test_tenant_456")
+        load_column_statistics(
+            mock_session, column_statistics_df, columns, UUID("11111111-1111-1111-1111-111111111111")
+        )
 
         mock_session.add_all.assert_called_once()
         mock_session.flush.assert_called_once()
@@ -604,18 +626,18 @@ class TestDataCatalogLoaderFlow:
         )
 
         pk = _convert_row_to_primary_key(
-            row,
-            "test_tenant_456",
-            UUID("11111111-1111-1111-1111-111111111111"),
-            UUID("22222222-2222-2222-2222-222222222222"),
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            table_id=UUID("22222222-2222-2222-2222-222222222222"),
+            column_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert isinstance(pk, PrimaryKeyConstraint)
-        assert pk.table_id == UUID("11111111-1111-1111-1111-111111111111")
-        assert pk.column_id == UUID("22222222-2222-2222-2222-222222222222")
+        assert pk.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert pk.table_id == UUID("22222222-2222-2222-2222-222222222222")
+        assert pk.column_id == UUID("33333333-3333-3333-3333-333333333333")
         assert pk.ordinal_position == 1
         assert pk.constraint_name == "pk_table1"
-        assert pk.tenant_id == "test_tenant_456"
 
     def test_load_primary_keys(self, mock_session):
         """Test load_primary_keys function."""
@@ -635,7 +657,7 @@ class TestDataCatalogLoaderFlow:
             {"TABLE_NAME": ["table1"], "COLUMN_NAME": ["id"], "ORDINAL_POSITION": [1], "CONSTRAINT_NAME": ["pk_table1"]}
         )
 
-        load_primary_keys(mock_session, primary_keys_df, tables, columns, "test_tenant_456")
+        load_primary_keys(mock_session, primary_keys_df, tables, columns, UUID("77777777-7777-7777-7777-777777777777"))
 
         mock_session.add_all.assert_called_once()
         mock_session.flush.assert_called_once()
@@ -646,7 +668,9 @@ class TestDataCatalogLoaderFlow:
         assert isinstance(added_pks[0], PrimaryKeyConstraint)
         assert added_pks[0].table_id == table1.id
         assert added_pks[0].column_id == column1.id
+        assert added_pks[0].ordinal_position == 1
         assert added_pks[0].constraint_name == "pk_table1"
+        assert added_pks[0].tenant_id == UUID("77777777-7777-7777-7777-777777777777")
 
     def test_convert_row_to_foreign_key(self):
         """Test _convert_row_to_foreign_key function."""
@@ -662,22 +686,22 @@ class TestDataCatalogLoaderFlow:
         )
 
         fk = _convert_row_to_foreign_key(
-            row,
-            "test_tenant_456",
-            UUID("11111111-1111-1111-1111-111111111111"),
-            UUID("22222222-2222-2222-2222-222222222222"),
-            UUID("33333333-3333-3333-3333-333333333333"),
-            UUID("44444444-4444-4444-4444-444444444444"),
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            table_id=UUID("22222222-2222-2222-2222-222222222222"),
+            column_id=UUID("33333333-3333-3333-3333-333333333333"),
+            referenced_table_id=UUID("44444444-4444-4444-4444-444444444444"),
+            referenced_column_id=UUID("55555555-5555-5555-5555-555555555555"),
         )
 
         assert isinstance(fk, ForeignKeyConstraint)
-        assert fk.table_id == UUID("11111111-1111-1111-1111-111111111111")
-        assert fk.column_id == UUID("22222222-2222-2222-2222-222222222222")
-        assert fk.referenced_table_id == UUID("33333333-3333-3333-3333-333333333333")
-        assert fk.referenced_column_id == UUID("44444444-4444-4444-4444-444444444444")
+        assert fk.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert fk.table_id == UUID("22222222-2222-2222-2222-222222222222")
+        assert fk.column_id == UUID("33333333-3333-3333-3333-333333333333")
+        assert fk.referenced_table_id == UUID("44444444-4444-4444-4444-444444444444")
+        assert fk.referenced_column_id == UUID("55555555-5555-5555-5555-555555555555")
         assert fk.constraint_name == "fk_table1"
         assert fk.ordinal_position == 1
-        assert fk.tenant_id == "test_tenant_456"
 
     def test_load_foreign_keys(self, mock_session):
         """Test load_foreign_keys function."""
@@ -710,7 +734,7 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        load_foreign_keys(mock_session, foreign_keys_df, tables, columns, "test_tenant_456")
+        load_foreign_keys(mock_session, foreign_keys_df, tables, columns, UUID("11111111-1111-1111-1111-111111111111"))
 
         mock_session.add_all.assert_called_once()
         mock_session.flush.assert_called_once()
@@ -840,10 +864,15 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        stats = _convert_row_to_column_statistics(row, "test_tenant_456", UUID("11111111-1111-1111-1111-111111111111"))
+        stats = _convert_row_to_column_statistics(
+            row=row,
+            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            column_id=UUID("22222222-2222-2222-2222-222222222222"),
+        )
 
         assert isinstance(stats, ColumnStatistics)
-        assert stats.column_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert stats.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert stats.column_id == UUID("22222222-2222-2222-2222-222222222222")
         assert stats.most_common_values is None
         assert stats.most_common_frequencies is None
         assert stats.null_percentage is None
