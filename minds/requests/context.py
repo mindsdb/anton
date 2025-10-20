@@ -1,5 +1,5 @@
 from typing import Any
-
+from uuid import UUID
 from fastapi import Request
 from pydantic import BaseModel, Field
 
@@ -9,23 +9,23 @@ class Context(BaseModel):
     Context for the application.
     """
 
-    user_id: str = Field(default="", description="The user ID")
-    tenant_id: str = Field(default="", description="The tenant ID")
-    user_email: str = Field(default="", description="The user email")
+    user_id: UUID = Field(default="", description="The user ID")
+    tenant_id: UUID = Field(default="", description="The tenant ID")
 
 
 def extract_context_from_request(request: Request) -> Context:
     """
     Extract the context from the request headers.
     """
-    # TODO: Discuss with infra team on how to get this from the JWT, current values are dummy
-    user_id = str(request.headers.get("x-user-id", ""))
-    tenant_id = str(request.headers.get("x-tenant-id", ""))
-    # TODO: Is this needed?
-    user_email = request.headers.get("x-user-email", "")
+    # TODO: Temporary solution while lucas.koontz finishes working on Auth API
+    
+    x_user_id = str(request.headers.get("x-user-id", ""))
+    x_tenant_id = str(request.headers.get("x-company-id", ""))
+    
+    user_id = UUID(int=x_user_id)
+    tenant_id = UUID(int=x_tenant_id)
 
-    return Context(user_id=user_id, user_email=user_email, tenant_id=tenant_id)
-
+    return Context(user_id=user_id, tenant_id=tenant_id)
 
 class LangfuseContextMetadata(BaseModel):
     """
