@@ -1,6 +1,7 @@
 import importlib
 import sys
 from unittest.mock import AsyncMock, Mock, patch
+from uuid import UUID
 
 import pytest
 from mindsdb_sdk.server import Server
@@ -52,7 +53,9 @@ def mock_mindsdb_client():
 @pytest.fixture
 def mock_context():
     """Mock Context."""
-    return Context(user_id="test_user", tenant_id="test_tenant", user_email="test@example.com")
+    return Context(
+        user_id=UUID("00000000-0000-0000-0000-000000000001"), tenant_id=UUID("00000000-0000-0000-0000-000000000002")
+    )
 
 
 @pytest.fixture
@@ -62,7 +65,7 @@ def mock_mind():
     mind.name = "gpt-3.5-turbo"
     mind.provider = "openai"
     mind.model_name = "gpt-3.5-turbo"
-    mind.user_id = "test_user"
+    mind.user_id = UUID("00000000-0000-0000-0000-000000000001")
     mind.parameters = {}
     mind.description = "Test mind"
     mind.mind_datasources = []
