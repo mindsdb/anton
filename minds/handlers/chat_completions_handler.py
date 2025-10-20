@@ -83,5 +83,4 @@ class ChatCompletionsHandler:
             config=DatabaseAgentConfig(enable_charting=self.metadata.enable_charting) if self.metadata else None,
         )
 
-        async for chunk in database_agent.get_completion(self.messages, stream=self.stream):
-            await streamer.push(role=Role.assistant, content=chunk)
+        await database_agent.run_completion(messages=self.messages, streamer=streamer, stream=self.stream)
