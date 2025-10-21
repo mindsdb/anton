@@ -26,7 +26,6 @@ jobs:
     uses: ./.github/workflows/tests.yml
 
   build:
-    if: github.event.pull_request.merged == true
     runs-on: mdb-dev
     needs: [tests, linter]
     env:
