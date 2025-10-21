@@ -207,8 +207,10 @@ class DatabaseToolkit:
             plan = None
 
         # Filter catalogs by plan (if available)
+        # Pass a deep copy to avoid modifying original catalogs
+        data_catalog_copy = copy.deepcopy(data_catalogs)
         data_catalogs_filtered = (
-            self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
+            self._filter_catalogs_with_plan(data_catalog_copy, plan) if plan else data_catalogs
         )
 
         # Extract engine types from data catalogs (same as generate_sql)
@@ -245,7 +247,7 @@ class DatabaseToolkit:
 
         # Log the retry prompt
         logger.info(f"Retry prompt for SQL correction ({len(retry_prompt)} chars):")
-        # logger.info(f"Retry prompt:\n{retry_prompt}")
+        logger.info(f"Retry prompt:\n{retry_prompt}")
 
         # Create correction agent using same pattern as generate_sql
         correction_agent = PydanticAIAgent(
@@ -311,7 +313,7 @@ class DatabaseToolkit:
 
         # Log the exact context string being sent to the LLM
         logger.info(f"Data catalog context for agent '{self.mind.name}' ({len(catalog_context)} chars):")
-        # logger.info(f"Context string:\n{catalog_context}")
+        logger.info(f"Context string:\n{catalog_context}")
 
         llm_config = get_llm_config(self.mind.provider, self.mind.model_name)
 
@@ -321,7 +323,7 @@ class DatabaseToolkit:
 
         # Log the final system prompt being sent to the LLM
         logger.info(f"Final system prompt for SQL generation ({len(generation_prompt)} chars):")
-        # logger.info(f"System prompt:\n{generation_prompt}")
+        logger.info(f"System prompt:\n{generation_prompt}")
 
         generation_agent = PydanticAIAgent(
             model=llm_config,
