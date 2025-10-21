@@ -45,6 +45,40 @@ jobs:
           build-for-environment: production
           image-ref: ${{ env.CI_REF_SLUG }}
 
+  migrate:
+    runs-on: mdb-prod
+    needs: [ build ]
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [staging, dev, alpha-dev]
+    environment:
+      name: ${{ matrix.deploy-env }}
+      url: ${{ vars.MDB_ENV_URL }}
+    # We only want to run one deploy job for an env at a time
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-${{ matrix.deploy-env }}
+      cancel-in-progress: false
+    env:
+      DATABASE_URI: ${{ secrets.MINDS_DB_URI }}
+      UV_LINK_MODE: "symlink"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Place cache in the tool dir because we mount this in our runnners
+          cache-local-path: "/home/runner/_work/_tool/uv-local-cache"
+          prune-cache: false
+          python-version: ${{ vars.CI_PYTHON_VERSION || '3.10' }}
+      - name: Install dependencies
+        run: |
+          uv pip install --prerelease=allow -r requirements/requirements.txt
+      - name: Migrate Database
+        run: |
+          env PYTHONPATH=../../ alembic upgrade head
+  
   deploy:
     runs-on: mdb-prod
     needs: [build]
@@ -59,6 +93,16 @@ jobs:
           repository: mindsdb/github-actions
           path: github-actions
       - uses: ./github-actions/setup-env
+      - name: Update IMAGE_TAG in values.yaml
+        run: |
+          # Install yq if not available
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+          # Update IMAGE_TAG environment variable value
+          yq -i '(.globalEnvsAlias.globalEnvs[] | select(.name == "IMAGE_TAG") | .value) = "development-${{ env.SLUG }}"' deployment/minds-flows/values.yaml
+          cat deployment/minds-flows/values.yaml
       - name: Notify of deployment starting
         id: slack
         uses: ./github-actions/slack-deploy-msg
