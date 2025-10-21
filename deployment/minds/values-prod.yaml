@@ -7,6 +7,22 @@ deployment:
           - path: /
             serviceName: minds
             servicePort: 80
+      
+      - host: mdb.ai
+        enableMultiPath: true
+        paths:
+          - path: /api/v1/chat
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/minds
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/datasources
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/tree
+            serviceName: minds
+            servicePort: 80
 
   extraEnvs:
 
