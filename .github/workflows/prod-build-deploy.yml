@@ -68,7 +68,6 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: 0.9.4
           # Place cache in the tool dir because we mount this in our runnners
           cache-local-path: "/home/runner/_work/_tool/uv-local-cache"
           prune-cache: false

@@ -52,12 +52,12 @@ jobs:
       matrix:
         environment: [staging, dev, alpha-dev]
     environment:
-      name: ${{ matrix.deploy-env }}
+      name: ${{ matrix.environment }}
       url: ${{ vars.MDB_ENV_URL }}
     # We only want to run one deploy job for an env at a time
     # Don't cancel in progress jobs because it may be for a different PR
     concurrency:
-      group: deploy-${{ matrix.deploy-env }}
+      group: deploy-${{ matrix.environment }}
       cancel-in-progress: false
     env:
       DATABASE_URI: ${{ secrets.MINDS_DB_URI }}
@@ -67,7 +67,6 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: 0.9.4
           # Place cache in the tool dir because we mount this in our runnners
           cache-local-path: "/home/runner/_work/_tool/uv-local-cache"
           prune-cache: false
