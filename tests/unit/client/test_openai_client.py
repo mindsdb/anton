@@ -4,10 +4,10 @@ import pytest
 
 from minds.client.openai_client import OpenAIClient
 from minds.common.vars import (
-    OPEN_AI_API_KEY,
-    OPEN_AI_API_URL,
-    OPEN_AI_MAX_TOKENS,
-    OPEN_AI_MODEL_NAME,
+    OPENAI_API_KEY,
+    OPENAI_API_URL,
+    OPENAI_MAX_TOKENS,
+    OPENAI_MODEL_NAME,
 )
 from minds.schemas.chat import Message, Role
 
@@ -23,10 +23,10 @@ def sample_messages():
 @pytest.fixture
 def client():
     return OpenAIClient(
-        api_url=OPEN_AI_API_URL,
-        api_key=OPEN_AI_API_KEY,
-        chat_completions_model=OPEN_AI_MODEL_NAME,
-        max_tokens=OPEN_AI_MAX_TOKENS,
+        api_url=OPENAI_API_URL,
+        api_key=OPENAI_API_KEY,
+        chat_completions_model=OPENAI_MODEL_NAME,
+        max_tokens=OPENAI_MAX_TOKENS,
     )
 
 
@@ -49,7 +49,7 @@ class TestOpenAIClient:
                 results.append(content)
 
             mock_create.assert_awaited_once_with(
-                model=OPEN_AI_MODEL_NAME,
+                model=OPENAI_MODEL_NAME,
                 messages=sample_messages,
                 stream=False,
                 temperature=None,
