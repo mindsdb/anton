@@ -251,8 +251,6 @@ services:
       - "${MINDSDB_HTTP_PORT}:47335"
     volumes:
       - mindsdb_data:/opt/mindsdb
-    environment:
-      MINDSDB_STORAGE_DIR: /opt/mindsdb
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:47334/api/status || exit 1"]
       interval: 30s
