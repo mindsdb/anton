@@ -136,31 +136,23 @@ class DatabaseToolkit:
         selected_tables = set(plan.selected_tables or [])
 
         for catalog in data_catalogs:
-            # Determine namespace prefix used in context rendering
-            namespace = None
-            try:
-                # MindsDBDataCatalog uses integration_name
-                namespace = catalog.integration_name
-            except Exception:
-                namespace = None
-            # RelationalDataCatalog uses datasource_name
-            if not namespace:
-                namespace = getattr(catalog, "datasource_name", None)
+            namespace = catalog.mind_datasource.datasource.name
 
             if selected_ds and namespace and namespace not in selected_ds:
                 continue
 
             # If table filters were specified, reduce tables map
-            if selected_tables and hasattr(catalog, "tables") and isinstance(catalog.tables, dict):
-                new_tables = {}
-                for tbl_name, tbl in catalog.tables.items():
+            if selected_tables:
+                tables = []
+                for tbl in catalog.mind_datasource.mind_datasource_tables:
+                    tbl_name = tbl.table.name
                     fq = f"{namespace}.{tbl_name}" if namespace else tbl_name
                     if not selected_tables or fq in selected_tables:
-                        new_tables[tbl_name] = tbl
+                        tables.append(tbl)
                 # If nothing matched and there was a hard table filter, skip catalog
-                if selected_tables and not new_tables:
+                if selected_tables and not tables:
                     continue
-                catalog.tables = new_tables
+                catalog.mind_datasource.mind_datasource_tables = tables
 
             filtered.append(catalog)
 
@@ -253,7 +245,7 @@ class DatabaseToolkit:
 
         # Log the retry prompt
         logger.info(f"Retry prompt for SQL correction ({len(retry_prompt)} chars):")
-        logger.info(f"Retry prompt:\n{retry_prompt}")
+        # logger.info(f"Retry prompt:\n{retry_prompt}")
 
         # Create correction agent using same pattern as generate_sql
         correction_agent = PydanticAIAgent(
@@ -319,7 +311,7 @@ class DatabaseToolkit:
 
         # Log the exact context string being sent to the LLM
         logger.info(f"Data catalog context for agent '{self.mind.name}' ({len(catalog_context)} chars):")
-        logger.info(f"Context string:\n{catalog_context}")
+        # logger.info(f"Context string:\n{catalog_context}")
 
         llm_config = get_llm_config(self.mind.provider, self.mind.model_name)
 
@@ -329,7 +321,7 @@ class DatabaseToolkit:
 
         # Log the final system prompt being sent to the LLM
         logger.info(f"Final system prompt for SQL generation ({len(generation_prompt)} chars):")
-        logger.info(f"System prompt:\n{generation_prompt}")
+        # logger.info(f"System prompt:\n{generation_prompt}")
 
         generation_agent = PydanticAIAgent(
             model=llm_config,
