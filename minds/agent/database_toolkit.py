@@ -126,7 +126,7 @@ class DatabaseToolkit:
 
         return sanitized
 
-    def _filter_catalogs_with_plan(self, data_catalogs, plan: QueryPlanResult):
+    def _filter_catalogs_with_plan(self, data_catalogs: list[DataCatalog], plan: QueryPlanResult):
         """Filter catalogs according to the plan selection (datasources and tables)."""
         if not plan or (not plan.selected_datasources and not plan.selected_tables):
             return data_catalogs
