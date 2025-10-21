@@ -1,4 +1,4 @@
-xname: Staging - Build and Deploy on push to main
+name: Staging - Build and Deploy on push to main
 
 on:
   push:

@@ -52,21 +52,21 @@ class TestDatasourcesService:
         """Create DatasourcesService instance."""
         return DatasourcesService(
             session=mock_session,
-            user_id="test-user-123",
-            tenant_id="test-tenant-123",
+            user_id=uuid4(),
+            tenant_id=uuid4(),
             mindsdb_client=mock_mindsdb_client,
         )
 
     @pytest.fixture
-    def sample_datasource(self):
+    def sample_datasource(self, user_id=uuid4(), tenant_id=uuid4()):
         """Sample datasource for testing."""
         return Datasource(
             id=uuid4(),
             name="test_postgres",
             engine="postgres",
             connection_data={"host": "localhost", "port": 5432, "user": "test"},
-            user_id="test-user-123",
-            tenant_id="test-tenant-123",
+            user_id=user_id,
+            tenant_id=tenant_id,
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )
@@ -80,12 +80,15 @@ class TestDatasourcesService:
 
     def test_service_initialization(self, mock_session, mock_mindsdb_client):
         """Test service initialization."""
+        user_id = uuid4()
+        tenant_id = uuid4()
         service = DatasourcesService(
-            session=mock_session, user_id="test-user", tenant_id="test-tenant", mindsdb_client=mock_mindsdb_client
+            session=mock_session, user_id=user_id, tenant_id=tenant_id, mindsdb_client=mock_mindsdb_client
         )
 
         assert service.session == mock_session
-        assert service.user_id == "test-user"
+        assert service.user_id == user_id
+        assert service.tenant_id == tenant_id
         assert service.mindsdb_client == mock_mindsdb_client
 
     def test_datasource_to_response(self, service, sample_datasource):

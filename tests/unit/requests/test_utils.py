@@ -1,5 +1,6 @@
 import uuid
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 
@@ -9,15 +10,17 @@ from minds.requests.utils import setup_langfuse_observation
 
 @pytest.fixture()
 def context():
-    return Context(user_id="123", user_email="test@example.com")
+    return Context(
+        user_id=UUID("00000000-0000-0000-0000-000000000001"), tenant_id=UUID("00000000-0000-0000-0000-000000000002")
+    )
 
 
 @pytest.fixture()
 def langfuse_context():
     return LangfuseContext(
-        user_id="123",
-        metadata=LangfuseContextMetadata(user_id="123", user_email="test@example.com"),
-        tags=["test@example.com"],
+        user_id=UUID("00000000-0000-0000-0000-000000000001"),
+        metadata=LangfuseContextMetadata(user_id=UUID("00000000-0000-0000-0000-000000000001")),
+        tags=["test"],
     )
 
 

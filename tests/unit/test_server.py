@@ -99,7 +99,7 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture()
 def headers():
-    return {"Authorization": "Bearer 1234567890"}
+    return {"Authorization": "Bearer 1234567890", "x-user-id": "1", "x-company-id": "2"}
 
 
 def test_healthz(server_app):

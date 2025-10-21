@@ -22,9 +22,14 @@ class TestAPIV1Router:
         return app
 
     @pytest.fixture
-    def client(self, app_with_router):
+    def headers(self):
+        """Create headers for test client."""
+        return {"x-user-id": "12345", "x-company-id": "12345"}
+
+    @pytest.fixture
+    def client(self, app_with_router, headers):
         """Create test client with router."""
-        return TestClient(app_with_router)
+        return TestClient(app_with_router, headers=headers)
 
     def test_router_prefix(self):
         """Test that router has correct prefix."""

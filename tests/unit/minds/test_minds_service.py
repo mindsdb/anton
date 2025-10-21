@@ -45,28 +45,28 @@ class TestMindsService:
         return Mock()
 
     @pytest.fixture
-    def minds_service(self, mock_session, mock_mindsdb_client):
+    def minds_service(self, mock_session, mock_mindsdb_client, user_id=uuid4(), tenant_id=uuid4()):
         """Create MindsService instance with mocked session."""
         # Mock the datasource validation by patching the validation method
         service = MindsService(
             session=mock_session,
             mindsdb_client=mock_mindsdb_client,
-            user_id="test-user-123",
-            tenant_id="test-tenant-123",
+            user_id=user_id,
+            tenant_id=tenant_id,
         )
         service._validate_datasources = AsyncMock()
         service._add_datasources_to_mind = AsyncMock()
         return service
 
     @pytest.fixture
-    def sample_mind(self):
+    def sample_mind(self, user_id=uuid4(), tenant_id=uuid4()):
         """Sample Mind instance for testing."""
         mind = Mind(
             name="test-mind",
             provider="openai",
             model_name="gpt-4o",
-            user_id="test-user-123",
-            tenant_id="test-tenant-123",
+            user_id=user_id,
+            tenant_id=tenant_id,
             parameters={"temperature": 0.7},
             deleted_at=None,
             created_at=datetime.now(timezone.utc),

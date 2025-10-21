@@ -1,5 +1,6 @@
 import importlib
 from unittest.mock import AsyncMock, Mock, patch
+from uuid import UUID
 
 import pytest
 from sqlmodel import Session
@@ -45,7 +46,9 @@ def mock_mindsdb_client():
 @pytest.fixture
 def mock_context():
     """Mock Context."""
-    return Context(user_id="test_user", tenant_id="test_tenant", user_email="test@example.com")
+    return Context(
+        user_id=UUID("00000000-0000-0000-0000-000000000001"), tenant_id=UUID("00000000-0000-0000-0000-000000000002")
+    )
 
 
 @pytest.fixture
