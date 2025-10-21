@@ -79,7 +79,6 @@ jobs:
           env PYTHONPATH=../../ alembic upgrade head
   
   deploy:
-    if: github.event.pull_request.merged == true
     runs-on: mdb-dev
     needs: [build, migrate]
     strategy:
