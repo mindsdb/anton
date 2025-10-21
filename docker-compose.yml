@@ -279,8 +279,6 @@ services:
   minds:
     build:
       context: .
-    volumes:
-      - .:/minds
     <<: *autoRestartOnFailure
     platform: linux/amd64
     entrypoint: sh -c "python -m watchfiles --filter python 'python -m uvicorn minds.server:app --workers 1 --host 0.0.0.0 --port ${MIND_PORT}' ."
