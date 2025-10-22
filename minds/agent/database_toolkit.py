@@ -24,6 +24,8 @@ from minds.common.vars import (
 from minds.model.data_catalog import DataCatalog
 from minds.model.database_agent import QueryGenerationResult, QueryGenerationResultRetry, QueryPlanResult
 from minds.model.mind import Mind
+from minds.requests.stream import MessageStreamer
+from minds.schemas.chat import Role
 
 logger = setup_logging()
 
@@ -49,16 +51,19 @@ class DatabaseToolkit:
         self.mind = mind
         self.mindsdb_client = mindsdb_client
 
-    async def generate_and_execute_sql(self, conversation_context: str) -> str:
-        return await self._generate_and_execute_with_retry(conversation_context)
+    async def generate_and_execute_sql(self, conversation_context: str, streamer: MessageStreamer) -> str:
+        return await self._generate_and_execute_with_retry(conversation_context, streamer)
 
-    async def _generate_and_execute_with_retry(self, conversation_context: str) -> str:
+    async def _generate_and_execute_with_retry(self, conversation_context: str, streamer: MessageStreamer) -> str:
         """Generate and execute SQL with LLM-driven retry logic."""
         last_error = None
         last_query = ""
 
         for attempt in range(MAX_SQL_RETRIES):
             logger.info(f"Attempt {attempt + 1} of {MAX_SQL_RETRIES}")
+            await streamer.push(
+                role=Role.system, content=f"Attempt {attempt + 1} of {MAX_SQL_RETRIES} to generate and execute SQL..."
+            )
 
             try:
                 query = None
@@ -73,12 +78,18 @@ class DatabaseToolkit:
                     logger.info("The final attempt will exclude error context and try from scratch.")
                     query = await self.generate_sql(conversation_context)
 
+                await streamer.push(role=Role.system, content=f"Generated SQL query on attempt {attempt + 1}: {query}.")
                 last_query = query
                 sanitized_query = self._sanitize_and_validate_sql_mindsdb(query)
+                await streamer.push(
+                    role=Role.system, content=f"Sanitized SQL query on attempt {attempt + 1}: {sanitized_query}."
+                )
 
+                await streamer.push(role=Role.system, thoughts=[f"Executing SQL query on attempt {attempt + 1}..."])
                 return await self.execute_sql(sanitized_query, raise_on_error=True)
             except Exception as e:
                 last_error = e
+                await streamer.push(role=Role.system, content=f"Attempt {attempt + 1} failed with error: {str(e)}.")
 
                 if attempt == MAX_SQL_RETRIES - 1:
                     # Final attempt failed

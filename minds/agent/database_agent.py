@@ -90,6 +90,7 @@ class DatabaseAgent:
             """
             return await ctx.deps.toolkit.generate_and_execute_sql(
                 ctx.deps.conversation_context,
+                ctx.deps.streamer,
             )
 
         return agent
@@ -183,7 +184,6 @@ class DatabaseAgent:
         else:
             result = await agent.run(conversation_context, deps=self.deps)
             yield result.output
-
 
     async def run_completion(self, messages: list[Message], streamer: MessageStreamer, stream: bool = False):
         """Run completion and push results to the streamer.

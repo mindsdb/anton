@@ -1,28 +1,16 @@
 import asyncio
-import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 from langfuse import get_client, observe
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.schemas.chat import (
-    ChatCompletion,
-    ChatCompletionChunk,
-    Choice,
-    Message,
-    Role,
-    StreamChoice,
-)
+from minds.schemas.chat import ChatCompletion, ChatCompletionChunk, Choice, Message, Role, StreamChoice, StreamMessage
 
 # Set up logging
 logger = setup_logging()
-
-
-class StreamMessage(Message):
-    id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4()}")
 
 
 def create_stream_message(role: Role, content: Any, request_id: str) -> StreamMessage:
