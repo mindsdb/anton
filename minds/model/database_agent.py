@@ -36,7 +36,7 @@ class QueryPlanResult(BaseModel):
         default=None,
         description="Error or inability to determine a plan.",
     )
-    
+
     def to_string(self) -> str:
         """Convert the plan result to a human-readable string."""
         parts = []

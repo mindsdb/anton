@@ -64,12 +64,15 @@ async def test_format_messages_for_streaming_emits_sse(streaming_mod):
     async for chunk in streaming_mod.format_messages_for_streaming(gen(), model):
         out.append(chunk)
 
-    # Should produce two SSE "data: <json>\n\n" lines
+    # Should produce two content SSE events followed by a final "stop" event
     assert all(ch.startswith("data: ") and ch.endswith("\n\n") for ch in out)
+    # Expect three chunks: two content chunks and a final stop chunk
+    assert len(out) == 3
     payload0 = json.loads(out[0][len("data: ") :].strip())
     payload1 = json.loads(out[1][len("data: ") :].strip())
+    payload2 = json.loads(out[2][len("data: ") :].strip())
 
-    # Basic schema checks
+    # Basic schema checks for content chunks
     assert payload0["id"] == "chatcmpl-A"
     assert payload1["id"] == "chatcmpl-B"
     assert payload0["model"] == model
@@ -79,9 +82,11 @@ async def test_format_messages_for_streaming_emits_sse(streaming_mod):
     assert payload0["choices"][0]["delta"]["content"] == "hello"
     assert payload1["choices"][0]["delta"]["role"] == streaming_mod.Role.assistant
     assert payload1["choices"][0]["delta"]["content"] == "test"
-    # finish_reason should be None (or absent) on non-final chunks and 'stop' on the last chunk
+    # The final chunk should be the stop marker
     assert payload0["choices"][0].get("finish_reason") is None
-    assert payload1["choices"][0]["finish_reason"] == "stop"
+    assert payload1["choices"][0].get("finish_reason") is None
+    assert payload2["choices"][0]["finish_reason"] == "stop"
+    assert payload2["choices"][0]["delta"]["content"] == ""
 
 
 # ---------- Streamer (queue-based) ----------
@@ -144,18 +149,21 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
     assert resp.headers["Cache-Control"] == "no-cache"
     assert resp.headers["Connection"] == "keep-alive"
 
-    # Collect a few chunks from the async body iterator
+    # Collect chunks until we see the final 'stop' chunk
     chunks = []
+    found_stop = False
     async for b in resp.body_iterator:
         s = b.decode() if isinstance(b, bytes | bytearray) else b
         chunks.append(s)
-        if len(chunks) >= 2:
+        payload = json.loads(s[len("data: ") :].strip())
+        if payload["choices"][0].get("finish_reason") == "stop":
+            found_stop = True
             break
 
-    # Two SSE lines for two pushes
+    assert found_stop, "Did not find final stop chunk in stream"
     assert all(ch.startswith("data: ") and ch.endswith("\n\n") for ch in chunks)
     payloads = [json.loads(ch[len("data: ") :].strip()) for ch in chunks]
-    assert [p["choices"][0]["delta"]["content"] for p in payloads] == [
+    assert [p["choices"][0]["delta"]["content"] for p in payloads if p["choices"][0].get("finish_reason") is None] == [
         "hello",
         "world",
     ]
