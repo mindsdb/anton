@@ -320,8 +320,10 @@ class DatabaseToolkit:
         )
 
         # Filter catalogs by plan (if available)
+        # Pass a deep copy to avoid modifying original catalogs
+        data_catalog_copy = copy.deepcopy(data_catalogs)
         data_catalogs_filtered = (
-            self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
+            self._filter_catalogs_with_plan(data_catalog_copy, plan) if plan else data_catalog_copy
         )
 
         # Extract engine types from filtered data catalogs
