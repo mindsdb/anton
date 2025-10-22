@@ -69,14 +69,14 @@ class DatabaseToolkit:
                 query = None
                 # Initial attempt will have no error context
                 if attempt == 0:
-                    query = await self.generate_sql(conversation_context)
+                    query = await self.generate_sql(conversation_context, streamer)
                 # Middle attempts: use correction with error context
                 elif attempt < MAX_SQL_RETRIES - 1:
-                    query = await self._generate_corrected_sql(conversation_context, last_query, str(last_error))
+                    query = await self._generate_corrected_sql(conversation_context, last_query, str(last_error), streamer)
                 # Final attempt: generate corrected SQL from scratch without error context
                 else:
                     logger.info("The final attempt will exclude error context and try from scratch.")
-                    query = await self.generate_sql(conversation_context)
+                    query = await self.generate_sql(conversation_context, streamer)
 
                 await streamer.push(role=Role.system, content=f"Generated SQL query on attempt {attempt + 1}: {query}.")
                 last_query = query
@@ -200,7 +200,9 @@ class DatabaseToolkit:
             logger.warning(f"Planning step failed, proceeding without filtering: {e}")
             return None
 
-    async def _generate_corrected_sql(self, conversation_context: str, failed_query: str, error_message: str) -> str:
+    async def _generate_corrected_sql(
+        self, conversation_context: str, failed_query: str, error_message: str, streamer: MessageStreamer
+    ) -> str:
         """Use LLM to analyze error and generate corrected SQL following existing patterns."""
         logger.info(f"Attempting LLM-driven SQL correction for error: {error_message}")
 
@@ -213,9 +215,14 @@ class DatabaseToolkit:
 
         # Run planning step to narrow down relevant engines/datasources/tables
         plan = await self._plan_selection(conversation_context, data_catalogs)
+
+        await streamer.push(Role.system, f"Planning step result: {plan.to_string() if plan else 'No plan generated.'}")
+
         if plan and plan.error:
             logger.info(f"Planning step returned error: {plan.error}. Proceeding with full catalogs.")
             plan = None
+
+        await streamer.push(Role.system, "Filtering data catalogs based on plan..." if plan else "Proceeding with full data catalogs.")
 
         # Filter catalogs by plan (if available)
         # Pass a deep copy to avoid modifying original catalogs
@@ -277,12 +284,13 @@ class DatabaseToolkit:
 
         return corrected_query
 
-    async def generate_sql(self, conversation_context: str) -> str:
+    async def generate_sql(self, conversation_context: str, streamer: MessageStreamer) -> str:
         """
         Generate SQL based on user input and database context.
 
         Args:
             conversation_context: The complete conversation context
+            streamer: The message streamer for pushing thoughts
 
         Returns:
             A SQL query string that addresses the user's request
@@ -296,9 +304,14 @@ class DatabaseToolkit:
 
         # Run planning step to narrow down relevant engines/datasources/tables
         plan = await self._plan_selection(conversation_context, data_catalogs)
+
+        await streamer.push(Role.system, f"Planning step result: {plan.to_string() if plan else 'No plan generated.'}")
+    
         if plan and plan.error:
             logger.info(f"Planning step returned error: {plan.error}. Proceeding with full catalogs.")
             plan = None
+
+        await streamer.push(Role.system, "Filtering data catalogs based on plan..." if plan else "Proceeding with full data catalogs.")
 
         # Filter catalogs by plan (if available)
         data_catalogs_filtered = (
