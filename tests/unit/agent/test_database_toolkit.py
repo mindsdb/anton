@@ -95,13 +95,18 @@ class TestDatabaseToolkit:
     @pytest.fixture
     def mock_data_catalog(self, mock_mind_datasource):
         """Create a mock DataCatalog instance for testing."""
-        catalog = Mock(spec=DataCatalog)
-        catalog.mind_datasource = mock_mind_datasource
-        catalog.integration_name = "test-integration"
-        catalog.datasource_name = "test-datasource"
-        catalog.tables = {"users": {"id": "int", "name": "string"}}
-        catalog.to_context_str = Mock(return_value="Mock catalog context")
-        return catalog
+
+        class DummyCatalog:
+            def __init__(self, mind_datasource):
+                self.mind_datasource = mind_datasource
+                self.integration_name = "test-integration"
+                self.datasource_name = "test-datasource"
+                self.tables = {"users": {"id": "int", "name": "string"}}
+
+            def to_context_str(self):
+                return "Mock catalog context"
+
+        return DummyCatalog(mock_mind_datasource)
 
     @pytest.fixture
     def database_toolkit(self, mock_mind, mock_mindsdb_client):
