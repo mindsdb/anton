@@ -59,7 +59,10 @@ class TestDatabaseToolkit:
         """Create a mock Datasource instance for testing."""
         datasource = Mock(spec=Datasource)
         datasource.id = UUID("12345678-1234-5678-1234-567812345678")
-        datasource.name = "test-datasource"
+        # The DatabaseToolkit uses the nested mind_datasource.datasource.name
+        # as the canonical namespace. Use the same value as integration_name in
+        # the tests to keep fixtures consistent.
+        datasource.name = "test-integration"
         datasource.engine = "postgres"
         datasource.created_at = datetime.now()
         datasource.modified_at = datetime.now()
@@ -80,6 +83,13 @@ class TestDatabaseToolkit:
         mind_datasource.deleted_at = None
         mind_datasource.tenant_id = "test-tenant"
         mind_datasource.status = "active"
+        # Provide a default list of mind_datasource_tables compatible with
+        # the DatabaseToolkit expectations. Each entry should have a `.table`
+        # attribute with a `.name`.
+        mock_table = Mock()
+        mock_table.table = Mock()
+        mock_table.table.name = "users"
+        mind_datasource.mind_datasource_tables = [mock_table]
         return mind_datasource
 
     @pytest.fixture
@@ -621,6 +631,13 @@ class TestDatabaseToolkit:
         catalog = Mock(spec=DataCatalog)
         catalog.integration_name = None
         catalog.datasource_name = "fallback-datasource"
+        # Provide nested mind_datasource.datasource.name to be used by toolkit
+        md = Mock()
+        ds = Mock()
+        ds.name = "fallback-datasource"
+        md.datasource = ds
+        md.mind_datasource_tables = []
+        catalog.mind_datasource = md
         catalog.tables = {"users": {"id": "int", "name": "string"}}
 
         catalogs = [catalog]
@@ -634,6 +651,14 @@ class TestDatabaseToolkit:
         catalog.integration_name = None
         catalog.datasource_name = None
         catalog.tables = {"users": {"id": "int", "name": "string"}}
+        # Provide a mind_datasource with a datasource.name = None so the toolkit
+        # can safely access nested attributes.
+        md = Mock()
+        ds = Mock()
+        ds.name = None
+        md.datasource = ds
+        md.mind_datasource_tables = []
+        catalog.mind_datasource = md
 
         catalogs = [catalog]
         plan = QueryPlanResult(selected_datasources=["some-datasource"])
@@ -645,22 +670,40 @@ class TestDatabaseToolkit:
         """Test catalog filtering with table filtering."""
         catalog = Mock(spec=DataCatalog)
         catalog.integration_name = "test-integration"
-        catalog.tables = {"users": {"id": "int", "name": "string"}, "orders": {"id": "int", "user_id": "int"}}
+        # Provide nested mind_datasource with table objects as expected by toolkit
+        md = Mock()
+        md.datasource = Mock()
+        md.datasource.name = "test-integration"
+        tbl_users = Mock()
+        tbl_users.table = Mock()
+        tbl_users.table.name = "users"
+        tbl_orders = Mock()
+        tbl_orders.table = Mock()
+        tbl_orders.table.name = "orders"
+        md.mind_datasource_tables = [tbl_users, tbl_orders]
+        catalog.mind_datasource = md
 
         catalogs = [catalog]
         plan = QueryPlanResult(selected_tables=["test-integration.users"])
         result = database_toolkit._filter_catalogs_with_plan(catalogs, plan)
 
-        # Should filter tables to only include users
+        # Should filter tables to only include users (within nested structure)
         assert len(result) == 1
-        assert "users" in result[0].tables
-        assert "orders" not in result[0].tables
+        assert any(getattr(t.table, "name", None) == "users" for t in result[0].mind_datasource.mind_datasource_tables)
+        assert all(getattr(t.table, "name", None) != "orders" for t in result[0].mind_datasource.mind_datasource_tables)
 
     def test_filter_catalogs_with_plan_no_matching_tables(self, database_toolkit):
         """Test catalog filtering when no tables match the filter."""
         catalog = Mock(spec=DataCatalog)
         catalog.integration_name = "test-integration"
-        catalog.tables = {"users": {"id": "int", "name": "string"}}
+        md = Mock()
+        md.datasource = Mock()
+        md.datasource.name = "test-integration"
+        tbl_users = Mock()
+        tbl_users.table = Mock()
+        tbl_users.table.name = "users"
+        md.mind_datasource_tables = [tbl_users]
+        catalog.mind_datasource = md
 
         catalogs = [catalog]
         plan = QueryPlanResult(selected_tables=["test-integration.nonexistent"])

@@ -126,7 +126,7 @@ class DatabaseToolkit:
 
         return sanitized
 
-    def _filter_catalogs_with_plan(self, data_catalogs, plan: QueryPlanResult):
+    def _filter_catalogs_with_plan(self, data_catalogs: list[DataCatalog], plan: QueryPlanResult):
         """Filter catalogs according to the plan selection (datasources and tables)."""
         if not plan or (not plan.selected_datasources and not plan.selected_tables):
             return data_catalogs
@@ -136,31 +136,23 @@ class DatabaseToolkit:
         selected_tables = set(plan.selected_tables or [])
 
         for catalog in data_catalogs:
-            # Determine namespace prefix used in context rendering
-            namespace = None
-            try:
-                # MindsDBDataCatalog uses integration_name
-                namespace = catalog.integration_name
-            except Exception:
-                namespace = None
-            # RelationalDataCatalog uses datasource_name
-            if not namespace:
-                namespace = getattr(catalog, "datasource_name", None)
+            namespace = catalog.mind_datasource.datasource.name
 
             if selected_ds and namespace and namespace not in selected_ds:
                 continue
 
             # If table filters were specified, reduce tables map
-            if selected_tables and hasattr(catalog, "tables") and isinstance(catalog.tables, dict):
-                new_tables = {}
-                for tbl_name, tbl in catalog.tables.items():
+            if selected_tables:
+                tables = []
+                for tbl in catalog.mind_datasource.mind_datasource_tables:
+                    tbl_name = tbl.table.name
                     fq = f"{namespace}.{tbl_name}" if namespace else tbl_name
                     if not selected_tables or fq in selected_tables:
-                        new_tables[tbl_name] = tbl
+                        tables.append(tbl)
                 # If nothing matched and there was a hard table filter, skip catalog
-                if selected_tables and not new_tables:
+                if selected_tables and not tables:
                     continue
-                catalog.tables = new_tables
+                catalog.mind_datasource.mind_datasource_tables = tables
 
             filtered.append(catalog)
 
@@ -215,9 +207,9 @@ class DatabaseToolkit:
             plan = None
 
         # Filter catalogs by plan (if available)
-        data_catalogs_filtered = (
-            self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
-        )
+        # Pass a deep copy to avoid modifying original catalogs
+        data_catalog_copy = copy.deepcopy(data_catalogs)
+        data_catalogs_filtered = self._filter_catalogs_with_plan(data_catalog_copy, plan) if plan else data_catalogs
 
         # Extract engine types from data catalogs (same as generate_sql)
         engines = {catalog.mind_datasource.datasource.engine for catalog in data_catalogs_filtered}
