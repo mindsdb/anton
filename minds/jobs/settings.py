@@ -72,11 +72,15 @@ def get_prefect_settings() -> PrefectSettings:
     This allows decorators to work with defaults while still loading from secrets at runtime.
     """
     name = _block_name(_ENV)
+    print(f"_ENV: {_ENV}")
     try:
         block = Secret.load(name)
         data = block.get()
+        print(f"data from secrets: {data}")
+        
         return PrefectSettings(**data)
     except Exception as e:
         # Return default settings if secret doesn't exist (useful during deployment)
         print(f"Warning: Could not load Prefect Secret block '{name}': {e}")
+        print(f"data from default: {data}")
         return PrefectSettings()
