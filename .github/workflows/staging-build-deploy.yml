@@ -103,7 +103,7 @@ jobs:
             sudo chmod +x /usr/local/bin/yq
           fi
           # Update IMAGE_TAG environment variable value
-          yq -i '(.globalEnvsAlias.globalEnvs[] | select(.name == "IMAGE_TAG") | .value) = "development-${{ env.SLUG }}"' deployment/minds-flows/values.yaml
+          yq -i '(.globalEnvsAlias.globalEnvs[] | select(.name == "IMAGE_TAG") | .value) = "staging-${{ env.SLUG }}"' deployment/minds-flows/values.yaml
           cat deployment/minds-flows/values.yaml
       - name: Notify of deployment starting
         id: slack
