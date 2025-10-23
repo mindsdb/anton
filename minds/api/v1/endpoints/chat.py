@@ -60,7 +60,7 @@ async def chat_completions(
     chat_completions_request: ChatCompletionsRequest,
     request: Request,
     mindsdb_client=Depends(get_mindsdb_client),
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
 ):
     """
     Handle chat completions for documents (API v1).

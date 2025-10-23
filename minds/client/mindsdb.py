@@ -3,7 +3,7 @@ from mindsdb_sdk import connect
 from mindsdb_sdk.server import Server
 
 from minds.common import get_authorization_bearer_token, get_headers_for_mindsdb_client
-from minds.common.vars import MINDSDB_API_KEY, MINDSDB_LOGIN, MINDSDB_PASSWORD, MINDSDB_URL
+from minds.common.vars import MINDSDB_LOGIN, MINDSDB_PASSWORD, MINDSDB_URL
 from minds.requests.context import Context
 
 

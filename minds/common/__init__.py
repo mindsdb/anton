@@ -4,7 +4,7 @@ from .authentication import (
     get_api_key_from_request,
     get_authorization_bearer_token,
     get_company_id,
-    get_headers_for_mindsdb_client
+    get_headers_for_mindsdb_client,
 )
 
 __all__ = [
