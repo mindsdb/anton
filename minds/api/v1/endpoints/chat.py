@@ -27,6 +27,15 @@ logger = setup_logging()
 router = APIRouter()
 
 
+def get_mindsdb_client(request: Request):
+    """
+    Dependency function to create MindsDB client from request.
+    """
+    context = extract_context_from_request(request)
+    mindsdb_client = create_mindsdb_client_from_request(request, context)
+    return mindsdb_client
+
+
 @router.options("/completions")
 async def options_handler():
     """
@@ -48,7 +57,10 @@ async def options_handler():
 @router.post("/completions")
 @observe(name="Chat Completions v1", as_type="generation")
 async def chat_completions(
-    chat_completions_request: ChatCompletionsRequest, request: Request, session: Session = Depends(get_session)
+    chat_completions_request: ChatCompletionsRequest,
+    request: Request,
+    mindsdb_client=Depends(get_mindsdb_client),
+    session: Session = Depends(get_session)
 ):
     """
     Handle chat completions for documents (API v1).
@@ -75,8 +87,6 @@ async def chat_completions(
 
     # Set up Langfuse observation
     request_id = setup_langfuse_observation(context=context)
-
-    mindsdb_client = create_mindsdb_client_from_request(request)
 
     try:
         logger.debug(f"🔄 [{request_id}] Starting chat completions v1")

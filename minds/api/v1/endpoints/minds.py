@@ -27,7 +27,7 @@ def get_minds_service(request: Request, session: Session = Depends(get_session))
     Dependency function to create MindsService with user context.
     """
     context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request)
+    mindsdb_client = create_mindsdb_client_from_request(request, context)
     return MindsService(
         session=session,
         mindsdb_client=mindsdb_client,
