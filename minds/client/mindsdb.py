@@ -7,13 +7,6 @@ from minds.common.vars import MINDSDB_API_KEY, MINDSDB_LOGIN, MINDSDB_PASSWORD, 
 from minds.requests.context import Context
 
 
-def create_mindsdb_client_from_env() -> Server:
-    """
-    Create a MindsDB client from the environment.
-    """
-    return create_mindsdb_client(api_key=MINDSDB_API_KEY)
-
-
 def create_mindsdb_client_from_request(request: Request, context: Context) -> Server:
     """
     Create a MindsDB client from a request.

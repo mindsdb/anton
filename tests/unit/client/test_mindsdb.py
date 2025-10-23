@@ -6,31 +6,8 @@ from mindsdb_sdk.server import Server
 
 from minds.client.mindsdb import (
     create_mindsdb_client,
-    create_mindsdb_client_from_env,
     create_mindsdb_client_from_request,
 )
-
-
-class TestCreateMindsdbClientFromEnv:
-    """Test cases for create_mindsdb_client_from_env function."""
-
-    def test_create_mindsdb_client_from_env_success(self):
-        """Test successful client creation from environment."""
-        result = create_mindsdb_client_from_env()
-        assert result is not None
-
-    @patch("minds.client.mindsdb.MINDSDB_API_KEY", None)
-    @patch("minds.client.mindsdb.connect")
-    def test_create_mindsdb_client_from_env_none_api_key(self, mock_connect):
-        """Test client creation with None API key connects without auth."""
-        mock_client = Mock(spec=Server)
-        mock_connect.return_value = mock_client
-
-        result = create_mindsdb_client_from_env()
-
-        # Should connect without authentication when no API key
-        mock_connect.assert_called_once()
-        assert result == mock_client
 
 
 class TestCreateMindsdbClientFromRequest:
