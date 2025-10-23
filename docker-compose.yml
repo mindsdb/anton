@@ -251,8 +251,6 @@ services:
       - "${MINDSDB_HTTP_PORT}:47335"
     volumes:
       - mindsdb_data:/opt/mindsdb
-    environment:
-      MINDSDB_CONFIG_PATH: /opt/mindsdb
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:47334/api/status || exit 1"]
       interval: 30s
@@ -305,8 +303,8 @@ services:
       MINDSDB_LOGIN: "${MINDSDB_LOGIN}"
       MINDSDB_PASSWORD: "${MINDSDB_PASSWORD}"
 
-      OPEN_AI_API_URL: "${OPEN_AI_API_URL}"
-      OPEN_AI_API_KEY: "${OPEN_AI_API_KEY}"
+      OPENAI_API_URL: "${OPENAI_API_URL}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
 
       LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY}"
       LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"

@@ -535,6 +535,50 @@ Generate a corrected SQL query that addresses the specific error while maintaini
 
 """
 
+CHART_GENERATION_INSTRUCTIONS = """
+**OUTPUT INSTRUCTIONS**
+
+- Always wrap mathematical expressions and formulas in `$` or `$$`:
+  - Inline formulas: `$expression$`
+  - Block formulas: `$$expression$$`
+  - Examples:
+    - Instead of: \\text{pe c} =\\frac{R}{B}, write: `$$\\text{pe c} =\\frac{R}{B}$$`
+    - Instead of: where ( \\Delta U ) is the change, write: where ($\\Delta U$) is the change.
+
+- When presenting or visualizing data:
+  - Use `ORDER BY` to sort information wherever possible and relevant.
+  - For filtering, prefer using `CASE` statements.
+
+- Aliasing conventions:
+  - Avoid using double quotes for aliases.
+  - Use backticks (\\`) for aliases, except when the alias is in lower-case underscore notation, in which case do not use quotes or backticks.
+    - Example: Instead of `SELECT COUNT(*) AS \\`count\\``, use `SELECT COUNT(*) AS count`.
+  - Always use lower-case underscore notation for aliases where possible.
+
+- Calculation guidance:
+  - Perform calculations within the database, leveraging window functions and aggregate operations like `OVER()`.
+  - When calculating percentages, use `nullif(a, b)` to safeguard against division by zero.
+
+- For distribution-related queries:
+  - Always include calculated percentages within the query.
+
+- Visualization requirements:
+  - If the output data includes more than one grouping, distribution, or a numerical/categorical breakdown suitable for visualization, generate a Chart.js configuration and include it in the Markdown response after the table output:
+    ```chartjs
+    {<chartjs config>}
+    ```
+  - When referring to the chart, use the word "chart" only. Do not mention Chart.js or its configuration. The front end will render the configuration as a chart, so ensure the JSON configuration is valid before returning it.
+  - When visualizing data, ensure you use `ORDER BY` in your queries to sort information as much as possible.
+
+## Output Format
+- Output a Markdown table with your query results, including all columns that are relevant to the user's question. If you are unsure of column names, infer them based on standard database conventions or provided data.
+- If a chart is included, place the Chart.js configuration in a code block labeled `chartjs` (as shown above) immediately following the Markdown table. Ensure the configuration is valid JSON.
+- If the query cannot be executed or if data is missing, return a clear error message describing the issue, formatted as plain text.
+- Match the ordering and field names in your output to the user's request wherever possible, or follow standard data conventions for the given context.
+
+After generating outputs or queries, validate that (1) column naming, ordering, and Markdown/table formatting accurately match requirements, and (2) any chart configuration is well-formed JSON and follows the guidelines. If validation fails, self-correct before finalizing the response.
+"""
+
 
 def get_prompt_template_for_engines(engines: set) -> str:
     """

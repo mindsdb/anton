@@ -122,6 +122,7 @@ class TestChatCompletionsRequestHandler:
                 messages=sample_streaming_chat_request.messages,
                 model=sample_streaming_chat_request.model,
                 stream=True,
+                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
             )
 
             # Verify process_streaming_producer was called
@@ -175,6 +176,7 @@ class TestChatCompletionsRequestHandler:
                 messages=sample_chat_request.messages,
                 model=sample_chat_request.model,
                 stream=False,
+                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
             )
 
             # Verify process_non_streaming_producer was called
@@ -236,6 +238,7 @@ class TestChatCompletionsRequestHandler:
                 messages=chat_request.messages,
                 model=chat_request.model,
                 stream=False,  # Should default to False when None
+                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
             )
 
             # Verify non-streaming producer was called (not streaming)
@@ -330,6 +333,7 @@ class TestChatCompletionsRequestHandler:
                 messages=sample_messages,  # Original messages
                 model="custom-model-v1",  # Custom model
                 stream=False,  # Explicit stream value
+                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="custom-session"),
             )
 
             # Verify process_non_streaming_producer received correct parameters

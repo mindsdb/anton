@@ -173,7 +173,7 @@ class TestChatCompletionsHandler:
         assert result is None
 
         # Verify DatabaseAgent was created with correct parameters
-        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit)
+        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit, config=None)
 
         # Verify DatabaseToolkit was created with correct parameters
         mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
@@ -228,7 +228,7 @@ class TestChatCompletionsHandler:
         assert result is None
 
         # Verify DatabaseAgent was created with correct parameters
-        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit)
+        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit, config=None)
 
         # Verify DatabaseToolkit was created with correct parameters
         mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
@@ -280,7 +280,7 @@ class TestChatCompletionsHandler:
         assert result is None
 
         # Verify DatabaseAgent was created with correct parameters
-        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit)
+        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit, config=None)
 
         # Verify DatabaseToolkit was created with correct parameters
         mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
@@ -332,7 +332,7 @@ class TestChatCompletionsHandler:
         assert result is None
 
         # Verify DatabaseAgent was created with correct parameters
-        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit)
+        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit, config=None)
 
         # Verify DatabaseToolkit was created with correct parameters
         mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
@@ -387,7 +387,7 @@ class TestChatCompletionsHandler:
         assert result is None
 
         # Verify DatabaseAgent was created with correct parameters
-        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit)
+        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit, config=None)
 
         # Verify DatabaseToolkit was created with correct parameters
         mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
@@ -460,7 +460,7 @@ class TestChatCompletionsHandler:
         assert result is None
 
         # Verify DatabaseAgent was created with correct parameters
-        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit)
+        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit, config=None)
 
         # Verify DatabaseToolkit was created with correct parameters
         mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
@@ -502,7 +502,7 @@ class TestChatCompletionsHandler:
         await sample_handler.chat_completions(mock_streamer)
 
         # Verify DatabaseAgent was created with correct parameters
-        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit)
+        mock_agent_class.assert_called_once_with(mind=mock_mind, database_toolkit=mock_toolkit, config=None)
 
         # Verify DatabaseToolkit was created with correct parameters
         mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)

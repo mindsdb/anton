@@ -2,10 +2,11 @@ from langfuse import observe
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
 
-from minds.agent.database_agent import DatabaseAgent
+from minds.agent.database_agent import DatabaseAgent, DatabaseAgentConfig
 from minds.agent.database_toolkit import DatabaseToolkit
 from minds.common.logger import setup_logging
 from minds.model.mind_datasource import DataCatalogStatus
+from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
 from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
@@ -24,6 +25,7 @@ class ChatCompletionsHandler:
         messages: list[Message],
         model: str,
         stream: bool,
+        metadata: ChatCompletionRequestMetadata | None = None,
     ):
         """
         Initialize the ChatCompletionsHandler with a list of messages.
@@ -41,6 +43,7 @@ class ChatCompletionsHandler:
         self.messages = messages
         self.model = model
         self.stream = stream
+        self.metadata = metadata
 
     @observe(name="Chat Completions Handler")
     async def chat_completions(self, streamer: MessageStreamer) -> str | None:
@@ -74,7 +77,11 @@ class ChatCompletionsHandler:
             return None
 
         database_toolkit = DatabaseToolkit(mind=mind, mindsdb_client=self.mindsdb_client)
-        database_agent = DatabaseAgent(mind=mind, database_toolkit=database_toolkit)
+        database_agent = DatabaseAgent(
+            mind=mind,
+            database_toolkit=database_toolkit,
+            config=DatabaseAgentConfig(enable_charting=self.metadata.enable_charting) if self.metadata else None,
+        )
 
         async for chunk in database_agent.get_completion(self.messages, stream=self.stream):
             await streamer.push(role=Role.assistant, content=chunk)

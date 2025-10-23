@@ -1,3 +1,4 @@
+import textwrap
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,6 +8,7 @@ from pydantic_ai import RunContext
 
 from minds.agent.database_toolkit import DatabaseToolkit
 from minds.agent.llm import get_llm_config
+from minds.agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
 from minds.schemas.chat import Message
@@ -24,6 +26,13 @@ class DatabaseDeps:
     conversation_context: str | None = None
 
 
+@dataclass
+class DatabaseAgentConfig:
+    """Config for the database agent."""
+
+    enable_charting: bool = False
+
+
 class DatabaseAgent:
     """Experimental agent implementation using Pydantic instead of Langchain.
 
@@ -35,15 +44,18 @@ class DatabaseAgent:
         self,
         mind: Mind,
         database_toolkit: DatabaseToolkit,
+        config: DatabaseAgentConfig | None = None,
     ):
         """Initialize the PydanticAgent.
 
         Args:
             mind: The database mind record.
             database_toolkit: DatabaseToolkit instance for executing database operations.
+            config: Config for the database agent.
         """
         self.mind = mind
         self.deps = DatabaseDeps(toolkit=database_toolkit)
+        self.config = config
 
         self._pydantic_agent = self._setup_agent()
 
@@ -55,14 +67,7 @@ class DatabaseAgent:
         """
         llm_model = get_llm_config(self.mind.provider, self.mind.model_name)
 
-        base_prompt = (
-            "You are a helpful database assistant created by MindsDB that can query databases and provide insights."
-        )
-
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        current_time = datetime.now().strftime("%H:%M:%S")
-
-        system_prompt = f"{base_prompt}\n\nCurrent date: {current_date}\nCurrent time: {current_time}"
+        system_prompt = self._get_system_prompt()
 
         agent = PydanticAIAgent(
             model=llm_model,
@@ -86,6 +91,30 @@ class DatabaseAgent:
             )
 
         return agent
+
+    def _get_system_prompt(self) -> str:
+        """Get the system prompt for the database agent.
+
+        Returns:
+            The system prompt for the database agent.
+        """
+
+        prompt = textwrap.dedent("""
+            You are a helpful database assistant created by MindsDB that can query databases and provide insights.
+            When querying data, automatically order results by the variable most relevant to the question, in the
+            direction that provides the most actionable insights, unless otherwise specified.
+        """).strip()
+
+        # Add charting instructions if enabled
+        if self.config and getattr(self.config, "enable_charting", False):
+            prompt += "\n\n" + CHART_GENERATION_INSTRUCTIONS
+
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        current_time = datetime.now().strftime("%H:%M:%S")
+
+        prompt += f"\n\nCurrent date: {current_date}\nCurrent time: {current_time}"
+
+        return prompt
 
     def _build_conversation_context(self, messages: list[Message]) -> str:
         """Build a conversation context string from messages.
