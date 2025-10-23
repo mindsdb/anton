@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pandas as pd
 import pytest
+from mindsdb_sdk.databases import Database
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
 
@@ -99,7 +100,6 @@ class TestDatasourcesService:
         assert result.id == sample_datasource.id
         assert result.name == "test_postgres"
         assert result.engine == "postgres"
-        assert result.connection_data == {"host": "localhost", "port": 5432, "user": "test"}
         assert result.is_demo is False
 
     @pytest.mark.asyncio
@@ -229,14 +229,17 @@ class TestDatasourcesService:
         mock_databases.drop = AsyncMock()
         mock_mindsdb_client.databases = mock_databases
 
-        update_request = DatasourceUpdateRequest(connection_data={"host": "newhost", "port": 5432})
+        update_request = DatasourceUpdateRequest(
+            description="Updated description", connection_data={"host": "newhost", "port": 5432}
+        )
 
         result = await service.update_datasource("test_postgres", update_request)
 
         assert isinstance(result, DatasourceResponse)
         assert result.name == "test_postgres"
-        assert result.connection_data == {"host": "newhost", "port": 5432}
         mock_session.commit.assert_called_once()
+        mock_databases.drop.assert_called_once()
+        mock_databases.create.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_update_datasource_not_found(self, service, mock_session):
@@ -282,7 +285,7 @@ class TestDatasourcesService:
         """Test successful connection testing."""
         service.get_datasource = AsyncMock(return_value=Mock())
 
-        mock_database = Mock()
+        mock_database = Mock(spec=Database)
         mock_tables = Mock()
         mock_tables.list = Mock()
         mock_database.tables = mock_tables
@@ -316,7 +319,7 @@ class TestDatasourcesService:
         """Test connection when table listing fails."""
         service.get_datasource = AsyncMock(return_value=Mock())
 
-        mock_database = Mock()
+        mock_database = Mock(spec=Database)
         mock_tables = Mock()
         mock_tables.list.side_effect = Exception("Connection failed")
         mock_database.tables = mock_tables

@@ -592,7 +592,5 @@ class DatasourcesService:
             connection_data = connection_status.mindsdb_database.params
 
         return DatasourceDetailedResponse(
-            **base_response.model_dump(),
-            connection_data=connection_data,
-            connection_status=connection_status
+            **base_response.model_dump(), connection_data=connection_data, connection_status=connection_status
         )

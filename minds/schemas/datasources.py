@@ -42,11 +42,14 @@ class DatasourceResponse(BaseModel):
 
 class DatasourceConnectionStatus(BaseModel):
     """Model for datasource connection status."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     success: bool = Field(..., description="Whether connection is successful")
     error_message: str | None = Field(None, description="Error message if connection failed")
-    mindsdb_database: Database | None = Field(None, description="Underlying MindsDB Database object if available", exclude=True)
+    mindsdb_database: Database | None = Field(
+        None, description="Underlying MindsDB Database object if available", exclude=True
+    )
 
 
 class DatasourceDetailedResponse(DatasourceResponse):
