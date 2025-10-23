@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from mindsdb_sdk.databases import Database
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DatasourceCreateRequest(BaseModel):
@@ -42,6 +42,7 @@ class DatasourceResponse(BaseModel):
 
 class DatasourceConnectionStatus(BaseModel):
     """Model for datasource connection status."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     success: bool = Field(..., description="Whether connection is successful")
     error_message: str | None = Field(None, description="Error message if connection failed")
