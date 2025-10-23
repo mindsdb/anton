@@ -460,7 +460,8 @@ class MindsService:
                             name=relationship.datasource.name,
                             engine=relationship.datasource.engine,
                             description=relationship.datasource.description,
-                            connection_data=relationship.datasource.connection_data,
+                            # Get connection data from MindsDB database object
+                            connection_data=self.mindsdb_client.databases.get(relationship.datasource.name).params,
                             tables=[
                                 mind_datasource_table.table.name
                                 for mind_datasource_table in relationship.mind_datasource_tables
