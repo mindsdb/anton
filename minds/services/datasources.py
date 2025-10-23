@@ -5,6 +5,7 @@ This service handles both internal dataource information storage and MindsDB SDK
 for datasource management operations.
 """
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -589,7 +590,11 @@ class DatasourcesService:
         connection_status = await self.test_connection(datasource.name)
         connection_data = None
         if connection_status.mindsdb_database:
-            connection_data = connection_status.mindsdb_database.params
+            connection_data = (
+                connection_status.mindsdb_database.params
+                if isinstance(connection_status.mindsdb_database.params, dict)
+                else json.loads(connection_status.mindsdb_database.params)
+            )
 
         return DatasourceDetailedResponse(
             **base_response.model_dump(), connection_data=connection_data, connection_status=connection_status
