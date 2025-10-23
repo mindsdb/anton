@@ -77,7 +77,7 @@ def load_data_catalog(
 
     try:
         # Create a MindsDB client
-        company_id = get_company_id(tenant_id, session)
+        company_id = get_company_id(tenant_id, user_id)
         mindsdb_client = create_mindsdb_client_with_credentials(
             url=prefect_settings.mindsdb_url,
             api_key=prefect_settings.mindsdb_api_key,

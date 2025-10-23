@@ -41,7 +41,7 @@ def get_data_catalog_loader(request: Request, session: Session = Depends(get_ses
     Dependency function to create DataCatalogLoader.
     """
     context = extract_context_from_request(request)
-    return DataCatalogLoader(session=session, tenant_id=context.tenant_id)
+    return DataCatalogLoader(session=session, tenant_id=context.tenant_id, user_id=context.user_id)
 
 
 @router.get("/")

@@ -84,7 +84,7 @@ def create_mindsdb_client_with_credentials(
     if api_key is None or not api_key or not api_key.strip():
         # For MindsDB without authentication, don't pass login/password at all
         if not password:
-            return connect(url=url)
+            return connect(url=url, headers=headers)
         else:
             return connect(
                 url=url,
