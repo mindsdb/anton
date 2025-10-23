@@ -8,6 +8,7 @@ for datasource management operations.
 from typing import Any
 from uuid import UUID
 
+from mindsdb_sdk.databases import Database
 from pydantic import BaseModel, Field
 
 
@@ -44,6 +45,7 @@ class DatasourceConnectionStatus(BaseModel):
 
     success: bool = Field(..., description="Whether connection is successful")
     error_message: str | None = Field(None, description="Error message if connection failed")
+    mindsdb_database: Database | None = Field(None, description="Underlying MindsDB Database object if available", exclude=True)
 
 
 class DatasourceDetailedResponse(DatasourceResponse):

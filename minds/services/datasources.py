@@ -396,10 +396,10 @@ class DatasourcesService:
             # This will trigger a connection test in MindsDB
             try:
                 database.tables.list()
-                return DatasourceConnectionStatus(success=True)
+                return DatasourceConnectionStatus(success=True, mindsdb_database=database)
             except Exception as db_error:
                 return DatasourceConnectionStatus(
-                    success=False, error_message=f"Connection test failed: {str(db_error)}"
+                    success=False, error_message=f"Connection test failed: {str(db_error)}", mindsdb_database=database
                 )
         except DatasourceNotFoundError:
             return DatasourceConnectionStatus(success=False, error_message="Datasource not found")
@@ -587,5 +587,12 @@ class DatasourcesService:
 
         # Get real connection status from MindsDB
         connection_status = await self.test_connection(datasource.name)
+        connection_data = None
+        if connection_status.mindsdb_database:
+            connection_data = connection_status.mindsdb_database.params
 
-        return DatasourceDetailedResponse(**base_response.model_dump(), connection_status=connection_status)
+        return DatasourceDetailedResponse(
+            **base_response.model_dump(),
+            connection_data=connection_data,
+            connection_status=connection_status
+        )
