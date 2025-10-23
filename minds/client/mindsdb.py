@@ -62,6 +62,7 @@ def create_mindsdb_client_with_credentials(
     api_key: str | None = None,
     login: str | None = None,
     password: str | None = None,
+    company_id: str | None = None,
 ) -> Server:
     """
     Create a MindsDB client with explicit credentials.
@@ -76,6 +77,9 @@ def create_mindsdb_client_with_credentials(
       A MindsDB client.
     """
 
+    headers = {
+        "company-id": company_id,
+    }
     # If no API key is provided, try connecting without authentication
     if api_key is None or not api_key or not api_key.strip():
         # For MindsDB without authentication, don't pass login/password at all
@@ -86,6 +90,7 @@ def create_mindsdb_client_with_credentials(
                 url=url,
                 login=login,
                 password=password,
+                headers=headers,
             )
 
     if not isinstance(api_key, str):
@@ -94,4 +99,5 @@ def create_mindsdb_client_with_credentials(
     return connect(
         url=url,
         api_key=api_key,
+        headers=headers,
     )

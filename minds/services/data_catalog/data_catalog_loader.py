@@ -7,6 +7,7 @@ Both execution modes are handled by Prefect.
 """
 
 from enum import Enum
+from uuid import UUID
 
 from prefect.deployments import run_deployment
 from prefect.exceptions import PrefectException
@@ -30,9 +31,10 @@ class DataCatalogLoader:
     Service class for loading the data catalog.
     """
 
-    def __init__(self, session: Session, tenant_id: str):
+    def __init__(self, session: Session, tenant_id: UUID, user_id: UUID):
         self.session = session
         self.tenant_id = tenant_id
+        self.user_id = user_id
 
     async def load(
         self,
@@ -57,6 +59,7 @@ class DataCatalogLoader:
                 parameters={
                     "mind_datasource_id": mind_datasource.id,
                     "tenant_id": self.tenant_id,
+                    "user_id": self.user_id,
                     "table_names": table_names,
                 },
                 timeout=0,
@@ -79,5 +82,6 @@ class DataCatalogLoader:
             load_data_catalog(
                 mind_datasource_id=mind_datasource.id,
                 tenant_id=self.tenant_id,
+                user_id=self.user_id,
                 table_names=table_names,
             )

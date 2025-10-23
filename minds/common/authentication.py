@@ -1,4 +1,5 @@
 import hashlib
+from uuid import UUID
 
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
@@ -85,7 +86,7 @@ def get_api_key_from_headers(headers: dict) -> str:
     return get_authorization_bearer_token(headers)
 
 
-def get_company_id(context: Context) -> str:
+def get_company_id(user_id: UUID, tenant_id: UUID) -> str:
     """
     Get the company ID from the context.
     This will be a combination of tenant ID and user ID, hashed to produce a consistent
@@ -93,12 +94,13 @@ def get_company_id(context: Context) -> str:
     Ideally, MindsDB should support multi-tenant natively in the future.
 
     Args:
-        context: The request context
+        user_id: The user ID
+        tenant_id: The tenant ID
 
     Returns:
         str: The company ID
     """
-    digest = hashlib.sha256((str(context.tenant_id) + str(context.user_id)).encode()).digest()
+    digest = hashlib.sha256((str(tenant_id) + str(user_id)).encode()).digest()
     company_id = int.from_bytes(digest[:4], byteorder="big", signed=False) % (2**31 - 1)
     return str(company_id)
 
@@ -114,5 +116,5 @@ def get_headers_for_mindsdb_client(context: Context) -> dict:
         dict: The headers for MindsDB client.
     """
     return {
-        "company-id": get_company_id(context),
+        "company-id": get_company_id(context.user_id, context.tenant_id),
     }
