@@ -48,6 +48,7 @@ class TestDataCatalogLoader:
         return DataCatalogLoader(
             session=mock_session,
             tenant_id="test_tenant_456",
+            user_id="test_user_123",
         )
 
     def test_initialization(self, mock_session):
@@ -55,10 +56,12 @@ class TestDataCatalogLoader:
         loader = DataCatalogLoader(
             session=mock_session,
             tenant_id="test_tenant_456",
+            user_id="test_user_123",
         )
 
         assert loader.session == mock_session
         assert loader.tenant_id == "test_tenant_456"
+        assert loader.user_id == "test_user_123"
 
     @pytest.mark.asyncio
     async def test_load_sync_mode(self, data_catalog_loader, mock_mind_datasource):
@@ -74,6 +77,7 @@ class TestDataCatalogLoader:
             mock_load_flow.assert_called_once_with(
                 mind_datasource_id=mock_mind_datasource.id,
                 tenant_id="test_tenant_456",
+                user_id="test_user_123",
                 table_names=["table1", "table2"],
             )
 
@@ -102,6 +106,7 @@ class TestDataCatalogLoader:
                 parameters={
                     "mind_datasource_id": mock_mind_datasource.id,
                     "tenant_id": "test_tenant_456",
+                    "user_id": "test_user_123",
                     "table_names": ["table1", "table2"],
                 },
             )
@@ -134,6 +139,7 @@ class TestDataCatalogLoader:
             mock_load_flow.assert_called_once_with(
                 mind_datasource_id=mock_mind_datasource.id,
                 tenant_id="test_tenant_456",
+                user_id="test_user_123",
                 table_names=None,
             )
 

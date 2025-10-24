@@ -69,7 +69,8 @@ class TestExtractContextFromRequest:
         with pytest.raises(ValueError) as e:
             _ = extract_context_from_request(mock_request)
 
-            assert "invalid literal for int() with base 10: ''" in str(e.value)
+        # Exception details should be available after the context manager exits
+        assert "invalid literal for int() with base 10: ''" in str(e.value)
 
     def test_extract_context_with_missing_headers_invalid_literals_non_integer_user_id(self):
         """Test extracting context when all headers are present but the user ID is not an integer."""
@@ -82,7 +83,8 @@ class TestExtractContextFromRequest:
         with pytest.raises(ValueError) as e:
             _ = extract_context_from_request(mock_request)
 
-            assert "invalid literal for int() with base 10: 'non-integer'" in str(e.value)
+        # Exception message should indicate which literal failed to parse
+        assert "invalid literal for int() with base 10: 'non-integer'" in str(e.value)
 
     def test_extract_context_with_missing_headers_invalid_literals_non_integer_tenant_id(self):
         """Test extracting context when all headers are present but the tenant ID is not an integer."""
@@ -95,7 +97,8 @@ class TestExtractContextFromRequest:
         with pytest.raises(ValueError) as e:
             _ = extract_context_from_request(mock_request)
 
-            assert "invalid literal for int() with base 10: '2'" in str(e.value)
+        # Exception message should indicate which literal failed to parse
+        assert "invalid literal for int() with base 10: 'non-integer'" in str(e.value)
 
 
 class TestLangfuseContextMetadata:
