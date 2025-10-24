@@ -89,8 +89,7 @@ def get_api_key_from_headers(headers: dict) -> str:
 def get_company_id(user_id: UUID, tenant_id: UUID) -> str:
     """
     Get the company ID from the context.
-    This will be a combination of tenant ID and user ID, hashed to produce a consistent
-    integer value. It is also modulo'd to fit within 32-bit signed integer range.
+    This will be a combination of tenant ID and user ID concatenated with an underscore.
     Ideally, MindsDB should support multi-tenant natively in the future.
 
     Args:
@@ -100,9 +99,7 @@ def get_company_id(user_id: UUID, tenant_id: UUID) -> str:
     Returns:
         str: The company ID
     """
-    digest = hashlib.sha256((str(tenant_id) + str(user_id)).encode()).digest()
-    company_id = int.from_bytes(digest[:4], byteorder="big", signed=False) % (2**31 - 1)
-    return str(company_id)
+    return f"{str(tenant_id)}_{str(user_id)}"
 
 
 def get_headers_for_mindsdb_client(context: Context) -> dict:
