@@ -19,7 +19,7 @@ Minds is a FastAPI-based service that provides an OpenAI-compatible chat complet
 
 ### Prerequisites
 
-- Python 3.8+ 
+- Python 3.8+
 - Virtual environment support
 - PostgreSQL 16+ (or use Docker Compose for local development)
 - Docker (optional, for containerized deployment)
