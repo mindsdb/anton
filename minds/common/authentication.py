@@ -1,4 +1,3 @@
-import hashlib
 from uuid import UUID
 
 from fastapi import HTTPException, Request, status
