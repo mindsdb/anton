@@ -11,7 +11,7 @@ from uuid import UUID
 
 import pandas as pd
 from mindsdb_sdk.server import Server
-from prefect import flow, task
+from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, select
@@ -51,6 +51,9 @@ def load_data_catalog(
         DataCatalogLoaderError: If there is an error during the loading process.
     """
     prefect_settings = get_prefect_settings()
+
+    logger = get_run_logger()
+
     # Create a database session
     session_generator = get_session(prefect_settings.database_uri)
     session = next(session_generator)

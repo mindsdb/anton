@@ -37,6 +37,7 @@ class TestAPIV1Router:
 
     def test_router_includes_all_endpoints(self, client):
         """Test that all expected endpoints are available."""
+
         # Test health endpoints
         response = client.get("/api/v1/health/")
         assert response.status_code == 200
