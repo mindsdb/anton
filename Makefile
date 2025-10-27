@@ -95,6 +95,9 @@ format/check: activate ## Format code with ruff
 format: activate ## Format code with ruff
 	$(PYTHON) -m ruff format minds tests
 
+check/fix: activate ## Format code with ruff
+	$(PYTHON) -m ruff check minds tests --fix
+
 prefect/secrets: ## Deploy Prefect secrets from local settings
 	$(PYTHON) -c "from minds.jobs.settings import create_prefect_settings; create_prefect_settings(); print('✓ Prefect secrets deployed successfully')"
 
