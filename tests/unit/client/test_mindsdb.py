@@ -14,10 +14,16 @@ from minds.client.mindsdb import (
 class TestCreateMindsdbClientFromEnv:
     """Test cases for create_mindsdb_client_from_env function."""
 
-    def test_create_mindsdb_client_from_env_success(self):
+    @patch("minds.client.mindsdb.connect")
+    def test_create_mindsdb_client_from_env_success(self, mock_connect):
         """Test successful client creation from environment."""
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
+
         result = create_mindsdb_client_from_env()
-        assert result is not None
+
+        mock_connect.assert_called_once()
+        assert result == mock_client
 
     @patch("minds.client.mindsdb.MINDSDB_API_KEY", None)
     @patch("minds.client.mindsdb.connect")
