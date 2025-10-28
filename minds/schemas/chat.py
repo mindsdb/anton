@@ -18,6 +18,10 @@ class Message(BaseModel):
     content: dict | BaseModel | str | list[Any] = None
 
 
+class StreamMessage(Message):
+    id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4()}")
+
+
 class StreamChoice(BaseModel):
     index: int
     delta: Message
