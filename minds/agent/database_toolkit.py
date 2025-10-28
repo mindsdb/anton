@@ -70,9 +70,7 @@ class DatabaseToolkit:
                     query = await self.generate_sql(conversation_context)
                 # Middle attempts: use correction with error context
                 elif attempt < MAX_SQL_RETRIES - 1:
-                    query = await self._generate_corrected_sql(
-                        conversation_context, last_query, str(last_error)
-                    )
+                    query = await self._generate_corrected_sql(conversation_context, last_query, str(last_error))
                 # Final attempt: generate corrected SQL from scratch without error context
                 else:
                     logger.info("The final attempt will exclude error context and try from scratch.")
@@ -200,9 +198,7 @@ class DatabaseToolkit:
             logger.warning(f"Planning step failed, proceeding without filtering: {e}")
             return None
 
-    async def _generate_corrected_sql(
-        self, conversation_context: str, failed_query: str, error_message: str
-    ) -> str:
+    async def _generate_corrected_sql(self, conversation_context: str, failed_query: str, error_message: str) -> str:
         """Use LLM to analyze error and generate corrected SQL following existing patterns."""
         logger.info(f"Attempting LLM-driven SQL correction for error: {error_message}")
 

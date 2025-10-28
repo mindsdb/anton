@@ -160,9 +160,10 @@ class TestDatabaseToolkit:
             result = await database_toolkit._generate_and_execute_with_retry(conversation_context, mock_streamer)
 
             assert result == expected_result
-            mock_generate.assert_called_once_with(conversation_context, mock_streamer)
+            mock_generate.assert_called_once_with(conversation_context)
             mock_sanitize.assert_called_once_with(expected_sql)
             mock_execute.assert_called_once_with(expected_sql, raise_on_error=True)
+            assert mock_streamer.push.call_count == 2
 
     @pytest.mark.asyncio
     async def test_generate_and_execute_with_retry_success_after_retry(self, database_toolkit, mock_streamer):
@@ -378,7 +379,7 @@ class TestDatabaseToolkit:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_generate_corrected_sql_success(self, database_toolkit, mock_data_catalog, mock_streamer):
+    async def test_generate_corrected_sql_success(self, database_toolkit, mock_data_catalog):
         """Test successful SQL correction."""
         conversation_context = "Show me all users"
         failed_query = "SELECT * FROM non_existent_table"
@@ -401,14 +402,12 @@ class TestDatabaseToolkit:
             mock_agent.run = AsyncMock(return_value=mock_result)
             mock_agent_class.return_value = mock_agent
 
-            result = await database_toolkit._generate_corrected_sql(
-                conversation_context, failed_query, error_message, mock_streamer
-            )
+            result = await database_toolkit._generate_corrected_sql(conversation_context, failed_query, error_message)
 
             assert result == expected_corrected_sql
 
     @pytest.mark.asyncio
-    async def test_generate_corrected_sql_no_catalogs(self, database_toolkit, mock_streamer):
+    async def test_generate_corrected_sql_no_catalogs(self, database_toolkit):
         """Test SQL correction with no data catalogs."""
         conversation_context = "Show me all users"
         failed_query = "SELECT * FROM non_existent_table"
@@ -418,12 +417,10 @@ class TestDatabaseToolkit:
             mock_cache.load.return_value = []
 
             with pytest.raises(Exception, match="No database context available for retry"):
-                await database_toolkit._generate_corrected_sql(
-                    conversation_context, failed_query, error_message, mock_streamer
-                )
+                await database_toolkit._generate_corrected_sql(conversation_context, failed_query, error_message)
 
     @pytest.mark.asyncio
-    async def test_generate_corrected_sql_llm_error(self, database_toolkit, mock_data_catalog, mock_streamer):
+    async def test_generate_corrected_sql_llm_error(self, database_toolkit, mock_data_catalog):
         """Test SQL correction with LLM error."""
         conversation_context = "Show me all users"
         failed_query = "SELECT * FROM non_existent_table"
@@ -437,12 +434,10 @@ class TestDatabaseToolkit:
             mock_get_llm.side_effect = Exception("LLM config error")
 
             with pytest.raises(Exception, match="LLM config error"):
-                await database_toolkit._generate_corrected_sql(
-                    conversation_context, failed_query, error_message, mock_streamer
-                )
+                await database_toolkit._generate_corrected_sql(conversation_context, failed_query, error_message)
 
     @pytest.mark.asyncio
-    async def test_generate_sql_success(self, database_toolkit, mock_data_catalog, mock_streamer):
+    async def test_generate_sql_success(self, database_toolkit, mock_data_catalog):
         """Test successful SQL generation."""
         conversation_context = "Show me all users"
         expected_sql = "SELECT * FROM users"
@@ -465,12 +460,12 @@ class TestDatabaseToolkit:
             mock_agent.run = AsyncMock(return_value=mock_result)
             mock_agent_class.return_value = mock_agent
 
-            result = await database_toolkit.generate_sql(conversation_context, mock_streamer)
+            result = await database_toolkit.generate_sql(conversation_context)
 
             assert result == expected_sql
 
     @pytest.mark.asyncio
-    async def test_generate_sql_no_catalogs(self, database_toolkit, mock_streamer):
+    async def test_generate_sql_no_catalogs(self, database_toolkit):
         """Test SQL generation with no data catalogs."""
         conversation_context = "Show me all users"
 
@@ -478,10 +473,10 @@ class TestDatabaseToolkit:
             mock_cache.load.return_value = []
 
             with pytest.raises(QueryGenerationError, match="No database context available"):
-                await database_toolkit.generate_sql(conversation_context, mock_streamer)
+                await database_toolkit.generate_sql(conversation_context)
 
     @pytest.mark.asyncio
-    async def test_generate_sql_with_error(self, database_toolkit, mock_data_catalog, mock_streamer):
+    async def test_generate_sql_with_error(self, database_toolkit, mock_data_catalog):
         """Test SQL generation with error in result."""
         conversation_context = "Show me all users"
         error_message = "Failed to generate SQL"
@@ -505,7 +500,7 @@ class TestDatabaseToolkit:
             mock_agent_class.return_value = mock_agent
 
             with pytest.raises(QueryGenerationError, match=error_message):
-                await database_toolkit.generate_sql(conversation_context, mock_streamer)
+                await database_toolkit.generate_sql(conversation_context)
 
     @pytest.mark.asyncio
     async def test_execute_sql_success(self, database_toolkit):
@@ -611,7 +606,7 @@ class TestDatabaseToolkit:
                 database_toolkit._sanitize_and_validate_sql_mindsdb(query)
 
     @pytest.mark.asyncio
-    async def test_generate_sql_with_planning_error(self, database_toolkit, mock_data_catalog, mock_streamer):
+    async def test_generate_sql_with_planning_error(self, database_toolkit, mock_data_catalog):
         """Test SQL generation when planning returns an error."""
         conversation_context = "Show me all users"
         expected_sql = "SELECT * FROM users"
@@ -638,7 +633,7 @@ class TestDatabaseToolkit:
             mock_agent.run = AsyncMock(return_value=mock_result)
             mock_agent_class.return_value = mock_agent
 
-            result = await database_toolkit.generate_sql(conversation_context, mock_streamer)
+            result = await database_toolkit.generate_sql(conversation_context)
 
             assert result == expected_sql
             # Should proceed with full catalogs when planning fails
