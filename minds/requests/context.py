@@ -1,8 +1,10 @@
 from typing import Any
 from uuid import UUID
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
+
+from minds.common.vars import DISABLE_AUTH
 
 
 class Context(BaseModel):
@@ -20,8 +22,17 @@ def extract_context_from_request(request: Request) -> Context:
     """
     # TODO: Temporary solution while lucas.koontz finishes working on Auth API
 
-    x_user_id = str(request.headers.get("x-user-id", ""))
-    x_tenant_id = str(request.headers.get("x-company-id", ""))
+    if DISABLE_AUTH:
+        return Context(
+            user_id=UUID("00000000-0000-0000-0000-000000000000"),
+            tenant_id=UUID("00000000-0000-0000-0000-000000000000"),
+        )
+
+    if request.headers.get("x-user-id") is None or request.headers.get("x-company-id") is None:
+        raise HTTPException(status_code=400, detail="Missing required authentication")
+
+    x_user_id = str(request.headers.get("x-user-id"))
+    x_tenant_id = str(request.headers.get("x-company-id"))
 
     user_id = UUID(int=int(x_user_id))
     tenant_id = UUID(int=int(x_tenant_id))

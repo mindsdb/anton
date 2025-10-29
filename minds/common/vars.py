@@ -78,3 +78,8 @@ DEFAULT_GOOGLE_MODEL = os.getenv("DEFAULT_GOOGLE_MODEL", "gemini-2.5-pro")
 MAX_DISPLAY_ROWS = int(os.getenv("MAX_DISPLAY_ROWS", 100))
 MAX_COLUMN_WIDTH = int(os.getenv("MAX_COLUMN_WIDTH", 300))
 MAX_SQL_RETRIES = int(os.getenv("MAX_SQL_RETRIES", 4))
+
+# ====================================
+# Auth
+# ====================================
+DISABLE_AUTH = bool(os.getenv("DISABLE_AUTH", False))

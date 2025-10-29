@@ -46,10 +46,12 @@ EOSQL
 
 # Create databases
 create_database "langfuse"
+create_database "prefect"
 create_database "minds"
 
 # Create user with permissions in a database
 create_user "langfuse" "langfuse" "langfuse"
+create_user "prefect" "prefect" "prefect"
 create_user "minds" "minds" "minds"
 
 echo "Database and user creation completed successfully."

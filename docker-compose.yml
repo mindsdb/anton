@@ -15,9 +15,9 @@ services:
   postgres:
     image: postgres:16.4
     <<: *autoRestartOnFailure
-    restart: always
+    restart: unless-stopped
     ports:
-      - ${PG_PORT}:5432
+      - "35432:5432"
     volumes:
       - postgres:/var/lib/postgresql/data
       - ./scripts/init-dbs.sh:/docker-entrypoint-initdb.d/init-dbs.sh
@@ -25,22 +25,41 @@ services:
       autoheal:
         condition: service_healthy
     environment:
-      POSTGRES_USER: "${PG_USER}"
-      POSTGRES_PASSWORD: "${PG_PASSWORD}"
-      POSTGRES_DB: "${PG_USER}"
-      PG_PASSWORD: "${PG_PASSWORD}"  # For init script
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${PG_USER}" ]
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 10s
       timeout: 4s
       retries: 5
+
+  pg-init:
+    image: postgres:16.4
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint:
+      ["/bin/bash","-lc",
+       "set -euo pipefail;
+        bash /scripts/init-dbs.sh"
+      ]
+    restart: "no"
 
   redis:
     image: redis:8.2.1
     <<: *autoRestartOnFailure
     restart: unless-stopped
     ports:
-      - '${REDIS_PORT}:6379'
+      - '16379:6379'
     depends_on:
       autoheal:
         condition: service_healthy
@@ -55,15 +74,15 @@ services:
     <<: *autoRestartOnFailure
     restart: unless-stopped
     ports:
-      - ${CLICKHOUSE_PORT}:8123
-      - ${CLICKHOUSE_TCP_PORT}:9000
+      - 18123:8123
+      - 19000:9000
     volumes:
       - ch_data:/var/lib/clickhouse
       - ch_logs:/var/log/clickhouse-server
     environment:
-      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: clickhouse
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
       TZ: UTC
     ulimits:
@@ -81,12 +100,15 @@ services:
     image: minio/minio:latest
     <<: *autoRestartOnFailure
     restart: unless-stopped
+    depends_on:
+      autoheal:
+        condition: service_healthy
     ports:
-      - ${MINIO_PORT}:9002
-      - ${MINIO_CONSOLE_PORT}:9001
+      - "19002:9000"
+      - "19001:9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
@@ -95,7 +117,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-  
+
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -103,18 +125,18 @@ services:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-        /usr/bin/mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
-        /usr/bin/mc mb -p local/${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse} || true
+        /usr/bin/mc alias set local http://minio:9000 minio miniosecret &&
+        /usr/bin/mc mb -p local/langfuse || true
       "
     restart: "no"
+
 
   langfuse-web:
     image: langfuse/langfuse:3.101.0
     <<: *autoRestartOnFailure
     restart: unless-stopped
-    profiles: ["langfuse"]
     ports:
-      - ${LANGFUSE_PORT}:3000
+      - "13000:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -129,46 +151,46 @@ services:
       minio-init:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: ${LANGFUSE_DB_URI}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      SALT: ${SALT} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY} # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
-      NEXTAUTH_URL: ${NEXTAUTH_URL}
-      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID} # Organization ID
-      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME} # Organization name
-      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID} # Project ID (UUID)
-      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME} # Project name
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY} # Project public key
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY} # Project secret key
-      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL} # User email
-      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME} # User name
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD} # User password
+      DATABASE_URL: "postgresql://langfuse:langfuse@postgres/langfuse"
+      NEXTAUTH_SECRET: Reosi8Qn7obpoXoiSHIK975ZzffH/1OvZaVk4a+moUA= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      SALT: plNYAdUp/lOpdYvt61d+us/elglz5WGedKTU65+coB4= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      ENCRYPTION_KEY: a77962b28ceb28f58ce4b247ff7c97685e072d99052f9de0a398f3539b767f2f # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
+      NEXTAUTH_URL: http://localhost:13000
+      LANGFUSE_INIT_ORG_ID: mindsdb # Organization ID
+      LANGFUSE_INIT_ORG_NAME: MindsDB # Organization name
+      LANGFUSE_INIT_PROJECT_ID: 23152f1d-9604-4629-a69d-27790d47b7fa # Project ID (UUID)
+      LANGFUSE_INIT_PROJECT_NAME: MindsDB # Project name
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: redacted # Project public key
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: redacted # Project secret key
+      LANGFUSE_INIT_USER_EMAIL: admin@langfuse.com # User email
+      LANGFUSE_INIT_USER_NAME: User # User name
+      LANGFUSE_INIT_USER_PASSWORD: password # User password
 
-      LANGFUSE_LOG_LEVEL: ${LANGFUSE_LOG_LEVEL}
+      LANGFUSE_LOG_LEVEL: info
 
       # Clickhouse
-      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL}
-      CLICKHOUSE_URL: ${CLICKHOUSE_URL}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: false
 
       # Redis
-      REDIS_CONNECTION_STRING: ${REDIS_CONNECTION_STRING}
+      REDIS_CONNECTION_STRING: redis://redis:6379
 
       # Minio
-      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: ${LANGFUSE_S3_EVENT_UPLOAD_ENABLED}
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION}
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT}
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY}
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE}
-      LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: ${LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED}
-    
-      AWS_ACCESS_KEY_ID: ${LANGFUSE_AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${LANGFUSE_AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${LANGFUSE_AWS_REGION}
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: true
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: false
+
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: miniosecret
+      AWS_REGION: us-east-1
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$(hostname):3000/api/public/health"]
       interval: 30s
@@ -179,7 +201,6 @@ services:
     image: langfuse/langfuse-worker:3.101.0
     <<: *autoRestartOnFailure
     restart: unless-stopped
-    profiles: ["langfuse"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -194,51 +215,110 @@ services:
       minio-init:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: ${LANGFUSE_DB_URI}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      SALT: ${SALT} # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY} # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
-      NEXTAUTH_URL: ${NEXTAUTH_URL}
-      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID} # Organization ID
-      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME} # Organization name
-      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID} # Project ID (UUID)
-      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME} # Project name
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY} # Project public key
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY} # Project secret key
-      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL} # User email
-      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME} # User name
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD} # User password
+      DATABASE_URL: "postgresql://langfuse:langfuse@postgres/langfuse"
+      NEXTAUTH_SECRET: Reosi8Qn7obpoXoiSHIK975ZzffH/1OvZaVk4a+moUA= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      SALT: plNYAdUp/lOpdYvt61d+us/elglz5WGedKTU65+coB4= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
+      ENCRYPTION_KEY: a77962b28ceb28f58ce4b247ff7c97685e072d99052f9de0a398f3539b767f2f # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
+      NEXTAUTH_URL: http://localhost:13000
+      LANGFUSE_INIT_ORG_ID: mindsdb # Organization ID
+      LANGFUSE_INIT_ORG_NAME: MindsDB # Organization name
+      LANGFUSE_INIT_PROJECT_ID: 23152f1d-9604-4629-a69d-27790d47b7fa # Project ID (UUID)
+      LANGFUSE_INIT_PROJECT_NAME: MindsDB # Project name
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: redacted # Project public key
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: redacted # Project secret key
+      LANGFUSE_INIT_USER_EMAIL: admin@langfuse.com # User email
+      LANGFUSE_INIT_USER_NAME: User # User name
+      LANGFUSE_INIT_USER_PASSWORD: password # User password
 
-      LANGFUSE_LOG_LEVEL: ${LANGFUSE_LOG_LEVEL}
+      LANGFUSE_LOG_LEVEL: info
 
       # Clickhouse
-      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL}
-      CLICKHOUSE_URL: ${CLICKHOUSE_URL}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: false
 
       # Redis
-      REDIS_CONNECTION_STRING: ${REDIS_CONNECTION_STRING}
+      REDIS_CONNECTION_STRING: redis://redis:6379
 
       # Minio
-      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: ${LANGFUSE_S3_EVENT_UPLOAD_ENABLED}
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION}
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT}
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY}
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE}
-      LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: ${LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED}
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: true
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: false
 
-      AWS_ACCESS_KEY_ID: ${LANGFUSE_AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${LANGFUSE_AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${LANGFUSE_AWS_REGION}
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: miniosecret
+      AWS_REGION: us-east-1
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$(hostname):3030/api/health"]
       interval: 30s
       timeout: 29s
       retries: 10
+
+  prefect-server:
+    image: prefecthq/prefect:3.4.19-python3.13
+    <<: *autoRestartOnFailure
+    restart: unless-stopped
+    command: prefect server start --no-services
+    depends_on:
+      autoheal:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pg-init:
+        condition: service_completed_successfully
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres/prefect
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_UI_API_URL: http://localhost:4200/api
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: redis
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+    ports:
+      - "4200:4200"
+
+  prefect-services:
+    image: prefecthq/prefect:3.4.19-python3.13
+    <<: *autoRestartOnFailure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pg-init:
+        condition: service_completed_successfully
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api   # points to server from inside Docker
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres/prefect
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: redis
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+    command: prefect server services start
+
+  prefect-worker:
+    image: prefecthq/prefect:3.4.19-python3.13
+    <<: *autoRestartOnFailure
+    depends_on:
+      prefect-server:
+        condition: service_started
+      prefect-services:
+        condition: service_started
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+    command: prefect worker start --pool local-pool
+
 
   mindsdb:
     build:
@@ -247,8 +327,8 @@ services:
     <<: *autoRestartOnFailure
     restart: unless-stopped
     ports:
-      - "${MINDSDB_PORT}:47334"
-      - "${MINDSDB_HTTP_PORT}:47335"
+      - "47334:47334"
+      - "47335:47335"
     volumes:
       - mindsdb_data:/opt/mindsdb
     healthcheck:
@@ -271,7 +351,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URI: "${DATABASE_URI}"
+      DATABASE_URI: postgresql://minds:minds@postgres/minds
     restart: "no"
 
   minds:
@@ -279,26 +359,39 @@ services:
       context: .
     <<: *autoRestartOnFailure
     platform: linux/amd64
-    entrypoint: sh -c "python -m watchfiles --filter python 'python -m uvicorn minds.server:app --workers 1 --host 0.0.0.0 --port ${MIND_PORT}' ."
+    entrypoint: sh -c "python -m watchfiles --filter python 'python -m uvicorn minds.server:app --workers 1 --host 0.0.0.0 --port 9010' ."
     restart: unless-stopped
     depends_on:
       migrate:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+      langfuse-worker:
+        condition: service_healthy
       mindsdb:
         condition: service_healthy
+      prefect-server:
+        condition: service_started
+      prefect-services:
+        condition: service_started
+      prefect-worker:
+        condition: service_started
     ports:
-      - "${MIND_PORT}:${MIND_PORT}"
+      - "9010:9010"
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:${MIND_PORT}/api/v1/health/" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:9010/api/v1/health/" ]
       interval: 10s
       timeout: 9s
       retries: 5
     environment:
-      DATABASE_URI: "${DATABASE_URI}"
+      ENV: local
+      LOG_LEVEL: DEBUG
 
-      # MindsDB configuration  
+      DATABASE_URI: postgresql://minds:minds@postgres/minds
+
+      # MindsDB configuration
       MINDSDB_URL: "http://mindsdb:47334"
       MINDSDB_LOGIN: "${MINDSDB_LOGIN}"
       MINDSDB_PASSWORD: "${MINDSDB_PASSWORD}"
@@ -306,10 +399,21 @@ services:
       OPENAI_API_URL: "${OPENAI_API_URL}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
 
-      LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY}"
-      LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"
+      LANGFUSE_PUBLIC_KEY: "redacted"
+      LANGFUSE_SECRET_KEY: "redacted"
       LANGFUSE_HOST: "http://langfuse:3000"
       LANGFUSE_ENABLED: "${LANGFUSE_ENABLED}"
+
+      # Auth
+      DISABLE_AUTH: "true" # Disable auth for local development
+
+      # Data Catalog
+      DATA_CATALOG_EXECUTION_MODE: synchronous
+
+      # Prefect
+      PREFECT_API_URL: http://prefect-server:4200/api
+    env_file:
+      - .env
 
 volumes:
   postgres:
