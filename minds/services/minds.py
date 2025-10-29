@@ -618,7 +618,10 @@ class MindsService:
                     )
                     await data_catalog_loader.load(mind_datasource, table_names)
                 except DataCatalogLoaderError:
-                    continue
+                    # Mark the mind-datasource relationship as failed
+                    mind_datasource.status = DataCatalogStatus.FAILED
+                    self.session.add(mind_datasource)
+                    self.session.commit()
                 except PrefectException:
                     # This occurs when the flow is submitted but fails immediately.
                     mind_datasource.status = DataCatalogStatus.FAILED
@@ -629,8 +632,6 @@ class MindsService:
                     f"Error adding datasource {datasource_name} to mind {mind.name} "
                     f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
                 )
-                # Continue with other datasources even if one fails
-                continue
 
         # Commit all relationships at once
         try:

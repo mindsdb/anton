@@ -124,9 +124,6 @@ def load_data_catalog(
         session.commit()
     except Exception as e:
         session.rollback()
-        mind_datasource.status = DataCatalogStatus.FAILED
-        session.add(mind_datasource)
-        session.commit()
         err_message = f"Failed to load data catalog for MindDatasource ID {mind_datasource_id}: {str(e)}"
         logger.error(f"Failed to load data catalog: {err_message}")
         raise DataCatalogLoaderError(f"Failed to load data catalog: {err_message}") from e
