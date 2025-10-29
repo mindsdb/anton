@@ -11,7 +11,8 @@ from minds.agent.llm import get_llm_config
 from minds.agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
-from minds.schemas.chat import Message
+from minds.requests.stream import MessageStreamer
+from minds.schemas.chat import Message, Role
 
 logger = setup_logging()
 
@@ -24,6 +25,7 @@ class DatabaseDeps:
 
     toolkit: DatabaseToolkit
     conversation_context: str | None = None
+    streamer: MessageStreamer | None = None
 
 
 @dataclass
@@ -88,6 +90,7 @@ class DatabaseAgent:
             """
             return await ctx.deps.toolkit.generate_and_execute_sql(
                 ctx.deps.conversation_context,
+                ctx.deps.streamer,
             )
 
         return agent
@@ -181,3 +184,30 @@ class DatabaseAgent:
         else:
             result = await agent.run(conversation_context, deps=self.deps)
             yield result.output
+
+    async def run_completion(self, messages: list[Message], streamer: MessageStreamer, stream: bool = False):
+        """Run completion and push results to the streamer.
+        The streamer will also be added to the dependencies to allow tools to push messages (thoughts).
+
+        Args:
+            messages: List of message dictionaries.
+            streamer: MessageStreamer instance to push messages to.
+            stream: Whether to stream the response.
+        """
+        # Use the preconfigured agent with tools
+        agent = self._pydantic_agent
+
+        # Build conversation context string from all messages
+        conversation_context = self._build_conversation_context(messages)
+
+        # Store the complete conversation context for the tool context
+        self.deps.conversation_context = conversation_context
+        self.deps.streamer = streamer
+
+        if stream:
+            async with agent.run_stream(conversation_context, deps=self.deps) as result:
+                async for chunk in result.stream_text(delta=True):
+                    await streamer.push(role=Role.assistant, content=chunk)
+        else:
+            result = await agent.run(conversation_context, deps=self.deps)
+            await streamer.push(role=Role.assistant, content=result.output)

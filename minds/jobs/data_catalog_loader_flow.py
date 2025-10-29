@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, select
 
 from minds.client.mindsdb import create_mindsdb_client_with_credentials
+from minds.common.authentication import get_company_id
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
@@ -37,6 +38,7 @@ class DataCatalogLoaderError(Exception):
 def load_data_catalog(
     mind_datasource_id: UUID,
     tenant_id: str,
+    user_id: str,
     table_names: list[str] | None = None,
 ) -> None:
     """
@@ -75,11 +77,13 @@ def load_data_catalog(
 
     try:
         # Create a MindsDB client
+        company_id = get_company_id(user_id, tenant_id)
         mindsdb_client = create_mindsdb_client_with_credentials(
             url=prefect_settings.mindsdb_url,
             api_key=prefect_settings.mindsdb_api_key,
             login=prefect_settings.mindsdb_login,
             password=prefect_settings.mindsdb_password,
+            company_id=company_id,
         )
 
         datasource_id = mind_datasource.datasource_id

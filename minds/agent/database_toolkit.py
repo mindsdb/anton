@@ -24,6 +24,8 @@ from minds.common.vars import (
 from minds.model.data_catalog import DataCatalog
 from minds.model.database_agent import QueryGenerationResult, QueryGenerationResultRetry, QueryPlanResult
 from minds.model.mind import Mind
+from minds.requests.stream import MessageStreamer
+from minds.schemas.chat import Role
 
 logger = setup_logging()
 
@@ -49,14 +51,15 @@ class DatabaseToolkit:
         self.mind = mind
         self.mindsdb_client = mindsdb_client
 
-    async def generate_and_execute_sql(self, conversation_context: str) -> str:
-        return await self._generate_and_execute_with_retry(conversation_context)
+    async def generate_and_execute_sql(self, conversation_context: str, streamer: MessageStreamer) -> str:
+        return await self._generate_and_execute_with_retry(conversation_context, streamer)
 
-    async def _generate_and_execute_with_retry(self, conversation_context: str) -> str:
+    async def _generate_and_execute_with_retry(self, conversation_context: str, streamer: MessageStreamer) -> str:
         """Generate and execute SQL with LLM-driven retry logic."""
         last_error = None
         last_query = ""
 
+        await streamer.push(role=Role.system, content="I will now generate the SQL query to answer your question.")
         for attempt in range(MAX_SQL_RETRIES):
             logger.info(f"Attempt {attempt + 1} of {MAX_SQL_RETRIES}")
 
@@ -75,8 +78,14 @@ class DatabaseToolkit:
 
                 last_query = query
                 sanitized_query = self._sanitize_and_validate_sql_mindsdb(query)
+                execution_result = await self.execute_sql(sanitized_query, raise_on_error=True)
 
-                return await self.execute_sql(sanitized_query, raise_on_error=True)
+                await streamer.push(
+                    role=Role.system,
+                    content=f"Here is the generated SQL query along with its execution result:\n{execution_result}",
+                )
+
+                return execution_result
             except Exception as e:
                 last_error = e
 
@@ -202,6 +211,7 @@ class DatabaseToolkit:
 
         # Run planning step to narrow down relevant engines/datasources/tables
         plan = await self._plan_selection(conversation_context, data_catalogs)
+
         if plan and plan.error:
             logger.info(f"Planning step returned error: {plan.error}. Proceeding with full catalogs.")
             plan = None
@@ -272,6 +282,7 @@ class DatabaseToolkit:
 
         Args:
             conversation_context: The complete conversation context
+            streamer: The message streamer for pushing thoughts
 
         Returns:
             A SQL query string that addresses the user's request
@@ -285,14 +296,15 @@ class DatabaseToolkit:
 
         # Run planning step to narrow down relevant engines/datasources/tables
         plan = await self._plan_selection(conversation_context, data_catalogs)
+
         if plan and plan.error:
             logger.info(f"Planning step returned error: {plan.error}. Proceeding with full catalogs.")
             plan = None
 
         # Filter catalogs by plan (if available)
-        data_catalogs_filtered = (
-            self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
-        )
+        # Pass a deep copy to avoid modifying original catalogs
+        data_catalog_copy = copy.deepcopy(data_catalogs)
+        data_catalogs_filtered = self._filter_catalogs_with_plan(data_catalog_copy, plan) if plan else data_catalog_copy
 
         # Extract engine types from filtered data catalogs
         engines = {catalog.mind_datasource.datasource.engine for catalog in data_catalogs_filtered}

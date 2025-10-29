@@ -37,6 +37,23 @@ class QueryPlanResult(BaseModel):
         description="Error or inability to determine a plan.",
     )
 
+    def to_string(self) -> str:
+        """Convert the plan result to a human-readable string."""
+        parts = []
+        if self.preferred_engine:
+            parts.append(f"Preferred Engine: {self.preferred_engine}")
+        if self.selected_datasources:
+            parts.append(f"Selected Datasources: {', '.join(self.selected_datasources)}")
+        if self.selected_tables:
+            parts.append(f"Selected Tables: {', '.join(self.selected_tables)}")
+        if self.selected_fields:
+            parts.append(f"Selected Fields: {', '.join(self.selected_fields)}")
+        if self.rationale:
+            parts.append(f"Rationale: {self.rationale}")
+        if self.error:
+            parts.append(f"Error: {self.error}")
+        return "\n".join(parts)
+
 
 class QueryGenerationResult(BaseModel):
     """Structured output for SQL generation via LLM."""

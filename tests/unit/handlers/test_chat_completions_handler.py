@@ -150,10 +150,13 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            # Simulate agent producing a single final chunk
+            await streamer.push(
+                role=Role.assistant, content=f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+            )
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
@@ -211,10 +214,12 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            await streamer.push(
+                role=Role.assistant, content=f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+            )
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
@@ -263,10 +268,12 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            await streamer.push(
+                role=Role.assistant, content=f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+            )
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
@@ -315,10 +322,12 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            await streamer.push(
+                role=Role.assistant, content=f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+            )
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
@@ -360,10 +369,10 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            await streamer.push(role=Role.assistant, content=f"Processed {len(messages)} messages with MindsDB session")
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
@@ -443,10 +452,10 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            await streamer.push(role=Role.assistant, content=f"Processed {len(messages)} messages with MindsDB session")
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
@@ -488,10 +497,12 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            await streamer.push(
+                role=Role.assistant, content=f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+            )
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
@@ -545,10 +556,12 @@ class TestChatCompletionsHandler:
         # Setup mock DatabaseAgent
         mock_agent = Mock()
 
-        async def mock_get_completion(messages, stream=False):
-            yield f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+        async def mock_run_completion(messages, streamer, stream=False):
+            await streamer.push(
+                role=Role.assistant, content=f"Processed {len(sample_handler.messages)} messages with MindsDB session"
+            )
 
-        mock_agent.get_completion = mock_get_completion
+        mock_agent.run_completion = mock_run_completion
         mock_agent_class.return_value = mock_agent
 
         # Setup mock DatabaseToolkit
