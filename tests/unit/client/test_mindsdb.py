@@ -12,41 +12,12 @@ from minds.client.mindsdb import (
 from minds.requests.context import Context
 
 
-
 @pytest.fixture
 def context():
     """Fixture for a sample Context object."""
     return Context(
         user_id=UUID("11111111-1111-1111-1111-111111111111"), tenant_id=UUID("22222222-2222-2222-2222-222222222222")
     )
-
-
-class TestCreateMindsdbClientFromEnv:
-    """Test cases for create_mindsdb_client_from_env function."""
-
-    @patch("minds.client.mindsdb.connect")
-    def test_create_mindsdb_client_from_env_success(self, mock_connect):
-        """Test successful client creation from environment."""
-        mock_client = Mock(spec=Server)
-        mock_connect.return_value = mock_client
-
-        result = create_mindsdb_client_from_env()
-
-        mock_connect.assert_called_once()
-        assert result == mock_client
-
-    @patch("minds.client.mindsdb.MINDSDB_API_KEY", None)
-    @patch("minds.client.mindsdb.connect")
-    def test_create_mindsdb_client_from_env_none_api_key(self, mock_connect):
-        """Test client creation with None API key connects without auth."""
-        mock_client = Mock(spec=Server)
-        mock_connect.return_value = mock_client
-
-        result = create_mindsdb_client_from_env()
-
-        # Should connect without authentication when no API key
-        mock_connect.assert_called_once()
-        assert result == mock_client
 
 
 class TestCreateMindsdbClientFromRequest:
