@@ -13,7 +13,7 @@ def get_tree_service(request: Request) -> TreeService:
     Dependency function to create TreeService with user context and MindsDB client.
     """
     context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request)
+    mindsdb_client = create_mindsdb_client_from_request(request, context)
 
     return TreeService(mindsdb_client=mindsdb_client, user_id=context.user_id)
 

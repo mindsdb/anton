@@ -38,7 +38,7 @@ def get_datasources_service(request: Request, session: Session = Depends(get_ses
     Dependency function to create DatasourcesService with user context and MindsDB client.
     """
     context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request)
+    mindsdb_client = create_mindsdb_client_from_request(request, context)
 
     return DatasourcesService(
         session=session,
