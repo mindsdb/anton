@@ -123,7 +123,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         # Cache the catalogs if any were created.
         if data_catalogs:
-            self.save(key, data_catalogs)
+            await self.save(key, data_catalogs)
 
         return data_catalogs
 
