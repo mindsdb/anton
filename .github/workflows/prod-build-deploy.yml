@@ -81,7 +81,7 @@ jobs:
   
   deploy:
     runs-on: mdb-prod
-    needs: [build]
+    needs: [build, migrate]
     environment:
       name: prod
       url: ${{ vars.MDB_ENV_URL }}
@@ -120,6 +120,15 @@ jobs:
           image-tag: production-${{ env.CI_REF_SLUG }}
           timeout: 600s
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
+      - name: Wait for Flow Deployment to Finish
+        run: |
+          JOB_NAME=$(kubectl get jobs \
+            --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | grep '^minds-jobs' \
+            | tail -n1)
+          echo "Waiting for job $JOB_NAME to complete..."
+          kubectl wait --for=condition=complete --timeout=300s job/$JOB_NAME
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()
