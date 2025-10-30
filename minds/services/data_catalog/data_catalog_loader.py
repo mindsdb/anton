@@ -45,8 +45,7 @@ class DataCatalogLoader:
         Load the data catalog for a given mind-datasource relationship.
 
         Args:
-            mind_datasource_id (UUID): The ID of the mind-datasource relationship.
-            tenant_id (str): The ID of the tenant.
+            mind_datasource (MindDatasource): The mind-datasource relationship to load the catalog for.
             table_names (list[str] | None): Optional list of table names to filter by. If None, load all tables.
         """
         if DATA_CATALOG_EXECUTION_MODE not in [mode.value for mode in DataCatalogExecutionMode]:

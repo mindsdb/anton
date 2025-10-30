@@ -618,9 +618,28 @@ class MindsService:
                     )
                     await data_catalog_loader.load(mind_datasource, table_names)
                 except DataCatalogLoaderError:
-                    continue
+                    # Mark the mind-datasource relationship as failed
+                    logger.error(
+                        f"Data catalog loading failed for datasource {datasource_name} "
+                        f"for user {self.user_id} in tenant {self.tenant_id}"
+                    )
+                    mind_datasource.status = DataCatalogStatus.FAILED
+                    self.session.add(mind_datasource)
+                    self.session.commit()
                 except PrefectException:
                     # This occurs when the flow is submitted but fails immediately.
+                    logger.error(
+                        f"Prefect flow submission failed when loading datasource {datasource_name} "
+                        f"to the data catalog for user {self.user_id} in tenant {self.tenant_id}"
+                    )
+                    mind_datasource.status = DataCatalogStatus.FAILED
+                    self.session.add(mind_datasource)
+                    self.session.commit()
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error loading datasource {datasource_name} to the data catalog "
+                        f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                    )
                     mind_datasource.status = DataCatalogStatus.FAILED
                     self.session.add(mind_datasource)
                     self.session.commit()
@@ -629,8 +648,6 @@ class MindsService:
                     f"Error adding datasource {datasource_name} to mind {mind.name} "
                     f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
                 )
-                # Continue with other datasources even if one fails
-                continue
 
         # Commit all relationships at once
         try:

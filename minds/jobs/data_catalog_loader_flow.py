@@ -37,8 +37,8 @@ class DataCatalogLoaderError(Exception):
 @flow
 def load_data_catalog(
     mind_datasource_id: UUID,
-    tenant_id: str,
-    user_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
     table_names: list[str] | None = None,
 ) -> None:
     """
@@ -46,7 +46,8 @@ def load_data_catalog(
 
     Args:
         mind_datasource_id (UUID): The ID of the mind datasource.
-        tenant_id (str): The ID of the tenant.
+        tenant_id (UUID): The ID of the tenant.
+        user_id (UUID): The ID of the user.
         table_names (list[str] | None): Optional list of table names to filter by. If None, load all tables.
 
     Raises:
@@ -124,9 +125,6 @@ def load_data_catalog(
         session.commit()
     except Exception as e:
         session.rollback()
-        mind_datasource.status = DataCatalogStatus.FAILED
-        session.add(mind_datasource)
-        session.commit()
         err_message = f"Failed to load data catalog for MindDatasource ID {mind_datasource_id}: {str(e)}"
         logger.error(f"Failed to load data catalog: {err_message}")
         raise DataCatalogLoaderError(f"Failed to load data catalog: {err_message}") from e
