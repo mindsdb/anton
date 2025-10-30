@@ -90,10 +90,6 @@ def load_data_catalog(
         datasource_id = mind_datasource.datasource_id
         datasource_name = mind_datasource.datasource.name
 
-        mind_datasource.status = DataCatalogStatus.LOADING
-        session.add(mind_datasource)
-        session.commit()
-
         tables_df = get_tables(mindsdb_client, datasource_name, table_names)
         tables_df = filter_loaded_tables(session, tables_df, mind_datasource_id, datasource_id, tenant_id)
 
@@ -119,10 +115,6 @@ def load_data_catalog(
         # Only commit if everything succeeded
         session.commit()
         logger.info("Successfully committed all data catalog information to database")
-
-        mind_datasource.status = DataCatalogStatus.COMPLETED
-        session.add(mind_datasource)
-        session.commit()
     except Exception as e:
         session.rollback()
         err_message = f"Failed to load data catalog for MindDatasource ID {mind_datasource_id}: {str(e)}"
