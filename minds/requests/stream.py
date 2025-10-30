@@ -225,7 +225,7 @@ async def _build_json_response_from_messages(messages: list[StreamMessage], mode
     choices = []
     for index, search_message in enumerate(messages):
         # Skip system messages (thoughts) in the final response.
-        if not search_message.role == Role.system:
+        if search_message.role != Role.system:
             # Properly serialize BaseModel content
             content = search_message.content
             if isinstance(content, BaseModel):
