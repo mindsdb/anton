@@ -143,14 +143,9 @@ jobs:
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
       - name: Wait for Flow Deployment to Finish
         run: |
-          echo "Looking for minds-jobs job in namespace ${{matrix.deploy-env}}..."
-          JOB_NAME=$(kubectl get jobs --namespace ${{matrix.deploy-env}} \
-            --sort-by=.metadata.creationTimestamp \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
-            | grep '^minds-jobs' \
-            | tail -n1)
-          echo  "Found job $JOB_NAME. Waiting for it to complete..."
-          kubectl -n ${{matrix.deploy-env}} wait --for=condition=complete --timeout=10m job/$JOB_NAME --namespace ${{matrix.deploy-env}}
+          export NAMESPACE=${{matrix.deploy-env}}
+
+          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=10m pod -l job-name=minds-jobs
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()
@@ -189,7 +184,7 @@ jobs:
           envsubst '${PR_NUMBER} ${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
 
           echo "Waiting for eval job to start..."
-          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
+          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=10m pod -l job-name=minds-langfuse-benchmarks
           kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
 
           # Pod should already be complete but just in case
