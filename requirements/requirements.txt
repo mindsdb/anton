@@ -16,3 +16,4 @@ pydantic-ai==0.7.4
 mindsdb_sdk==3.4.7
 pandas==2.3.1
 prefect==3.4.18
+async-property==0.2.2
