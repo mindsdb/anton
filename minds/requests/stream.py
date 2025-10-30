@@ -224,17 +224,19 @@ async def _build_json_response_from_messages(messages: list[StreamMessage], mode
     message_id = messages[-1].id if messages else ""
     choices = []
     for index, search_message in enumerate(messages):
-        # Properly serialize BaseModel content
-        content = search_message.content
-        if isinstance(content, BaseModel):
-            content = content.model_dump()
+        # Skip system messages (thoughts) in the final response.
+        if not search_message.role == Role.system:
+            # Properly serialize BaseModel content
+            content = search_message.content
+            if isinstance(content, BaseModel):
+                content = content.model_dump()
 
-        choice = Choice(
-            index=index,
-            message=Message(role=search_message.role, content=content),
-            finish_reason="stop",  # Set finish_reason to "stop" for successful completion
-        )
-        choices.append(choice)
+            choice = Choice(
+                index=index,
+                message=Message(role=search_message.role, content=content),
+                finish_reason="stop",  # Set finish_reason to "stop" for successful completion
+            )
+            choices.append(choice)
 
     response = ChatCompletion(id=message_id, model=model, choices=choices)
     return JSONResponse(response.model_dump())
