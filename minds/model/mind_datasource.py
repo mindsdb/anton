@@ -30,6 +30,7 @@ class DataCatalogStatus(str, Enum):
     LOADING = "LOADING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class MindDatasource(BaseSQLModel, table=True):
@@ -78,8 +79,10 @@ class MindDatasource(BaseSQLModel, table=True):
                 return DataCatalogStatus.LOADING
             elif state.is_completed():
                 return DataCatalogStatus.COMPLETED
-            elif state.is_failed():
+            elif state.is_failed() or state.is_crashed():
                 return DataCatalogStatus.FAILED
+            elif state.is_cancelling() or state.is_cancelled():
+                return DataCatalogStatus.CANCELLED
         return DataCatalogStatus.PENDING
 
     def __repr__(self) -> str:
