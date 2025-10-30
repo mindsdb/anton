@@ -40,7 +40,7 @@ jobs:
 
   build:
     runs-on: mdb-dev
-    # needs: [tests, linter, get-deploy-labels]
+    needs: [tests, linter, get-deploy-labels]
     if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
     env:
       AWS_REGION: us-east-1
@@ -149,8 +149,8 @@ jobs:
             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
             | grep '^minds-jobs' \
             | tail -n1)
-          echo "Found job $JOB_NAME. Waiting for it to complete..."
-          kubectl -n ${{matrix.deploy-env}} wait --for=condition=complete --timeout=300s job/$JOB_NAME --namespace ${{matrix.deploy-env}}
+          echo  "Found job $JOB_NAME. Waiting for it to complete..."
+          kubectl -n ${{matrix.deploy-env}} wait --for=condition=complete --timeout=10m job/$JOB_NAME --namespace ${{matrix.deploy-env}}
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()
@@ -210,4 +210,3 @@ jobs:
             kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o yaml || true
             exit 1
           fi
-

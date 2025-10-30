@@ -124,13 +124,14 @@ jobs:
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
       - name: Wait for Flow Deployment to Finish
         run: |
-          JOB_NAME=$(kubectl get jobs \
+          echo "Looking for minds-jobs job in namespace ${{matrix.environment}}..."
+          JOB_NAME=$(kubectl get jobs --namespace ${{matrix.environment}} \
             --sort-by=.metadata.creationTimestamp \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
             | grep '^minds-jobs' \
             | tail -n1)
-          echo "Waiting for job $JOB_NAME to complete..."
-          kubectl wait --for=condition=complete --timeout=300s job/$JOB_NAME
+          echo  "Found job $JOB_NAME. Waiting for it to complete..."
+          kubectl -n ${{matrix.environment}} wait --for=condition=complete --timeout=600s job/$JOB_NAME --namespace ${{matrix.environment}}
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         # Run this even if the deployment fails
