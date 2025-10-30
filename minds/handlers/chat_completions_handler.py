@@ -70,10 +70,7 @@ class ChatCompletionsHandler:
         for relationship in mind.mind_datasources:
             status = await relationship.status
             statuses.append(status)
-        if any(
-            status in [DataCatalogStatus.LOADING, DataCatalogStatus.PENDING]
-            for status in statuses
-        ):
+        if any(status in [DataCatalogStatus.LOADING, DataCatalogStatus.PENDING] for status in statuses):
             await streamer.push(
                 role=Role.assistant,
                 content="The Mind is not ready yet. Please try again later.",
