@@ -52,3 +52,7 @@ deployment:
     # Langfuse
     - name: LANGFUSE_ENVIRONMENT
       value: "demo"
+
+    # Data Catalog
+    - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
+      value: "demo--data-catalog-loader"

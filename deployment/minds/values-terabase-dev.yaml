@@ -53,3 +53,7 @@ deployment:
     # Langfuse
     - name: LANGFUSE_ENVIRONMENT
       value: "terabase-dev"
+
+    # Data Catalog
+    - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
+      value: "terabase-dev--data-catalog-loader"

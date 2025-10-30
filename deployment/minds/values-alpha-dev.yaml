@@ -51,3 +51,7 @@ deployment:
     # Langfuse
     - name: LANGFUSE_ENVIRONMENT
       value: "alpha-dev"
+
+    # Data Catalog
+    - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
+      value: "alpha-dev--data-catalog-loader"

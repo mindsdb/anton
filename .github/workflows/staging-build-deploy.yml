@@ -135,4 +135,50 @@ jobs:
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
           update-message-id: ${{ steps.slack.outputs.ts }}
 
+  run-evals:
+    runs-on: mdb-dev
+    needs: [ deploy ]
+    strategy:
+      matrix:
+        environment: [staging, dev, alpha-dev]
+    environment:
+      name: ${{ matrix.environment }}
+      url: ${{ vars.MDB_ENV_URL }}
+    # We want other deployments to wait while we test
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-${{ matrix.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run evals
+        run: |
+          export NAMESPACE=${{matrix.environment}}
+          export MINDS_BASE_URL=${{vars.MINDS_V3_ENV_URL}}
+          export PR_NUMBER=${{github.event.pull_request.number}}
 
+          kubectl -n $NAMESPACE delete job --ignore-not-found minds-langfuse-benchmarks
+          envsubst '${PR_NUMBER} ${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
+
+          echo "Waiting for eval job to start..."
+          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
+          kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
+
+          # Pod should already be complete but just in case
+          kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=1m "job/minds-langfuse-benchmarks"
+
+          # Read completion state
+          IS_COMPLETE=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Complete")]}{.status}{end}')
+          IS_FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Failed")]}{.status}{end}')
+
+          if [[ "$IS_COMPLETE" == "True" ]]; then
+            echo "Job completed successfully."
+            exit 0
+          elif [[ "$IS_FAILED" == "True" ]]; then
+            echo "Job failed."
+            exit 1
+          else
+            echo "Job neither reported Complete nor Failed (likely timeout)."
+            kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o yaml || true
+            exit 1
+          fi

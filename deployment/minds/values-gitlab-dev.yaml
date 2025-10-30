@@ -52,3 +52,7 @@ deployment:
     # Langfuse
     - name: LANGFUSE_ENVIRONMENT
       value: "gitlab-dev"
+
+    # Data Catalog
+    - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
+      value: "gitlab-dev--data-catalog-loader"
