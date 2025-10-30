@@ -116,7 +116,8 @@ jobs:
       - name: Remove old jobs
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
-          kubectl -n $NAMESPACE delete job --ignore-not-found minds-flows
+
+          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
         with:
           environment-slug: prod
