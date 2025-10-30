@@ -113,6 +113,10 @@ jobs:
           env-name: "prod"
           env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
+      - name: Remove old jobs
+        run: |
+          export NAMESPACE=${{matrix.deploy-env}}
+          kubectl -n $NAMESPACE delete job --ignore-not-found minds-flows
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
         with:
           environment-slug: prod
