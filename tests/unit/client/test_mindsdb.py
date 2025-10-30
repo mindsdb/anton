@@ -322,3 +322,55 @@ class TestCreateMindsdbClient:
         # Accept any Exception to be robust to implementation details.
         with pytest.raises(AttributeError):
             create_mindsdb_client_with_credentials("http://x", api_key=123, company_id="c")
+
+    @patch("minds.client.mindsdb.connect")
+    @patch("minds.client.mindsdb.MINDSDB_PASSWORD", "password123")
+    @patch("minds.client.mindsdb.MINDSDB_LOGIN", "loginuser")
+    def test_create_mindsdb_client_uses_minidsb_login_password_when_set(self, mock_connect, context):
+        """If MINDSDB_PASSWORD is configured, create_mindsdb_client should pass
+        login/password when api_key is missing."""
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
+
+        # Call with no api_key so branch for login/password is used
+        result = create_mindsdb_client(None, headers={"company-id": "cid"})
+
+        # Ensure connect was invoked with login/password in kwargs
+        assert mock_connect.called
+        called_args, called_kwargs = mock_connect.call_args
+        assert called_kwargs.get("login") == "loginuser"
+        assert called_kwargs.get("password") == "password123"
+        assert called_kwargs.get("headers") == {"company-id": "cid"}
+        assert result == mock_client
+
+    def test_create_mindsdb_client_non_string_api_key_raises_value_error(self):
+        """Passing a non-string api_key (but with .strip) should raise ValueError."""
+        # bytes has .strip(), so it will pass the initial strip check and hit the isinstance check
+        with pytest.raises(ValueError):
+            create_mindsdb_client(b"bytes", headers=None)
+
+    def test_create_mindsdb_client_with_credentials_non_string_api_key_raises_value_error(self):
+        """create_mindsdb_client_with_credentials should raise ValueError for non-string
+        api_key that implements strip()."""
+        with pytest.raises(ValueError):
+            create_mindsdb_client_with_credentials("http://x", api_key=b"bytes", company_id="c")
+
+    @patch("minds.client.mindsdb.get_authorization_bearer_token")
+    @patch("minds.client.mindsdb.get_headers_for_mindsdb_client")
+    @patch("minds.client.mindsdb.create_mindsdb_client")
+    def test_create_mindsdb_client_from_request_uses_get_headers(
+        self, mock_create_client, mock_get_headers, mock_get_token, context
+    ):
+        """Ensure headers are obtained from get_headers_for_mindsdb_client and
+        forwarded to create_mindsdb_client."""
+        mock_request = Mock(spec=Request)
+        mock_get_token.return_value = "tk"
+        mock_get_headers.return_value = {"company-id": "hdr"}
+        mock_client = Mock(spec=Server)
+        mock_create_client.return_value = mock_client
+
+        result = create_mindsdb_client_from_request(mock_request, context)
+
+        mock_get_headers.assert_called_once_with(context)
+        mock_create_client.assert_called_once_with("tk", headers={"company-id": "hdr"})
+        assert result == mock_client
