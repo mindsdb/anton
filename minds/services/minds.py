@@ -9,13 +9,11 @@ MindsDB is only used for datasource validation, not for minds storage.
 from datetime import datetime, timezone
 
 from mindsdb_sdk.server import Server
-from prefect.exceptions import PrefectException
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
 from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
-from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource

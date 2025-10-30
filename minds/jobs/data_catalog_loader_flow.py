@@ -22,7 +22,7 @@ from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
-from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+from minds.model.mind_datasource import MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
 
 logger = setup_logging()

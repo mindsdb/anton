@@ -320,5 +320,5 @@ class TestCreateMindsdbClient:
         # The implementation may attempt to call .strip() on api_key before
         # validating its type, which raises AttributeError for non-string input.
         # Accept any Exception to be robust to implementation details.
-        with pytest.raises(Exception):
+        with pytest.raises(AttributeError):
             create_mindsdb_client_with_credentials("http://x", api_key=123, company_id="c")

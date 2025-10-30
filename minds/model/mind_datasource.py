@@ -16,8 +16,8 @@ from pydantic import computed_field
 from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, Relationship
 
-from minds.model.base import BaseSQLModel
 from minds.client.prefect import PrefectClient
+from minds.model.base import BaseSQLModel
 from minds.model.mind_datasource_table import MindDatasourceTable
 
 if TYPE_CHECKING:

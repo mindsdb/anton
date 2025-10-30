@@ -1,5 +1,6 @@
-import pytest
 from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from minds.client.prefect import PrefectClient
 
