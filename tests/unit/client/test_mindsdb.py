@@ -8,6 +8,7 @@ from mindsdb_sdk.server import Server
 from minds.client.mindsdb import (
     create_mindsdb_client,
     create_mindsdb_client_from_request,
+    create_mindsdb_client_with_credentials,
 )
 from minds.requests.context import Context
 
@@ -263,3 +264,61 @@ class TestCreateMindsdbClient:
             create_mindsdb_client(api_key, headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"})
 
         mock_connect.assert_called_once()
+
+    @patch("minds.client.mindsdb.connect")
+    def test_create_mindsdb_client_with_credentials_api_key(self, mock_connect, context):
+        """Test explicit-credentials client creation when API key is provided."""
+        url = "http://explicit-test:9000"
+        api_key = "cred-api-key"
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
+
+        result = create_mindsdb_client_with_credentials(
+            url, api_key=api_key, company_id=f"{str(context.tenant_id)}_{str(context.user_id)}"
+        )
+
+        mock_connect.assert_called_once_with(
+            url=url,
+            api_key=api_key,
+            headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"},
+        )
+        assert result == mock_client
+
+    @patch("minds.client.mindsdb.connect")
+    def test_create_mindsdb_client_with_credentials_no_auth(self, mock_connect, context):
+        """When no api_key and no password are provided, should connect without auth."""
+        url = "http://no-auth-test:9000"
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
+
+        result = create_mindsdb_client_with_credentials(url, api_key=None, company_id="company-xyz")
+
+        mock_connect.assert_called_once_with(url=url, headers={"company-id": "company-xyz"})
+        assert result == mock_client
+
+    @patch("minds.client.mindsdb.connect")
+    def test_create_mindsdb_client_with_credentials_with_login_password(self, mock_connect, context):
+        """When login/password are provided (and no api_key), connect using them."""
+        url = "http://login-test:9000"
+        mock_client = Mock(spec=Server)
+        mock_connect.return_value = mock_client
+
+        result = create_mindsdb_client_with_credentials(
+            url, api_key=None, login="user", password="pass", company_id="company-abc"
+        )
+
+        mock_connect.assert_called_once_with(
+            url=url,
+            login="user",
+            password="pass",
+            headers={"company-id": "company-abc"},
+        )
+        assert result == mock_client
+
+    def test_create_mindsdb_client_with_credentials_invalid_api_key_raises(self):
+        """Passing a non-string api_key should raise an exception."""
+        # The implementation may attempt to call .strip() on api_key before
+        # validating its type, which raises AttributeError for non-string input.
+        # Accept any Exception to be robust to implementation details.
+        with pytest.raises(Exception):
+            create_mindsdb_client_with_credentials("http://x", api_key=123, company_id="c")
