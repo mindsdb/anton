@@ -4,13 +4,13 @@ deployment:
   # This is the name of the deployment, this is used in a _lot_ of places in the helm charts so lets just specify it
   name: minds
 
-  replicaCount: 3
+  replicaCount: 2
 
   # What group we're in in gitlab and what namespace we deploy to in kubernetes
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
     command: ["python", "-m", "uvicorn", "minds.server:create_app"]
-    args: ["--factory", "--workers", "33", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*", "--log-level", "debug"]
+    args: ["--factory", "--workers", " 24", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
 
 
   # livenessProbes are used to determine when to restart a container
@@ -34,10 +34,10 @@ deployment:
   resources:
     limits:
       cpu: 4
-      memory: 1Gi
+      memory: 8Gi
     requests:
       cpu: 2
-      memory: 1Gi
+      memory: 8Gi
 
   # Enable autoscaling
   autoscaling:
