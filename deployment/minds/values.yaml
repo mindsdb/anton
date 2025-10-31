@@ -12,15 +12,20 @@ deployment:
     command: ["python", "-m", "uvicorn", "minds.server:app"]
     args: ["--workers", "33", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
 
+
   # livenessProbes are used to determine when to restart a container
   # Only specify the values you need to override from the defaults
   livenessProbe:
-    enabled: false
+    enabled: true
+    initialDelaySeconds: 30
+    path: /api/v1/health/live
 
   # readinessProbes are used to determine when a container is ready to start accepting traffic
   # Only specify the values you need to override from the defaults
   readinessProbe:
-    enabled: false
+    enabled: true
+    initialDelaySeconds: 30
+    path: /api/v1/health/ready
 
   # deployment container resource requests/limits
   # this is set VERY low by default, to be aggressive above resource limiting, please override this if necessary

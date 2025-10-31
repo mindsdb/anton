@@ -145,11 +145,12 @@ jobs:
           image-tag: development-${{ env.SLUG }}
           timeout: 600s
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
-      - name: Wait for Flow Deployment to Finish
+      - name: Wait for Deployment to be ready
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
 
           kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
+          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=5m pod -l app=minds
 
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
