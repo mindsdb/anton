@@ -40,7 +40,6 @@ deployment:
 
   ingress:
     enabled: true
-    pathType: Prefix
     annotations:
       nginx.ingress.kubernetes.io/proxy-connect-timeout: "1200"
       nginx.ingress.kubernetes.io/proxy-read-timeout: "1200"
