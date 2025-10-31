@@ -314,7 +314,7 @@ class MindsService:
                     raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
 
             datasource_configs = mind_data.datasources
-            if datasource_configs:
+            if datasource_configs is not None:
                 # Validate new datasources if provided
                 await self._validate_datasources(mind_data.datasources)
                 # Cancel any running data catalog loader flows for the mind
@@ -446,7 +446,7 @@ class MindsService:
         """
         # If datasource configs are explicitly provided (e.g. on creation), use those
         # On create and update, the relationships may not be fully populated yet
-        if datasource_configs:
+        if datasource_configs is not None:
             datasources = datasource_configs
         # Get linked datasources through the many-to-many relationship
         else:
