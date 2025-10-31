@@ -15,25 +15,37 @@ from minds.common.logger import setup_logging
 logger = setup_logging()
 
 
-# Create FastAPI app
-app = FastAPI(
-    title="Minds API",
-    description="FastAPI-based service providing OpenAI-compatible chat completions with MindsDB integration",
-    version="1.0.0",
-)
+def create_app() -> FastAPI:
+    """
+    Create and configure the FastAPI application.
 
-# Configure CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow any origin. This will be controlled by the ingress controller.
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
-)
+    Returns:
+        FastAPI: Configured FastAPI application instance
+    """
+    # Create FastAPI app
+    app = FastAPI(
+        title="Minds API",
+        description="FastAPI-based service providing OpenAI-compatible chat completions with MindsDB integration",
+        version="1.0.0",
+    )
 
-# Include v1 API routes
-app.include_router(v1_router)
+    # Configure CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow any origin. This will be controlled by the ingress controller.
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+        max_age=3600,
+    )
 
-logger.info("Minds application created successfully")
+    # Include v1 API routes
+    app.include_router(v1_router)
+
+    logger.info("Minds application created successfully")
+    return app
+
+
+# Create the application instance
+app = create_app()

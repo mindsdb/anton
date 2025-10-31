@@ -9,8 +9,8 @@ deployment:
   # What group we're in in gitlab and what namespace we deploy to in kubernetes
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
-    command: ["python", "-m", "uvicorn", "minds.server:app"]
-    args: ["--workers", "33", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
+    command: ["python", "-m", "uvicorn", "minds.server:create_app"]
+    args: ["--factory", "--workers", "33", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*", "--log-level", "debug"]
 
 
   # livenessProbes are used to determine when to restart a container
@@ -33,10 +33,10 @@ deployment:
   #       Requests are "soft" limits and are what affects HPA (autoscaling) aggressiveness if HPA is enabled
   resources:
     limits:
-      cpu: 1
+      cpu: 4
       memory: 1Gi
     requests:
-      cpu: 500m
+      cpu: 2
       memory: 1Gi
 
   # Enable autoscaling
