@@ -1,24 +1,14 @@
 # minds/tests/integration/conftest.py
-import logging, random, string
+import logging
 import os
 import time
 import uuid
-from minds.client import Client
-from minds.datasources import DatabaseConfig
+
 import pytest
 import requests
 from requests import Session
 
-from .config import AUTH_TOKEN, DATASOURCE_CONFIGS, MINDS_API_BASE_URL, POSTGRES_CONFIG
-
-
-# ----------------------------------
-# Constants
-# ----------------------------------
-MAX_RETRIES = 60
-POLL_INTERVAL = 2
-REQUIRED_STATUSES = ["PENDING"]
-OPTIONAL_STATUSES = ["LOADING"]
+from .config import AUTH_TOKEN, DATASOURCE_CONFIGS, MINDS_API_BASE_URL
 
 
 # ----------------------------------
@@ -141,76 +131,3 @@ def temporary_mind(api_client: Session, temporary_datasource):
     logging.info(f"TEARDOWN: Deleting mind '{unique_name}'...")
     delete_resp = api_client.delete(f"{MINDS_API_BASE_URL}/api/v1/minds/{unique_name}")
     assert delete_resp.status_code in [204, 404], "FIXTURE FAILED: Could not delete mind."
-
-# ----------------------------------
-# Fixtures for SDK Client Testing
-# ----------------------------------
-
-@pytest.fixture(scope="session")
-def sdk_client() -> Client:
-    """
-    Provides a minds.client.Client instance for SDK-specific tests.
-    Uses a default API key if the environment variable is not set.
-    """
-    # Use the AUTH_TOKEN from config, defaulting to 'valid_key' if it's not set.
-    api_key = AUTH_TOKEN if AUTH_TOKEN is not None else "valid_key"
-
-    # MINDS_API_BASE_URL already defaults correctly in config.py
-    return Client(api_key="valid_key", base_url=MINDS_API_BASE_URL)
-
-# Helper function to generate short random names
-def get_unique_name(prefix: str, length: int = 8) -> str:
-    """Generates a unique name with a given prefix and a random suffix."""
-    random_suffix = ''.join(random.choices(string.ascii_lowercase, k=length))
-    return f"{prefix}_{random_suffix}"
-
-
-@pytest.fixture(scope="function")
-def sdk_datasource(sdk_client: Client):
-    """
-    Creates a unique PostgreSQL datasource using the SDK client for a single test.
-    Cleans up the datasource after the test completes.
-    """
-    # Generate a short, valid name
-    ds_name = get_unique_name("sdk_ds")
-    logging.info(f"SETUP: Creating SDK datasource '{ds_name}'...")
-
-    db_config = DatabaseConfig(
-        name=ds_name,
-        engine='postgres',
-        connection_data=POSTGRES_CONFIG
-    )
-    sdk_client.datasources.create(db_config)
-    yield ds_name
-
-    # Teardown
-    logging.info(f"TEARDOWN: Deleting SDK datasource '{ds_name}'...")
-    try:
-        sdk_client.datasources.drop(ds_name)
-    except Exception as e:
-        logging.warning(f"Could not clean up SDK datasource '{ds_name}': {e}")
-
-
-@pytest.fixture(scope="function")
-def sdk_mind(sdk_client: Client, sdk_datasource: str):
-    """
-    Creates a unique mind using the SDK client, linked to the sdk_datasource fixture.
-    Cleans up the mind after the test completes.
-    """
-    # Generate a short, valid name that is well under the 32-character limit
-    mind_name = get_unique_name("sdk_mind")
-    logging.info(f"SETUP: Creating SDK mind '{mind_name}' linked to '{sdk_datasource}'...")
-
-    sdk_client.minds.create(
-        name=mind_name,
-        provider='openai',
-        datasources=[sdk_datasource]
-    )
-    yield mind_name
-
-    # Teardown
-    logging.info(f"TEARDOWN: Deleting SDK mind '{mind_name}'...")
-    try:
-        sdk_client.minds.drop(mind_name)
-    except Exception as e:
-        logging.warning(f"Could not clean up SDK mind '{mind_name}': {e}")

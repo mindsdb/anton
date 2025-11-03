@@ -15,9 +15,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 load_dotenv()
 
 # --- API and Schema Configuration ---
-MINDS_API_BASE_URL = os.getenv("MINDS_API_BASE_URL", "https://minds-terabase.dev.mdb.ai")  #
-MINDS_OPENAPI_SPEC_URL = os.getenv("MINDS_OPENAPI_SPEC_URL", f"{MINDS_API_BASE_URL.strip('/')}/openapi.json")
-AUTH_TOKEN = os.getenv("MINDS_API_TOKEN")
+MINDS_API_BASE_URL = os.getenv("MINDS_API_BASE_URL")
+logging.info(f"--- USING API BASE URL: {MINDS_API_BASE_URL} ---")
+AUTH_TOKEN = os.getenv("MINDS_API_KEY")
 
 # --- DATASOURCE CONFIGURATIONS ---
 DATASOURCE_CONFIGS = []

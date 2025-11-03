@@ -1,5 +1,6 @@
 import logging
 import time
+import uuid
 
 import pytest
 
@@ -9,56 +10,144 @@ from .conftest import poll_mind_transitions
 # States we expect a mind to pass through before completion
 
 
+# --- Reusable Helper Function ---
+
+
+def get_and_verify_mind(api_client, mind_name, expected_status=200):
+    """
+    Reusable helper to fetch a mind and assert the HTTP status.
+    Returns the mind's JSON data if 200, otherwise None.
+    """
+    logging.info(f"HELPER: GET /api/v1/minds/{mind_name} (expecting {expected_status})")
+    get_resp = api_client.get(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}")
+
+    assert get_resp.status_code == expected_status, (
+        f"Failed to get mind '{mind_name}'. "
+        f"Expected {expected_status}, got {get_resp.status_code}. "
+        f"Response: {get_resp.text}"
+    )
+
+    if expected_status == 200:
+        return get_resp.json()
+    return None
+
+
+# --- Test Class ---
+
+
 @pytest.mark.happy_path
 class TestMindsAPI:
-    def test_mind_crud_workflow(self, api_client, temporary_mind):
+    def test_mind_crud_workflow(self, api_client, temporary_datasource):
         """
-        Tests the full CRUD lifecycle of a Mind.
+        Tests the full C-R-U-D lifecycle explicitly.
         """
-        mind_name, (ds_name, config) = temporary_mind
+        # --- 1. SETUP (from fixture) ---
+        ds_name, config = temporary_datasource
+        mind_name = f"test-crud-explicit-{uuid.uuid4()}"
+        initial_tables = [config["sample_table"], "home_rentals"]
 
-        # --- READ: Verify mind creation ---
-        logging.info(f"TEST: Verifying creation of mind '{mind_name}'")
-        get_resp = api_client.get(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}")
-        assert get_resp.status_code == 200, f"Failed to get mind. Response: {get_resp.text}"
-        assert get_resp.json()["name"] == mind_name
+        # --- 2. CREATE (POST) ---
+        logging.info(f"TEST: Explicitly creating mind '{mind_name}'")
+        payload = {
+            "name": mind_name,
+            "provider": "openai",
+            "model_name": "gpt-4",
+            "parameters": {},
+            "datasources": [
+                {
+                    "name": ds_name,
+                    "tables": initial_tables,
+                }
+            ],
+        }
+        create_resp = api_client.post(f"{MINDS_API_BASE_URL}/api/v1/minds/", json=payload)
+        assert create_resp.status_code == 201, f"Failed to create mind. Response: {create_resp.text}"
 
-        # Poll until final state
+        # --- 3. POLL until COMPLETED ---
+        logging.info(f"TEST: Polling for mind '{mind_name}' to complete...")
         mind_data = poll_mind_transitions(api_client, mind_name)
         assert mind_data["status"] == "COMPLETED"
+        logging.info(f"SUCCESS: Mind '{mind_name}' is COMPLETED.")
 
-        # Validate table exists for this datasource
-        expected_table = config["sample_table"].lower()
-        found = False
-        for ds in mind_data.get("datasources", []):
-            if ds.get("name") != ds_name:
-                continue
-            for table in ds.get("tables", []):
-                if expected_table in table.lower():
-                    found = True
-                    break
-        assert found, (
-            f"Expected table '{expected_table}' not found in mind '{mind_name}' "
-            f"datasource '{ds_name}'. Found tables: {ds.get('tables', [])}"
+        # --- 4. READ (GET) after Create ---
+        logging.info(f"TEST: Verifying mind '{mind_name}' exists after create.")
+        mind_data = get_and_verify_mind(api_client, mind_name, expected_status=200)
+
+        assert mind_data["name"] == mind_name
+        found_ds = mind_data.get("datasources", [])[0]
+        assert found_ds["name"] == ds_name
+
+        # --- FIX: Use a subset check, not equality ---
+        def normalize_table(t):
+            # "public.house_sales" -> "house_sales"
+            # "Home_Rentals" -> "home_rentals"
+            return t.split(".")[-1].lower()
+
+        # Convert to sets for easy comparison
+        tables_from_api = set(normalize_table(t) for t in found_ds.get("tables", []))
+        expected_tables = set(normalize_table(t) for t in initial_tables)
+
+        # Check if the tables we sent are a SUBSET of the tables the API returned
+        assert expected_tables.issubset(tables_from_api), (
+            f"Mind tables do not contain all expected tables. Expected: {expected_tables}, Got: {tables_from_api}"
         )
-        # --- UPDATE: Modify mind parameters ---
-        logging.info(f"TEST: Updating mind '{mind_name}'")
-        update_payload = {"parameters": {"temperature": 0.5}}
-        update_resp = api_client.put(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}", json=update_payload)
-        assert update_resp.status_code == 200
-        assert update_resp.json()["parameters"]["temperature"] == 0.5
+        logging.info(f"SUCCESS: Verified mind '{mind_name}' initial data.")
 
-        # --- DELETE: Clean up mind ---
+        # --- 5. UPDATE (PUT) ---
+        logging.info(f"TEST: Updating mind '{mind_name}' with new tables")
+        updated_tables = ["house_sales", "orders"]
+
+        update_payload = {"datasources": [{"name": ds_name, "tables": updated_tables}]}
+
+        update_resp = api_client.put(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}", json=update_payload)
+        assert update_resp.status_code == 200, f"Failed to update mind. Response: {update_resp.text}"
+
+        # Verify the change in the response from the PUT
+        response_data = update_resp.json()
+
+        # --- FIX: Use subset check here too ---
+        tables_from_api = set(normalize_table(t) for t in response_data["datasources"][0].get("tables", []))
+        expected_tables = set(normalize_table(t) for t in updated_tables)
+
+        assert expected_tables.issubset(tables_from_api)
+
+        # Poll until final state after update
+        logging.info(f"TEST: Polling for mind '{mind_name}' to complete after update...")
+        mind_data = poll_mind_transitions(api_client, mind_name)
+        assert mind_data["status"] == "COMPLETED"
+        logging.info("SUCCESS: Mind update is COMPLETED.")
+
+        # --- 6. READ (GET) after Update ---
+        logging.info(f"TEST: Verifying mind '{mind_name}' data is persisted after update.")
+        updated_mind_data = get_and_verify_mind(api_client, mind_name, expected_status=200)
+
+        assert updated_mind_data["name"] == mind_name
+        found_ds = updated_mind_data.get("datasources", [])[0]
+        assert found_ds["name"] == ds_name
+
+        # --- FIX: Use subset check here too ---
+        tables_from_api = set(normalize_table(t) for t in found_ds.get("tables", []))
+        expected_tables = set(normalize_table(t) for t in updated_tables)
+
+        assert expected_tables.issubset(tables_from_api), (
+            f"Mind tables do not contain all expected tables after update. "
+            f"Expected: {expected_tables}, Got: {tables_from_api}"
+        )
+        logging.info(f"SUCCESS: Verified mind '{mind_name}' updated data.")
+
+        # --- 7. DELETE (DELETE) ---
         logging.info(f"TEST: Deleting mind '{mind_name}'")
         delete_resp = api_client.delete(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}")
         assert delete_resp.status_code in (200, 204), f"Failed to delete mind. Response: {delete_resp.text}"
+        logging.info("SUCCESS: Mind deleted.")
 
-        # Verify deletion
-        get_after_delete = api_client.get(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}")
-        assert get_after_delete.status_code == 404
+        # --- 8. READ after DELETE (GET) ---
+        logging.info(f"TEST: Verifying mind '{mind_name}' is gone (GET 404).")
+        get_and_verify_mind(api_client, mind_name, expected_status=404)
+        logging.info("SUCCESS: Verified mind deletion (404).")
 
     def test_list_minds(self, api_client, temporary_mind):
-        # Unpack mind_name and datasource info
+        # This test remains unchanged.
         mind_name, (ds_name, config) = temporary_mind
 
         logging.info("TEST: Listing all minds and searching for the new mind.")
