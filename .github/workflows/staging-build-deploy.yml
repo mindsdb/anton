@@ -117,7 +117,7 @@ jobs:
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
       - name: Remove old jobs
         run: |
-          export NAMESPACE=${{matrix.deploy-env}}
+          export NAMESPACE=${{matrix.environment}}
 
           kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
@@ -129,7 +129,7 @@ jobs:
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
       - name: Wait for Flow Deployment to Finish
         run: |
-          export NAMESPACE=${{matrix.deploy-env}}
+          export NAMESPACE=${{matrix.environment}}
 
           kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
           kubectl -n $NAMESPACE wait --for=condition=ready --timeout=5m pod -l app=minds
