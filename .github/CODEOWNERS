@@ -6,3 +6,4 @@ deployment          @mindsdb/devops
 alembic             @mindsdb/devops
 alembic.ini         @mindsdb/devops
 Makefile            @mindsdb/devops
+prefect.yaml        @mindsdb/devops

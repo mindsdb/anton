@@ -19,7 +19,7 @@ To install the chart...
 
 ```bash
 
-export SERVICE_NAME="minds-jobs"
+export SERVICE_NAME="minds-flows"
 export CI_ENVIRONMENT_SLUG="dev"
 export K8S_NAMESPACE="dev"
 export HELM_CHART=$SERVICE_NAME

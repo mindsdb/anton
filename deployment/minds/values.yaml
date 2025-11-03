@@ -9,30 +9,35 @@ deployment:
   # What group we're in in gitlab and what namespace we deploy to in kubernetes
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
-    # command: ["/bin/bash"]
-    # args: ["-c", "sleep infinity"]
+    command: ["python", "-m", "uvicorn", "minds.server:create_app"]
+    args: ["--factory", "--workers", " 24", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
+
 
   # livenessProbes are used to determine when to restart a container
   # Only specify the values you need to override from the defaults
   livenessProbe:
-    enabled: false
+    enabled: true
+    initialDelaySeconds: 30
+    path: /api/v1/health/live
 
   # readinessProbes are used to determine when a container is ready to start accepting traffic
   # Only specify the values you need to override from the defaults
   readinessProbe:
-    enabled: false
+    enabled: true
+    initialDelaySeconds: 30
+    path: /api/v1/health/ready
 
   # deployment container resource requests/limits
   # this is set VERY low by default, to be aggressive above resource limiting, please override this if necessary
   # Note: Limits are HARD Limits
   #       Requests are "soft" limits and are what affects HPA (autoscaling) aggressiveness if HPA is enabled
-  # resources:
-  #   limits:
-  #     cpu: 100m
-  #     memory: 4Gi
-  #   requests:
-  #     cpu: 1000m
-  #     memory: 4Gi
+  resources:
+    limits:
+      cpu: 4
+      memory: 8Gi
+    requests:
+      cpu: 2
+      memory: 8Gi
 
   # Enable autoscaling
   autoscaling:
@@ -40,6 +45,26 @@ deployment:
 
   ingress:
     enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-connect-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-body-size: 500m
+      nginx.ingress.kubernetes.io/enable-cors: "false"
+      nginx.ingress.kubernetes.io/cors-allow-methods: "GET,OPTIONS,PUT,POST,PATCH,DELETE"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "http://localhost:3000"
+      nginx.ingress.kubernetes.io/cors-allow-headers: >-
+        DNT,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,
+        Authorization,X-CSRF-Token,Accept,Origin,Access-Control-Allow-Origin,X-File-Name,Set-Cookie,X-User-Id,X-User-Email,X-Company-Id,X-Forwarded-User
+      nginx.ingress.kubernetes.io/cors-max-age: "3600"
+      nginx.ingress.kubernetes.io/use-regex: "true"
+      
+      # Forward auth configuration using your gateway service
+      nginx.ingress.kubernetes.io/auth-url: "auth-url" # Needs to be set in the environment values file
+      nginx.ingress.kubernetes.io/auth-method: "GET"
+      nginx.ingress.kubernetes.io/auth-response-headers: >-
+        X-Company-Id,X-User-Id,X-User-Email,X-Forwarded-User
+      nginx.ingress.kubernetes.io/auth-request-headers: "Authorization,Cookie"
 
   service:
     targetPort: 9010

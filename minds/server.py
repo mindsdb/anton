@@ -32,8 +32,8 @@ def create_app() -> FastAPI:
     # Configure CORS middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Allow any origin
-        allow_credentials=False,  # Set to False when using "*"
+        allow_origins=["*"],  # Allow any origin. This will be controlled by the ingress controller.
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["*"],

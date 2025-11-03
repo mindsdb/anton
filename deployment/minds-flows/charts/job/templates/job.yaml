@@ -6,7 +6,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ printf "%s-%s" .Values.name (now | date "0102-1504") | quote }}
+  name: {{ .Values.name | quote }}
   labels:
     app: {{ template "name" . }}
 {{ include "labels_without_key_or_name" . | indent 4 }}
