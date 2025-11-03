@@ -314,13 +314,15 @@ class MindsService:
                     raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
 
             datasource_configs = mind_data.datasources
-            if datasource_configs is not None:
+
+            if datasource_configs:
                 # Validate new datasources if provided
-                await self._validate_datasources(mind_data.datasources)
-                # Cancel any running data catalog loader flows for the mind
-                await self._cancel_data_catalog_loader_flows_for_mind(mind)
-                # Update the datasources associated with the mind
-                await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
+                await self._validate_datasources(datasource_configs)
+
+            # Cancel any running data catalog loader flows for the mind
+            await self._cancel_data_catalog_loader_flows_for_mind(mind)
+            # Update the datasources associated with the mind
+            await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
 
             # Update mind fields
             if mind_data.name is not None:
@@ -675,7 +677,8 @@ class MindsService:
             self.session.flush()
 
             # Add new relationships
-            await self._add_datasources_to_mind(mind, new_datasource_configs, data_catalog_loader)
+            if new_datasource_configs:
+                await self._add_datasources_to_mind(mind, new_datasource_configs, data_catalog_loader)
 
             logger.debug(f"Updated datasources for mind {mind.name}")
         except Exception as e:
