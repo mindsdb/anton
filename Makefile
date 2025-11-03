@@ -47,11 +47,9 @@ activate: $(VENV)/$(VENV_DIR)/activate ## Activate the virtual environment
 test/unit: activate ## Run unit tests
 	$(PYTHON) -m pytest tests/unit/
 
-test/integration: activate ## Run integration tests (happy path)
+test/integration: activate 
 	$(PYTHON) -m pytest tests/integration/ -m "happy_path"
 
-test/contract: activate ## Run contract tests
-	$(PYTHON) -m pytest tests/integration/ -m "contract"
 
 test/integration/all: activate ## Run all integration tests
 	$(PYTHON) -m pytest tests/integration/
