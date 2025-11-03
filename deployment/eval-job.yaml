@@ -14,12 +14,14 @@ spec:
           imagePullPolicy: Always
           command: ["/bin/sh", "-c"]
           args:
+            # max_items has been set to 100 to avoid running evals against very large datasets like Spider
+            # in the future, we can make this configurable via a secret or config map
             - >
               python -m src.scripts.run_langfuse_experiments \
                 --minds-base-url "${MINDS_BASE_URL}" \
                 --langfuse-host "https://langfuse.dev.mindsdb.com" \
-                --pr-number "${PR_NUMBER}"
-                --max-items ${LANGFUSE_DATASETS_MAX_ITEMS}
+                --pr-number "${PR_NUMBER}" \
+                --max-items 100
           env:
             - name: MINDS_API_KEY
               valueFrom:
