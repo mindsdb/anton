@@ -7,11 +7,6 @@ import pytest
 from .config import MINDS_API_BASE_URL
 from .conftest import poll_mind_transitions
 
-# States we expect a mind to pass through before completion
-
-
-# --- Reusable Helper Function ---
-
 
 def get_and_verify_mind(api_client, mind_name, expected_status=200):
     """
@@ -77,7 +72,6 @@ class TestMindsAPI:
         found_ds = mind_data.get("datasources", [])[0]
         assert found_ds["name"] == ds_name
 
-        # --- FIX: Use a subset check, not equality ---
         def normalize_table(t):
             # "public.house_sales" -> "house_sales"
             # "Home_Rentals" -> "home_rentals"
@@ -104,8 +98,6 @@ class TestMindsAPI:
 
         # Verify the change in the response from the PUT
         response_data = update_resp.json()
-
-        # --- FIX: Use subset check here too ---
         tables_from_api = set(normalize_table(t) for t in response_data["datasources"][0].get("tables", []))
         expected_tables = set(normalize_table(t) for t in updated_tables)
 
@@ -125,7 +117,6 @@ class TestMindsAPI:
         found_ds = updated_mind_data.get("datasources", [])[0]
         assert found_ds["name"] == ds_name
 
-        # --- FIX: Use subset check here too ---
         tables_from_api = set(normalize_table(t) for t in found_ds.get("tables", []))
         expected_tables = set(normalize_table(t) for t in updated_tables)
 
@@ -147,7 +138,6 @@ class TestMindsAPI:
         logging.info("SUCCESS: Verified mind deletion (404).")
 
     def test_list_minds(self, api_client, temporary_mind):
-        # This test remains unchanged.
         mind_name, (ds_name, config) = temporary_mind
 
         logging.info("TEST: Listing all minds and searching for the new mind.")
