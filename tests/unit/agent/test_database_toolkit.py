@@ -59,7 +59,10 @@ class TestDatabaseToolkit:
         """Create a mock Datasource instance for testing."""
         datasource = Mock(spec=Datasource)
         datasource.id = UUID("12345678-1234-5678-1234-567812345678")
-        datasource.name = "test-datasource"
+        # The DatabaseToolkit uses the nested mind_datasource.datasource.name
+        # as the canonical namespace. Use the same value as integration_name in
+        # the tests to keep fixtures consistent.
+        datasource.name = "test-integration"
         datasource.engine = "postgres"
         datasource.created_at = datetime.now()
         datasource.modified_at = datetime.now()
@@ -80,23 +83,42 @@ class TestDatabaseToolkit:
         mind_datasource.deleted_at = None
         mind_datasource.tenant_id = "test-tenant"
         mind_datasource.status = "active"
+        # Provide a default list of mind_datasource_tables compatible with
+        # the DatabaseToolkit expectations. Each entry should have a `.table`
+        # attribute with a `.name`.
+        mock_table = Mock()
+        mock_table.table = Mock()
+        mock_table.table.name = "users"
+        mind_datasource.mind_datasource_tables = [mock_table]
         return mind_datasource
 
     @pytest.fixture
     def mock_data_catalog(self, mock_mind_datasource):
         """Create a mock DataCatalog instance for testing."""
-        catalog = Mock(spec=DataCatalog)
-        catalog.mind_datasource = mock_mind_datasource
-        catalog.integration_name = "test-integration"
-        catalog.datasource_name = "test-datasource"
-        catalog.tables = {"users": {"id": "int", "name": "string"}}
-        catalog.to_context_str = Mock(return_value="Mock catalog context")
-        return catalog
+
+        class DummyCatalog:
+            def __init__(self, mind_datasource):
+                self.mind_datasource = mind_datasource
+                self.integration_name = "test-integration"
+                self.datasource_name = "test-datasource"
+                self.tables = {"users": {"id": "int", "name": "string"}}
+
+            def to_context_str(self):
+                return "Mock catalog context"
+
+        return DummyCatalog(mock_mind_datasource)
 
     @pytest.fixture
     def database_toolkit(self, mock_mind, mock_mindsdb_client):
         """Create a DatabaseToolkit instance for testing."""
         return DatabaseToolkit(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
+
+    @pytest.fixture
+    def mock_streamer(self):
+        """Mock MessageStreamer for tests that need it."""
+        m = Mock()
+        m.push = AsyncMock()
+        return m
 
     def test_database_toolkit_initialization(self, mock_mind, mock_mindsdb_client):
         """Test DatabaseToolkit initialization."""
@@ -106,7 +128,7 @@ class TestDatabaseToolkit:
         assert toolkit.mindsdb_client == mock_mindsdb_client
 
     @pytest.mark.asyncio
-    async def test_generate_and_execute_sql_success(self, database_toolkit):
+    async def test_generate_and_execute_sql_success(self, database_toolkit, mock_streamer):
         """Test successful SQL generation and execution."""
         conversation_context = "Show me all users"
         expected_result = "Query executed successfully"
@@ -114,13 +136,13 @@ class TestDatabaseToolkit:
         with patch.object(database_toolkit, "_generate_and_execute_with_retry") as mock_retry:
             mock_retry.return_value = expected_result
 
-            result = await database_toolkit.generate_and_execute_sql(conversation_context)
+            result = await database_toolkit.generate_and_execute_sql(conversation_context, mock_streamer)
 
             assert result == expected_result
-            mock_retry.assert_called_once_with(conversation_context)
+            mock_retry.assert_called_once_with(conversation_context, mock_streamer)
 
     @pytest.mark.asyncio
-    async def test_generate_and_execute_with_retry_success_first_attempt(self, database_toolkit):
+    async def test_generate_and_execute_with_retry_success_first_attempt(self, database_toolkit, mock_streamer):
         """Test successful SQL generation on first attempt."""
         conversation_context = "Show me all users"
         expected_sql = "SELECT * FROM users"
@@ -135,15 +157,16 @@ class TestDatabaseToolkit:
             mock_sanitize.return_value = expected_sql
             mock_execute.return_value = expected_result
 
-            result = await database_toolkit._generate_and_execute_with_retry(conversation_context)
+            result = await database_toolkit._generate_and_execute_with_retry(conversation_context, mock_streamer)
 
             assert result == expected_result
             mock_generate.assert_called_once_with(conversation_context)
             mock_sanitize.assert_called_once_with(expected_sql)
             mock_execute.assert_called_once_with(expected_sql, raise_on_error=True)
+            assert mock_streamer.push.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_generate_and_execute_with_retry_success_after_retry(self, database_toolkit):
+    async def test_generate_and_execute_with_retry_success_after_retry(self, database_toolkit, mock_streamer):
         """Test successful SQL generation after retry."""
         conversation_context = "Show me all users"
         failed_sql = "SELECT * FROM non_existent_table"
@@ -163,7 +186,7 @@ class TestDatabaseToolkit:
             mock_sanitize.side_effect = [QueryGenerationError("Table not found"), None, None]
             mock_execute.side_effect = [Exception("Table not found"), expected_result]
 
-            result = await database_toolkit._generate_and_execute_with_retry(conversation_context)
+            result = await database_toolkit._generate_and_execute_with_retry(conversation_context, mock_streamer)
 
             assert result == expected_result
             assert mock_generate.call_count == 1  # Only first attempt
@@ -172,7 +195,7 @@ class TestDatabaseToolkit:
             assert mock_execute.call_count == 2  # Failed and successful attempts
 
     @pytest.mark.asyncio
-    async def test_generate_and_execute_with_retry_max_retries_exceeded(self, database_toolkit):
+    async def test_generate_and_execute_with_retry_max_retries_exceeded(self, database_toolkit, mock_streamer):
         """Test SQL generation when max retries are exceeded."""
         conversation_context = "Show me all users"
         error_message = "Persistent error"
@@ -189,7 +212,7 @@ class TestDatabaseToolkit:
             mock_sanitize.side_effect = QueryGenerationError(error_message)
             mock_execute.side_effect = Exception(error_message)
 
-            result = await database_toolkit._generate_and_execute_with_retry(conversation_context)
+            result = await database_toolkit._generate_and_execute_with_retry(conversation_context, mock_streamer)
 
             expected_error = (
                 f"Sorry, I'm having an issue querying the data I need. Tried 4 times. Final error: {error_message}"
@@ -463,6 +486,7 @@ class TestDatabaseToolkit:
             patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
             patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
             patch("minds.agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
+            patch.object(database_toolkit, "_plan_selection", return_value=None),
         ):
             mock_cache.load.return_value = [mock_data_catalog]
             mock_llm = Mock()
@@ -621,6 +645,13 @@ class TestDatabaseToolkit:
         catalog = Mock(spec=DataCatalog)
         catalog.integration_name = None
         catalog.datasource_name = "fallback-datasource"
+        # Provide nested mind_datasource.datasource.name to be used by toolkit
+        md = Mock()
+        ds = Mock()
+        ds.name = "fallback-datasource"
+        md.datasource = ds
+        md.mind_datasource_tables = []
+        catalog.mind_datasource = md
         catalog.tables = {"users": {"id": "int", "name": "string"}}
 
         catalogs = [catalog]
@@ -634,6 +665,14 @@ class TestDatabaseToolkit:
         catalog.integration_name = None
         catalog.datasource_name = None
         catalog.tables = {"users": {"id": "int", "name": "string"}}
+        # Provide a mind_datasource with a datasource.name = None so the toolkit
+        # can safely access nested attributes.
+        md = Mock()
+        ds = Mock()
+        ds.name = None
+        md.datasource = ds
+        md.mind_datasource_tables = []
+        catalog.mind_datasource = md
 
         catalogs = [catalog]
         plan = QueryPlanResult(selected_datasources=["some-datasource"])
@@ -645,22 +684,40 @@ class TestDatabaseToolkit:
         """Test catalog filtering with table filtering."""
         catalog = Mock(spec=DataCatalog)
         catalog.integration_name = "test-integration"
-        catalog.tables = {"users": {"id": "int", "name": "string"}, "orders": {"id": "int", "user_id": "int"}}
+        # Provide nested mind_datasource with table objects as expected by toolkit
+        md = Mock()
+        md.datasource = Mock()
+        md.datasource.name = "test-integration"
+        tbl_users = Mock()
+        tbl_users.table = Mock()
+        tbl_users.table.name = "users"
+        tbl_orders = Mock()
+        tbl_orders.table = Mock()
+        tbl_orders.table.name = "orders"
+        md.mind_datasource_tables = [tbl_users, tbl_orders]
+        catalog.mind_datasource = md
 
         catalogs = [catalog]
         plan = QueryPlanResult(selected_tables=["test-integration.users"])
         result = database_toolkit._filter_catalogs_with_plan(catalogs, plan)
 
-        # Should filter tables to only include users
+        # Should filter tables to only include users (within nested structure)
         assert len(result) == 1
-        assert "users" in result[0].tables
-        assert "orders" not in result[0].tables
+        assert any(getattr(t.table, "name", None) == "users" for t in result[0].mind_datasource.mind_datasource_tables)
+        assert all(getattr(t.table, "name", None) != "orders" for t in result[0].mind_datasource.mind_datasource_tables)
 
     def test_filter_catalogs_with_plan_no_matching_tables(self, database_toolkit):
         """Test catalog filtering when no tables match the filter."""
         catalog = Mock(spec=DataCatalog)
         catalog.integration_name = "test-integration"
-        catalog.tables = {"users": {"id": "int", "name": "string"}}
+        md = Mock()
+        md.datasource = Mock()
+        md.datasource.name = "test-integration"
+        tbl_users = Mock()
+        tbl_users.table = Mock()
+        tbl_users.table.name = "users"
+        md.mind_datasource_tables = [tbl_users]
+        catalog.mind_datasource = md
 
         catalogs = [catalog]
         plan = QueryPlanResult(selected_tables=["test-integration.nonexistent"])

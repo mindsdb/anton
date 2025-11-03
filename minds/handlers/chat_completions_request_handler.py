@@ -48,6 +48,9 @@ async def chat_completions_request_handler(
     model = chat_completions_request.model
     logger.debug(f"🔄[{request_id}] Model: {model}")
 
+    metadata = chat_completions_request.metadata
+    logger.debug(f"🔄[{request_id}] Metadata: {metadata}")
+
     chat_completions_handler = ChatCompletionsHandler(
         session=session,
         context=context,
@@ -55,6 +58,7 @@ async def chat_completions_request_handler(
         messages=messages,
         model=model,
         stream=stream,
+        metadata=metadata,
     )
 
     if stream:

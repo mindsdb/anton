@@ -12,10 +12,10 @@ class TestBaseSQLModel:
 
     def test_base_sql_model_initialization(self):
         """Test that BaseSQLModel can be instantiated with default values."""
-        model = BaseSQLModel(tenant_id="test-tenant")
+        model = BaseSQLModel(tenant_id=UUID("00000000-0000-0000-0000-000000000123"))
 
         assert model.id is None
-        assert model.tenant_id == "test-tenant"
+        assert model.tenant_id == UUID("00000000-0000-0000-0000-000000000123")
         assert model.created_at is None
         assert model.modified_at is None
 
@@ -24,10 +24,15 @@ class TestBaseSQLModel:
         test_id = UUID("12345678-1234-5678-1234-567812345678")
         test_datetime = datetime(2023, 1, 1, 12, 0, 0)
 
-        model = BaseSQLModel(id=test_id, tenant_id="test-tenant", created_at=test_datetime, modified_at=test_datetime)
+        model = BaseSQLModel(
+            id=test_id,
+            tenant_id=UUID("00000000-0000-0000-0000-000000000123"),
+            created_at=test_datetime,
+            modified_at=test_datetime,
+        )
 
         assert model.id == test_id
-        assert model.tenant_id == "test-tenant"
+        assert model.tenant_id == UUID("00000000-0000-0000-0000-000000000123")
         assert model.created_at == test_datetime
         assert model.modified_at == test_datetime
 

@@ -4,6 +4,8 @@ Unit tests for API v1 router.
 Tests the router configuration and endpoint aggregation.
 """
 
+from unittest.mock import Mock, patch
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,12 +21,18 @@ class TestAPIV1Router:
         """Create FastAPI app with v1 router included."""
         app = FastAPI()
         app.include_router(api_router)
+
         return app
 
     @pytest.fixture
-    def client(self, app_with_router):
+    def headers(self):
+        """Create headers for test client."""
+        return {"x-user-id": "12345", "x-company-id": "12345"}
+
+    @pytest.fixture
+    def client(self, app_with_router, headers):
         """Create test client with router."""
-        return TestClient(app_with_router)
+        return TestClient(app_with_router, headers=headers)
 
     def test_router_prefix(self):
         """Test that router has correct prefix."""
@@ -32,6 +40,7 @@ class TestAPIV1Router:
 
     def test_router_includes_all_endpoints(self, client):
         """Test that all expected endpoints are available."""
+
         # Test health endpoints
         response = client.get("/api/v1/health/")
         assert response.status_code == 200
@@ -42,10 +51,19 @@ class TestAPIV1Router:
         response = client.get("/api/v1/health/live")
         assert response.status_code == 200
 
-    def test_minds_endpoints_registered(self, client):
+    @patch("minds.client.mindsdb.connect")
+    @patch("minds.requests.context.extract_context_from_request")
+    def test_minds_endpoints_registered(self, mock_context, mock_connect, client):
         """Test that minds endpoints are registered."""
-        # These will fail due to missing dependencies, but should be routed correctly
-        # We expect various error codes (400, 422, 500), but not 404 (not found)
+        # Mock MindsDB client
+        mock_client = Mock()
+        mock_client.minds = Mock()
+        mock_client.minds.list.return_value = []
+        mock_connect.return_value = mock_client
+
+        # Mock context
+        mock_context.return_value.user_id = "test-user"
+        mock_context.return_value.tenant_id = "test-tenant"
 
         response = client.get("/api/v1/minds/")
         assert response.status_code != 404  # Endpoint should exist
@@ -58,14 +76,38 @@ class TestAPIV1Router:
         response = client.post("/api/v1/chat/completions", json={})
         assert response.status_code in [422, 500]  # Not 404 - endpoint exists
 
-    def test_datasources_endpoints_registered(self, client):
+    @patch("minds.client.mindsdb.connect")
+    @patch("minds.requests.context.extract_context_from_request")
+    def test_datasources_endpoints_registered(self, mock_context, mock_connect, client):
         """Test that datasources endpoints are registered."""
+        # Mock MindsDB client
+        mock_client = Mock()
+        mock_client.datasources = Mock()
+        mock_client.datasources.list.return_value = []
+        mock_connect.return_value = mock_client
+
+        # Mock context
+        mock_context.return_value.user_id = "test-user"
+        mock_context.return_value.tenant_id = "test-tenant"
+
         response = client.get("/api/v1/datasources/")
-        # Could be 200 (success), 422 (validation), or 500 (dependency error) - just not 404
         assert response.status_code != 404  # Endpoint should exist
 
-    def test_tree_endpoints_registered(self, client):
+    @patch("minds.client.mindsdb.connect")
+    @patch("minds.requests.context.extract_context_from_request")
+    def test_tree_endpoints_registered(self, mock_context, mock_connect, client):
         """Test that tree endpoints are registered."""
+        # Mock MindsDB client
+        mock_client = Mock()
+        mock_client.trees = Mock()
+        mock_client.trees.list.return_value = []
+        mock_client.get_databases.return_value = []
+        mock_connect.return_value = mock_client
+
+        # Mock context
+        mock_context.return_value.user_id = "test-user"
+        mock_context.return_value.tenant_id = "test-tenant"
+
         response = client.get("/api/v1/tree/")
         # Could be 200 (success), 422 (validation), or 500 (dependency error) - just not 404
         assert response.status_code != 404  # Endpoint should exist

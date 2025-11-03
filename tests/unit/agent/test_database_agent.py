@@ -388,3 +388,58 @@ class TestDatabaseAgent:
         # Should contain conversation instruction for multiple messages
         assert "This is a conversation history" in context
         assert "Please respond to the most recent user message" in context
+
+    @pytest.mark.asyncio
+    async def test_run_completion_non_streaming_pushes_result(self, database_agent):
+        """Test run_completion in non-streaming mode pushes agent output to streamer."""
+        messages = [Message(role=Role.user, content="Query")]
+
+        # Mock agent.run to return a result with output
+        mock_result = Mock()
+        mock_result.output = "Final answer"
+        database_agent._pydantic_agent.run = AsyncMock(return_value=mock_result)
+
+        # Prepare a mock streamer with AsyncMock push
+        mock_streamer = Mock()
+        mock_streamer.push = AsyncMock()
+
+        await database_agent.run_completion(messages=messages, streamer=mock_streamer, stream=False)
+
+        # Ensure the agent's conversation was set and streamer.push was called with the output
+        assert database_agent.deps.conversation_context == "Query"
+        mock_streamer.push.assert_awaited_once_with(role=Role.assistant, content="Final answer")
+
+    @pytest.mark.asyncio
+    async def test_run_completion_streaming_pushes_chunks(self, database_agent):
+        """Test run_completion in streaming mode pushes chunks to streamer as they arrive."""
+        messages = [Message(role=Role.user, content="Stream me")]
+
+        # Prepare streaming chunks
+        chunks = ["a", "b", "c"]
+
+        mock_stream_result = Mock()
+
+        async def mock_stream_text(delta=True):
+            for c in chunks:
+                yield c
+
+        mock_stream_result.stream_text = mock_stream_text
+
+        class MockAsyncContextManager:
+            async def __aenter__(self):
+                return mock_stream_result
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        database_agent._pydantic_agent.run_stream = Mock(return_value=MockAsyncContextManager())
+
+        mock_streamer = Mock()
+        mock_streamer.push = AsyncMock()
+
+        await database_agent.run_completion(messages=messages, streamer=mock_streamer, stream=True)
+
+        # Ensure push was called for each chunk
+        assert mock_streamer.push.await_count == len(chunks)
+        # Verify conversation context set
+        assert database_agent.deps.conversation_context == "Stream me"

@@ -6,6 +6,7 @@ while adding user attribution for multi-user support.
 """
 
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from sqlalchemy import JSON, UniqueConstraint
 from sqlmodel import Column, Field, Relationship
@@ -32,12 +33,13 @@ class Datasource(BaseSQLModel, table=True):
 
     # Core fields (matching MindsDB)
     name: str = Field(..., max_length=255, description="Datasource name (unique per company)")
+    description: str | None = Field(None, description="Description of the datasource")
     engine: str = Field(..., max_length=50, description="Database engine (postgres, mysql, etc.)")
     connection_data: dict[str, Any] = Field(
         default_factory=dict, sa_column=Column(JSON), description="Connection parameters (matches MindsDB 'data' field)"
     )
 
-    user_id: str = Field(..., max_length=255, description="ID of the user who created this datasource")
+    user_id: UUID = Field(..., description="ID of the user who created this datasource")
     engine_info: str | None = Field(None, description="Engine information")
 
     # Relationships - Many-to-many with minds through junction table

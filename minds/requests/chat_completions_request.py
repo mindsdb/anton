@@ -5,6 +5,7 @@ from minds.schemas.chat import Message
 
 class ChatCompletionRequestMetadata(BaseModel):
     mdb_completions_session_id: str | int | None = Field(default=None, description="Session ID for the request")
+    enable_charting: bool = Field(default=False, description="Whether to enable charting for the request")
 
 
 class ChatCompletionsRequest(BaseModel):
@@ -13,7 +14,8 @@ class ChatCompletionsRequest(BaseModel):
         description="List of messages for the chat completion request",
     )
     metadata: ChatCompletionRequestMetadata | None = Field(
-        default=None, description="Make metadata optional with default None"
+        default=None,
+        description="Make metadata optional with default None",
     )
     stream: bool | None = Field(
         default=False,

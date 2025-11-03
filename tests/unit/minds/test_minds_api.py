@@ -71,7 +71,7 @@ class TestMindsAPI:
                 DatasourceConfig(name="test-datasource", tables=["test-table"]),
             ],
             created_at="2024-01-01T00:00:00Z",
-            updated_at="2024-01-01T00:00:00Z",
+            modified_at="2024-01-01T00:00:00Z",
         )
 
     @pytest.fixture
@@ -113,13 +113,18 @@ class TestMindsAPI:
         mock_minds_service.list_minds = AsyncMock(return_value=[sample_mind_response])
 
         result = await list_minds(
-            minds_service=mock_minds_service, provider="openai", include_deleted=False, limit=10, offset=0
+            minds_service=mock_minds_service,
+            provider="openai",
+            include_deleted=False,
+            limit=10,
+            offset=0,
+            with_detailed_data=False,
         )
 
         assert len(result) == 1
         assert result[0].name == "test-mind"
         mock_minds_service.list_minds.assert_called_once_with(
-            provider="openai", include_deleted=False, limit=10, offset=0
+            provider="openai", include_deleted=False, limit=10, offset=0, with_detailed_data=False
         )
 
     @pytest.mark.asyncio

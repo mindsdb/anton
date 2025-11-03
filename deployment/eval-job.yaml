@@ -19,18 +19,19 @@ spec:
                 --minds-base-url "${MINDS_BASE_URL}" \
                 --langfuse-host "https://langfuse.dev.mindsdb.com" \
                 --pr-number "${PR_NUMBER}"
+                --max-items ${LANGFUSE_DATASETS_MAX_ITEMS}
           env:
-            - name: DEFAULT_MINDS_API_KEY
+            - name: MINDS_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: minds-test-user
                   key: api_key
-            - name: DEFAULT_LANGFUSE_PUBLIC_KEY
+            - name: LANGFUSE_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:
                   name: mindsdb-secrets
                   key: LANGFUSE_PUBLIC_KEY
-            - name: DEFAULT_LANGFUSE_SECRET_KEY
+            - name: LANGFUSE_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: mindsdb-secrets

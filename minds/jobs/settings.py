@@ -75,6 +75,7 @@ def get_prefect_settings() -> PrefectSettings:
     try:
         block = Secret.load(name)
         data = block.get()
+
         return PrefectSettings(**data)
     except Exception as e:
         # Return default settings if secret doesn't exist (useful during deployment)

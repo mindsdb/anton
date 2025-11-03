@@ -1,5 +1,9 @@
+from uuid import UUID
+
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
+
+from minds.requests.context import Context
 
 
 class AuthHeaders(BaseModel):
@@ -79,3 +83,34 @@ def get_api_key_from_headers(headers: dict) -> str:
         str: The API key
     """
     return get_authorization_bearer_token(headers)
+
+
+def get_company_id(user_id: UUID, tenant_id: UUID) -> str:
+    """
+    Get the company ID from the context.
+    This will be a combination of tenant ID and user ID concatenated with an underscore.
+    Ideally, MindsDB should support multi-tenant natively in the future.
+
+    Args:
+        user_id: The user ID
+        tenant_id: The tenant ID
+
+    Returns:
+        str: The company ID
+    """
+    return f"{str(tenant_id)}_{str(user_id)}"
+
+
+def get_headers_for_mindsdb_client(context: Context) -> dict:
+    """
+    Get the headers for MindsDB client from the context.
+
+    Args:
+        context: The request context.
+
+    Returns:
+        dict: The headers for MindsDB client.
+    """
+    return {
+        "company-id": get_company_id(context.user_id, context.tenant_id),
+    }

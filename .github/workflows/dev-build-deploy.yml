@@ -84,7 +84,7 @@ jobs:
           # Place cache in the tool dir because we mount this in our runnners
           cache-local-path: "/home/runner/_work/_tool/uv-local-cache"
           prune-cache: false
-          python-version: ${{ vars.CI_PYTHON_VERSION || '3.10' }}
+          python-version: ${{ vars.CI_PYTHON_VERSION || '3.13' }}
       - name: Install dependencies
         run: |
           uv pip install --prerelease=allow -r requirements/requirements.txt
@@ -173,7 +173,7 @@ jobs:
       - name: Run evals
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
-          export MINDS_BASE_URL=${{vars.MDB_ENV_URL}}
+          export MINDS_BASE_URL=${{vars.MINDS_V3_ENV_URL}}
           export PR_NUMBER=${{github.event.pull_request.number}}
 
           kubectl -n $NAMESPACE delete job --ignore-not-found minds-langfuse-benchmarks

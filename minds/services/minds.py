@@ -19,7 +19,13 @@ from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
-from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.schemas.minds import (
+    DatasourceConfig,
+    DetailedDatasourceConfig,
+    MindCreateRequest,
+    MindResponse,
+    MindUpdateRequest,
+)
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 
 # Set up logging
@@ -116,21 +122,22 @@ class MindsService:
 
             statement = (
                 select(Mind)
-                .join(Mind.mind_datasources)
-                .join(MindDatasource.datasource)
-                .where(MindDatasource.deleted_at.is_(None))
-                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
                 .where(and_(*conditions))
                 .order_by(Mind.created_at.desc())
                 .offset(offset)
                 .limit(limit)
+                .options(
+                    selectinload(Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))).selectinload(
+                        MindDatasource.datasource
+                    )
+                )
             )
 
             minds = self.session.exec(statement).all()
 
             minds_list = []
             for mind in minds:
-                mind_response = self._mind_to_response(mind, with_detailed_data)
+                mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
                 minds_list.append(mind_response)
 
             logger.info(
@@ -164,7 +171,7 @@ class MindsService:
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
-            mind_response = self._mind_to_response(mind, with_detailed_data)
+            mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
             logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return mind_response
         except MindNotFoundError:
@@ -306,7 +313,8 @@ class MindsService:
                 if existing_mind:
                     raise MindAlreadyExistsError(f"Mind with name '{mind_data.name}' already exists")
 
-            if mind_data.datasources:
+            datasource_configs = mind_data.datasources
+            if datasource_configs:
                 # Validate new datasources if provided
                 await self._validate_datasources(mind_data.datasources)
                 # Cancel any running data catalog loader flows for the mind
@@ -330,7 +338,7 @@ class MindsService:
 
             logger.info(f"Updated mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            return self._mind_to_response(mind)
+            return self._mind_to_response(mind, datasource_configs=datasource_configs)
         except (MindNotFoundError, MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
@@ -437,34 +445,49 @@ class MindsService:
             MindResponse: Mind response object
         """
         # If datasource configs are explicitly provided (e.g. on creation), use those
-        # On creation, the relationships may not be fully populated yet
+        # On create and update, the relationships may not be fully populated yet
         if datasource_configs:
             datasources = datasource_configs
         # Get linked datasources through the many-to-many relationship
         else:
-            datasources = [
-                DatasourceConfig(
-                    name=relationship.datasource.name,
-                    tables=[
-                        mind_datasource_table.table.name
-                        for mind_datasource_table in relationship.mind_datasource_tables
-                    ],
-                    status=relationship.status,
-                )
-                for relationship in mind.mind_datasources
-            ]
+            if with_detailed_data:
+                datasources = [
+                    DetailedDatasourceConfig(
+                        name=relationship.datasource.name,
+                        engine=relationship.datasource.engine,
+                        description=relationship.datasource.description,
+                        connection_data=relationship.datasource.connection_data,
+                        tables=[
+                            mind_datasource_table.table.name
+                            for mind_datasource_table in relationship.mind_datasource_tables
+                        ],
+                        status=relationship.status,
+                        created_at=str(relationship.datasource.created_at),
+                        modified_at=str(relationship.datasource.modified_at),
+                    )
+                    for relationship in mind.mind_datasources
+                ]
+            else:
+                datasources = [
+                    DatasourceConfig(
+                        name=relationship.datasource.name,
+                        tables=[
+                            mind_datasource_table.table.name
+                            for mind_datasource_table in relationship.mind_datasource_tables
+                        ],
+                        status=relationship.status,
+                    )
+                    for relationship in mind.mind_datasources
+                ]
 
-        # TODO: add detailed datasource data if with_detailed_data is True, this is the
-        # actual DATA value in the integrations e.g without password which should be hashed
-        # {"user": "", "password": "", "host": ".com", "port": "5432", "database": "demo", "schema": "demo_data"}
         return MindResponse(
             name=mind.name,
             model_name=mind.model_name,
             provider=mind.provider,
             parameters=mind.parameters or {},
             datasources=datasources,
-            created_at=str(mind.created_at) if mind.created_at else "",
-            updated_at=str(mind.modified_at) if mind.modified_at else "",
+            created_at=mind.created_at.isoformat(),
+            modified_at=mind.modified_at.isoformat(),
         )
 
     async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:
@@ -595,9 +618,28 @@ class MindsService:
                     )
                     await data_catalog_loader.load(mind_datasource, table_names)
                 except DataCatalogLoaderError:
-                    continue
+                    # Mark the mind-datasource relationship as failed
+                    logger.error(
+                        f"Data catalog loading failed for datasource {datasource_name} "
+                        f"for user {self.user_id} in tenant {self.tenant_id}"
+                    )
+                    mind_datasource.status = DataCatalogStatus.FAILED
+                    self.session.add(mind_datasource)
+                    self.session.commit()
                 except PrefectException:
                     # This occurs when the flow is submitted but fails immediately.
+                    logger.error(
+                        f"Prefect flow submission failed when loading datasource {datasource_name} "
+                        f"to the data catalog for user {self.user_id} in tenant {self.tenant_id}"
+                    )
+                    mind_datasource.status = DataCatalogStatus.FAILED
+                    self.session.add(mind_datasource)
+                    self.session.commit()
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error loading datasource {datasource_name} to the data catalog "
+                        f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                    )
                     mind_datasource.status = DataCatalogStatus.FAILED
                     self.session.add(mind_datasource)
                     self.session.commit()
@@ -606,8 +648,6 @@ class MindsService:
                     f"Error adding datasource {datasource_name} to mind {mind.name} "
                     f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
                 )
-                # Continue with other datasources even if one fails
-                continue
 
         # Commit all relationships at once
         try:

@@ -24,6 +24,8 @@ from minds.common.vars import (
 from minds.model.data_catalog import DataCatalog
 from minds.model.database_agent import QueryGenerationResult, QueryGenerationResultRetry, QueryPlanResult
 from minds.model.mind import Mind
+from minds.requests.stream import MessageStreamer
+from minds.schemas.chat import Role
 
 logger = setup_logging()
 
@@ -49,14 +51,15 @@ class DatabaseToolkit:
         self.mind = mind
         self.mindsdb_client = mindsdb_client
 
-    async def generate_and_execute_sql(self, conversation_context: str) -> str:
-        return await self._generate_and_execute_with_retry(conversation_context)
+    async def generate_and_execute_sql(self, conversation_context: str, streamer: MessageStreamer) -> str:
+        return await self._generate_and_execute_with_retry(conversation_context, streamer)
 
-    async def _generate_and_execute_with_retry(self, conversation_context: str) -> str:
+    async def _generate_and_execute_with_retry(self, conversation_context: str, streamer: MessageStreamer) -> str:
         """Generate and execute SQL with LLM-driven retry logic."""
         last_error = None
         last_query = ""
 
+        await streamer.push(role=Role.system, content="I will now generate the SQL query to answer your question.")
         for attempt in range(MAX_SQL_RETRIES):
             logger.info(f"Attempt {attempt + 1} of {MAX_SQL_RETRIES}")
 
@@ -75,8 +78,14 @@ class DatabaseToolkit:
 
                 last_query = query
                 sanitized_query = self._sanitize_and_validate_sql_mindsdb(query)
+                execution_result = await self.execute_sql(sanitized_query, raise_on_error=True)
 
-                return await self.execute_sql(sanitized_query, raise_on_error=True)
+                await streamer.push(
+                    role=Role.system,
+                    content=f"Here is the generated SQL query along with its execution result:\n{execution_result}",
+                )
+
+                return execution_result
             except Exception as e:
                 last_error = e
 
@@ -126,7 +135,7 @@ class DatabaseToolkit:
 
         return sanitized
 
-    def _filter_catalogs_with_plan(self, data_catalogs, plan: QueryPlanResult):
+    def _filter_catalogs_with_plan(self, data_catalogs: list[DataCatalog], plan: QueryPlanResult):
         """Filter catalogs according to the plan selection (datasources and tables)."""
         if not plan or (not plan.selected_datasources and not plan.selected_tables):
             return data_catalogs
@@ -136,31 +145,23 @@ class DatabaseToolkit:
         selected_tables = set(plan.selected_tables or [])
 
         for catalog in data_catalogs:
-            # Determine namespace prefix used in context rendering
-            namespace = None
-            try:
-                # MindsDBDataCatalog uses integration_name
-                namespace = catalog.integration_name
-            except Exception:
-                namespace = None
-            # RelationalDataCatalog uses datasource_name
-            if not namespace:
-                namespace = getattr(catalog, "datasource_name", None)
+            namespace = catalog.mind_datasource.datasource.name
 
             if selected_ds and namespace and namespace not in selected_ds:
                 continue
 
             # If table filters were specified, reduce tables map
-            if selected_tables and hasattr(catalog, "tables") and isinstance(catalog.tables, dict):
-                new_tables = {}
-                for tbl_name, tbl in catalog.tables.items():
+            if selected_tables:
+                tables = []
+                for tbl in catalog.mind_datasource.mind_datasource_tables:
+                    tbl_name = tbl.table.name
                     fq = f"{namespace}.{tbl_name}" if namespace else tbl_name
                     if not selected_tables or fq in selected_tables:
-                        new_tables[tbl_name] = tbl
+                        tables.append(tbl)
                 # If nothing matched and there was a hard table filter, skip catalog
-                if selected_tables and not new_tables:
+                if selected_tables and not tables:
                     continue
-                catalog.tables = new_tables
+                catalog.mind_datasource.mind_datasource_tables = tables
 
             filtered.append(catalog)
 
@@ -210,14 +211,15 @@ class DatabaseToolkit:
 
         # Run planning step to narrow down relevant engines/datasources/tables
         plan = await self._plan_selection(conversation_context, data_catalogs)
+
         if plan and plan.error:
             logger.info(f"Planning step returned error: {plan.error}. Proceeding with full catalogs.")
             plan = None
 
         # Filter catalogs by plan (if available)
-        data_catalogs_filtered = (
-            self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
-        )
+        # Pass a deep copy to avoid modifying original catalogs
+        data_catalog_copy = copy.deepcopy(data_catalogs)
+        data_catalogs_filtered = self._filter_catalogs_with_plan(data_catalog_copy, plan) if plan else data_catalogs
 
         # Extract engine types from data catalogs (same as generate_sql)
         engines = {catalog.mind_datasource.datasource.engine for catalog in data_catalogs_filtered}
@@ -280,6 +282,7 @@ class DatabaseToolkit:
 
         Args:
             conversation_context: The complete conversation context
+            streamer: The message streamer for pushing thoughts
 
         Returns:
             A SQL query string that addresses the user's request
@@ -293,14 +296,15 @@ class DatabaseToolkit:
 
         # Run planning step to narrow down relevant engines/datasources/tables
         plan = await self._plan_selection(conversation_context, data_catalogs)
+
         if plan and plan.error:
             logger.info(f"Planning step returned error: {plan.error}. Proceeding with full catalogs.")
             plan = None
 
         # Filter catalogs by plan (if available)
-        data_catalogs_filtered = (
-            self._filter_catalogs_with_plan(copy.deepcopy(data_catalogs), plan) if plan else data_catalogs
-        )
+        # Pass a deep copy to avoid modifying original catalogs
+        data_catalog_copy = copy.deepcopy(data_catalogs)
+        data_catalogs_filtered = self._filter_catalogs_with_plan(data_catalog_copy, plan) if plan else data_catalog_copy
 
         # Extract engine types from filtered data catalogs
         engines = {catalog.mind_datasource.datasource.engine for catalog in data_catalogs_filtered}

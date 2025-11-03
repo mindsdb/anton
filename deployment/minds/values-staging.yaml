@@ -1,10 +1,49 @@
 deployment:
   ingress:
+  ingress:
+  
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-connect-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-body-size: 500m
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      nginx.ingress.kubernetes.io/cors-allow-methods: "GET,OPTIONS,PUT,POST"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+      nginx.ingress.kubernetes.io/cors-allow-headers: "Origin,Content-Type,Accept,Authorization,Access-Control-Allow-Origin,X-User-Id,X-User-Email,X-Company-Id"
+      nginx.ingress.kubernetes.io/cors-max-age: "3600"
+
+      nginx.ingress.kubernetes.io/use-regex: "true"
+      
+      # Lower priority than health ingress
+      # nginx.ingress.kubernetes.io/priority: "100"
+      
+      # Forward auth configuration using your gateway service
+      nginx.ingress.kubernetes.io/auth-url: "http://mindsdb-gateway.staging.svc.cluster.local:80/cloud/llm/api-key/"
+      nginx.ingress.kubernetes.io/auth-method: "GET"
+      nginx.ingress.kubernetes.io/auth-response-headers: "X-Company-Id,X-User-Id,X-User-Email,X-Forwarded-User"
+      nginx.ingress.kubernetes.io/auth-request-headers: "Authorization,Cookie"
     hosts:
       - host: minds.staging.mdb.ai
         enableMultiPath: true
         paths:
           - path: /
+            serviceName: minds
+            servicePort: 80
+      
+      - host: staging.mdb.ai
+        enableMultiPath: true
+        paths:
+          - path: /api/v1/chat
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/minds
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/datasources
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/tree
             serviceName: minds
             servicePort: 80
 

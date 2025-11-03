@@ -11,12 +11,13 @@ from uuid import UUID
 
 import pandas as pd
 from mindsdb_sdk.server import Server
-from prefect import flow, task
+from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, select
 
 from minds.client.mindsdb import create_mindsdb_client_with_credentials
+from minds.common.authentication import get_company_id
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
@@ -36,7 +37,8 @@ class DataCatalogLoaderError(Exception):
 @flow
 def load_data_catalog(
     mind_datasource_id: UUID,
-    tenant_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
     table_names: list[str] | None = None,
 ) -> None:
     """
@@ -44,13 +46,17 @@ def load_data_catalog(
 
     Args:
         mind_datasource_id (UUID): The ID of the mind datasource.
-        tenant_id (str): The ID of the tenant.
+        tenant_id (UUID): The ID of the tenant.
+        user_id (UUID): The ID of the user.
         table_names (list[str] | None): Optional list of table names to filter by. If None, load all tables.
 
     Raises:
         DataCatalogLoaderError: If there is an error during the loading process.
     """
     prefect_settings = get_prefect_settings()
+
+    logger = get_run_logger()
+
     # Create a database session
     session_generator = get_session(prefect_settings.database_uri)
     session = next(session_generator)
@@ -72,11 +78,13 @@ def load_data_catalog(
 
     try:
         # Create a MindsDB client
+        company_id = get_company_id(user_id, tenant_id)
         mindsdb_client = create_mindsdb_client_with_credentials(
             url=prefect_settings.mindsdb_url,
             api_key=prefect_settings.mindsdb_api_key,
             login=prefect_settings.mindsdb_login,
             password=prefect_settings.mindsdb_password,
+            company_id=company_id,
         )
 
         datasource_id = mind_datasource.datasource_id
@@ -91,19 +99,20 @@ def load_data_catalog(
 
         if len(tables_df) > 0:
             tables = load_tables(session, tables_df, mind_datasource_id, datasource_id, tenant_id)
+            loaded_table_names = [table.name for table in tables]
 
-            columns_df = get_columns(mindsdb_client, datasource_name, table_names)
+            columns_df = get_columns(mindsdb_client, datasource_name, loaded_table_names)
             columns = load_columns(session, columns_df, tables, tenant_id)
 
-            column_statistics_df = get_column_statistics(mindsdb_client, datasource_name, table_names)
+            column_statistics_df = get_column_statistics(mindsdb_client, datasource_name, loaded_table_names)
             if len(column_statistics_df) > 0:
                 load_column_statistics(session, column_statistics_df, columns, tenant_id)
 
-            primary_keys_df = get_primary_keys(mindsdb_client, datasource_name, table_names)
+            primary_keys_df = get_primary_keys(mindsdb_client, datasource_name, loaded_table_names)
             if len(primary_keys_df) > 0:
                 load_primary_keys(session, primary_keys_df, tables, columns, tenant_id)
 
-            foreign_keys_df = get_foreign_keys(mindsdb_client, datasource_name, table_names)
+            foreign_keys_df = get_foreign_keys(mindsdb_client, datasource_name, loaded_table_names)
             if len(foreign_keys_df) > 0:
                 load_foreign_keys(session, foreign_keys_df, tables, columns, tenant_id)
 
@@ -116,9 +125,6 @@ def load_data_catalog(
         session.commit()
     except Exception as e:
         session.rollback()
-        mind_datasource.status = DataCatalogStatus.FAILED
-        session.add(mind_datasource)
-        session.commit()
         err_message = f"Failed to load data catalog for MindDatasource ID {mind_datasource_id}: {str(e)}"
         logger.error(f"Failed to load data catalog: {err_message}")
         raise DataCatalogLoaderError(f"Failed to load data catalog: {err_message}") from e

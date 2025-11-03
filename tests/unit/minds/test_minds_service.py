@@ -8,7 +8,9 @@ Tests the business logic layer for minds management including:
 - Transaction management
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import pytest
 from sqlmodel import Session
@@ -43,30 +45,36 @@ class TestMindsService:
         return Mock()
 
     @pytest.fixture
-    def minds_service(self, mock_session, mock_mindsdb_client):
+    def minds_service(self, mock_session, mock_mindsdb_client, user_id=uuid4(), tenant_id=uuid4()):
         """Create MindsService instance with mocked session."""
         # Mock the datasource validation by patching the validation method
         service = MindsService(
             session=mock_session,
             mindsdb_client=mock_mindsdb_client,
-            user_id="test-user-123",
-            tenant_id="test-tenant-123",
+            user_id=user_id,
+            tenant_id=tenant_id,
         )
         service._validate_datasources = AsyncMock()
         service._add_datasources_to_mind = AsyncMock()
         return service
 
     @pytest.fixture
-    def sample_mind(self):
+    def sample_mind(self, user_id=uuid4(), tenant_id=uuid4()):
         """Sample Mind instance for testing."""
-        return Mind(
+        mind = Mind(
             name="test-mind",
             provider="openai",
             model_name="gpt-4o",
-            user_id="test-user-123",
+            user_id=user_id,
+            tenant_id=tenant_id,
             parameters={"temperature": 0.7},
             deleted_at=None,
+            created_at=datetime.now(timezone.utc),
+            modified_at=datetime.now(timezone.utc),
         )
+        # Mock the mind_datasources relationship as an empty list
+        mind.mind_datasources = []
+        return mind
 
     @pytest.fixture
     def create_request(self):
@@ -186,9 +194,12 @@ class TestMindsService:
         mock_session.exec.return_value.first.return_value = None
 
         # Mock the created mind - use a valid UUID format
-        import uuid
+        def mock_refresh(mind):
+            mind.id = str(uuid4())
+            mind.created_at = datetime.now(timezone.utc)
+            mind.modified_at = datetime.now(timezone.utc)
 
-        mock_session.refresh.side_effect = lambda mind: setattr(mind, "id", str(uuid.uuid4()))
+        mock_session.refresh.side_effect = mock_refresh
 
         result = await minds_service.create_mind(create_request, mock_data_catalog_loader)
 

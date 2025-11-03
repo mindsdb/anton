@@ -99,26 +99,57 @@ format/check: activate ## Check code formatting with Ruff
 format: activate ## Format code with Ruff
 	$(PYTHON) -m ruff format minds tests
 
-# --- Prefect ---
-prefect/secrets: activate ## Deploy Prefect secrets from local settings
+check/fix: activate ## Format code with ruff
+	$(PYTHON) -m ruff check minds tests --fix
+
+prefect/secrets: ## Deploy Prefect secrets from local settings
 	$(PYTHON) -c "from minds.jobs.settings import create_prefect_settings; create_prefect_settings(); print('✓ Prefect secrets deployed successfully')"
 
 prefect/deploy: activate ## Deploy all flows to Prefect
 	@echo "Deploying all flows..."
-	$(PYTHON) -m minds.jobs.deploy
+	@echo "Auto-rejecting all deployment prompts..."
+	@if command -v $(VENV)/bin/prefect >/dev/null 2>&1; then \
+		yes n | $(VENV)/bin/prefect deploy --all; \
+	else \
+		echo "Error: Prefect not found. Please ensure it's installed in your virtual environment."; \
+		echo "Try running: $(PIP) install prefect"; \
+		exit 1; \
+	fi
 
-prefect/set-image: ## Set image tag in prefect.yaml (e.g., make prefect/set-image IMAGE_TAG=dev-abc)
-	$(PYTHON) -c "import os, sys; tag = os.getenv('IMAGE_TAG'); \
-	sys.exit('Error: IMAGE_TAG is required.') if not tag else None; \
-	print(f'Setting image tag to: {tag}'); \
-	with open('prefect.yaml', 'r+') as f: \
-	    content = f.read(); f.seek(0); f.write(content.replace('IMAGE_TAG_PLACEHOLDER', tag))"
+# Set dynamic image for CI/CD deployments
+prefect/set-image: ## Set the image tag dynamically (usage: make prefect/set-image IMAGE_TAG=development-abc123 or set IMAGE_TAG env var)
+	@# Set IMAGE_TAG from environment variable if not provided as make variable
+	$(eval IMAGE_TAG ?= $(shell echo $$IMAGE_TAG))
+	@# Check if IMAGE_TAG is still empty after trying environment variable
+	@if [ -z "$(IMAGE_TAG)" ]; then \
+		echo "Error: IMAGE_TAG is required. Set it as environment variable or pass as make variable: make prefect/set-image IMAGE_TAG=development-abc123"; \
+		exit 1; \
+	fi
+	@echo "Setting image tag to: $(IMAGE_TAG)"
+	sed -i.bak 's|IMAGE_TAG_PLACEHOLDER|$(IMAGE_TAG)|g' prefect.yaml
+	@echo "✓ Image tag updated in prefect.yaml"
 
-prefect/set-env: ## Set environment in prefect.yaml (e.g., make prefect/set-env ENV=dev)
-	$(PYTHON) -c "import os, sys; env = os.getenv('ENV'); \
-	sys.exit('Error: ENV is required.') if not env else None; \
-	print(f'Setting environment name to: {env}'); \
-	with open('prefect.yaml', 'r+') as f: \
-	    content = f.read(); f.seek(0); f.write(content.replace('ENV_PLACEHOLDER', env))"
+# Set dynamic environment name for deployment names
+prefect/set-env: ## Set the environment name for deployment names (usage: make prefect/set-env ENV=dev or set ENV env var)
+	@# Set ENV from environment variable if not provided as make variable
+	$(eval ENV ?= $(shell echo $$ENV))
+	@# Check if ENV is still empty after trying environment variable
+	@if [ -z "$(ENV)" ]; then \
+		echo "Error: ENV is required. Set it as environment variable or pass as make variable: make prefect/set-env ENV=dev"; \
+		exit 1; \
+	fi
+	@echo "Setting environment name to: $(ENV)"
+	sed -i.bak 's|ENV_PLACEHOLDER|$(ENV)|g' prefect.yaml
+	@echo "✓ Environment name updated in prefect.yaml"
 
-prefect/deploy/full: activate prefect/secrets prefect/set-image prefect/set-env prefect/deploy ## Set config and deploy all flows
+prefect/set-config: ## Set image, environment, and API URL if provided (usage: make prefect/set-config IMAGE_TAG=dev-123 ENV=dev PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api)
+	@# Set image tag if IMAGE_TAG is provided
+	@if [ ! -z "$(IMAGE_TAG)" ] || [ ! -z "$$IMAGE_TAG" ]; then \
+		$(MAKE) prefect/set-image; \
+	fi
+	@# Set environment name if ENV is provided
+	@if [ ! -z "$(ENV)" ] || [ ! -z "$$ENV" ]; then \
+		$(MAKE) prefect/set-env; \
+	fi
+
+prefect/deploy/full: activate prefect/secrets prefect/set-config prefect/deploy ## Set config (image/API URL if provided), and then deploy all flows

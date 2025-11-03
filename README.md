@@ -74,10 +74,10 @@ MIND_PORT=9010
 LANGFUSE_PORT=3001
 
 # OpenAI Configuration
-OPEN_AI_API_URL=https://api.openai.com/v1
-OPEN_AI_API_KEY=your-api-key-here
-OPEN_AI_MODEL_NAME=gpt-4o
-OPEN_AI_MAX_TOKENS=400000
+OPENAI_API_URL=https://api.openai.com/v1
+OPENAI_API_KEY=your-api-key-here
+OPENAI_MODEL_NAME=gpt-4o
+OPENAI_MAX_TOKENS=400000
 
 # MindsDB Configuration
 MINDSDB_URL=https://cloud.mindsdb.com
