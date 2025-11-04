@@ -11,11 +11,12 @@ from enum import Enum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Enum as SAEnum
+from async_property import async_property
+from pydantic import computed_field
 from sqlalchemy import UniqueConstraint
-from sqlmodel import Column as SQLModelColumn
 from sqlmodel import Field, Relationship
 
+from minds.client.prefect import PrefectClient
 from minds.model.base import BaseSQLModel
 from minds.model.mind_datasource_table import MindDatasourceTable
 
@@ -29,6 +30,7 @@ class DataCatalogStatus(str, Enum):
     LOADING = "LOADING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class MindDatasource(BaseSQLModel, table=True):
@@ -47,14 +49,6 @@ class MindDatasource(BaseSQLModel, table=True):
 
     datasource_id: UUID = Field(..., foreign_key="datasources.id", description="ID of the datasource", index=True)
 
-    status: DataCatalogStatus = Field(
-        default=DataCatalogStatus.PENDING,
-        sa_column=SQLModelColumn(
-            SAEnum(DataCatalogStatus, name="data_catalog_status", native_enum=False), nullable=False
-        ),
-        description="Status of the data catalog loading",
-    )
-
     flow_run_id: UUID | None = Field(
         default=None, description="ID of the flow run of the Prefect deployment for loading the data catalog"
     )
@@ -66,6 +60,30 @@ class MindDatasource(BaseSQLModel, table=True):
 
     # Ensure each mind-datasource pair is unique
     __table_args__ = (UniqueConstraint("mind_id", "datasource_id", name="unique_mind_datasource_pair"),)
+
+    @computed_field(return_type=DataCatalogStatus)
+    @async_property
+    async def status(self) -> DataCatalogStatus:
+        """
+        Async: get status of the mind-datasource relationship.
+
+        This awaits the Prefect client which exposes async methods.
+        Callers should `await mind_datasource.status` from async code.
+        """
+        prefect_client = PrefectClient()
+        if self.flow_run_id:
+            states = await prefect_client.get_flow_run_state(str(self.flow_run_id))
+            # Get the latest state of the flow run
+            state = states[-1]
+            if state.is_running():
+                return DataCatalogStatus.LOADING
+            elif state.is_completed():
+                return DataCatalogStatus.COMPLETED
+            elif state.is_failed() or state.is_crashed():
+                return DataCatalogStatus.FAILED
+            elif state.is_cancelling() or state.is_cancelled():
+                return DataCatalogStatus.CANCELLED
+        return DataCatalogStatus.PENDING
 
     def __repr__(self) -> str:
         """String representation of the mind-datasource relationship."""

@@ -203,7 +203,7 @@ class DatabaseToolkit:
         logger.info(f"Attempting LLM-driven SQL correction for error: {error_message}")
 
         # Load data catalogs (same as generate_sql)
-        data_catalogs = data_catalog_cache.load(self.mind)
+        data_catalogs = await data_catalog_cache.load(self.mind)
 
         if not data_catalogs:
             logger.warning(f"No data catalogs found for agent {self.mind.name} during retry")
@@ -288,7 +288,7 @@ class DatabaseToolkit:
             A SQL query string that addresses the user's request
         """
         # Load data catalogs for this agent
-        data_catalogs = data_catalog_cache.load(self.mind)
+        data_catalogs = await data_catalog_cache.load(self.mind)
 
         if not data_catalogs:
             logger.warning(f"No data catalogs found for agent {self.mind.name}")

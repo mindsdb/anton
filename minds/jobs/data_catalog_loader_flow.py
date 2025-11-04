@@ -22,7 +22,7 @@ from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
-from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+from minds.model.mind_datasource import MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
 
 logger = setup_logging()
@@ -90,10 +90,6 @@ def load_data_catalog(
         datasource_id = mind_datasource.datasource_id
         datasource_name = mind_datasource.datasource.name
 
-        mind_datasource.status = DataCatalogStatus.LOADING
-        session.add(mind_datasource)
-        session.commit()
-
         tables_df = get_tables(mindsdb_client, datasource_name, table_names)
         tables_df = filter_loaded_tables(session, tables_df, mind_datasource_id, datasource_id, tenant_id)
 
@@ -119,10 +115,6 @@ def load_data_catalog(
         # Only commit if everything succeeded
         session.commit()
         logger.info("Successfully committed all data catalog information to database")
-
-        mind_datasource.status = DataCatalogStatus.COMPLETED
-        session.add(mind_datasource)
-        session.commit()
     except Exception as e:
         session.rollback()
         err_message = f"Failed to load data catalog for MindDatasource ID {mind_datasource_id}: {str(e)}"

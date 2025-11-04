@@ -15,7 +15,6 @@ from sqlmodel import Session, and_, select
 
 from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
-from minds.jobs.data_catalog_loader_flow import DataCatalogLoaderError
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
@@ -137,7 +136,7 @@ class MindsService:
 
             minds_list = []
             for mind in minds:
-                mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
+                mind_response = await self._mind_to_response(mind, with_detailed_data=with_detailed_data)
                 minds_list.append(mind_response)
 
             logger.info(
@@ -171,7 +170,7 @@ class MindsService:
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
-            mind_response = self._mind_to_response(mind, with_detailed_data=with_detailed_data)
+            mind_response = await self._mind_to_response(mind, with_detailed_data=with_detailed_data)
             logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return mind_response
         except MindNotFoundError:
@@ -271,7 +270,7 @@ class MindsService:
 
             logger.info(f"Created mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            return self._mind_to_response(new_mind, datasource_configs=mind_data.datasources)
+            return await self._mind_to_response(new_mind, datasource_configs=mind_data.datasources)
         except (MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
@@ -340,7 +339,7 @@ class MindsService:
 
             logger.info(f"Updated mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            return self._mind_to_response(mind, datasource_configs=datasource_configs)
+            return await self._mind_to_response(mind, datasource_configs=datasource_configs)
         except (MindNotFoundError, MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
             self.session.rollback()
             raise
@@ -432,7 +431,7 @@ class MindsService:
         )
         return self.session.exec(statement).first()
 
-    def _mind_to_response(
+    async def _mind_to_response(
         self, mind: Mind, datasource_configs: list[DatasourceConfig] = None, with_detailed_data: bool = False
     ) -> MindResponse:
         """
@@ -453,34 +452,38 @@ class MindsService:
         # Get linked datasources through the many-to-many relationship
         else:
             if with_detailed_data:
-                datasources = [
-                    DetailedDatasourceConfig(
-                        name=relationship.datasource.name,
-                        engine=relationship.datasource.engine,
-                        description=relationship.datasource.description,
-                        connection_data=relationship.datasource.connection_data,
-                        tables=[
-                            mind_datasource_table.table.name
-                            for mind_datasource_table in relationship.mind_datasource_tables
-                        ],
-                        status=relationship.status,
-                        created_at=str(relationship.datasource.created_at),
-                        modified_at=str(relationship.datasource.modified_at),
+                datasources = []
+                for relationship in mind.mind_datasources:
+                    status = await relationship.status
+                    datasources.append(
+                        DetailedDatasourceConfig(
+                            name=relationship.datasource.name,
+                            engine=relationship.datasource.engine,
+                            description=relationship.datasource.description,
+                            connection_data=relationship.datasource.connection_data,
+                            tables=[
+                                mind_datasource_table.table.name
+                                for mind_datasource_table in relationship.mind_datasource_tables
+                            ],
+                            status=status,
+                            created_at=str(relationship.datasource.created_at),
+                            modified_at=str(relationship.datasource.modified_at),
+                        )
                     )
-                    for relationship in mind.mind_datasources
-                ]
             else:
-                datasources = [
-                    DatasourceConfig(
-                        name=relationship.datasource.name,
-                        tables=[
-                            mind_datasource_table.table.name
-                            for mind_datasource_table in relationship.mind_datasource_tables
-                        ],
-                        status=relationship.status,
+                datasources = []
+                for relationship in mind.mind_datasources:
+                    status = await relationship.status
+                    datasources.append(
+                        DatasourceConfig(
+                            name=relationship.datasource.name,
+                            tables=[
+                                mind_datasource_table.table.name
+                                for mind_datasource_table in relationship.mind_datasource_tables
+                            ],
+                            status=status,
+                        )
                     )
-                    for relationship in mind.mind_datasources
-                ]
 
         return MindResponse(
             name=mind.name,
@@ -613,38 +616,16 @@ class MindsService:
                     f"for user {self.user_id} in tenant {self.tenant_id}"
                 )
 
-                try:
-                    logger.debug(
-                        f"Loading datasource {datasource_name} to the data catalog "
-                        f"for user {self.user_id} in tenant {self.tenant_id}"
-                    )
-                    await data_catalog_loader.load(mind_datasource, table_names)
-                except DataCatalogLoaderError:
-                    # Mark the mind-datasource relationship as failed
-                    logger.error(
-                        f"Data catalog loading failed for datasource {datasource_name} "
-                        f"for user {self.user_id} in tenant {self.tenant_id}"
-                    )
-                    mind_datasource.status = DataCatalogStatus.FAILED
-                    self.session.add(mind_datasource)
-                    self.session.commit()
-                except PrefectException:
-                    # This occurs when the flow is submitted but fails immediately.
-                    logger.error(
-                        f"Prefect flow submission failed when loading datasource {datasource_name} "
-                        f"to the data catalog for user {self.user_id} in tenant {self.tenant_id}"
-                    )
-                    mind_datasource.status = DataCatalogStatus.FAILED
-                    self.session.add(mind_datasource)
-                    self.session.commit()
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error loading datasource {datasource_name} to the data catalog "
-                        f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
-                    )
-                    mind_datasource.status = DataCatalogStatus.FAILED
-                    self.session.add(mind_datasource)
-                    self.session.commit()
+                logger.debug(
+                    f"Loading datasource {datasource_name} to the data catalog "
+                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                )
+                await data_catalog_loader.load(mind_datasource, table_names)
+            except PrefectException as e:
+                logger.error(
+                    f"Error starting data catalog loader flow for datasource {datasource_name} "
+                    f"to mind {mind.name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                )
             except Exception as e:
                 logger.error(
                     f"Error adding datasource {datasource_name} to mind {mind.name} "
@@ -695,5 +676,6 @@ class MindsService:
         """
         prefect_client = PrefectClient()
         for relationship in mind.mind_datasources:
-            if relationship.status == DataCatalogStatus.LOADING and relationship.flow_run_id:
+            status = await relationship.status
+            if status == DataCatalogStatus.LOADING and relationship.flow_run_id:
                 await prefect_client.cancel_flow_run(relationship.flow_run_id)

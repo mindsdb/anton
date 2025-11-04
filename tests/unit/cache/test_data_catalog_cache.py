@@ -115,64 +115,64 @@ class TestDataCatalogInMemoryCache:
         cache = DataCatalogInMemoryCache(max_size=0)
         assert cache.max_size == 0
 
-    def test_save_single_catalog(self, cache, mock_data_catalog):
+    async def test_save_single_catalog(self, cache, mock_data_catalog):
         """Test saving a single data catalog."""
         key = DataCatalogCache.MindKey("test-mind", datetime(2024, 1, 1, 12, 0, 0))
         catalogs = [mock_data_catalog]
 
-        cache.save(key, catalogs)
+        await cache.save(key, catalogs)
 
-        assert cache.size() == 1
+        assert await cache.size() == 1
         assert key.to_string() in cache.cache
         assert cache.cache[key.to_string()] == catalogs
 
-    def test_save_multiple_catalogs(self, cache, mock_data_catalog):
+    async def test_save_multiple_catalogs(self, cache, mock_data_catalog):
         """Test saving multiple data catalogs."""
         key = DataCatalogCache.MindKey("test-mind", datetime(2024, 1, 1, 12, 0, 0))
         catalog1 = Mock(spec=DataCatalog)
         catalog2 = Mock(spec=DataCatalog)
         catalogs = [catalog1, catalog2]
 
-        cache.save(key, catalogs)
+        await cache.save(key, catalogs)
 
-        assert cache.size() == 1
+        assert await cache.size() == 1
         assert cache.cache[key.to_string()] == catalogs
 
-    def test_save_updates_modified_on(self, cache, mock_data_catalog):
+    async def test_save_updates_modified_on(self, cache, mock_data_catalog):
         """Test that save updates the modified_on field for catalogs."""
         key = DataCatalogCache.MindKey("test-mind", datetime(2024, 1, 1, 12, 0, 0))
         catalogs = [mock_data_catalog]
 
         with patch("minds.cache.data_catalog.datetime") as mock_datetime:
             mock_datetime.now.return_value = datetime(2024, 2, 1, 12, 0, 0)
-            cache.save(key, catalogs)
+            await cache.save(key, catalogs)
 
         # Verify that modified_at was updated
         mock_data_catalog.modified_at = mock_datetime.now.return_value
 
-    def test_load_cache_hit(self, cache, mock_mind, mock_data_catalog):
+    async def test_load_cache_hit(self, cache, mock_mind, mock_data_catalog):
         """Test loading from cache when data exists (cache hit)."""
         key = DataCatalogCache.MindKey(mock_mind.name, mock_mind.modified_at)
         catalogs = [mock_data_catalog]
         cache.cache[key.to_string()] = catalogs
 
-        result = cache.load(mock_mind)
+        result = await cache.load(mock_mind)
 
         assert result == catalogs
-        assert cache.size() == 1
+        assert await cache.size() == 1
         # Verify the item was moved to the end (most recently used)
         assert list(cache.cache.keys())[-1] == key.to_string()
 
-    def test_load_cache_miss_no_datasources(self, cache, mock_mind):
+    async def test_load_cache_miss_no_datasources(self, cache, mock_mind):
         """Test loading from cache when data doesn't exist and no datasources."""
         mock_mind.mind_datasources = []
 
-        result = cache.load(mock_mind)
+        result = await cache.load(mock_mind)
 
         assert result == []
-        assert cache.size() == 0
+        assert await cache.size() == 0
 
-    def test_load_cache_miss_with_datasources(self, cache, mock_mind):
+    async def test_load_cache_miss_with_datasources(self, cache, mock_mind):
         """Test loading from cache when data doesn't exist but datasources exist."""
         from uuid import UUID
 
@@ -192,22 +192,26 @@ class TestDataCatalogInMemoryCache:
         mock_mind_datasource.deleted_at = None
         mock_mind_datasource.mind_id = UUID("87654321-4321-8765-4321-876543218765")
         mock_mind_datasource.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
-        mock_mind_datasource.status = DataCatalogStatus.COMPLETED
+
+        async def _status_completed():
+            return DataCatalogStatus.COMPLETED
+
+        mock_mind_datasource.status = _status_completed()
         mock_mind_datasource.datasource = mock_datasource
         mock_mind_datasource.mind_datasource_tables = []
 
         mock_mind.mind_datasources = [mock_mind_datasource]
 
-        result = cache.load(mock_mind)
+        result = await cache.load(mock_mind)
 
         assert len(result) == 1
         # The result should be a real DataCatalog object, not the mock
         assert isinstance(result[0], DataCatalog)
         assert result[0].mind_datasource == mock_mind_datasource
-        assert cache.size() == 1
+        assert await cache.size() == 1
         # The cache creates DataCatalog directly, not through datasource.get_data_catalog()
 
-    def test_load_cache_miss_with_multiple_datasources(self, cache, mock_mind):
+    async def test_load_cache_miss_with_multiple_datasources(self, cache, mock_mind):
         """Test loading from cache with multiple datasources."""
         # Mock multiple datasources
         mock_datasource1 = Mock()
@@ -231,7 +235,11 @@ class TestDataCatalogInMemoryCache:
         mock_mind_datasource1.deleted_at = None
         mock_mind_datasource1.mind_id = UUID("87654321-4321-8765-4321-876543218765")
         mock_mind_datasource1.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
-        mock_mind_datasource1.status = DataCatalogStatus.COMPLETED
+
+        async def _status_completed_1():
+            return DataCatalogStatus.COMPLETED
+
+        mock_mind_datasource1.status = _status_completed_1()
         mock_mind_datasource1.datasource = mock_datasource1
         mock_mind_datasource1.mind_datasource_tables = []
 
@@ -243,13 +251,17 @@ class TestDataCatalogInMemoryCache:
         mock_mind_datasource2.deleted_at = None
         mock_mind_datasource2.mind_id = UUID("87654321-4321-8765-4321-876543218765")
         mock_mind_datasource2.datasource_id = UUID("33333333-4444-5555-6666-777777777777")
-        mock_mind_datasource2.status = DataCatalogStatus.COMPLETED
+
+        async def _status_completed_2():
+            return DataCatalogStatus.COMPLETED
+
+        mock_mind_datasource2.status = _status_completed_2()
         mock_mind_datasource2.datasource = mock_datasource2
         mock_mind_datasource2.mind_datasource_tables = []
 
         mock_mind.mind_datasources = [mock_mind_datasource1, mock_mind_datasource2]
 
-        result = cache.load(mock_mind)
+        result = await cache.load(mock_mind)
 
         assert len(result) == 2
         # The results should be real DataCatalog objects, not mocks
@@ -257,48 +269,48 @@ class TestDataCatalogInMemoryCache:
         assert isinstance(result[1], DataCatalog)
         assert result[0].mind_datasource == mock_mind_datasource1
         assert result[1].mind_datasource == mock_mind_datasource2
-        assert cache.size() == 1
+        assert await cache.size() == 1
         # The cache creates DataCatalog directly, not through datasource.get_data_catalog()
 
-    def test_invalidate_existing_key(self, cache, mock_data_catalog):
+    async def test_invalidate_existing_key(self, cache, mock_data_catalog):
         """Test invalidating an existing cache entry."""
         key = DataCatalogCache.MindKey("test-mind", datetime(2024, 1, 1, 12, 0, 0))
         catalogs = [mock_data_catalog]
         cache.cache[key.to_string()] = catalogs
 
-        cache.invalidate(key)
+        await cache.invalidate(key)
 
-        assert cache.size() == 0
+        assert await cache.size() == 0
         assert key.to_string() not in cache.cache
 
-    def test_invalidate_nonexistent_key(self, cache):
+    async def test_invalidate_nonexistent_key(self, cache):
         """Test invalidating a non-existent cache entry."""
         key = DataCatalogCache.MindKey("nonexistent-mind", datetime(2024, 1, 1, 12, 0, 0))
 
         # Should not raise an exception
-        cache.invalidate(key)
-        assert cache.size() == 0
+        await cache.invalidate(key)
+        assert await cache.size() == 0
 
-    def test_lru_eviction_when_at_capacity(self, cache, mock_data_catalog):
+    async def test_lru_eviction_when_at_capacity(self, cache, mock_data_catalog):
         """Test LRU eviction when cache reaches max capacity."""
         # Fill cache to capacity
         for i in range(3):
             key = DataCatalogCache.MindKey(f"mind-{i}", datetime(2024, 1, 1, 12, i, 0))
             catalog = Mock(spec=DataCatalog)
-            cache.save(key, [catalog])
+            await cache.save(key, [catalog])
 
-        assert cache.size() == 3
+        assert await cache.size() == 3
 
         # Add one more item, should evict the least recently used (first item)
         key4 = DataCatalogCache.MindKey("mind-4", datetime(2024, 1, 1, 12, 4, 0))
         catalog4 = Mock(spec=DataCatalog)
-        cache.save(key4, [catalog4])
+        await cache.save(key4, [catalog4])
 
-        assert cache.size() == 3
+        assert await cache.size() == 3
         assert "mind-0:2024-01-01 12:00:00" not in cache.cache  # First item evicted
         assert "mind-4:2024-01-01 12:04:00" in cache.cache  # New item added
 
-    def test_lru_eviction_with_access_pattern(self, cache, mock_data_catalog):
+    async def test_lru_eviction_with_access_pattern(self, cache, mock_data_catalog):
         """Test LRU eviction with specific access patterns."""
         # Add items to cache
         key1 = DataCatalogCache.MindKey("mind-1", datetime(2024, 1, 1, 12, 1, 0))
@@ -309,9 +321,9 @@ class TestDataCatalogInMemoryCache:
         catalog2 = Mock(spec=DataCatalog)
         catalog3 = Mock(spec=DataCatalog)
 
-        cache.save(key1, [catalog1])
-        cache.save(key2, [catalog2])
-        cache.save(key3, [catalog3])
+        await cache.save(key1, [catalog1])
+        await cache.save(key2, [catalog2])
+        await cache.save(key3, [catalog3])
 
         # Simulate accessing mind-1 to make it most recently used
         # This is done by removing and re-adding it to the end of the OrderedDict
@@ -322,58 +334,58 @@ class TestDataCatalogInMemoryCache:
         # Add new item, should evict mind-2 (least recently used)
         key4 = DataCatalogCache.MindKey("mind-4", datetime(2024, 1, 1, 12, 4, 0))
         catalog4 = Mock(spec=DataCatalog)
-        cache.save(key4, [catalog4])
+        await cache.save(key4, [catalog4])
 
-        assert cache.size() == 3
+        assert await cache.size() == 3
         assert "mind-2:2024-01-01 12:02:00" not in cache.cache  # mind-2 evicted
         assert "mind-1:2024-01-01 12:01:00" in cache.cache  # mind-1 kept
         assert "mind-4:2024-01-01 12:04:00" in cache.cache  # mind-4 added
 
-    def test_clear_cache(self, cache, mock_data_catalog):
+    async def test_clear_cache(self, cache, mock_data_catalog):
         """Test clearing the entire cache."""
         # Add some items to cache
         key1 = DataCatalogCache.MindKey("mind-1", datetime(2024, 1, 1, 12, 1, 0))
         key2 = DataCatalogCache.MindKey("mind-2", datetime(2024, 1, 1, 12, 2, 0))
-        cache.save(key1, [mock_data_catalog])
-        cache.save(key2, [mock_data_catalog])
+        await cache.save(key1, [mock_data_catalog])
+        await cache.save(key2, [mock_data_catalog])
 
-        assert cache.size() == 2
+        assert await cache.size() == 2
 
-        cache.clear()
+        await cache.clear()
 
-        assert cache.size() == 0
+        assert await cache.size() == 0
         assert len(cache.cache) == 0
 
-    def test_size_method(self, cache, mock_data_catalog):
+    async def test_size_method(self, cache, mock_data_catalog):
         """Test the size method returns correct count."""
-        assert cache.size() == 0
+        assert await cache.size() == 0
 
         key1 = DataCatalogCache.MindKey("mind-1", datetime(2024, 1, 1, 12, 1, 0))
-        cache.save(key1, [mock_data_catalog])
-        assert cache.size() == 1
+        await cache.save(key1, [mock_data_catalog])
+        assert await cache.size() == 1
 
         key2 = DataCatalogCache.MindKey("mind-2", datetime(2024, 1, 1, 12, 2, 0))
-        cache.save(key2, [mock_data_catalog])
-        assert cache.size() == 2
+        await cache.save(key2, [mock_data_catalog])
+        assert await cache.size() == 2
 
-    def test_cache_with_empty_catalogs_list(self, cache):
+    async def test_cache_with_empty_catalogs_list(self, cache):
         """Test cache behavior with empty catalogs list."""
         key = DataCatalogCache.MindKey("test-mind", datetime(2024, 1, 1, 12, 0, 0))
         catalogs = []
 
-        cache.save(key, catalogs)
+        await cache.save(key, catalogs)
 
-        assert cache.size() == 1
+        assert await cache.size() == 1
         assert cache.cache[key.to_string()] == catalogs
 
-    def test_cache_with_none_catalogs(self, cache):
+    async def test_cache_with_none_catalogs(self, cache):
         """Test cache behavior with None catalogs."""
         key = DataCatalogCache.MindKey("test-mind", datetime(2024, 1, 1, 12, 0, 0))
         catalogs = None
 
         # Should handle None gracefully or raise appropriate error
         with pytest.raises((TypeError, AttributeError)):
-            cache.save(key, catalogs)
+            await cache.save(key, catalogs)
 
 
 class TestDataCatalogRedisCache:
@@ -443,7 +455,7 @@ class TestDataCatalogCacheFactory:
 class TestDataCatalogCacheIntegration:
     """Integration tests for the data catalog cache system."""
 
-    def test_full_cache_workflow(self):
+    async def test_full_cache_workflow(self):
         """Test a complete cache workflow: save, load, invalidate."""
         cache = DataCatalogInMemoryCache(max_size=2)
 
@@ -457,9 +469,9 @@ class TestDataCatalogCacheIntegration:
         catalogs2 = [catalog2]
 
         # Save catalogs
-        cache.save(key1, catalogs1)
-        cache.save(key2, catalogs2)
-        assert cache.size() == 2
+        await cache.save(key1, catalogs1)
+        await cache.save(key2, catalogs2)
+        assert await cache.size() == 2
 
         # Load catalogs (simulate cache hit)
         mock_mind1 = Mock(spec=Mind)
@@ -472,16 +484,16 @@ class TestDataCatalogCacheIntegration:
         assert result1 == catalogs1
 
         # Invalidate one entry
-        cache.invalidate(key1)
-        assert cache.size() == 1
+        await cache.invalidate(key1)
+        assert await cache.size() == 1
         assert key1.to_string() not in cache.cache
         assert key2.to_string() in cache.cache
 
         # Clear remaining cache
-        cache.clear()
-        assert cache.size() == 0
+        await cache.clear()
+        assert await cache.size() == 0
 
-    def test_cache_with_realistic_mind_data(self):
+    async def test_cache_with_realistic_mind_data(self):
         """Test cache with realistic mind and datasource data."""
         cache = DataCatalogInMemoryCache(max_size=5)
 
@@ -516,7 +528,11 @@ class TestDataCatalogCacheIntegration:
         mock_mind_datasource1.deleted_at = None
         mock_mind_datasource1.mind_id = UUID("87654321-4321-8765-4321-876543218765")
         mock_mind_datasource1.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
-        mock_mind_datasource1.status = DataCatalogStatus.COMPLETED
+
+        async def _status_completed_a():
+            return DataCatalogStatus.COMPLETED
+
+        mock_mind_datasource1.status = _status_completed_a()
         mock_mind_datasource1.datasource = mock_datasource1
         mock_mind_datasource1.mind_datasource_tables = []
 
@@ -528,14 +544,18 @@ class TestDataCatalogCacheIntegration:
         mock_mind_datasource2.deleted_at = None
         mock_mind_datasource2.mind_id = UUID("87654321-4321-8765-4321-876543218765")
         mock_mind_datasource2.datasource_id = UUID("33333333-4444-5555-6666-777777777777")
-        mock_mind_datasource2.status = DataCatalogStatus.COMPLETED
+
+        async def _status_completed_b():
+            return DataCatalogStatus.COMPLETED
+
+        mock_mind_datasource2.status = _status_completed_b()
         mock_mind_datasource2.datasource = mock_datasource2
         mock_mind_datasource2.mind_datasource_tables = []
 
         mock_mind.mind_datasources = [mock_mind_datasource1, mock_mind_datasource2]
 
         # Load data (cache miss)
-        result = cache.load(mock_mind)
+        result = await cache.load(mock_mind)
 
         assert len(result) == 2
         # The results should be real DataCatalog objects, not mocks
@@ -543,14 +563,14 @@ class TestDataCatalogCacheIntegration:
         assert isinstance(result[1], DataCatalog)
         assert result[0].mind_datasource == mock_mind_datasource1
         assert result[1].mind_datasource == mock_mind_datasource2
-        assert cache.size() == 1
+        assert await cache.size() == 1
 
         # Load again (cache hit)
-        result2 = cache.load(mock_mind)
+        result2 = await cache.load(mock_mind)
         assert result2 == result
-        assert cache.size() == 1
+        assert await cache.size() == 1
 
-    def test_cache_performance_with_large_dataset(self):
+    async def test_cache_performance_with_large_dataset(self):
         """Test cache performance and behavior with larger datasets."""
         cache = DataCatalogInMemoryCache(max_size=10)
 
@@ -558,10 +578,10 @@ class TestDataCatalogCacheIntegration:
         for i in range(15):  # More than max_size
             key = DataCatalogCache.MindKey(f"mind-{i}", datetime(2024, 1, 1, 12, i, 0))
             catalog = Mock(spec=DataCatalog)
-            cache.save(key, [catalog])
+            await cache.save(key, [catalog])
 
         # Should only have max_size items
-        assert cache.size() == 10
+        assert await cache.size() == 10
 
         # First 5 items should be evicted
         for i in range(5):

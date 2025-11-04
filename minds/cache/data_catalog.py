@@ -38,7 +38,7 @@ class DataCatalogCache(ABC):
             return f"{self.mind_name}:{str(self.modified_at)}"
 
     @abstractmethod
-    def load(self, mind: Mind) -> list[DataCatalog]:
+    async def load(self, mind: Mind) -> list[DataCatalog]:
         """
         Load data catalogs for the given mind.
 
@@ -51,7 +51,7 @@ class DataCatalogCache(ABC):
         pass
 
     @abstractmethod
-    def save(self, key: MindKey, catalogs: list[DataCatalog]) -> None:
+    async def save(self, key: MindKey, catalogs: list[DataCatalog]) -> None:
         """
         Save data catalogs for the given key.
 
@@ -62,7 +62,7 @@ class DataCatalogCache(ABC):
         pass
 
     @abstractmethod
-    def invalidate(self, key: MindKey) -> None:
+    async def invalidate(self, key: MindKey) -> None:
         """
         Invalidate cached data catalogs.
 
@@ -85,7 +85,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         self.max_size = max_size
         self.cache: OrderedDict[str, list[DataCatalog]] = OrderedDict()
 
-    def load(self, mind: Mind) -> list[DataCatalog]:
+    async def load(self, mind: Mind) -> list[DataCatalog]:
         """
         Load data catalogs from the cache or create new ones.
 
@@ -110,7 +110,8 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         data_catalogs = []
         for mind_datasource in mind.mind_datasources:
-            if mind_datasource.status != DataCatalogStatus.COMPLETED:
+            status = await mind_datasource.status
+            if status != DataCatalogStatus.COMPLETED:
                 logger.info(
                     f"Skipping data catalog for mind datasource {mind_datasource.id} "
                     f"for mind {mind.name} because it is in status {mind_datasource.status}"
@@ -122,11 +123,11 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         # Cache the catalogs if any were created.
         if data_catalogs:
-            self.save(key, data_catalogs)
+            await self.save(key, data_catalogs)
 
         return data_catalogs
 
-    def save(self, key: DataCatalogCache.MindKey, catalogs: list[DataCatalog]) -> None:
+    async def save(self, key: DataCatalogCache.MindKey, catalogs: list[DataCatalog]) -> None:
         """
         Save data catalogs to the cache.
 
@@ -148,7 +149,7 @@ class DataCatalogInMemoryCache(DataCatalogCache):
         self.cache[key_str] = catalogs
         logger.info(f"Saved {len(catalogs)} data catalogs with key: {key_str}")
 
-    def invalidate(self, key: DataCatalogCache.MindKey) -> None:
+    async def invalidate(self, key: DataCatalogCache.MindKey) -> None:
         """
         Invalidate cached data catalogs.
 
@@ -162,12 +163,12 @@ class DataCatalogInMemoryCache(DataCatalogCache):
             self.cache.pop(key_str)
             logger.info(f"Invalidated {catalog_count} data catalogs with key: {key_str}")
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         """Clear the entire cache."""
         self.cache.clear()
         logger.info("Cleared data catalog cache")
 
-    def size(self) -> int:
+    async def size(self) -> int:
         """Get the current size of the cache."""
         return len(self.cache)
 
