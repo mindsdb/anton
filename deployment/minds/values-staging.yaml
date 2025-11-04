@@ -7,7 +7,7 @@ deployment:
       # Forward auth configuration using your gateway service
       nginx.ingress.kubernetes.io/auth-url: "http://mindsdb-gateway.staging.svc.cluster.local:80/cloud/llm/api-key/"
     hosts:
-      - host: minds.staging.mdb.ai
+      - host: minds-staging.mdb.ai
         enableMultiPath: true
         paths:
           - path: /

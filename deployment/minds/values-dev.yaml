@@ -8,7 +8,7 @@ deployment:
       nginx.ingress.kubernetes.io/auth-url: "http://mindsdb-gateway.dev.svc.cluster.local:80/cloud/llm/api-key/"
 
     hosts:
-      - host: minds.dev.mdb.ai
+      - host: minds-dev.mdb.ai
         enableMultiPath: true
         paths:
           - path: /
