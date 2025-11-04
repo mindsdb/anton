@@ -1,7 +1,7 @@
 """drop_connection_data_col
 
-Revision ID: 008_drop_connection_data_col
-Revises: 007_change_tenant_id_to_uuid
+Revision ID: 009_drop_connection_data_col
+Revises: 008_drop_mind_ds_status_col
 Create Date: 2025-10-23 11:22:43.896830
 
 """
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '008_drop_connection_data_col'
-down_revision: Union[str, None] = '007_change_tenant_id_to_uuid'
+revision: str = '009_drop_connection_data_col'
+down_revision: Union[str, None] = '008_drop_mind_ds_status_col'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
