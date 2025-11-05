@@ -225,8 +225,7 @@ class TestDatasourcesService:
         mock_session.exec.return_value = mock_result
 
         mock_databases = Mock()
-        mock_databases.create = AsyncMock()
-        mock_databases.drop = AsyncMock()
+        mock_databases.update = AsyncMock()
         mock_mindsdb_client.databases = mock_databases
 
         update_request = DatasourceUpdateRequest(
@@ -238,8 +237,7 @@ class TestDatasourcesService:
         assert isinstance(result, DatasourceResponse)
         assert result.name == "test_postgres"
         mock_session.commit.assert_called_once()
-        mock_databases.drop.assert_called_once()
-        mock_databases.create.assert_called_once()
+        mock_databases.update.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_update_datasource_not_found(self, service, mock_session):
