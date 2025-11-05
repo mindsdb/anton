@@ -517,24 +517,12 @@ class DatasourcesService:
             raise DatasourceServiceError(f"MindsDB database creation failed: {str(e)}") from None
 
     async def _update_mindsdb_database(self, datasource: Datasource, connection_data: dict[str, Any]) -> None:
-        """Update database/integration in MindsDB by recreating it."""
+        """Update database/integration (connection data) in MindsDB."""
         try:
             logger.debug(f"Updating MindsDB database for datasource {datasource.name}")
 
-            databases = self.mindsdb_client.databases
-
-            # MindsDB SDK doesn't have update method, so we drop and recreate
-            try:
-                databases.drop(datasource.name)
-                logger.debug(f"Dropped existing MindsDB database {datasource.name}")
-            except Exception:
-                # Database might not exist, continue with creation
-                logger.debug("Datasource not found. Skipping...")
-
-            # Recreate with new parameters
-            databases.create(
+            self.mindsdb_client.databases.update(
                 name=datasource.name,
-                engine=datasource.engine,
                 connection_args=connection_data,
             )
 
