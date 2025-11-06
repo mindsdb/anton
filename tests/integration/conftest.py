@@ -8,7 +8,7 @@ import pytest
 import requests
 from requests import Session
 
-from .config import MINDS_API_KEY, DATASOURCE_CONFIGS, MINDS_API_BASE_URL
+from .config import DATASOURCE_CONFIGS, MINDS_API_BASE_URL, MINDS_API_KEY
 
 
 # ----------------------------------
