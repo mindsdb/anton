@@ -191,3 +191,59 @@ async def test_process_non_streaming_producer_returns_json(streaming_mod):
     assert data["choices"][1]["message"]["content"] == "a"
     # Non-streaming responses should include finish_reason == 'stop' for each choice
     assert all(c.get("finish_reason") == "stop" for c in data["choices"])
+
+
+@pytest.mark.asyncio
+async def test_process_non_streaming_filters_out_system_messages(streaming_mod):
+    """Non-streaming responses should exclude messages with role==Role.system."""
+    model = "model_test_non_streaming_filters_system"
+
+    async def producer(collector):
+        await collector.push(streaming_mod.Role.user, "u")
+        await collector.push(streaming_mod.Role.system, "thought")
+        await collector.push(streaming_mod.Role.assistant, "a")
+
+    resp = await streaming_mod.process_non_streaming_producer(producer, request_id="chatcmpl-sys", model=model)
+    assert resp.status_code == 200
+    data = json.loads(resp.body.decode())
+    assert data["model"] == model
+    # The system/thought message should be filtered out, leaving only user + assistant
+    assert len(data["choices"]) == 2
+    assert [c["message"]["content"] for c in data["choices"]] == ["u", "a"]
+    # Ensure the system content is not present anywhere in the choices
+    assert all("thought" not in c["message"]["content"] for c in data["choices"])
+
+
+@pytest.mark.asyncio
+async def test_process_streaming_producer_includes_system_messages(streaming_mod):
+    """Streaming responses should include system-role messages (they are not filtered when streaming)."""
+    model = "model_test_streaming_includes_system"
+    trace_name = "trace_streaming_includes_system"
+
+    async def producer(streamer):
+        await streamer.push(streaming_mod.Role.user, "hello")
+        await streamer.push(streaming_mod.Role.system, "internal_thought")
+        await streamer.push(streaming_mod.Role.assistant, "world")
+
+    resp = await streaming_mod.process_streaming_producer(
+        producer,
+        request_id="chatcmpl-stream-sys",
+        trace_name=trace_name,
+        model=model,
+    )
+
+    found_system = False
+    found_stop = False
+    async for b in resp.body_iterator:
+        s = b.decode() if isinstance(b, bytes | bytearray) else b
+        payload = json.loads(s[len("data: ") :].strip())
+        delta = payload["choices"][0]["delta"]
+        # Check for the system message content emitted in the stream
+        if delta.get("content") == "internal_thought":
+            found_system = True
+        if payload["choices"][0].get("finish_reason") == "stop":
+            found_stop = True
+            break
+
+    assert found_system, "Expected system message to be present in streaming output"
+    assert found_stop, "Did not find final stop chunk in stream"

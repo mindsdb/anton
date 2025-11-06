@@ -101,7 +101,7 @@ class TestDataCatalogLoader:
 
             # Verify the deployment was called with correct parameters
             mock_run_deployment_patch.assert_called_once_with(
-                name="load-data-catalog/dev",
+                name="load-data-catalog/local--data-catalog-loader",
                 timeout=0,
                 parameters={
                     "mind_datasource_id": mock_mind_datasource.id,

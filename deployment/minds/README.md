@@ -1,4 +1,4 @@
-# CW Summary
+# Minds
 
 This helm chart is just using a subchart of our standardized deployment helm charts
 

@@ -318,9 +318,9 @@ class TestMindsService:
         assert "Failed to delete mind" in str(exc_info.value)
         mock_session.rollback.assert_called_once()
 
-    def test_mind_to_response_conversion(self, minds_service, sample_mind):
+    async def test_mind_to_response_conversion(self, minds_service, sample_mind):
         """Test conversion of Mind model to MindResponse."""
-        result = minds_service._mind_to_response(sample_mind)
+        result = await minds_service._mind_to_response(sample_mind)
 
         assert result.name == "test-mind"
         assert result.provider == "openai"

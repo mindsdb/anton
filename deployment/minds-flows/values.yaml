@@ -85,7 +85,7 @@ job:
   # Job configuration
   <<: *globalEnvsYamlAlias
 
-  name: minds-jobs
+  name: minds-flows
 
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds

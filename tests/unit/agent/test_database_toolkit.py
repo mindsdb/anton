@@ -133,9 +133,9 @@ class TestDatabaseToolkit:
         conversation_context = "Show me all users"
         expected_result = "Query executed successfully"
 
-        with patch.object(database_toolkit, "_generate_and_execute_with_retry") as mock_retry:
-            mock_retry.return_value = expected_result
-
+        with patch.object(
+            database_toolkit, "_generate_and_execute_with_retry", new=AsyncMock(return_value=expected_result)
+        ) as mock_retry:
             result = await database_toolkit.generate_and_execute_sql(conversation_context, mock_streamer)
 
             assert result == expected_result
@@ -149,9 +149,9 @@ class TestDatabaseToolkit:
         expected_result = "Query executed successfully"
 
         with (
-            patch.object(database_toolkit, "generate_sql") as mock_generate,
+            patch.object(database_toolkit, "generate_sql", new=AsyncMock()) as mock_generate,
             patch.object(database_toolkit, "_sanitize_and_validate_sql_mindsdb") as mock_sanitize,
-            patch.object(database_toolkit, "execute_sql") as mock_execute,
+            patch.object(database_toolkit, "execute_sql", new=AsyncMock()) as mock_execute,
         ):
             mock_generate.return_value = expected_sql
             mock_sanitize.return_value = expected_sql
@@ -174,10 +174,10 @@ class TestDatabaseToolkit:
         expected_result = "Query executed successfully"
 
         with (
-            patch.object(database_toolkit, "generate_sql") as mock_generate,
-            patch.object(database_toolkit, "_generate_corrected_sql") as mock_correct,
+            patch.object(database_toolkit, "generate_sql", new=AsyncMock()) as mock_generate,
+            patch.object(database_toolkit, "_generate_corrected_sql", new=AsyncMock()) as mock_correct,
             patch.object(database_toolkit, "_sanitize_and_validate_sql_mindsdb") as mock_sanitize,
-            patch.object(database_toolkit, "execute_sql") as mock_execute,
+            patch.object(database_toolkit, "execute_sql", new=AsyncMock()) as mock_execute,
         ):
             # First attempt: generate_sql returns failed_sql, sanitize fails, execute fails
             # Second attempt: _generate_corrected_sql returns corrected_sql, sanitize succeeds
@@ -201,10 +201,10 @@ class TestDatabaseToolkit:
         error_message = "Persistent error"
 
         with (
-            patch.object(database_toolkit, "generate_sql") as mock_generate,
-            patch.object(database_toolkit, "_generate_corrected_sql") as mock_correct,
+            patch.object(database_toolkit, "generate_sql", new=AsyncMock()) as mock_generate,
+            patch.object(database_toolkit, "_generate_corrected_sql", new=AsyncMock()) as mock_correct,
             patch.object(database_toolkit, "_sanitize_and_validate_sql_mindsdb") as mock_sanitize,
-            patch.object(database_toolkit, "execute_sql") as mock_execute,
+            patch.object(database_toolkit, "execute_sql", new=AsyncMock()) as mock_execute,
         ):
             # All attempts fail
             mock_generate.side_effect = Exception(error_message)
@@ -390,9 +390,9 @@ class TestDatabaseToolkit:
             patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
             patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
             patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
-            patch.object(database_toolkit, "_plan_selection", return_value=None),
+            patch.object(database_toolkit, "_plan_selection", new=AsyncMock(return_value=None)),
         ):
-            mock_cache.load.return_value = [mock_data_catalog]
+            mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
 
@@ -414,7 +414,7 @@ class TestDatabaseToolkit:
         error_message = "Table not found"
 
         with patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache:
-            mock_cache.load.return_value = []
+            mock_cache.load = AsyncMock(return_value=[])
 
             with pytest.raises(Exception, match="No database context available for retry"):
                 await database_toolkit._generate_corrected_sql(conversation_context, failed_query, error_message)
@@ -430,7 +430,7 @@ class TestDatabaseToolkit:
             patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
             patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
         ):
-            mock_cache.load.return_value = [mock_data_catalog]
+            mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
             mock_get_llm.side_effect = Exception("LLM config error")
 
             with pytest.raises(Exception, match="LLM config error"):
@@ -447,9 +447,9 @@ class TestDatabaseToolkit:
             patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
             patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
             patch("minds.agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
-            patch.object(database_toolkit, "_plan_selection", return_value=None),
+            patch.object(database_toolkit, "_plan_selection", new=AsyncMock(return_value=None)),
         ):
-            mock_cache.load.return_value = [mock_data_catalog]
+            mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
             mock_get_template.return_value = "Mock prompt template"
@@ -470,7 +470,7 @@ class TestDatabaseToolkit:
         conversation_context = "Show me all users"
 
         with patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache:
-            mock_cache.load.return_value = []
+            mock_cache.load = AsyncMock(return_value=[])
 
             with pytest.raises(QueryGenerationError, match="No database context available"):
                 await database_toolkit.generate_sql(conversation_context)
@@ -486,9 +486,9 @@ class TestDatabaseToolkit:
             patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
             patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
             patch("minds.agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
-            patch.object(database_toolkit, "_plan_selection", return_value=None),
+            patch.object(database_toolkit, "_plan_selection", new=AsyncMock(return_value=None)),
         ):
-            mock_cache.load.return_value = [mock_data_catalog]
+            mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
             mock_get_template.return_value = "Mock prompt template"
@@ -613,12 +613,12 @@ class TestDatabaseToolkit:
 
         with (
             patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
-            patch.object(database_toolkit, "_plan_selection") as mock_plan,
+            patch.object(database_toolkit, "_plan_selection", new=AsyncMock()) as mock_plan,
             patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
             patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
             patch("minds.agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
         ):
-            mock_cache.load.return_value = [mock_data_catalog]
+            mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
             # Planning returns error
             error_plan = QueryPlanResult(error="Planning failed")
             mock_plan.return_value = error_plan

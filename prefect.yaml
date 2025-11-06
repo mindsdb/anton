@@ -34,9 +34,9 @@ definitions:
           
 # the deployments section allows you to provide configuration for deploying flows
 deployments:
-- name: dev
+- name: "ENV_PLACEHOLDER--data-catalog-loader"
   version: null
-  tags: []
+  tags: *common_tags
   concurrency_limit: null
   description: Load data catalog information from MindsDB into the local database.
   entrypoint: minds/jobs/data_catalog_loader_flow.py:load_data_catalog

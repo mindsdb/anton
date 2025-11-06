@@ -81,7 +81,7 @@ jobs:
   
   deploy:
     runs-on: mdb-prod
-    needs: [build]
+    needs: [build, migrate]
     environment:
       name: prod
       url: ${{ vars.MDB_ENV_URL }}
@@ -101,7 +101,7 @@ jobs:
             sudo chmod +x /usr/local/bin/yq
           fi
           # Update IMAGE_TAG environment variable value
-          yq -i '(.globalEnvsAlias.globalEnvs[] | select(.name == "IMAGE_TAG") | .value) = "development-${{ env.SLUG }}"' deployment/minds-flows/values.yaml
+          yq -i '(.globalEnvsAlias.globalEnvs[] | select(.name == "IMAGE_TAG") | .value) = "production-${{ env.SLUG }}"' deployment/minds-flows/values.yaml
           cat deployment/minds-flows/values.yaml
       - name: Notify of deployment starting
         id: slack
@@ -113,6 +113,10 @@ jobs:
           env-name: "prod"
           env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
+      - name: Remove old jobs
+        run: |
+          export NAMESPACE=prod
+          kubectl -n $NAMESPACE delete job --ignore-not-found minds-flows
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
         with:
           environment-slug: prod
@@ -120,6 +124,12 @@ jobs:
           image-tag: production-${{ env.CI_REF_SLUG }}
           timeout: 600s
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
+      - name: Wait for Flow Deployment to Finish
+        run: |
+          export NAMESPACE=prod
+
+          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
+          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=5m pod -l app=minds
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()
@@ -131,6 +141,54 @@ jobs:
           env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
           update-message-id: ${{ steps.slack.outputs.ts }}
+
+
+  run-evals:
+    runs-on: mdb-dev
+    needs: [ deploy ]
+    environment:
+      name: prod
+      url: ${{ vars.MDB_ENV_URL }}
+    # We want other deployments to wait while we test
+    # Don't cancel in progress jobs because it may be for a different PR
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run evals
+        run: |
+          export NAMESPACE=prod
+          export MINDS_BASE_URL=${{vars.MINDS_V3_ENV_URL}}
+          export PR_NUMBER=${{github.event.pull_request.number}}
+
+          kubectl -n $NAMESPACE delete job --ignore-not-found minds-langfuse-benchmarks
+          envsubst '${PR_NUMBER} ${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
+
+          echo "Waiting for eval job to start..."
+          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
+          kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
+
+          # Pod should already be complete but just in case
+          kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=1m "job/minds-langfuse-benchmarks"
+
+          # Read completion state
+          IS_COMPLETE=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Complete")]}{.status}{end}')
+          IS_FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Failed")]}{.status}{end}')
+
+          if [[ "$IS_COMPLETE" == "True" ]]; then
+            echo "Job completed successfully."
+            exit 0
+          elif [[ "$IS_FAILED" == "True" ]]; then
+            echo "Job failed."
+            exit 1
+          else
+            echo "Job neither reported Complete nor Failed (likely timeout)."
+            kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o yaml || true
+            exit 1
+          fi
+
+
 
 
 

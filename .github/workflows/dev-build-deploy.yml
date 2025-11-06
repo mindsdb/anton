@@ -102,7 +102,7 @@ jobs:
 
   deploy:
     runs-on: mdb-dev
-    needs: [ get-deploy-labels, migrate ]
+    needs: [ get-deploy-labels, migrate, build ]
     strategy:
       matrix:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
@@ -142,6 +142,10 @@ jobs:
           env-name: ${{ matrix.deploy-env }}
           env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
+      - name: Remove old jobs
+        run: |
+          export NAMESPACE=${{matrix.deploy-env}}
+          kubectl -n $NAMESPACE delete job --ignore-not-found minds-flows
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
         with:
           environment-slug: ${{matrix.deploy-env}}
@@ -149,6 +153,12 @@ jobs:
           image-tag: development-${{ env.SLUG }}
           timeout: 600s
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
+      - name: Wait for Deployment to be ready
+        run: |
+          export NAMESPACE=${{matrix.deploy-env}}
+
+          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
+          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=5m pod -l app=minds
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()
@@ -161,7 +171,6 @@ jobs:
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
           update-message-id: ${{ steps.slack.outputs.ts }}
 
-  integration-tests:
     runs-on: mdb-dev
     steps:
       - uses: actions/checkout@v4
@@ -201,7 +210,7 @@ jobs:
           envsubst '${PR_NUMBER} ${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
 
           echo "Waiting for eval job to start..."
-          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
+          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=10m pod -l job-name=minds-langfuse-benchmarks
           kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
 
           # Pod should already be complete but just in case
@@ -222,4 +231,3 @@ jobs:
             kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o yaml || true
             exit 1
           fi
-
