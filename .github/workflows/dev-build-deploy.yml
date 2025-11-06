@@ -20,17 +20,9 @@ jobs:
     # Runs linter
     uses: ./.github/workflows/linter.yml
 
-  # Runs unit tests
-  unit-tests:
-    runs-on: mdb-dev
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12.4'
-      - name: Run unit tests
-        run: make test/unit/coverage
+  run-unit-tests:
+    # Runs unit tests
+    uses: ./.github/workflows/tests-unit.yml
 
   # Looks for labels like "deploy-to-<env>" attached to a PR, so we can deploy to those envs
   get-deploy-labels:
@@ -48,7 +40,7 @@ jobs:
 
   build:
     runs-on: mdb-dev
-    needs: [unit-tests, get-deploy-labels]
+    needs: [run-unit-tests, get-deploy-labels]
     if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
     env:
       AWS_REGION: us-east-1
@@ -172,19 +164,8 @@ jobs:
           update-message-id: ${{ steps.slack.outputs.ts }}
 
   integration-tests:
-    runs-on: mdb-dev
     needs: [ get-deploy-labels, deploy ]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12.4'
-      - name: Run integration tests
-        run: |
-          make test/integration
-        env:
-          MINDS_API_BASE_URL: ${{ vars.MDB_ENV_URL }}
+    uses: ./.github/workflows/tests-integration.yml
 
   run-evals:
     runs-on: mdb-dev

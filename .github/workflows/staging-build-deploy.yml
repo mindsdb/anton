@@ -21,13 +21,13 @@ jobs:
     # Runs linter
     uses: ./.github/workflows/linter.yml
 
-  tests:
-    # Runs tests
-    uses: ./.github/workflows/tests.yml
+  run-unit-tests:
+    # Runs unit tests
+    uses: ./.github/workflows/tests-unit.yml
 
   build:
     runs-on: mdb-dev
-    needs: [tests, linter]
+    needs: [run-unit-tests, linter]
     env:
       AWS_REGION: us-east-1
     steps:
@@ -144,6 +144,13 @@ jobs:
           env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
           update-message-id: ${{ steps.slack.outputs.ts }}
+
+  integration-tests:
+    needs: [ deploy ]
+    strategy:
+      matrix:
+        environment: [staging, dev, alpha-dev]
+    uses: ./.github/workflows/tests-integration.yml
 
   run-evals:
     runs-on: mdb-dev
