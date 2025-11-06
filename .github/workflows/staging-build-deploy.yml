@@ -149,8 +149,10 @@ jobs:
     needs: [ deploy ]
     strategy:
       matrix:
-        environment: [staging, dev, alpha-dev]
+        deploy-env: [staging, dev, alpha-dev]
     uses: ./.github/workflows/tests-integration.yml
+    with:
+      deploy-env: ${{ matrix.deploy-env }}
 
   run-evals:
     runs-on: mdb-dev

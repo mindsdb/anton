@@ -145,6 +145,8 @@ jobs:
   integration-tests:
     needs: [ deploy ]
     uses: ./.github/workflows/tests-integration.yml
+    with:
+      deploy-env: prod
 
   run-evals:
     runs-on: mdb-dev

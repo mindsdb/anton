@@ -164,11 +164,11 @@ jobs:
           update-message-id: ${{ steps.slack.outputs.ts }}
 
   integration-tests:
-    uses: ./.github/workflows/tests-integration.yml
     needs: [ get-deploy-labels, deploy ]
     strategy:
       matrix:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+    uses: ./.github/workflows/tests-integration.yml
     with:
       deploy-env: ${{ matrix.deploy-env }}
 
