@@ -8,7 +8,7 @@ import pytest
 import requests
 from requests import Session
 
-from .config import AUTH_TOKEN, DATASOURCE_CONFIGS, MINDS_API_BASE_URL
+from .config import MINDS_API_KEY, DATASOURCE_CONFIGS, MINDS_API_BASE_URL
 
 
 # ----------------------------------
@@ -19,8 +19,8 @@ def api_client():
     """Returns a requests.Session configured for MindsDB API calls."""
     session = requests.Session()
     headers = {"Content-Type": "application/json"}
-    if AUTH_TOKEN:
-        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
+    if MINDS_API_KEY:
+        headers["Authorization"] = f"Bearer {MINDS_API_KEY}"
     session.headers.update(headers)
     yield session
     session.close()

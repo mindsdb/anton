@@ -17,7 +17,7 @@ load_dotenv()
 # --- API and Schema Configuration ---
 MINDS_API_BASE_URL = os.getenv("MINDS_API_BASE_URL")
 logging.info(f"--- USING API BASE URL: {MINDS_API_BASE_URL} ---")
-AUTH_TOKEN = os.getenv("MINDS_API_KEY")
+MINDS_API_KEY = os.getenv("MINDS_API_KEY")
 
 # --- DATASOURCE CONFIGURATIONS ---
 DATASOURCE_CONFIGS = []
