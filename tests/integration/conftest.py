@@ -8,7 +8,6 @@ import pytest
 import requests
 from requests import Session
 
-
 # ===================================================================
 # EXPLICIT TEST CONFIGURATION
 # ===================================================================
@@ -39,6 +38,7 @@ if all(POSTGRES_CONFIG.values()):
         }
     )
 
+
 # ----------------------------------
 # API client fixture
 # ----------------------------------
@@ -59,11 +59,10 @@ def api_client():
 # ----------------------------------
 IN_PROGRESS_STATUSES = ["PENDING", "LOADING"]
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 60))
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 2))  # seconds
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 2))
 
 
 def poll_mind_transitions(api_client: Session, mind_name: str) -> dict:
-    # ... (Keep your existing implementation exactly the same) ...
     observed_states = set()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -97,7 +96,6 @@ def poll_mind_transitions(api_client: Session, mind_name: str) -> dict:
 # ----------------------------------
 @pytest.fixture(scope="function", params=DATASOURCE_CONFIGS, ids=[c["engine"] for c in DATASOURCE_CONFIGS])
 def temporary_datasource(request, api_client: Session):
-    # ... (Keep your existing implementation exactly the same) ...
     config = request.param
     unique_name = f"{config['name_prefix']}-{uuid.uuid4()}"
     logging.info(f"SETUP: Creating {config['engine']} datasource '{unique_name}'...")
@@ -118,7 +116,6 @@ def temporary_datasource(request, api_client: Session):
 # ----------------------------------
 @pytest.fixture(scope="function")
 def temporary_mind(api_client: Session, temporary_datasource):
-    # ... (Keep your existing implementation exactly the same, using MINDS_API_BASE_URL) ...
     ds_name, config = temporary_datasource
     unique_name = f"test-mind-fixture-{uuid.uuid4()}"
     logging.info(f"SETUP: Creating mind '{unique_name}' linked to datasource '{ds_name}'...")
