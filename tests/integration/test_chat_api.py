@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from .config import MINDS_API_BASE_URL
+from .conftest import MINDS_API_BASE_URL
 
 
 @pytest.mark.happy_path

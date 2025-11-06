@@ -4,8 +4,7 @@ import uuid
 
 import pytest
 
-from .config import MINDS_API_BASE_URL
-from .conftest import poll_mind_transitions
+from .conftest import MINDS_API_BASE_URL, poll_mind_transitions
 
 
 def get_and_verify_mind(api_client, mind_name, expected_status=200):
@@ -74,16 +73,15 @@ class TestMindsAPI:
 
         def normalize_table(t):
             # "public.house_sales" -> "house_sales"
-            # "Home_Rentals" -> "home_rentals"
             return t.split(".")[-1].lower()
 
-        # Convert to sets for easy comparison
+        # Convert to sets for flexible comparison (fixes AssertionError)
         tables_from_api = set(normalize_table(t) for t in found_ds.get("tables", []))
         expected_tables = set(normalize_table(t) for t in initial_tables)
 
-        # Check if the tables we sent are a SUBSET of the tables the API returned
+        # Check if the tables we sent are present in the API response
         assert expected_tables.issubset(tables_from_api), (
-            f"Mind tables do not contain all expected tables. Expected: {expected_tables}, Got: {tables_from_api}"
+            f"Mind tables missing expected tables. Expected: {expected_tables}, Got: {tables_from_api}"
         )
         logging.info(f"SUCCESS: Verified mind '{mind_name}' initial data.")
 
@@ -121,8 +119,7 @@ class TestMindsAPI:
         expected_tables = set(normalize_table(t) for t in updated_tables)
 
         assert expected_tables.issubset(tables_from_api), (
-            f"Mind tables do not contain all expected tables after update. "
-            f"Expected: {expected_tables}, Got: {tables_from_api}"
+            f"Mind tables missing expected tables after update. Expected: {expected_tables}, Got: {tables_from_api}"
         )
         logging.info(f"SUCCESS: Verified mind '{mind_name}' updated data.")
 
