@@ -103,7 +103,7 @@ check/fix: activate ## Format code with ruff
 prefect/secrets: ## Deploy Prefect secrets from local settings
 	$(PYTHON) -c "from minds.jobs.settings import create_prefect_settings; create_prefect_settings(); print('✓ Prefect secrets deployed successfully')"
 
-prefect/deploy: activate ## Deploy all flows to Prefect
+prefect/deploy: ## Deploy all flows to Prefect
 	@echo "Deploying all flows..."
 	@echo "Auto-rejecting all deployment prompts..."
 	@if command -v $(VENV)/bin/prefect >/dev/null 2>&1; then \
