@@ -147,6 +147,7 @@ jobs:
     uses: ./.github/workflows/tests-integration.yml
     with:
       deploy-env: prod
+    secrets: inherit
 
   run-evals:
     runs-on: mdb-dev

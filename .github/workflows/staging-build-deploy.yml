@@ -153,6 +153,7 @@ jobs:
     uses: ./.github/workflows/tests-integration.yml
     with:
       deploy-env: ${{ matrix.deploy-env }}
+    secrets: inherit
 
   run-evals:
     runs-on: mdb-dev
