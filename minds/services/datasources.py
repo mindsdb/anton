@@ -155,6 +155,7 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
+            datasource_name = datasource_name.lower()
             logger.debug(f"Getting datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             datasource = await self._get_datasource(datasource_name)
@@ -191,6 +192,7 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
+            datasource_data.name = datasource_data.name.lower()
             logger.debug(
                 f"Creating datasource {datasource_data.name} for user {self.user_id} in tenant {self.tenant_id}"
             )
@@ -260,6 +262,7 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
+            datasource_name = datasource_name.lower()
             logger.debug(f"Updating datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             # Get existing datasource
@@ -321,6 +324,7 @@ class DatasourcesService:
             DatasourceNotFoundError: If datasource doesn't exist
         """
         try:
+            datasource_name = datasource_name.lower()
             logger.debug(
                 f"Deleting datasource {datasource_name} "
                 f"for user {self.user_id} in tenant {self.tenant_id} (cascade={cascade})"
@@ -386,6 +390,7 @@ class DatasourcesService:
             Connection status result
         """
         try:
+            datasource_name = datasource_name.lower()
             logger.debug(
                 f"Testing connection for datasource {datasource_name} "
                 f"for user {self.user_id} in tenant {self.tenant_id}"
@@ -424,6 +429,7 @@ class DatasourcesService:
         self, datasource_name: str, table_name: str, limit: int = 10
     ) -> DatasourceTableSampleResponse:
         """Get a sample of a table from a datasource."""
+        datasource_name = datasource_name.lower()
         logger.debug(
             f"Getting sample data for table {table_name} of datasource {datasource_name} "
             f"for user {self.user_id} in tenant {self.tenant_id}"
@@ -456,6 +462,7 @@ class DatasourcesService:
 
     async def get_datasource_table_row_count(self, datasource_name: str, table_name: str) -> int:
         """Get the row count of a table from a datasource."""
+        datasource_name = datasource_name.lower()
         logger.debug(
             f"Getting row count for table {table_name} of datasource {datasource_name} "
             f"for user {self.user_id} in tenant {self.tenant_id}"
@@ -569,15 +576,6 @@ class DatasourcesService:
         except Exception as e:
             logger.error(f"Failed to delete MindsDB database {datasource_name}: {str(e)}")
             raise DatasourceServiceError(f"MindsDB database deletion failed: {str(e)}") from None
-
-    async def _exists_in_mindsdb(self, datasource_name: str) -> bool:
-        """Check if datasource exists in MindsDB."""
-        try:
-            databases = self.mindsdb_client.databases
-            database = databases.get(datasource_name)
-            return database is not None
-        except Exception:
-            return False
 
     def _datasource_to_response(self, datasource: Datasource) -> DatasourceResponse:
         """Convert Datasource model to response object."""
