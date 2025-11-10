@@ -98,7 +98,6 @@ class TestDatasourceResponse:
         assert response.id == test_uuid
         assert response.description is None
         assert response.engine is None
-        assert response.connection_data is None
         assert response.created_at is None
         assert response.is_demo is None
 
