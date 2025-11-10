@@ -14,7 +14,6 @@ from pydantic import ValidationError
 from minds.model.mind_datasource import DataCatalogStatus
 from minds.schemas.minds import (
     DatasourceConfig,
-    DeleteMindRequest,
     DetailedDatasourceConfig,
     MindCreateRequest,
     MindResponse,
@@ -343,22 +342,6 @@ class TestMindResponse:
         data["datasources"] = []
         response = MindResponse(**data)
         assert response.status == DataCatalogStatus.COMPLETED
-
-
-class TestDeleteMindRequest:
-    """Test suite for DeleteMindRequest schema."""
-
-    def test_delete_mind_request_default(self):
-        """Test delete mind request with default values."""
-        request = DeleteMindRequest()
-
-        assert request.cascade is False
-
-    def test_delete_mind_request_with_cascade(self):
-        """Test delete mind request with cascade option."""
-        request = DeleteMindRequest(cascade=True)
-
-        assert request.cascade is True
 
 
 class TestSchemaInteroperability:

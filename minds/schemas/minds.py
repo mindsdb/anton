@@ -79,11 +79,3 @@ class MindResponse(BaseModel):
             ):
                 return datasource.status
         return DataCatalogStatus.COMPLETED
-
-
-class DeleteMindRequest(BaseModel):
-    """Request model for mind deletion with options."""
-
-    cascade: bool = Field(
-        default=False, description="Whether to delete associated resources that aren't used elsewhere"
-    )
