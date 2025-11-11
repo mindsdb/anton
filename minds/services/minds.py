@@ -164,6 +164,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
+            mind_name = mind_name.lower()
             logger.debug(f"Getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)
@@ -197,6 +198,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
+            mind_name = mind_name.lower()
             logger.debug(f"Getting mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             mind = await self._get_mind(mind_name)
@@ -300,6 +302,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
+            mind_name = mind_name.lower()
             logger.debug(f"Updating mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)
@@ -366,6 +369,7 @@ class MindsService:
             MindNotFoundError: If the mind doesn't exist
         """
         try:
+            mind_name = mind_name.lower()
             logger.debug(f"Deleting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)

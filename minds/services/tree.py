@@ -49,6 +49,7 @@ class TreeService:
         :return: List of TreeNodeResponse objects representing tables/schemas
         """
         try:
+            database_name = database_name.lower()
             # Get database from MindsDB SDK
             database = self.mindsdb_client.databases.get(database_name)
 

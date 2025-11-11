@@ -50,6 +50,14 @@ class TestDatasourceCreateRequest:
         with pytest.raises(ValidationError):
             DatasourceCreateRequest(name="test")  # Missing engine and connection_data
 
+    def test_create_request_lowercase_fields(self):
+        """Test that name and engine fields are lowercased."""
+        data = {"name": "Test-DB", "engine": "Postgres", "connection_data": {"host": "localhost"}}
+        request = DatasourceCreateRequest(**data)
+
+        assert request.name == "test-db"
+        assert request.engine == "postgres"
+
 
 class TestDatasourceUpdateRequest:
     """Test DatasourceUpdateRequest schema."""

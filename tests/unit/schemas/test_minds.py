@@ -14,7 +14,6 @@ from pydantic import ValidationError
 from minds.model.mind_datasource import DataCatalogStatus
 from minds.schemas.minds import (
     DatasourceConfig,
-    DeleteMindRequest,
     DetailedDatasourceConfig,
     MindCreateRequest,
     MindResponse,
@@ -92,7 +91,7 @@ class TestMindCreateRequest:
     def test_create_request_name_constraints(self):
         """Test name field constraints."""
         # Valid names
-        valid_names = ["test-mind", "mind_123", "Mind-Test-123"]
+        valid_names = ["test-mind", "mind_123"]
         for name in valid_names:
             request = MindCreateRequest(name=name, provider="openai")
             assert request.name == name
@@ -138,6 +137,23 @@ class TestMindCreateRequest:
             request = MindCreateRequest(name="test", provider="openai", datasources=datasources)
             assert request.datasources == datasources
 
+    def test_create_request_lowercase_name_and_datasources(self):
+        """Test that name and datasource names are lowercased."""
+        data = {
+            "name": "Test-Mind",
+            "provider": "openai",
+            "datasources": [
+                DatasourceConfig(name="DataSource1", tables=["Table1"]),
+                DatasourceConfig(name="DATA_SOURCE_2", tables=None),
+            ],
+        }
+
+        request = MindCreateRequest(**data)
+
+        assert request.name == "test-mind"
+        assert request.datasources[0].name == "datasource1"
+        assert request.datasources[1].name == "data_source_2"
+
 
 class TestMindUpdateRequest:
     """Test suite for MindUpdateRequest schema."""
@@ -180,6 +196,22 @@ class TestMindUpdateRequest:
         assert len(request.datasources) == 1
         assert request.datasources[0].name == "new-datasource"
         assert request.datasources[0].tables == ["table1"]
+
+    def test_update_request_lowercase_name_and_datasources(self):
+        """Test that name and datasource names are lowercased in update request."""
+        data = {
+            "name": "Updated-Mind",
+            "datasources": [
+                DatasourceConfig(name="DataSource1", tables=["Table1"]),
+                DatasourceConfig(name="DATA_SOURCE_2", tables=None),
+            ],
+        }
+
+        request = MindUpdateRequest(**data)
+
+        assert request.name == "updated-mind"
+        assert request.datasources[0].name == "datasource1"
+        assert request.datasources[1].name == "data_source_2"
 
 
 class TestMindResponse:
@@ -343,22 +375,6 @@ class TestMindResponse:
         data["datasources"] = []
         response = MindResponse(**data)
         assert response.status == DataCatalogStatus.COMPLETED
-
-
-class TestDeleteMindRequest:
-    """Test suite for DeleteMindRequest schema."""
-
-    def test_delete_mind_request_default(self):
-        """Test delete mind request with default values."""
-        request = DeleteMindRequest()
-
-        assert request.cascade is False
-
-    def test_delete_mind_request_with_cascade(self):
-        """Test delete mind request with cascade option."""
-        request = DeleteMindRequest(cascade=True)
-
-        assert request.cascade is True
 
 
 class TestSchemaInteroperability:
