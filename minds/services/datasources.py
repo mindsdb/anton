@@ -383,7 +383,7 @@ class DatasourcesService:
             )
 
             # Get datasource to verify it exists
-            _ = await self.get_datasource(datasource_name)
+            _ = await self._get_datasource(datasource_name)
 
             # Test connection using MindsDB by trying to list tables
             databases = self.mindsdb_client.databases
