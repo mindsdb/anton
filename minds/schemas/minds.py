@@ -69,7 +69,7 @@ class MindUpdateRequest(BaseModel):
             return v.lower()
         return v
 
-    @field_validator("datasources", mode="before")
+    @field_validator("datasources", mode="after")
     def lowercase_datasource_names(cls, v: list[DatasourceConfig]) -> list[DatasourceConfig]:
         for ds in v:
             ds.name = ds.name.lower()
