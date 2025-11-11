@@ -157,7 +157,7 @@ jobs:
 
   run-evals:
     runs-on: mdb-dev
-    needs: [ deploy ]
+    needs: [ deploy, integration-tests ]
     strategy:
       matrix:
         environment: [staging, dev, alpha-dev]

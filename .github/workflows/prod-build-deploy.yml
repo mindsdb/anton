@@ -151,7 +151,7 @@ jobs:
 
   run-evals:
     runs-on: mdb-dev
-    needs: [ deploy ]
+    needs: [ deploy, integration-tests ]
     environment:
       name: prod
       url: ${{ vars.MDB_ENV_URL }}
