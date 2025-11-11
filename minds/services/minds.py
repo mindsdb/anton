@@ -231,7 +231,6 @@ class MindsService:
             DatasourceNotFoundError: If any specified datasource doesn't exist
         """
         try:
-            mind_data.name = mind_data.name.lower()
             logger.debug(f"Creating mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
 
             # Check if mind already exists in our database

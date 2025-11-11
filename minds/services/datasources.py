@@ -192,7 +192,6 @@ class DatasourcesService:
             DatasourceConnectionError: If connection test fails
         """
         try:
-            datasource_data.name = datasource_data.name.lower()
             logger.debug(
                 f"Creating datasource {datasource_data.name} for user {self.user_id} in tenant {self.tenant_id}"
             )

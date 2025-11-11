@@ -7,7 +7,7 @@ including creation, updates, and relationship management.
 
 from typing import Any
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 from minds.model.mind_datasource import DataCatalogStatus
 
@@ -41,6 +41,18 @@ class MindCreateRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict, description="Mind parameters and configuration")
     datasources: list[DatasourceConfig] = Field(default_factory=list, description="List of datasource names to attach")
 
+    @field_validator("name", mode="before")
+    def lowercase_name(cls, v: str) -> str:
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @field_validator("datasources", mode="before")
+    def lowercase_datasource_names(cls, v: list[DatasourceConfig]) -> list[DatasourceConfig]:
+        for ds in v:
+            ds.name = ds.name.lower()
+        return v
+
 
 class MindUpdateRequest(BaseModel):
     """Request model for updating an existing mind."""
@@ -50,6 +62,18 @@ class MindUpdateRequest(BaseModel):
     model_name: str | None = Field(None, description="Model name")
     parameters: dict[str, Any] | None = Field(None, description="Mind parameters and configuration")
     datasources: list[DatasourceConfig] | None = Field(None, description="List of datasource names")
+
+    @field_validator("name", mode="before")
+    def lowercase_name(cls, v: str) -> str:
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
+    @field_validator("datasources", mode="before")
+    def lowercase_datasource_names(cls, v: list[DatasourceConfig]) -> list[DatasourceConfig]:
+        for ds in v:
+            ds.name = ds.name.lower()
+        return v
 
 
 class MindResponse(BaseModel):

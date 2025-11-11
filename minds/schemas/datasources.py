@@ -8,7 +8,7 @@ for datasource management operations.
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DatasourceCreateRequest(BaseModel):
@@ -18,6 +18,12 @@ class DatasourceCreateRequest(BaseModel):
     description: str | None = Field(None, description="Description of the datasource")
     engine: str = Field(..., description="Database engine (postgres, mysql, etc.)")
     connection_data: dict[str, Any] = Field(..., description="Connection parameters")
+
+    @field_validator("name", "engine", mode="before")
+    def lowercase_fields(cls, v: str) -> str:
+        if isinstance(v, str):
+            return v.lower()
+        return v
 
 
 class DatasourceUpdateRequest(BaseModel):
