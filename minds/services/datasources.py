@@ -5,7 +5,9 @@ This service handles both internal dataource information storage and MindsDB SDK
 for datasource management operations.
 """
 
+import json
 from datetime import datetime, timezone
+from typing import Any
 
 from mindsdb_sdk.server import Server
 from sqlalchemy.orm import selectinload, with_loader_criteria
@@ -207,33 +209,31 @@ class DatasourcesService:
                 name=datasource_data.name,
                 description=datasource_data.description,
                 engine=datasource_data.engine,
-                connection_data=datasource_data.connection_data,
                 user_id=self.user_id,
                 tenant_id=self.tenant_id,
             )
 
             # Save to internal database first
             self.session.add(datasource)
-            self.session.commit()
-            self.session.refresh(datasource)
+            self.session.flush()
 
             try:
-                await self._create_mindsdb_database(datasource)
+                await self._create_mindsdb_database(datasource, datasource_data.connection_data)
 
+                self.session.commit()
+                self.session.refresh(datasource)
                 logger.info(
                     f"Created datasource {datasource_data.name} for user {self.user_id} in tenant {self.tenant_id}"
                 )
 
             except DatasourceServiceError:
                 # Rollback internal database if MindsDB creation fails
-                self.session.delete(datasource)
-                self.session.commit()
+                self.session.rollback()
                 raise
 
             return self._datasource_to_response(datasource)
 
         except DatasourceAlreadyExistsError:
-            self.session.rollback()
             raise
         except Exception as e:
             self.session.rollback()
@@ -270,38 +270,29 @@ class DatasourcesService:
             if not datasource:
                 raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
 
-            # Store original data for rollback
-            original_data = datasource.connection_data.copy() if datasource.connection_data else {}
-
             # Update fields (using simplified schema)
-            if datasource_data.connection_data is not None:
-                if datasource.description is not None:
-                    datasource.description = datasource_data.description
-                datasource.connection_data = datasource_data.connection_data
+            if datasource_data.description is not None:
+                datasource.description = datasource_data.description
 
             # Save to internal database first
-            self.session.add(datasource)
-            self.session.commit()
-            self.session.refresh(datasource)
+            self.session.flush()
 
             try:
                 # Update in MindsDB if connection data changed
                 if datasource_data.connection_data is not None:
-                    await self._update_mindsdb_database(datasource)
+                    await self._update_mindsdb_database(datasource, datasource_data.connection_data)
 
+                self.session.commit()
+                self.session.refresh(datasource)
                 logger.info(f"Updated datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
 
             except DatasourceServiceError:
-                # Rollback internal database if MindsDB update fails
-                datasource.connection_data = original_data
-                self.session.add(datasource)
-                self.session.commit()
+                self.session.rollback()
                 raise
 
             return self._datasource_to_response(datasource)
 
         except DatasourceNotFoundError:
-            self.session.rollback()
             raise
         except Exception as e:
             self.session.rollback()
@@ -410,10 +401,10 @@ class DatasourcesService:
             # This will trigger a connection test in MindsDB
             try:
                 database.tables.list()
-                return DatasourceConnectionStatus(success=True)
+                return DatasourceConnectionStatus(success=True, mindsdb_database=database)
             except Exception as db_error:
                 return DatasourceConnectionStatus(
-                    success=False, error_message=f"Connection test failed: {str(db_error)}"
+                    success=False, error_message=f"Connection test failed: {str(db_error)}", mindsdb_database=database
                 )
         except DatasourceNotFoundError:
             return DatasourceConnectionStatus(success=False, error_message="Datasource not found")
@@ -510,7 +501,7 @@ class DatasourcesService:
 
         return datasource
 
-    async def _create_mindsdb_database(self, datasource: Datasource) -> None:
+    async def _create_mindsdb_database(self, datasource: Datasource, connection_data: dict[str, Any]) -> None:
         """Create database/integration in MindsDB."""
         try:
             logger.debug(f"Creating MindsDB database for datasource {datasource.name}")
@@ -522,7 +513,7 @@ class DatasourcesService:
             databases.create(
                 name=datasource.name,
                 engine=datasource.engine,
-                connection_args=datasource.connection_data,
+                connection_args=connection_data,
             )
 
             logger.info(f"Created MindsDB database {datasource.name}")
@@ -531,26 +522,14 @@ class DatasourcesService:
             logger.error(f"Failed to create MindsDB database {datasource.name}: {str(e)}")
             raise DatasourceServiceError(f"MindsDB database creation failed: {str(e)}") from None
 
-    async def _update_mindsdb_database(self, datasource: Datasource) -> None:
-        """Update database/integration in MindsDB by recreating it."""
+    async def _update_mindsdb_database(self, datasource: Datasource, connection_data: dict[str, Any]) -> None:
+        """Update database/integration (connection data) in MindsDB."""
         try:
             logger.debug(f"Updating MindsDB database for datasource {datasource.name}")
 
-            databases = self.mindsdb_client.databases
-
-            # MindsDB SDK doesn't have update method, so we drop and recreate
-            try:
-                databases.drop(datasource.name)
-                logger.debug(f"Dropped existing MindsDB database {datasource.name}")
-            except Exception:
-                # Database might not exist, continue with creation
-                logger.debug("Datasource not found. Skipping...")
-
-            # Recreate with new parameters
-            databases.create(
+            self.mindsdb_client.databases.update(
                 name=datasource.name,
-                engine=datasource.engine,
-                connection_args=datasource.connection_data,
+                connection_args=connection_data,
             )
 
             logger.info(f"Updated MindsDB database {datasource.name}")
@@ -583,7 +562,6 @@ class DatasourcesService:
             name=datasource.name,
             description=datasource.description,
             engine=datasource.engine,
-            connection_data=datasource.connection_data,
             created_at=datasource.created_at.isoformat(),
             modified_at=datasource.modified_at.isoformat(),
             is_demo=False,
@@ -595,5 +573,14 @@ class DatasourcesService:
 
         # Get real connection status from MindsDB
         connection_status = await self.test_connection(datasource.name)
+        connection_data = None
+        if connection_status.mindsdb_database:
+            connection_data = (
+                connection_status.mindsdb_database.params
+                if isinstance(connection_status.mindsdb_database.params, dict)
+                else json.loads(connection_status.mindsdb_database.params)
+            )
 
-        return DatasourceDetailedResponse(**base_response.model_dump(), connection_status=connection_status)
+        return DatasourceDetailedResponse(
+            **base_response.model_dump(), connection_data=connection_data, connection_status=connection_status
+        )

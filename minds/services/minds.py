@@ -6,6 +6,7 @@ related to mind management, including CRUD operations with internal database sto
 MindsDB is only used for datasource validation, not for minds storage.
 """
 
+import json
 from datetime import datetime, timezone
 
 from mindsdb_sdk.server import Server
@@ -459,12 +460,19 @@ class MindsService:
                 datasources = []
                 for relationship in mind.mind_datasources:
                     status = await relationship.status
+
+                    # Get connection data from MindsDB database object
+                    connection_data = self.mindsdb_client.databases.get(relationship.datasource.name).params
+                    connection_data = (
+                        connection_data if isinstance(connection_data, dict) else json.loads(connection_data)
+                    )
+
                     datasources.append(
                         DetailedDatasourceConfig(
                             name=relationship.datasource.name,
                             engine=relationship.datasource.engine,
                             description=relationship.datasource.description,
-                            connection_data=relationship.datasource.connection_data,
+                            connection_data=connection_data,
                             tables=[
                                 mind_datasource_table.table.name
                                 for mind_datasource_table in relationship.mind_datasource_tables
