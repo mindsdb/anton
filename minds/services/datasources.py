@@ -5,7 +5,6 @@ This service handles both internal dataource information storage and MindsDB SDK
 for datasource management operations.
 """
 
-import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +13,7 @@ from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, select
 
 from minds.common.logger import setup_logging
+from minds.common.utilities import safe_parse
 from minds.model.datasource import Datasource
 from minds.model.mind_datasource import MindDatasource
 from minds.schemas.datasources import (
@@ -581,7 +581,7 @@ class DatasourcesService:
             connection_data = (
                 connection_status.mindsdb_database.params
                 if isinstance(connection_status.mindsdb_database.params, dict)
-                else json.loads(connection_status.mindsdb_database.params)
+                else safe_parse(connection_status.mindsdb_database.params)
             )
 
         return DatasourceDetailedResponse(
