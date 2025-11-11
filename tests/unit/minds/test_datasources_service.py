@@ -281,7 +281,7 @@ class TestDatasourcesService:
     @pytest.mark.asyncio
     async def test_connection_success(self, service, mock_mindsdb_client):
         """Test successful connection testing."""
-        service.get_datasource = AsyncMock(return_value=Mock())
+        service._get_datasource = AsyncMock(return_value=Mock())
 
         mock_database = Mock(spec=Database)
         mock_tables = Mock()
@@ -301,7 +301,7 @@ class TestDatasourcesService:
     @pytest.mark.asyncio
     async def test_connection_datasource_not_found_in_mindsdb(self, service, mock_mindsdb_client):
         """Test connection when datasource not found in MindsDB."""
-        service.get_datasource = AsyncMock(return_value=Mock())
+        service._get_datasource = AsyncMock(return_value=Mock())
 
         mock_databases = Mock()
         mock_databases.get.side_effect = AttributeError("Database not found")
@@ -315,7 +315,7 @@ class TestDatasourcesService:
     @pytest.mark.asyncio
     async def test_connection_table_list_failure(self, service, mock_mindsdb_client):
         """Test connection when table listing fails."""
-        service.get_datasource = AsyncMock(return_value=Mock())
+        service._get_datasource = AsyncMock(return_value=Mock())
 
         mock_database = Mock(spec=Database)
         mock_tables = Mock()
@@ -334,7 +334,7 @@ class TestDatasourcesService:
     @pytest.mark.asyncio
     async def test_connection_datasource_not_found(self, service):
         """Test connection when datasource doesn't exist."""
-        service.get_datasource = AsyncMock(side_effect=DatasourceNotFoundError("Not found"))
+        service._get_datasource = AsyncMock(side_effect=DatasourceNotFoundError("Not found"))
 
         result = await service.test_connection("nonexistent")
 
@@ -344,7 +344,7 @@ class TestDatasourcesService:
     @pytest.mark.asyncio
     async def test_connection_unexpected_error(self, service):
         """Test connection with unexpected error."""
-        service.get_datasource = AsyncMock(side_effect=Exception("Unexpected error"))
+        service._get_datasource = AsyncMock(side_effect=Exception("Unexpected error"))
 
         result = await service.test_connection("test_postgres")
 
