@@ -133,12 +133,13 @@ prefect/set-image-name: ## Set the image name dynamically (usage: make prefect/s
 	$(eval IMAGE_NAME ?= $(shell echo $$IMAGE_NAME))
 	@# Check if IMAGE_NAME is still empty after trying environment variable
 	@if [ -z "$(IMAGE_NAME)" ]; then \
-		echo "Using default image name: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds" \
-		$(eval IMAGE_NAME = 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds); \
+		echo "Error: IMAGE_NAME is required. Set it as environment variable or pass as make variable: make prefect/set-image-name IMAGE_NAME=168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds"; \
+		exit 1; \
 	fi
-	@echo "Setting image name to: $(IMAGE_NAME)"
+	@echo "Setting image tag to: $(IMAGE_NAME)"
 	sed -i.bak 's|IMAGE_NAME_PLACEHOLDER|$(IMAGE_NAME)|g' prefect.yaml
-	@echo "✓ Image name updated in prefect.yaml"
+	@echo "✓ Image tag updated in prefect.yaml"
+
 
 # Set dynamic image for CI/CD deployments
 prefect/set-image-tag: ## Set the image tag dynamically (usage: make prefect/set-image-tag IMAGE_TAG=development-abc123 or set IMAGE_TAG env var)
@@ -171,29 +172,24 @@ prefect/set-prefect-api-url: ## Set the Prefect API URL (usage: make prefect/set
 	$(eval PREFECT_API_URL ?= $(shell echo $$PREFECT_API_URL))
 	@# Check if PREFECT_API_URL is still empty after trying environment variable
 	@if [ -z "$(PREFECT_API_URL)" ]; then \
-		echo "Using default Prefect API URL: http://prefect-server.dev.svc.cluster.local:4200/api" \
-		$(eval PREFECT_API_URL = http://prefect-server.dev.svc.cluster.local:4200/api); \
+		echo "Error: PREFECT_API_URL is required. Set it as environment variable or pass as make variable: make prefect/set-prefect-api-url PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api"; \
+		exit 1; \
 	fi
 	@echo "Setting Prefect API URL to: $(PREFECT_API_URL)"
 	sed -i.bak 's|PREFECT_API_URL_PLACEHOLDER|$(PREFECT_API_URL)|g' prefect.yaml
-	@echo "✓ Prefect API URL updated in prefect.docker.yaml"
+	@echo "✓ Prefect API URL updated in prefect.yaml"
 
 prefect/set-config: ## Set image, environment, and API URL if provided (usage: make prefect/set-config IMAGE_TAG=dev-123 ENV=dev PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api)
 	@# Set image name if IMAGE_NAME is provided
-	@if [ ! -z "$(IMAGE_NAME)" ] || [ ! -z "$$IMAGE_NAME" ]; then \
-		$(MAKE) prefect/set-image-name; \
-	fi
+	$(MAKE) prefect/set-image-name;
+	
 	@# Set image tag if IMAGE_TAG is provided
-	@if [ ! -z "$(IMAGE_TAG)" ] || [ ! -z "$$IMAGE_TAG" ]; then \
-		$(MAKE) prefect/set-image-tag; \
-	fi
+	$(MAKE) prefect/set-image-tag;
+
 	@# Set environment name if ENV is provided
-	@if [ ! -z "$(ENV)" ] || [ ! -z "$$ENV" ]; then \
-		$(MAKE) prefect/set-env; \
-	fi
+	$(MAKE) prefect/set-env;
+
 	@# Set Prefect API URL if PREFECT_API_URL is provided
-	@if [ ! -z "$(PREFECT_API_URL)" ] || [ ! -z "$$PREFECT_API_URL" ]; then \
-		$(MAKE) prefect/set-prefect-api-url; \
-	fi
+	$(MAKE) prefect/set-prefect-api-url;
 
 prefect/deploy/full: activate prefect/secrets prefect/set-config prefect/deploy ## Set config (image/API URL if provided), and then deploy all flows

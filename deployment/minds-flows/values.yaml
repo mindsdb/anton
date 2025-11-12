@@ -7,6 +7,9 @@ globalEnvsAlias: &globalEnvsYamlAlias
 
     - name: LOG_LEVEL
       value: "INFO"    
+
+    - name: IMAGE_NAME
+      value: "168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds"
       
     - name: IMAGE_TAG
       value: "latest"
