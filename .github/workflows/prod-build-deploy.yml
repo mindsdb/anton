@@ -128,8 +128,8 @@ jobs:
         run: |
           export NAMESPACE=prod
 
-          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
-          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=5m pod -l app=minds
+          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=10m "job/minds-flows"
+          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=10m pod -l app=minds
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()
@@ -172,7 +172,7 @@ jobs:
           envsubst '${PR_NUMBER} ${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
 
           echo "Waiting for eval job to start..."
-          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=5m pod -l job-name=minds-langfuse-benchmarks
+          kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=10m pod -l job-name=minds-langfuse-benchmarks
           kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
 
           # Pod should already be complete but just in case

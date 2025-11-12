@@ -40,6 +40,7 @@ def create_mindsdb_client(api_key: str | None, headers: dict | None) -> Server:
     # If no API key is provided, try connecting without authentication
     if api_key is None or not api_key or not api_key.strip():
         # For MindsDB without authentication, don't pass login/password at all
+        logger.debug(f"Creating MindsDB client with URL: '{MINDSDB_URL}' and password: '{MINDSDB_PASSWORD}'")
         if not MINDSDB_PASSWORD:
             logger.debug(f"Creating MindsDB client without authentication with URL: {MINDSDB_URL}")
             return connect(url=MINDSDB_URL, headers=headers)
