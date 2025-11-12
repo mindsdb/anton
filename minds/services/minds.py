@@ -318,14 +318,14 @@ class MindsService:
 
             datasource_configs = mind_data.datasources
 
-            if datasource_configs:
-                # Validate new datasources if provided
-                await self._validate_datasources(datasource_configs)
-
-            # Cancel any running data catalog loader flows for the mind
-            await self._cancel_data_catalog_loader_flows_for_mind(mind)
-            # Update the datasources associated with the mind
-            await self._update_mind_datasources(mind, mind_data.datasources, data_catalog_loader)
+            if datasource_configs is not None:
+                if datasource_configs:
+                    # Validate new datasources if provided
+                    await self._validate_datasources(datasource_configs)
+                # Cancel any running data catalog loader flows for the mind
+                await self._cancel_data_catalog_loader_flows_for_mind(mind)
+                # Update the datasources associated with the mind
+                await self._update_mind_datasources(mind, datasource_configs, data_catalog_loader)
 
             # Update mind fields
             if mind_data.name is not None:
