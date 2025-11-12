@@ -21,7 +21,7 @@ definitions:
   tags: &common_tags
     - "minds"
     - "ENV_PLACEHOLDER"
-  image: &default_image "168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds:IMAGE_TAG_PLACEHOLDER"
+  image: &default_image "IMAGE_NAME_PLACEHOLDER:IMAGE_TAG_PLACEHOLDER"
   work_pools:
     default: &default_work_pool
       name: standard-worker-pool
@@ -29,7 +29,7 @@ definitions:
         image: *default_image
         namespace: infrastructure
         env:
-          PREFECT_API_URL: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
+          PREFECT_API_URL: "PREFECT_API_URL_PLACEHOLDER"
           ENV: "ENV_PLACEHOLDER"
           
 # the deployments section allows you to provide configuration for deploying flows

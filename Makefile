@@ -15,7 +15,17 @@ DOCKER_COMMAND :=   $(shell docker-compose -v > /dev/null 2>&1; \
 						fi; \
 					fi;)
 
-VENV = env
+SHELL := /bin/bash
+.ONESHELL:
+
+IN_CONTAINER := $(shell test -f /.dockerenv && echo 1 || echo 0)
+
+ifeq ($(IN_CONTAINER),1)
+  VENV ?= /opt/venv
+else
+  VENV ?= env
+endif
+
 PYTHON ?= $(VENV)/bin/python
 PIP ?= $(VENV)/bin/pip
 
@@ -26,12 +36,17 @@ help:
 
 .PHONY: $(VENV)/bin/activate
 $(VENV)/bin/activate: requirements/requirements-dev.txt # Create virtualenv and install dependencies
+	@echo "Creating virtual environment at $(VENV)..."
 	python3 -m venv "$(VENV)"
-	$(PIP) install -r requirements/requirements-dev.txt
-	$(PIP) install -e .
+	@echo "Virtual environment created. Installing requirements..."
+	@ls -la $(VENV)/bin/ || echo "bin directory not found"
+	$(VENV)/bin/pip install -r requirements/requirements-dev.txt
+	$(VENV)/bin/pip install -e .
+	@echo "Virtual environment setup complete."
 
 activate: $(VENV)/bin/activate # Activate virtualenv
 	@echo "activate virtualenv"
+
 
 # Check if a docker-compose command was found. Print a help message if not
 deps:
@@ -112,8 +127,21 @@ prefect/deploy: ## Deploy all flows to Prefect (requires secrets to be deployed 
 		exit 1; \
 	fi
 
+# Set image name
+prefect/set-image-name: ## Set the image name dynamically (usage: make prefect/set-image-name IMAGE_NAME=168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds or set IMAGE_NAME env var)
+	@# Set IMAGE_NAME from environment variable if not provided as make variable
+	$(eval IMAGE_NAME ?= $(shell echo $$IMAGE_NAME))
+	@# Check if IMAGE_NAME is still empty after trying environment variable
+	@if [ -z "$(IMAGE_NAME)" ]; then \
+		echo "Using default image name: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds" \
+		$(eval IMAGE_NAME = 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds); \
+	fi
+	@echo "Setting image name to: $(IMAGE_NAME)"
+	sed -i.bak 's|IMAGE_NAME_PLACEHOLDER|$(IMAGE_NAME)|g' prefect.yaml
+	@echo "✓ Image name updated in prefect.yaml"
+
 # Set dynamic image for CI/CD deployments
-prefect/set-image: ## Set the image tag dynamically (usage: make prefect/set-image IMAGE_TAG=development-abc123 or set IMAGE_TAG env var)
+prefect/set-image-tag: ## Set the image tag dynamically (usage: make prefect/set-image-tag IMAGE_TAG=development-abc123 or set IMAGE_TAG env var)
 	@# Set IMAGE_TAG from environment variable if not provided as make variable
 	$(eval IMAGE_TAG ?= $(shell echo $$IMAGE_TAG))
 	@# Check if IMAGE_TAG is still empty after trying environment variable
@@ -138,14 +166,34 @@ prefect/set-env: ## Set the environment name for deployment names (usage: make p
 	sed -i.bak 's|ENV_PLACEHOLDER|$(ENV)|g' prefect.yaml
 	@echo "✓ Environment name updated in prefect.yaml"
 
+prefect/set-prefect-api-url: ## Set the Prefect API URL (usage: make prefect/set-prefect-api-url PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api)
+	@# Set PREFECT_API_URL from environment variable if not provided as make variable
+	$(eval PREFECT_API_URL ?= $(shell echo $$PREFECT_API_URL))
+	@# Check if PREFECT_API_URL is still empty after trying environment variable
+	@if [ -z "$(PREFECT_API_URL)" ]; then \
+		echo "Using default Prefect API URL: http://prefect-server.dev.svc.cluster.local:4200/api" \
+		$(eval PREFECT_API_URL = http://prefect-server.dev.svc.cluster.local:4200/api); \
+	fi
+	@echo "Setting Prefect API URL to: $(PREFECT_API_URL)"
+	sed -i.bak 's|PREFECT_API_URL_PLACEHOLDER|$(PREFECT_API_URL)|g' prefect.yaml
+	@echo "✓ Prefect API URL updated in prefect.docker.yaml"
+
 prefect/set-config: ## Set image, environment, and API URL if provided (usage: make prefect/set-config IMAGE_TAG=dev-123 ENV=dev PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api)
+	@# Set image name if IMAGE_NAME is provided
+	@if [ ! -z "$(IMAGE_NAME)" ] || [ ! -z "$$IMAGE_NAME" ]; then \
+		$(MAKE) prefect/set-image-name; \
+	fi
 	@# Set image tag if IMAGE_TAG is provided
 	@if [ ! -z "$(IMAGE_TAG)" ] || [ ! -z "$$IMAGE_TAG" ]; then \
-		$(MAKE) prefect/set-image; \
+		$(MAKE) prefect/set-image-tag; \
 	fi
 	@# Set environment name if ENV is provided
 	@if [ ! -z "$(ENV)" ] || [ ! -z "$$ENV" ]; then \
 		$(MAKE) prefect/set-env; \
+	fi
+	@# Set Prefect API URL if PREFECT_API_URL is provided
+	@if [ ! -z "$(PREFECT_API_URL)" ] || [ ! -z "$$PREFECT_API_URL" ]; then \
+		$(MAKE) prefect/set-prefect-api-url; \
 	fi
 
 prefect/deploy/full: activate prefect/secrets prefect/set-config prefect/deploy ## Set config (image/API URL if provided), and then deploy all flows
