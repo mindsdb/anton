@@ -1,10 +1,14 @@
 from fastapi import Request
 from mindsdb_sdk import connect
 from mindsdb_sdk.server import Server
+from minds.common.logger import setup_logging
 
 from minds.common import get_authorization_bearer_token, get_headers_for_mindsdb_client
 from minds.common.vars import MINDSDB_LOGIN, MINDSDB_PASSWORD, MINDSDB_URL
 from minds.requests.context import Context
+
+# Set up logging
+logger = setup_logging()
 
 
 def create_mindsdb_client_from_request(request: Request, context: Context) -> Server:
@@ -16,7 +20,8 @@ def create_mindsdb_client_from_request(request: Request, context: Context) -> Se
     """
     api_key = get_authorization_bearer_token(request)
     headers = get_headers_for_mindsdb_client(context)
-
+    logger.debug(f"Creating MindsDB client from request with API key: {api_key}")
+    logger.debug(f"Headers: {headers}")
     return create_mindsdb_client(api_key, headers=headers)
 
 
@@ -36,8 +41,10 @@ def create_mindsdb_client(api_key: str | None, headers: dict | None) -> Server:
     if api_key is None or not api_key or not api_key.strip():
         # For MindsDB without authentication, don't pass login/password at all
         if not MINDSDB_PASSWORD:
+            logger.debug(f"Creating MindsDB client without authentication with URL: {MINDSDB_URL}")
             return connect(url=MINDSDB_URL, headers=headers)
         else:
+            logger.debug(f"Creating MindsDB client with authentication with URL: {MINDSDB_URL}")
             return connect(
                 url=MINDSDB_URL,
                 login=MINDSDB_LOGIN,
