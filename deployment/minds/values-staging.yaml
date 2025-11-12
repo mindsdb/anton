@@ -36,6 +36,15 @@ deployment:
     - name: LANGFUSE_ENVIRONMENT
       value: "staging"
 
+    - name: LANGFUSE_TRACING_ENABLED
+      value: "false"
+
+    - name: LANGFUSE_PUBLIC_KEY
+      value: "remove"
+
+    - name: LANGFUSE_SECRET_KEY
+      value: "remove"
+
     # Data Catalog
     - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
       value: "staging--data-catalog-loader"

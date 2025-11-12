@@ -1,22 +1,30 @@
 #!make
-.PHONY: help deps
+.PHONY: help deps activate test test/all lint format
 
 # If someone runs just 'make', show the help
 .DEFAULT_GOAL := help
 
-# Find the docker-compose command on the current system
-DOCKER_COMMAND :=   $(shell docker-compose -v > /dev/null 2>&1; \
-					if [ $$? -eq 0 ]; then \
-						echo "docker-compose"; \
-					else \
-						docker compose -v > /dev/null 2>&1; \
-						if [ $$? -eq 0 ]; then \
-							echo "docker compose"; \
-						fi; \
-					fi;)
+# --- OS Detection and Configuration ---
+# Default to Unix-like shell unless on Windows
+SHELL := /bin/bash
+SET_ENV = export
 
 SHELL := /bin/bash
 .ONESHELL:
+
+# Windows specific overrides
+ifeq ($(OS),Windows_NT)
+    SHELL := cmd.exe
+    VENV_DIR = Scripts
+    PYTHON_EXE = python.exe
+    PIP_EXE = pip.exe
+    SET_ENV = set
+else
+    VENV_DIR = bin
+    PYTHON_EXE = python
+    PIP_EXE = pip
+    SET_ENV = export
+endif
 
 IN_CONTAINER := $(shell test -f /.dockerenv && echo 1 || echo 0)
 
@@ -26,27 +34,29 @@ else
   VENV ?= env
 endif
 
-PYTHON ?= $(VENV)/bin/python
-PIP ?= $(VENV)/bin/pip
-
+PYTHON ?= $(VENV)/$(VENV_DIR)/$(PYTHON_EXE)
+PIP ?= $(VENV)/$(VENV_DIR)/$(PIP_EXE)
+DOCKER_COMMAND := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 MINDS_CONTAINER = minds
 
-help:
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+# --- Core Targets ---
+help: ## Display this help message
+	@echo "Usage: make [target]"
+	@echo ""
+	@echo "Available targets:"
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-.PHONY: $(VENV)/bin/activate
-$(VENV)/bin/activate: requirements/requirements-dev.txt # Create virtualenv and install dependencies
+.PHONY: $(VENV)/$(VENV_DIR)/activate
+$(VENV)/$(VENV_DIR)/activate: requirements/requirements-dev.txt ## Create virtualenv and install dependencies
 	@echo "Creating virtual environment at $(VENV)..."
-	python3 -m venv "$(VENV)"
+	python -m venv "$(VENV)"
 	@echo "Virtual environment created. Installing requirements..."
-	@ls -la $(VENV)/bin/ || echo "bin directory not found"
-	$(VENV)/bin/pip install -r requirements/requirements-dev.txt
-	$(VENV)/bin/pip install -e .
+	@ls -la $(VENV)/$(VENV_DIR)/ || echo "$(VENV_DIR) directory not found"
+	$(PIP) install -r requirements/requirements-dev.txt
+	$(PIP) install -e .
 	@echo "Virtual environment setup complete."
 
-activate: $(VENV)/bin/activate # Activate virtualenv
-	@echo "activate virtualenv"
-
+activate: $(VENV)/$(VENV_DIR)/activate ## Activate the virtual environment
 
 # Check if a docker-compose command was found. Print a help message if not
 deps:
@@ -55,59 +65,58 @@ ifndef DOCKER_COMMAND
 	exit 1
 endif
 
-# Run unit tests
-test/unit: activate
+# --- Testing ---
+test/unit: activate ## Run unit tests
 	$(PYTHON) -m pytest tests/unit/
 
-# Run integration tests
-test/integration: activate
+test/integration: activate 
+	$(PYTHON) -m pytest tests/integration/ -m "happy_path"
+
+
+test/integration/all: activate ## Run all integration tests
 	$(PYTHON) -m pytest tests/integration/
 
-# Run all tests
-test: test/unit test/integration
+test: test/unit test/integration ## Run standard tests (unit and happy_path integration)
 
-# Coverage
-test/unit/coverage: activate
+test/all: test/unit test/integration/all ## Run all tests (unit, integration, and contract)
+
+# --- Coverage ---
+test/unit/coverage: activate ## Run unit tests with coverage
 	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-fail-under=85
 
-coverage/html: activate
+coverage/html: activate ## Generate HTML coverage report
 	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-report html
 
-# Run the server
-run: activate docker/deps
+# --- Development ---
+run: activate docker/deps ## Run the development server with auto-reload
 	$(PYTHON) -m watchfiles --filter python '$(PYTHON) -m uvicorn minds.server:app --host 0.0.0.0 --port 9010' .
 
-# Run docker deps
-docker/deps:
-	$(DOCKER_COMMAND) up -d postgres redis langfuse-web langfuse-worker migrate
-
-# Build the docker image
-docker/build: deps
-	export DOCKER_BUILDKIT=1; \
-	$(DOCKER_COMMAND) build
-
-# Run the docker container
-docker/run: deps
-	export DOCKER_BUILDKIT=1; \
-	$(DOCKER_COMMAND) up
-
-# Stop the docker container
-docker/stop: deps
-	$(DOCKER_COMMAND) down
-
-# Run database migrations
-migrate: activate ## Run alembic database migrations
+migrate: activate ## Run Alembic database migrations
 	$(PYTHON) -m alembic upgrade head
 
-lint: check/lint format/check
+# --- Docker ---
+docker/deps: ## Start docker dependencies (Postgres, Redis, etc.)
+	$(DOCKER_COMMAND) up -d postgres redis langfuse-web langfuse-worker migrate
 
-check/lint: activate ## Check code style with ruff
+docker/build: ## Build the docker image
+	$(SET_ENV) DOCKER_BUILDKIT=1 && $(DOCKER_COMMAND) build
+
+docker/run: docker/deps ## Run the full application in Docker
+	$(SET_ENV) DOCKER_BUILDKIT=1 && $(DOCKER_COMMAND) up
+
+docker/stop: ## Stop the docker containers
+	$(DOCKER_COMMAND) down
+
+# --- Linting and Formatting ---
+lint: check/lint format/check ## Run all linting and formatting checks
+
+check/lint: activate ## Check code style with Ruff
 	$(PYTHON) -m ruff check minds tests
 
-format/check: activate ## Format code with ruff
+format/check: activate ## Check code formatting with Ruff
 	$(PYTHON) -m ruff format minds tests --check
 
-format: activate ## Format code with ruff
+format: activate ## Format code with Ruff
 	$(PYTHON) -m ruff format minds tests
 
 check/fix: activate ## Format code with ruff
@@ -116,7 +125,7 @@ check/fix: activate ## Format code with ruff
 prefect/secrets: ## Deploy Prefect secrets from local settings
 	$(PYTHON) -c "from minds.jobs.settings import create_prefect_settings; create_prefect_settings(); print('✓ Prefect secrets deployed successfully')"
 
-prefect/deploy: ## Deploy all flows to Prefect (requires secrets to be deployed first)
+prefect/deploy: ## Deploy all flows to Prefect
 	@echo "Deploying all flows..."
 	@echo "Auto-rejecting all deployment prompts..."
 	@if command -v $(VENV)/bin/prefect >/dev/null 2>&1; then \

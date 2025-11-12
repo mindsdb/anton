@@ -20,9 +20,9 @@ jobs:
     # Runs linter
     uses: ./.github/workflows/linter.yml
 
-  tests:
-    # Runs tests
-    uses: ./.github/workflows/tests.yml
+  run-unit-tests:
+    # Runs unit tests
+    uses: ./.github/workflows/tests-unit.yml
 
   # Looks for labels like "deploy-to-<env>" attached to a PR, so we can deploy to those envs
   get-deploy-labels:
@@ -40,7 +40,7 @@ jobs:
 
   build:
     runs-on: mdb-dev
-    needs: [get-deploy-labels, tests]
+    needs: [run-unit-tests, get-deploy-labels]
     if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
     env:
       AWS_REGION: us-east-1
@@ -163,9 +163,19 @@ jobs:
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
           update-message-id: ${{ steps.slack.outputs.ts }}
 
+  integration-tests:
+    needs: [ get-deploy-labels, deploy ]
+    strategy:
+      matrix:
+        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+    uses: ./.github/workflows/tests-integration.yml
+    with:
+      deploy-env: ${{ matrix.deploy-env }}
+    secrets: inherit
+
   run-evals:
     runs-on: mdb-dev
-    needs: [ get-deploy-labels, deploy ]
+    needs: [ get-deploy-labels, deploy, integration-tests ]
     strategy:
       matrix:
         deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
