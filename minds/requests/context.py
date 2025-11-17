@@ -4,8 +4,8 @@ from uuid import UUID
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
-from minds.common.vars import DISABLE_AUTH
 from minds.common.logger import setup_logging
+from minds.common.vars import DISABLE_AUTH
 
 # Set up logging
 logger = setup_logging()
