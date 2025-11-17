@@ -53,7 +53,7 @@ def _create_test_user_api_key():
     if response.status_code != 200:
         pytest.fail(f"Failed to create test user: {response.text}")
     
-    print(f"Created test user \"{response.json()["email"]}\" for MindsDB API access")
+    print(f"Created test user \"{response.json()['email']}\" for MindsDB API access")
     return response.json()["api_key"]
 
 @pytest.fixture(scope="session")
