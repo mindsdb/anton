@@ -38,6 +38,7 @@ PYTHON ?= $(VENV)/$(VENV_DIR)/$(PYTHON_EXE)
 PIP ?= $(VENV)/$(VENV_DIR)/$(PIP_EXE)
 DOCKER_COMMAND := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 MINDS_CONTAINER = minds
+PREFECT_CONFIG ?= prefect.yaml
 
 # --- Core Targets ---
 help: ## Display this help message
@@ -125,30 +126,16 @@ check/fix: activate ## Format code with ruff
 prefect/secrets: ## Deploy Prefect secrets from local settings
 	$(PYTHON) -c "from minds.jobs.settings import create_prefect_settings; create_prefect_settings(); print('✓ Prefect secrets deployed successfully')"
 
-prefect/deploy: ## Deploy all flows to Prefect
-	@echo "Deploying all flows..."
+prefect/deploy: ## Deploy all flows to Prefect (uses PREFECT_CONFIG, default: prefect.yaml)
+	@echo "Deploying all flows using $(PREFECT_CONFIG)..."
 	@echo "Auto-rejecting all deployment prompts..."
 	@if command -v $(VENV)/bin/prefect >/dev/null 2>&1; then \
-		yes n | $(VENV)/bin/prefect deploy --all; \
+		yes n | $(VENV)/bin/prefect deploy --all --prefect-file $(PREFECT_CONFIG); \
 	else \
 		echo "Error: Prefect not found. Please ensure it's installed in your virtual environment."; \
 		echo "Try running: $(PIP) install prefect"; \
 		exit 1; \
 	fi
-
-# Set image name
-prefect/set-image-name: ## Set the image name dynamically (usage: make prefect/set-image-name IMAGE_NAME=168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds or set IMAGE_NAME env var)
-	@# Set IMAGE_NAME from environment variable if not provided as make variable
-	$(eval IMAGE_NAME ?= $(shell echo $$IMAGE_NAME))
-	@# Check if IMAGE_NAME is still empty after trying environment variable
-	@if [ -z "$(IMAGE_NAME)" ]; then \
-		echo "Error: IMAGE_NAME is required. Set it as environment variable or pass as make variable: make prefect/set-image-name IMAGE_NAME=168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds"; \
-		exit 1; \
-	fi
-	@echo "Setting image tag to: $(IMAGE_NAME)"
-	sed -i.bak 's|IMAGE_NAME_PLACEHOLDER|$(IMAGE_NAME)|g' prefect.yaml
-	@echo "✓ Image tag updated in prefect.yaml"
-
 
 # Set dynamic image for CI/CD deployments
 prefect/set-image-tag: ## Set the image tag dynamically (usage: make prefect/set-image-tag IMAGE_TAG=development-abc123 or set IMAGE_TAG env var)
@@ -159,9 +146,9 @@ prefect/set-image-tag: ## Set the image tag dynamically (usage: make prefect/set
 		echo "Error: IMAGE_TAG is required. Set it as environment variable or pass as make variable: make prefect/set-image IMAGE_TAG=development-abc123"; \
 		exit 1; \
 	fi
-	@echo "Setting image tag to: $(IMAGE_TAG)"
-	sed -i.bak 's|IMAGE_TAG_PLACEHOLDER|$(IMAGE_TAG)|g' prefect.yaml
-	@echo "✓ Image tag updated in prefect.yaml"
+	@echo "Setting image tag to: $(IMAGE_TAG) in $(PREFECT_CONFIG)"
+	sed -i.bak 's|IMAGE_TAG_PLACEHOLDER|$(IMAGE_TAG)|g' $(PREFECT_CONFIG)
+	@echo "✓ Image tag updated in $(PREFECT_CONFIG)"
 
 # Set dynamic environment name for deployment names
 prefect/set-env: ## Set the environment name for deployment names (usage: make prefect/set-env ENV=dev or set ENV env var)
@@ -172,33 +159,33 @@ prefect/set-env: ## Set the environment name for deployment names (usage: make p
 		echo "Error: ENV is required. Set it as environment variable or pass as make variable: make prefect/set-env ENV=dev"; \
 		exit 1; \
 	fi
-	@echo "Setting environment name to: $(ENV)"
-	sed -i.bak 's|ENV_PLACEHOLDER|$(ENV)|g' prefect.yaml
-	@echo "✓ Environment name updated in prefect.yaml"
+	@echo "Setting environment name to: $(ENV) in $(PREFECT_CONFIG)"
+	sed -i.bak 's|ENV_PLACEHOLDER|$(ENV)|g' $(PREFECT_CONFIG)
+	@echo "✓ Environment name updated in $(PREFECT_CONFIG)"
 
-prefect/set-prefect-api-url: ## Set the Prefect API URL (usage: make prefect/set-prefect-api-url PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api)
-	@# Set PREFECT_API_URL from environment variable if not provided as make variable
-	$(eval PREFECT_API_URL ?= $(shell echo $$PREFECT_API_URL))
-	@# Check if PREFECT_API_URL is still empty after trying environment variable
-	@if [ -z "$(PREFECT_API_URL)" ]; then \
-		echo "Error: PREFECT_API_URL is required. Set it as environment variable or pass as make variable: make prefect/set-prefect-api-url PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api"; \
-		exit 1; \
-	fi
-	@echo "Setting Prefect API URL to: $(PREFECT_API_URL)"
-	sed -i.bak 's|PREFECT_API_URL_PLACEHOLDER|$(PREFECT_API_URL)|g' prefect.yaml
-	@echo "✓ Prefect API URL updated in prefect.yaml"
 
-prefect/set-config: ## Set image, environment, and API URL if provided (usage: make prefect/set-config IMAGE_TAG=dev-123 ENV=dev PREFECT_API_URL=http://prefect-server.dev.svc.cluster.local:4200/api)
-	@# Set image name if IMAGE_NAME is provided
-	$(MAKE) prefect/set-image-name;
-	
+prefect/set-config: ## Set image, environment if provided (usage: make prefect/set-config IMAGE_TAG=dev-123 ENV=dev)
 	@# Set image tag if IMAGE_TAG is provided
 	$(MAKE) prefect/set-image-tag;
 
 	@# Set environment name if ENV is provided
 	$(MAKE) prefect/set-env;
 
-	@# Set Prefect API URL if PREFECT_API_URL is provided
-	$(MAKE) prefect/set-prefect-api-url;
-
 prefect/deploy/full: activate prefect/secrets prefect/set-config prefect/deploy ## Set config (image/API URL if provided), and then deploy all flows
+
+# --- Docker-specific Prefect Commands ---
+prefect/docker/deploy: ## Deploy all flows using prefect.docker.yaml
+	$(MAKE) prefect/deploy PREFECT_CONFIG=prefect.docker.yaml
+
+prefect/docker/set-image-tag: ## Set image tag in prefect.docker.yaml (usage: make prefect/docker/set-image-tag IMAGE_TAG=dev-123)
+	$(MAKE) prefect/set-image-tag PREFECT_CONFIG=prefect.docker.yaml
+
+prefect/docker/set-env: ## Set environment name in prefect.docker.yaml (usage: make prefect/docker/set-env ENV=dev)
+	$(MAKE) prefect/set-env PREFECT_CONFIG=prefect.docker.yaml
+
+prefect/docker/set-config: ## Set image and environment in prefect.docker.yaml (usage: make prefect/docker/set-config IMAGE_TAG=dev-123 ENV=dev)
+	$(MAKE) prefect/set-config PREFECT_CONFIG=prefect.docker.yaml
+
+prefect/docker/deploy/full: activate prefect/secrets ## Set config and deploy all flows using prefect.docker.yaml
+	$(MAKE) prefect/set-config PREFECT_CONFIG=prefect.docker.yaml
+	$(MAKE) prefect/deploy PREFECT_CONFIG=prefect.docker.yaml
