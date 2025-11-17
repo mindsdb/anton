@@ -24,7 +24,7 @@ definitions:
         image: *default_image
         namespace: infrastructure
         env:
-          PREFECT_API_URL: "http://prefect-server.dev.svc.cluster.local:4200/api"
+          PREFECT_API_URL: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
           ENV: "ENV_PLACEHOLDER"
           
 # the deployments section allows you to provide configuration for deploying flows
