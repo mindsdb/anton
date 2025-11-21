@@ -149,8 +149,8 @@ jobs:
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
 
-          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=5m "job/minds-flows"
-          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=5m pod -l app=minds
+          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=10m "job/minds-flows"
+          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=10m pod -l app=minds
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()

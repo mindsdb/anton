@@ -6,7 +6,7 @@ globalEnvsAlias: &globalEnvsYamlAlias
     # ====================================
 
     - name: LOG_LEVEL
-      value: "INFO"    
+      value: "INFO"
       
     - name: IMAGE_TAG
       value: "latest"

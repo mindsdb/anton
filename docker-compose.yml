@@ -315,9 +315,11 @@ services:
         condition: service_started
       prefect-services:
         condition: service_started
+    volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
-    command: prefect worker start --pool local-pool
+    command: prefect worker start --pool standard-worker-pool --type docker --install-policy always
 
 
   mindsdb:
@@ -353,6 +355,56 @@ services:
     environment:
       DATABASE_URI: postgresql://minds:minds@postgres/minds
     restart: "no"
+
+  minds-flows:
+    build:
+      context: .
+    image: minds-flows:latest
+    <<: *autoRestartOnFailure
+    platform: linux/amd64
+    command: ["make", "prefect/docker/deploy/full"]
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      prefect-server:
+        condition: service_started
+      prefect-services:
+        condition: service_started
+      prefect-worker:
+        condition: service_started
+    volumes:
+      - .:/minds
+    environment:
+      ENV: local
+      LOG_LEVEL: DEBUG
+
+      IMAGE_NAME: minds-flows
+      IMAGE_TAG: latest
+
+      DATABASE_URI: postgresql://minds:minds@postgres/minds
+
+      # MindsDB configuration
+      MINDSDB_URL: "http://mindsdb:47334"
+
+      OPENAI_API_URL: "${OPENAI_API_URL}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+
+      LANGFUSE_PUBLIC_KEY: "redacted"
+      LANGFUSE_SECRET_KEY: "redacted"
+      LANGFUSE_HOST: "http://langfuse:3000"
+      LANGFUSE_ENABLED: "${LANGFUSE_ENABLED}"
+
+      # Auth
+      DISABLE_AUTH: "true" # Disable auth for local development
+
+      # Data Catalog
+      DATA_CATALOG_EXECUTION_MODE: asynchronous
+
+      # Prefect
+      PREFECT_API_URL: http://host.docker.internal:4200/api
+    env_file:
+      - .env
 
   minds:
     build:
@@ -408,7 +460,7 @@ services:
       DISABLE_AUTH: "true" # Disable auth for local development
 
       # Data Catalog
-      DATA_CATALOG_EXECUTION_MODE: synchronous
+      DATA_CATALOG_EXECUTION_MODE: asynchronous
 
       # Prefect
       PREFECT_API_URL: http://prefect-server:4200/api

@@ -4,7 +4,11 @@ from uuid import UUID
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
+from minds.common.logger import setup_logging
 from minds.common.vars import DISABLE_AUTH
+
+# Set up logging
+logger = setup_logging()
 
 
 class Context(BaseModel):
@@ -23,6 +27,7 @@ def extract_context_from_request(request: Request) -> Context:
     # TODO: Temporary solution while lucas.koontz finishes working on Auth API
 
     if DISABLE_AUTH:
+        logger.debug(f"Extracting context from request with DISABLE_AUTH: {DISABLE_AUTH}")
         return Context(
             user_id=UUID("00000000-0000-0000-0000-000000000000"),
             tenant_id=UUID("00000000-0000-0000-0000-000000000000"),

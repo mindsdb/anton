@@ -16,15 +16,15 @@ definitions:
     - "minds"
     - "ENV_PLACEHOLDER"
     - "IMAGE_TAG_PLACEHOLDER"
-  image: &default_image "168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds:IMAGE_TAG_PLACEHOLDER"
+  image: &default_image "minds-flows:IMAGE_TAG_PLACEHOLDER"
   work_pools:
     default: &default_work_pool
       name: standard-worker-pool
       job_variables:
         image: *default_image
-        namespace: infrastructure
+        image_pull_policy: "Never"
         env:
-          PREFECT_API_URL: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
+          PREFECT_API_URL: "http://host.docker.internal:4200/api"
           ENV: "ENV_PLACEHOLDER"
           
 # the deployments section allows you to provide configuration for deploying flows
