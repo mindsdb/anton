@@ -161,7 +161,7 @@ async def check_mind_exists(
         logger.error(
             f"Service error checking mind for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error checking mind {mind_name} "
