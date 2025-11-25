@@ -28,9 +28,7 @@ class PrefectClient:
         """
         logger.debug(f"Getting task states for flow run {flow_run_id}")
         async with get_client() as client:
-            tasks = await client.read_task_runs(
-                flow_run_filter=FlowRunFilter(id=FlowRunFilterId(any_=[flow_run_id]))
-            )
+            tasks = await client.read_task_runs(flow_run_filter=FlowRunFilter(id=FlowRunFilterId(any_=[flow_run_id])))
             task_states = {task.name: task.state for task in tasks}
         return task_states
 
