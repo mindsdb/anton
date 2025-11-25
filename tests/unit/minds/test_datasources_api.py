@@ -332,9 +332,7 @@ class TestDatasourcesAPI:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await check_datasource_exists(
-                datasource_name="test_postgres", datasources_service=mock_datasources_service
-            )
+            await check_datasource_exists(datasource_name="test_postgres", datasources_service=mock_datasources_service)
 
         assert exc_info.value.status_code == 404
         assert "Datasource 'test_postgres' not found" in str(exc_info.value.detail)
@@ -349,9 +347,7 @@ class TestDatasourcesAPI:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await check_datasource_exists(
-                datasource_name="test_postgres", datasources_service=mock_datasources_service
-            )
+            await check_datasource_exists(datasource_name="test_postgres", datasources_service=mock_datasources_service)
 
         assert exc_info.value.status_code == 400
         assert "Failed to check datasource existence" in str(exc_info.value.detail)
@@ -364,9 +360,7 @@ class TestDatasourcesAPI:
         mock_datasources_service.check_datasource_exists = AsyncMock(side_effect=Exception("Unexpected error"))
 
         with pytest.raises(HTTPException) as exc_info:
-            await check_datasource_exists(
-                datasource_name="test_postgres", datasources_service=mock_datasources_service
-            )
+            await check_datasource_exists(datasource_name="test_postgres", datasources_service=mock_datasources_service)
 
         assert exc_info.value.status_code == 500
         assert "Internal server error" in str(exc_info.value.detail)

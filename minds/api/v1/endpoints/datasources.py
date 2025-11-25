@@ -146,7 +146,7 @@ async def get_datasource(
             f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
-    
+
 
 @router.head("/{datasource_name}", status_code=200)
 async def check_datasource_exists(

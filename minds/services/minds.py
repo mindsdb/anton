@@ -400,7 +400,7 @@ class MindsService:
                 f"Error deleting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to delete mind: {str(e)}") from None
-        
+
     async def check_mind_exists(self, mind_name: str) -> None:
         """
         Check if a mind exists by name.
@@ -410,7 +410,7 @@ class MindsService:
 
         Raises:
             MindNotFoundError: If the mind doesn't exist
-            
+
         Returns:
             None
         """

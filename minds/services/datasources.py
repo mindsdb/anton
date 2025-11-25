@@ -493,8 +493,7 @@ class DatasourcesService:
         """
         datasource_name = datasource_name.lower()
         logger.debug(
-            f"Checking existence of datasource {datasource_name} "
-            f"for user {self.user_id} in tenant {self.tenant_id}"
+            f"Checking existence of datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}"
         )
 
         try:
@@ -507,9 +506,7 @@ class DatasourcesService:
             raise DatasourceServiceError(f"Failed to check datasource existence: {str(e)}") from None
 
         if datasource:
-            logger.debug(
-                f"Datasource {datasource_name} exists for user {self.user_id} in tenant {self.tenant_id}"
-            )
+            logger.debug(f"Datasource {datasource_name} exists for user {self.user_id} in tenant {self.tenant_id}")
             return
         else:
             logger.debug(

@@ -131,8 +131,8 @@ async def get_mind(
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
-    
-    
+
+
 @router.head("/{mind_name}", status_code=200)
 async def check_mind_exists(
     mind_name: str,
