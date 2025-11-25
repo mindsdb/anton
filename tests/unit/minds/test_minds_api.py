@@ -14,6 +14,7 @@ import pytest
 from fastapi import HTTPException
 
 from minds.api.v1.endpoints.minds import (
+    check_mind_exists,
     create_mind,
     delete_mind,
     get_mind,
@@ -179,6 +180,49 @@ class TestMindsAPI:
 
         assert exc_info.value.status_code == 404
         assert "Mind not found" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_success(self, mock_minds_service):
+        """Test successful mind existence check."""
+        mock_minds_service.check_mind_exists = AsyncMock(return_value=None)
+
+        result = await check_mind_exists(mind_name="test-mind", minds_service=mock_minds_service)
+
+        assert result is None
+        mock_minds_service.check_mind_exists.assert_called_once_with(mind_name="test-mind")
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_not_found(self, mock_minds_service):
+        """Test mind existence check when mind doesn't exist."""
+        mock_minds_service.check_mind_exists = AsyncMock(side_effect=MindNotFoundError("Mind not found"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_mind_exists(mind_name="nonexistent", minds_service=mock_minds_service)
+
+        assert exc_info.value.status_code == 404
+        assert "Mind not found" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_service_error(self, mock_minds_service):
+        """Test mind existence check with service error."""
+        mock_minds_service.check_mind_exists = AsyncMock(side_effect=MindsServiceError("Database error"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_mind_exists(mind_name="test-mind", minds_service=mock_minds_service)
+
+        assert exc_info.value.status_code == 400
+        assert "Database error" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_unexpected_error(self, mock_minds_service):
+        """Test mind existence check with unexpected error."""
+        mock_minds_service.check_mind_exists = AsyncMock(side_effect=Exception("Unexpected error"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_mind_exists(mind_name="test-mind", minds_service=mock_minds_service)
+
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_create_mind_success(

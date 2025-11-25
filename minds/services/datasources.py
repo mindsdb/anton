@@ -507,10 +507,14 @@ class DatasourcesService:
             raise DatasourceServiceError(f"Failed to check datasource existence: {str(e)}") from None
 
         if datasource:
-            logger.debug(f"Datasource {datasource_name} exists for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(
+                f"Datasource {datasource_name} exists for user {self.user_id} in tenant {self.tenant_id}"
+            )
             return
         else:
-            logger.debug(f"Datasource {datasource_name} does not exist for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(
+                f"Datasource {datasource_name} does not exist for user {self.user_id} in tenant {self.tenant_id}"
+            )
             raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
 
     async def _get_datasource(self, datasource_name: str) -> Datasource:

@@ -421,7 +421,8 @@ class MindsService:
             mind = await self._get_mind(mind_name)
         except Exception as e:
             logger.error(
-                f"Error checking existence of mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"Error checking existence of mind {mind_name} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to check mind existence: {str(e)}") from None
 

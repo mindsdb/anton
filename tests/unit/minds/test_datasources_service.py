@@ -465,3 +465,40 @@ class TestDatasourcesService:
 
         with pytest.raises(DatasourceServiceError, match="Failed to get row count"):
             await service.get_datasource_table_row_count("test_postgres", "test_table")
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_success(self, service, sample_datasource):
+        """Test successful datasource existence check."""
+        service._get_datasource = AsyncMock(return_value=sample_datasource)
+
+        result = await service.check_datasource_exists("test_postgres")
+
+        assert result is None
+        service._get_datasource.assert_called_once_with("test_postgres")
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_not_found(self, service):
+        """Test check datasource exists when datasource doesn't exist."""
+        service._get_datasource = AsyncMock(return_value=None)
+
+        with pytest.raises(DatasourceNotFoundError, match="Datasource 'test_postgres' not found"):
+            await service.check_datasource_exists("test_postgres")
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_lowercase(self, service, sample_datasource):
+        """Test that datasource name is converted to lowercase."""
+        service._get_datasource = AsyncMock(return_value=sample_datasource)
+
+        result = await service.check_datasource_exists("TEST_POSTGRES")
+
+        assert result is None
+        # Should be called with lowercase name
+        service._get_datasource.assert_called_once_with("test_postgres")
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_database_error(self, service):
+        """Test check datasource exists with database error."""
+        service._get_datasource = AsyncMock(side_effect=Exception("Database error"))
+
+        with pytest.raises(DatasourceServiceError, match="Failed to check datasource existence"):
+            await service.check_datasource_exists("test_postgres")

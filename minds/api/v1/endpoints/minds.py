@@ -148,7 +148,8 @@ async def check_mind_exists(
         None: 200 OK if mind exists, 404 Not Found if it does not
     """
     logger.debug(
-        f"Check mind existence requested: {mind_name} (v1) for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+        f"Check mind existence requested: {mind_name} (v1) for "
+        f"user {minds_service.user_id} in tenant {minds_service.tenant_id}"
     )
 
     try:

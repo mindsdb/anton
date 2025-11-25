@@ -327,3 +327,40 @@ class TestMindsService:
         assert result.model_name == "gpt-4o"
         assert result.parameters == {"temperature": 0.7}
         assert result.datasources == []
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_success(self, minds_service, sample_mind):
+        """Test successful mind existence check."""
+        minds_service._get_mind = AsyncMock(return_value=sample_mind)
+
+        result = await minds_service.check_mind_exists("test-mind")
+
+        assert result is None
+        minds_service._get_mind.assert_called_once_with("test-mind")
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_not_found(self, minds_service):
+        """Test check mind exists when mind doesn't exist."""
+        minds_service._get_mind = AsyncMock(return_value=None)
+
+        with pytest.raises(MindNotFoundError, match="Mind 'test-mind' not found"):
+            await minds_service.check_mind_exists("test-mind")
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_lowercase(self, minds_service, sample_mind):
+        """Test that mind name is converted to lowercase."""
+        minds_service._get_mind = AsyncMock(return_value=sample_mind)
+
+        result = await minds_service.check_mind_exists("TEST-MIND")
+
+        assert result is None
+        # Should be called with lowercase name
+        minds_service._get_mind.assert_called_once_with("test-mind")
+
+    @pytest.mark.asyncio
+    async def test_check_mind_exists_database_error(self, minds_service):
+        """Test check mind exists with database error."""
+        minds_service._get_mind = AsyncMock(side_effect=Exception("Database error"))
+
+        with pytest.raises(MindsServiceError, match="Failed to check mind existence"):
+            await minds_service.check_mind_exists("test-mind")

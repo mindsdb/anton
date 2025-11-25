@@ -8,6 +8,7 @@ import pytest
 
 from minds.api.v1.endpoints.datasources import (
     check_datasource_connection,
+    check_datasource_exists,
     create_datasource,
     delete_datasource,
     get_datasource,
@@ -308,6 +309,67 @@ class TestDatasourcesAPI:
 
         assert result.success is False
         assert "Connection failed" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_success(self, mock_datasources_service):
+        """Test successful datasource existence check."""
+        mock_datasources_service.check_datasource_exists = AsyncMock(return_value=None)
+
+        result = await check_datasource_exists(
+            datasource_name="test_postgres", datasources_service=mock_datasources_service
+        )
+
+        assert result is None
+        mock_datasources_service.check_datasource_exists.assert_called_once_with(datasource_name="test_postgres")
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_not_found(self, mock_datasources_service):
+        """Test check datasource exists when not found."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.check_datasource_exists = AsyncMock(
+            side_effect=DatasourceNotFoundError("Datasource 'test_postgres' not found")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_datasource_exists(
+                datasource_name="test_postgres", datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 404
+        assert "Datasource 'test_postgres' not found" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_service_error(self, mock_datasources_service):
+        """Test check datasource exists with service error."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.check_datasource_exists = AsyncMock(
+            side_effect=DatasourceServiceError("Failed to check datasource existence")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_datasource_exists(
+                datasource_name="test_postgres", datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "Failed to check datasource existence" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_check_datasource_exists_unexpected_error(self, mock_datasources_service):
+        """Test check datasource exists with unexpected error."""
+        from fastapi import HTTPException
+
+        mock_datasources_service.check_datasource_exists = AsyncMock(side_effect=Exception("Unexpected error"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_datasource_exists(
+                datasource_name="test_postgres", datasources_service=mock_datasources_service
+            )
+
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in str(exc_info.value.detail)
 
     @pytest.fixture
     def sample_table_sample_response(self):
