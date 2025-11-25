@@ -210,7 +210,7 @@ class TestMindsAPI:
         with pytest.raises(HTTPException) as exc_info:
             await check_mind_exists(mind_name="test-mind", minds_service=mock_minds_service)
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Database error" in exc_info.value.detail
 
     @pytest.mark.asyncio

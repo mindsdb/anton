@@ -349,7 +349,7 @@ class TestDatasourcesAPI:
         with pytest.raises(HTTPException) as exc_info:
             await check_datasource_exists(datasource_name="test_postgres", datasources_service=mock_datasources_service)
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Failed to check datasource existence" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
