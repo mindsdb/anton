@@ -181,7 +181,7 @@ async def check_datasource_exists(
             f"Service error in check_datasource_exists "
             f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in check_datasource_exists "
