@@ -478,6 +478,42 @@ class DatasourcesService:
             )
             raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
 
+    async def check_datasource_exists(self, datasource_name: str) -> None:
+        """
+        Check if a datasource exists by name.
+
+        Args:
+            datasource_name: Name of the datasource to check.
+
+        Raises:
+            DatasourceNotFoundError: If the datasource does not exist.
+
+        Returns:
+            None
+        """
+        datasource_name = datasource_name.lower()
+        logger.debug(
+            f"Checking existence of datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}"
+        )
+
+        try:
+            datasource = await self._get_datasource(datasource_name)
+        except Exception as e:
+            logger.error(
+                f"Error checking existence of datasource {datasource_name} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
+            raise DatasourceServiceError(f"Failed to check datasource existence: {str(e)}") from None
+
+        if datasource:
+            logger.debug(f"Datasource {datasource_name} exists for user {self.user_id} in tenant {self.tenant_id}")
+            return
+        else:
+            logger.debug(
+                f"Datasource {datasource_name} does not exist for user {self.user_id} in tenant {self.tenant_id}"
+            )
+            raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
     async def _get_datasource(self, datasource_name: str) -> Datasource:
         """
         Utility function to get a specific datasource by name.

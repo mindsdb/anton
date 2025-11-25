@@ -133,6 +133,44 @@ async def get_mind(
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
+@router.head("/{mind_name}", status_code=200)
+async def check_mind_exists(
+    mind_name: str,
+    minds_service: MindsService = Depends(get_minds_service),
+) -> None:
+    """
+    Check if a specific mind exists by name for the authenticated user.
+
+    Args:
+        mind_name (str): Name of the mind to check
+
+    Returns:
+        None: 200 OK if mind exists, 404 Not Found if it does not
+    """
+    logger.debug(
+        f"Check mind existence requested: {mind_name} (v1) for "
+        f"user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+    )
+
+    try:
+        await minds_service.check_mind_exists(mind_name=mind_name)
+    except MindNotFoundError as e:
+        logger.warning(f"Mind not found for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MindsServiceError as e:
+        logger.error(
+            f"Service error checking mind for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e)) from None
+    except Exception as e:
+        logger.error(
+            f"Unexpected error checking mind {mind_name} "
+            f"for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
 @router.post("/", status_code=201)
 async def create_mind(
     mind_data: MindCreateRequest,

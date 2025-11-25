@@ -148,6 +148,48 @@ async def get_datasource(
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
+@router.head("/{datasource_name}", status_code=200)
+async def check_datasource_exists(
+    datasource_name: str,
+    datasources_service: DatasourcesService = Depends(get_datasources_service),
+):
+    """
+    Check if a datasource exists by name.
+
+    Args:
+        datasource_name: Name of the datasource to check
+
+    Returns:
+        200 OK if exists, 404 Not Found if it does not exist
+    """
+    try:
+        logger.debug(
+            f"Check datasource exists requested: {datasource_name} (v1) "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+        )
+
+        await datasources_service.check_datasource_exists(datasource_name=datasource_name)
+
+    except DatasourceNotFoundError as e:
+        logger.error(
+            f"Datasource not found "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except DatasourceServiceError as e:
+        logger.error(
+            f"Service error in check_datasource_exists "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
+        raise HTTPException(status_code=500, detail=str(e)) from None
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in check_datasource_exists "
+            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}: {str(e)}"
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
 @router.post("/", status_code=201)
 async def create_datasource(
     datasource_data: DatasourceCreateRequest, datasources_service: DatasourcesService = Depends(get_datasources_service)

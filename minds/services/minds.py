@@ -401,6 +401,38 @@ class MindsService:
             )
             raise MindsServiceError(f"Failed to delete mind: {str(e)}") from None
 
+    async def check_mind_exists(self, mind_name: str) -> None:
+        """
+        Check if a mind exists by name.
+
+        Args:
+            mind_name (str): Name of the mind to check
+
+        Raises:
+            MindNotFoundError: If the mind doesn't exist
+
+        Returns:
+            None
+        """
+        mind_name = mind_name.lower()
+        logger.debug(f"Checking existence of mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+
+        try:
+            mind = await self._get_mind(mind_name)
+        except Exception as e:
+            logger.error(
+                f"Error checking existence of mind {mind_name} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
+            raise MindsServiceError(f"Failed to check mind existence: {str(e)}") from None
+
+        if mind:
+            logger.info(f"Mind {mind_name} exists for user {self.user_id} in tenant {self.tenant_id}")
+            return
+        else:
+            logger.info(f"Mind {mind_name} does not exist for user {self.user_id} in tenant {self.tenant_id}")
+            raise MindNotFoundError(f"Mind '{mind_name}' not found")
+
     async def _get_mind(self, mind_name: str) -> Mind:
         """Utility function to get a specific mind by name."""
         statement = select(Mind).where(
