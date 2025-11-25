@@ -11,7 +11,7 @@ Tests the Pydantic models used for minds API including:
 import pytest
 from pydantic import ValidationError
 
-from minds.model.mind_datasource import DataCatalogStatus
+from minds.model.mind_datasource import DataCatalogStatus, DetailedDataCatalogStatus
 from minds.schemas.minds import (
     DatasourceConfig,
     DetailedDatasourceConfig,
@@ -279,7 +279,7 @@ class TestMindResponse:
         detailed_datasource = DetailedDatasourceConfig(
             name="detailed-datasource",
             tables=["users", "orders"],
-            status=DataCatalogStatus.COMPLETED,
+            status=DetailedDataCatalogStatus(tasks=[], progress=1.0, overall_status=DataCatalogStatus.COMPLETED),
             engine="postgres",
             description="Production database",
             connection_data={"host": "prod.db.com", "port": 5432},
@@ -310,7 +310,7 @@ class TestMindResponse:
         detailed_datasource = DetailedDatasourceConfig(
             name="serializable-detailed",
             tables=["table1"],
-            status=DataCatalogStatus.LOADING,
+            status=DetailedDataCatalogStatus(tasks=[], progress=0.5, overall_status=DataCatalogStatus.LOADING),
             engine="postgres",
             description="Test datasource",
             connection_data={"host": "localhost", "port": 5432},
@@ -337,12 +337,17 @@ class TestMindResponse:
         assert ds_serialized["engine"] == "postgres"
         assert ds_serialized["description"] == "Test datasource"
         assert ds_serialized["connection_data"] == {"host": "localhost", "port": 5432}
-        assert ds_serialized["status"] == "LOADING"
+        assert ds_serialized["status"]["overall_status"] == "LOADING"
+        assert ds_serialized["status"]["progress"] == 0.5
+        assert ds_serialized["status"]["tasks"] == []
 
     def test_mind_response_status_computation(self):
         """Test status computation based on datasource statuses."""
         # Test with all completed datasources
-        completed_datasource = DatasourceConfig(name="completed-ds", status=DataCatalogStatus.COMPLETED)
+        completed_datasource = DatasourceConfig(
+            name="completed-ds",
+            status=DetailedDataCatalogStatus(tasks=[], progress=1.0, overall_status=DataCatalogStatus.COMPLETED),
+        )
         data = {
             "name": "test-mind",
             "model_name": "gpt-4o",
@@ -354,19 +359,28 @@ class TestMindResponse:
         assert response.status == DataCatalogStatus.COMPLETED
 
         # Test with pending datasource
-        pending_datasource = DatasourceConfig(name="pending-ds", status=DataCatalogStatus.PENDING)
+        pending_datasource = DatasourceConfig(
+            name="pending-ds",
+            status=DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.PENDING),
+        )
         data["datasources"] = [completed_datasource, pending_datasource]
         response = MindResponse(**data)
         assert response.status == DataCatalogStatus.PENDING
 
         # Test with loading datasource
-        loading_datasource = DatasourceConfig(name="loading-ds", status=DataCatalogStatus.LOADING)
+        loading_datasource = DatasourceConfig(
+            name="loading-ds",
+            status=DetailedDataCatalogStatus(tasks=[], progress=0.5, overall_status=DataCatalogStatus.LOADING),
+        )
         data["datasources"] = [completed_datasource, loading_datasource]
         response = MindResponse(**data)
         assert response.status == DataCatalogStatus.LOADING
 
         # Test with failed datasource (should take precedence)
-        failed_datasource = DatasourceConfig(name="failed-ds", status=DataCatalogStatus.FAILED)
+        failed_datasource = DatasourceConfig(
+            name="failed-ds",
+            status=DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.FAILED),
+        )
         data["datasources"] = [completed_datasource, failed_datasource]
         response = MindResponse(**data)
         assert response.status == DataCatalogStatus.FAILED
