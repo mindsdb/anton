@@ -31,7 +31,7 @@ class PrefectClient:
         async with get_client() as client:
             tasks = await client.read_task_runs(
                 flow_run_filter=FlowRunFilter(id=FlowRunFilterId(any_=[flow_run_id])),
-                sort=TaskRunSort.EXPECTED_START_TIME_ASC
+                sort=TaskRunSort.EXPECTED_START_TIME_ASC,
             )
             task_states = {task.name: task.state for task in tasks}
         return task_states
