@@ -2,7 +2,7 @@
 Unit tests for datasources API endpoints.
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
 
@@ -104,13 +104,28 @@ class TestDatasourcesAPI:
         mock_datasources_service.list_datasources = AsyncMock(return_value=[sample_datasource_response])
 
         result = await list_datasources(
-            engine=None, limit=100, offset=0, with_detailed_data=False, datasources_service=mock_datasources_service
+            engine=None,
+            limit=100,
+            offset=0,
+            with_detailed_data=False,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
+            datasources_service=mock_datasources_service,
         )
 
         assert len(result) == 1
         assert result[0].name == "test_postgres"
         mock_datasources_service.list_datasources.assert_called_once_with(
-            engine=None, limit=100, offset=0, with_detailed_data=False
+            name=ANY,
+            engine=None,
+            include_deleted=ANY,
+            limit=100,
+            offset=0,
+            with_detailed_data=False,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
         )
 
     @pytest.mark.asyncio
@@ -118,7 +133,12 @@ class TestDatasourcesAPI:
         """Test listing empty datasources."""
         mock_datasources_service.list_datasources = AsyncMock(return_value=[])
 
-        result = await list_datasources(datasources_service=mock_datasources_service)
+        result = await list_datasources(
+            datasources_service=mock_datasources_service,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
+        )
 
         assert result == []
 
@@ -128,12 +148,27 @@ class TestDatasourcesAPI:
         mock_datasources_service.list_datasources = AsyncMock(return_value=[sample_datasource_response])
 
         result = await list_datasources(
-            engine="postgres", limit=10, offset=5, with_detailed_data=True, datasources_service=mock_datasources_service
+            engine="postgres",
+            limit=10,
+            offset=5,
+            with_detailed_data=True,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
+            datasources_service=mock_datasources_service,
         )
 
         assert len(result) == 1
         mock_datasources_service.list_datasources.assert_called_once_with(
-            engine="postgres", limit=10, offset=5, with_detailed_data=True
+            name=ANY,
+            engine="postgres",
+            include_deleted=ANY,
+            limit=10,
+            offset=5,
+            with_detailed_data=True,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
         )
 
     @pytest.mark.asyncio
@@ -144,7 +179,12 @@ class TestDatasourcesAPI:
         mock_datasources_service.list_datasources = AsyncMock(side_effect=DatasourceServiceError("Service error"))
 
         with pytest.raises(HTTPException) as exc_info:
-            await list_datasources(datasources_service=mock_datasources_service)
+            await list_datasources(
+                datasources_service=mock_datasources_service,
+                include_total=False,
+                sort_by=None,
+                sort_order="desc",
+            )
 
         assert exc_info.value.status_code == 400
         assert "Service error" in str(exc_info.value.detail)

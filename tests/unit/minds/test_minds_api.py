@@ -8,7 +8,7 @@ Tests the FastAPI endpoints for minds management including:
 - Input validation
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -120,12 +120,23 @@ class TestMindsAPI:
             limit=10,
             offset=0,
             with_detailed_data=False,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
         )
 
         assert len(result) == 1
         assert result[0].name == "test-mind"
         mock_minds_service.list_minds.assert_called_once_with(
-            provider="openai", include_deleted=False, limit=10, offset=0, with_detailed_data=False
+            name=ANY,
+            provider="openai",
+            include_deleted=False,
+            limit=10,
+            offset=0,
+            with_detailed_data=False,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
         )
 
     @pytest.mark.asyncio
@@ -133,7 +144,12 @@ class TestMindsAPI:
         """Test minds listing with empty result."""
         mock_minds_service.list_minds = AsyncMock(return_value=[])
 
-        result = await list_minds(minds_service=mock_minds_service)
+        result = await list_minds(
+            minds_service=mock_minds_service,
+            include_total=False,
+            sort_by=None,
+            sort_order="desc",
+        )
 
         assert result == []
         mock_minds_service.list_minds.assert_called_once()
@@ -144,7 +160,12 @@ class TestMindsAPI:
         mock_minds_service.list_minds = AsyncMock(side_effect=MindsServiceError("Service error"))
 
         with pytest.raises(HTTPException) as exc_info:
-            await list_minds(minds_service=mock_minds_service)
+            await list_minds(
+                minds_service=mock_minds_service,
+                include_total=False,
+                sort_by=None,
+                sort_order="desc",
+            )
 
         assert exc_info.value.status_code == 400
         assert "Service error" in exc_info.value.detail
@@ -155,7 +176,12 @@ class TestMindsAPI:
         mock_minds_service.list_minds = AsyncMock(side_effect=Exception("Unexpected error"))
 
         with pytest.raises(HTTPException) as exc_info:
-            await list_minds(minds_service=mock_minds_service)
+            await list_minds(
+                minds_service=mock_minds_service,
+                include_total=False,
+                sort_by=None,
+                sort_order="desc",
+            )
 
         assert exc_info.value.status_code == 500
         assert "Internal server error" in exc_info.value.detail
@@ -316,7 +342,12 @@ class TestMindsAPI:
         # Test MindsServiceError -> 400
         mock_minds_service.list_minds = AsyncMock(side_effect=MindsServiceError("Service error"))
         with pytest.raises(HTTPException) as exc_info:
-            await list_minds(minds_service=mock_minds_service)
+            await list_minds(
+                minds_service=mock_minds_service,
+                include_total=False,
+                sort_by=None,
+                sort_order="desc",
+            )
         assert exc_info.value.status_code == 400
 
         # Test MindNotFoundError -> 404
@@ -344,7 +375,12 @@ class TestMindsAPI:
         # Test unexpected Exception -> 500
         mock_minds_service.list_minds = AsyncMock(side_effect=Exception("Unexpected"))
         with pytest.raises(HTTPException) as exc_info:
-            await list_minds(minds_service=mock_minds_service)
+            await list_minds(
+                minds_service=mock_minds_service,
+                include_total=False,
+                sort_by=None,
+                sort_order="desc",
+            )
         assert exc_info.value.status_code == 500
 
 
