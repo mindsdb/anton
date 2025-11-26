@@ -121,7 +121,7 @@ class DatasourcesService:
             # Build query conditions
             conditions = [Datasource.user_id == self.user_id, Datasource.tenant_id == self.tenant_id]
             if name is not None:
-                conditions.append(Datasource.name == name)
+                conditions.append(Datasource.name.ilike(f"%{name}%"))
             if engine is not None:
                 conditions.append(Datasource.engine == engine)
             if not include_deleted:
@@ -130,7 +130,7 @@ class DatasourcesService:
             # Build base query for counting (without joins and options)
             count_conditions = [Datasource.user_id == self.user_id, Datasource.tenant_id == self.tenant_id]
             if name is not None:
-                count_conditions.append(Datasource.name == name)
+                count_conditions.append(Datasource.name.ilike(f"%{name}%"))
             if engine is not None:
                 count_conditions.append(Datasource.engine == engine)
             if not include_deleted:

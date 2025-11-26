@@ -124,7 +124,7 @@ class MindsService:
             # Build query conditions
             conditions = [Mind.user_id == self.user_id, Mind.tenant_id == self.tenant_id]
             if name is not None:
-                conditions.append(Mind.name == name)
+                conditions.append(Mind.name.ilike(f"%{name}%"))
             if provider is not None:
                 conditions.append(Mind.provider == provider)
             # not sure if this is needed initially
@@ -134,7 +134,7 @@ class MindsService:
             # Build base query for counting (without joins and options)
             count_conditions = [Mind.user_id == self.user_id, Mind.tenant_id == self.tenant_id]
             if name is not None:
-                count_conditions.append(Mind.name == name)
+                count_conditions.append(Mind.name.ilike(f"%{name}%"))
             if provider is not None:
                 count_conditions.append(Mind.provider == provider)
             if not include_deleted:
