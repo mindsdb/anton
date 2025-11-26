@@ -65,7 +65,10 @@ async def list_datasources(
         None, description="Field to sort by (name, created_at, updated_at, engine)"
     ),
     sort_order: Literal["asc", "desc"] = Query("desc", description="Sort order (asc or desc)"),
-) -> list[DatasourceResponse | DatasourceDetailedResponse] | dict[str, list[DatasourceResponse | DatasourceDetailedResponse] | int]:
+) -> (
+    list[DatasourceResponse | DatasourceDetailedResponse]
+    | dict[str, list[DatasourceResponse | DatasourceDetailedResponse] | int]
+):
     """
     List all datasources for the authenticated user.
 
@@ -110,7 +113,9 @@ async def list_datasources(
             )
             return {"datasources": datasources, "total": total}
         else:
-            logger.info(f"Listed datasources for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}")
+            logger.info(
+                f"Listed datasources for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+            )
             return datasources
     except DatasourceServiceError as e:
         logger.error(

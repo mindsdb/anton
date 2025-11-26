@@ -71,7 +71,8 @@ async def list_minds(
         - limit: Maximum number of minds to return (1-100, default: 50)
         - offset: Number of minds to skip for pagination (default: 0)
         - include_total: Include total count of minds in response (default: false)
-        - sort_by: Field to sort by (name, created_at, updated_at, provider, model_name). Defaults to created_at if not specified.
+        - sort_by: Field to sort by (name, created_at, updated_at, provider, model_name).
+          Defaults to created_at if not specified.
         - sort_order: Sort order (asc or desc, default: desc)
 
     Returns:
@@ -95,7 +96,8 @@ async def list_minds(
         if include_total:
             minds, total = result
             logger.info(
-                f"Listed {len(minds)} minds (total: {total}) for user {minds_service.user_id} in tenant {minds_service.tenant_id}"
+                f"Listed {len(minds)} minds (total: {total}) "
+                f"for user {minds_service.user_id} in tenant {minds_service.tenant_id} (offset={offset}, limit={limit})"
             )
             return {"minds": minds, "total": total}
         else:

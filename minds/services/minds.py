@@ -6,8 +6,8 @@ related to mind management, including CRUD operations with internal database sto
 MindsDB is only used for datasource validation, not for minds storage.
 """
 
-from typing import Literal
 from datetime import datetime, timezone
+from typing import Literal
 
 from mindsdb_sdk.server import Server
 from prefect.exceptions import PrefectException
@@ -145,9 +145,7 @@ class MindsService:
             if include_total:
                 # For count, we don't need joins or options
                 count_statement = (
-                    select(func.count(func.distinct(Mind.id)))
-                    .select_from(Mind)
-                    .where(and_(*count_conditions))
+                    select(func.count(func.distinct(Mind.id))).select_from(Mind).where(and_(*count_conditions))
                 )
                 total_count = self.session.exec(count_statement).one()
 

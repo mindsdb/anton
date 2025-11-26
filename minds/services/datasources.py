@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from mindsdb_sdk.server import Server
 from sqlalchemy.orm import selectinload, with_loader_criteria
-from sqlmodel import Session, and_, select, func
+from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
 from minds.common.utilities import safe_parse
@@ -90,7 +90,10 @@ class DatasourcesService:
         include_total: bool = False,
         sort_by: Literal["name", "created_at", "updated_at", "engine"] | None = None,
         sort_order: Literal["asc", "desc"] = "desc",
-    ) -> list[DatasourceResponse | DatasourceDetailedResponse] | tuple[list[DatasourceResponse | DatasourceDetailedResponse], int]:
+    ) -> (
+        list[DatasourceResponse | DatasourceDetailedResponse]
+        | tuple[list[DatasourceResponse | DatasourceDetailedResponse], int]
+    ):
         """
         List datasources for the current company.
 
@@ -157,13 +160,7 @@ class DatasourcesService:
 
             order_by = sort_field.desc() if sort_order == "desc" else sort_field.asc()
 
-            statement = (
-                select(Datasource)
-                .where(and_(*conditions))
-                .order_by(order_by)
-                .offset(offset)
-                .limit(limit)
-            )
+            statement = select(Datasource).where(and_(*conditions)).order_by(order_by).offset(offset).limit(limit)
 
             datasources = self.session.exec(statement).all()
 
