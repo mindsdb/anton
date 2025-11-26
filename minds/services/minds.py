@@ -166,25 +166,24 @@ class MindsService:
 
             order_by = sort_field.desc() if sort_order == "desc" else sort_field.asc()
 
-            # Use distinct to avoid duplicates from the join when a mind has multiple datasources
             statement = (
                 select(Mind)
-                .distinct()
-                .join(Mind.mind_datasources)
-                .join(MindDatasource.datasource)
-                .where(MindDatasource.deleted_at.is_(None))
-                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
                 .where(and_(*conditions))
                 .order_by(order_by)
                 .offset(offset)
                 .limit(limit)
+                .options(
+                    selectinload(Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))).selectinload(
+                        MindDatasource.datasource
+                    )
+                )
             )
 
             minds = self.session.exec(statement).all()
 
             minds_list = []
             for mind in minds:
-                mind_response = self._mind_to_response(mind, with_detailed_data)
+                mind_response = await self._mind_to_response(mind, with_detailed_data=with_detailed_data)
                 minds_list.append(mind_response)
 
             logger.info(

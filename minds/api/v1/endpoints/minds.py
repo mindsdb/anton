@@ -55,6 +55,7 @@ async def list_minds(
     include_deleted: bool = Query(False, description="Filter by deleted status"),
     limit: int = Query(50, le=100, ge=1, description="Maximum number of minds to return"),
     offset: int = Query(0, ge=0, description="Number of minds to skip for pagination"),
+    with_detailed_data: bool = Query(False, description="Include detailed datasource information"),
     include_total: bool = Query(False, description="Include total count of minds in response"),
     sort_by: Literal["name", "created_at", "updated_at", "provider", "model_name"] | None = Query(
         None, description="Field to sort by (name, created_at, updated_at, provider, model_name)"
@@ -85,6 +86,7 @@ async def list_minds(
             include_deleted=include_deleted,
             limit=limit,
             offset=offset,
+            with_detailed_data=with_detailed_data,
             include_total=include_total,
             sort_by=sort_by,
             sort_order=sort_order,
