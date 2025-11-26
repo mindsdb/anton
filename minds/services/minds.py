@@ -6,12 +6,13 @@ related to mind management, including CRUD operations with internal database sto
 MindsDB is only used for datasource validation, not for minds storage.
 """
 
+from typing import Literal
 from datetime import datetime, timezone
 
 from mindsdb_sdk.server import Server
 from prefect.exceptions import PrefectException
 from sqlalchemy.orm import selectinload, with_loader_criteria
-from sqlmodel import Session, and_, select
+from sqlmodel import Session, and_, func, select
 
 from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
@@ -87,14 +88,18 @@ class MindsService:
 
     async def list_minds(
         self,
+        name: str | None = None,
         provider: str | None = None,
         include_deleted: bool = False,
         limit: int = 50,
         offset: int = 0,
         with_detailed_data: bool = False,
-    ) -> list[MindResponse]:
+        include_total: bool = False,
+        sort_by: Literal["name", "created_at", "updated_at", "provider", "model_name"] | None = None,
+        sort_order: Literal["asc", "desc"] = "desc",
+    ) -> list[MindResponse] | tuple[list[MindResponse], int]:
         """
-        List minds for the current user/company with optional filtering and pagination.
+        List minds for the current user/company with optional filtering, pagination, sorting, and total count.
 
         Args:
             provider (Optional[str]): Filter by provider (openai, google, etc.)
@@ -102,48 +107,93 @@ class MindsService:
             limit (int): Maximum number of minds to return (default: 50)
             offset (int): Number of minds to skip (default: 0)
             with_detailed_data (bool): Include detailed datasource base data
+            include_total (bool): If True, return tuple of (minds, total_count)
+            sort_by (Optional[str]): Field to sort by (name, created_at, updated_at, provider, model_name)
+            sort_order (str): Sort order (asc or desc, default: desc)
 
         Returns:
-            List[MindResponse]: List of mind objects
+            List[MindResponse] or tuple[list[MindResponse], int]: List of mind objects, optionally with total count
         """
         try:
             logger.debug(
                 f"Listing minds for user {self.user_id} in tenant {self.tenant_id} with filters: "
-                f"provider={provider}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
+                f"provider={provider}, include_deleted={include_deleted}, limit={limit}, offset={offset}, "
+                f"sort_by={sort_by}, sort_order={sort_order}, include_total={include_total}"
             )
 
             # Build query conditions
             conditions = [Mind.user_id == self.user_id, Mind.tenant_id == self.tenant_id]
+            if name is not None:
+                conditions.append(Mind.name == name)
             if provider is not None:
                 conditions.append(Mind.provider == provider)
             # not sure if this is needed initially
             if not include_deleted:
                 conditions.append(Mind.deleted_at.is_(None))
 
+            # Build base query for counting (without joins and options)
+            count_conditions = [Mind.user_id == self.user_id, Mind.tenant_id == self.tenant_id]
+            if name is not None:
+                count_conditions.append(Mind.name == name)
+            if provider is not None:
+                count_conditions.append(Mind.provider == provider)
+            if not include_deleted:
+                count_conditions.append(Mind.deleted_at.is_(None))
+
+            # Calculate total count if requested
+            total_count = None
+            if include_total:
+                # For count, we don't need joins or options
+                count_statement = (
+                    select(func.count(func.distinct(Mind.id)))
+                    .select_from(Mind)
+                    .where(and_(*count_conditions))
+                )
+                total_count = self.session.exec(count_statement).one()
+
+            # Determine sort field and order
+            sort_field = Mind.created_at  # default
+            if sort_by == "name":
+                sort_field = Mind.name
+            elif sort_by == "created_at":
+                sort_field = Mind.created_at
+            elif sort_by == "updated_at":
+                sort_field = Mind.modified_at
+            elif sort_by == "provider":
+                sort_field = Mind.provider
+            elif sort_by == "model_name":
+                sort_field = Mind.model_name
+
+            order_by = sort_field.desc() if sort_order == "desc" else sort_field.asc()
+
+            # Use distinct to avoid duplicates from the join when a mind has multiple datasources
             statement = (
                 select(Mind)
+                .distinct()
+                .join(Mind.mind_datasources)
+                .join(MindDatasource.datasource)
+                .where(MindDatasource.deleted_at.is_(None))
+                .options(selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource))
                 .where(and_(*conditions))
-                .order_by(Mind.created_at.desc())
+                .order_by(order_by)
                 .offset(offset)
                 .limit(limit)
-                .options(
-                    selectinload(Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))).selectinload(
-                        MindDatasource.datasource
-                    )
-                )
             )
 
             minds = self.session.exec(statement).all()
 
             minds_list = []
             for mind in minds:
-                mind_response = await self._mind_to_response(mind, with_detailed_data=with_detailed_data)
+                mind_response = self._mind_to_response(mind, with_detailed_data)
                 minds_list.append(mind_response)
 
             logger.info(
                 f"Retrieved {len(minds_list)} minds "
                 f"for user {self.user_id} in tenant {self.tenant_id} (offset={offset}, limit={limit})"
             )
+
+            if include_total:
+                return minds_list, total_count
             return minds_list
         except Exception as e:
             logger.error(f"Error listing minds for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
