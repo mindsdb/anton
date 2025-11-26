@@ -5,6 +5,8 @@ This module contains endpoints for CRUD operations on datasources,
 providing a clean v1 API interface for datasource management.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlmodel import Session
 
@@ -52,22 +54,33 @@ def get_datasources_service(request: Request, session: Session = Depends(get_ses
 async def list_datasources(
     datasources_service: DatasourcesService = Depends(get_datasources_service),
     # Optional query parameters for filtering and pagination
+    name: str | None = Query(None, description="Filter by datasource name"),
     engine: str | None = Query(None, description="Filter by database engine (postgres, mysql, etc.)"),
+    include_deleted: bool = Query(False, description="Include deleted datasources"),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of results (1-1000)"),
     offset: int = Query(0, ge=0, description="Number of results to skip for pagination"),
     with_detailed_data: bool = Query(False, description="Include connection status and detailed information"),
-) -> list[DatasourceResponse | DatasourceDetailedResponse]:
+    include_total: bool = Query(False, description="Include total count of datasources in response"),
+    sort_by: Literal["name", "created_at", "updated_at", "engine"] | None = Query(
+        None, description="Field to sort by (name, created_at, updated_at, engine)"
+    ),
+    sort_order: Literal["asc", "desc"] = Query("desc", description="Sort order (asc or desc)"),
+) -> list[DatasourceResponse | DatasourceDetailedResponse] | dict[str, list[DatasourceResponse | DatasourceDetailedResponse] | int]:
     """
     List all datasources for the authenticated user.
 
     Provides pagination and filtering capabilities for efficient datasource management.
 
     Args:
+        name: Filter by datasource name
         engine: Filter by database engine type
+        include_deleted: Filter by deleted datasources
         limit: Maximum number of results to return
         offset: Number of results to skip (for pagination)
-        with_detailed_data: Include connection status and additional details
-
+        with_detailed_data: Include connection status and other details
+        include_total: Include total count of datasources in response
+        sort_by: Field to sort by (name, created_at, updated_at, engine)
+        sort_order: Sort order (asc or desc, default: desc)
     Returns:
         List of datasource objects matching the specified criteria
     """
@@ -78,14 +91,27 @@ async def list_datasources(
         )
 
         datasources = await datasources_service.list_datasources(
-            engine=engine, limit=limit, offset=offset, with_detailed_data=with_detailed_data
+            name=name,
+            engine=engine,
+            include_deleted=include_deleted,
+            limit=limit,
+            offset=offset,
+            with_detailed_data=with_detailed_data,
+            include_total=include_total,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
 
-        logger.info(
-            f"Listed {len(datasources)} datasources "
-            f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
-        )
-        return datasources
+        if include_total:
+            datasources, total = datasources
+            logger.info(
+                f"Listed {len(datasources)} datasources (total: {total}) "
+                f"for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}"
+            )
+            return {"datasources": datasources, "total": total}
+        else:
+            logger.info(f"Listed datasources for user {datasources_service.user_id} in tenant {datasources_service.tenant_id}")
+            return datasources
     except DatasourceServiceError as e:
         logger.error(
             f"Service error in list_datasources "

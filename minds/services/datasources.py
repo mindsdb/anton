@@ -6,11 +6,11 @@ for datasource management operations.
 """
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from mindsdb_sdk.server import Server
 from sqlalchemy.orm import selectinload, with_loader_criteria
-from sqlmodel import Session, and_, select
+from sqlmodel import Session, and_, select, func
 
 from minds.common.logger import setup_logging
 from minds.common.utilities import safe_parse
@@ -81,21 +81,29 @@ class DatasourcesService:
 
     async def list_datasources(
         self,
+        name: str | None = None,
         engine: str | None = None,
         include_deleted: bool = False,
         limit: int = 100,
         offset: int = 0,
         with_detailed_data: bool = False,
-    ) -> list[DatasourceResponse | DatasourceDetailedResponse]:
+        include_total: bool = False,
+        sort_by: Literal["name", "created_at", "updated_at", "engine"] | None = None,
+        sort_order: Literal["asc", "desc"] = "desc",
+    ) -> list[DatasourceResponse | DatasourceDetailedResponse] | tuple[list[DatasourceResponse | DatasourceDetailedResponse], int]:
         """
         List datasources for the current company.
 
         Args:
+            name: Filter by datasource name
             engine: Filter by database engine
             include_deleted: Include deleted datasources
             limit: Maximum number of results
             offset: Number of results to skip
             with_detailed_data: Include connection status and other details
+            include_total: Include total count of datasources in response
+            sort_by: Field to sort by (name, created_at, updated_at, engine)
+            sort_order: Sort order (asc or desc, default: desc)
 
         Returns:
             List of datasource response objects
@@ -103,39 +111,75 @@ class DatasourcesService:
         try:
             logger.debug(
                 f"Listing datasources for user {self.user_id} in tenant {self.tenant_id} with filters: "
-                f"engine={engine}, include_deleted={include_deleted}, limit={limit}, offset={offset}"
+                f"name={name}, engine={engine}, include_deleted={include_deleted}, limit={limit}, offset={offset}, "
+                f"sort_by={sort_by}, sort_order={sort_order}, include_total={include_total}"
             )
 
-            # Build query with filters
-            statement = select(Datasource).where(
-                and_(
-                    Datasource.user_id == self.user_id,
-                    Datasource.tenant_id == self.tenant_id,
-                )
-            )
-
+            # Build query conditions
+            conditions = [Datasource.user_id == self.user_id, Datasource.tenant_id == self.tenant_id]
+            if name is not None:
+                conditions.append(Datasource.name == name)
             if engine is not None:
-                statement = statement.where(Datasource.engine == engine)
-
+                conditions.append(Datasource.engine == engine)
             if not include_deleted:
-                statement = statement.where(Datasource.deleted_at.is_(None))
+                conditions.append(Datasource.deleted_at.is_(None))
 
-            statement = statement.offset(offset).limit(limit)
+            # Build base query for counting (without joins and options)
+            count_conditions = [Datasource.user_id == self.user_id, Datasource.tenant_id == self.tenant_id]
+            if name is not None:
+                count_conditions.append(Datasource.name == name)
+            if engine is not None:
+                count_conditions.append(Datasource.engine == engine)
+            if not include_deleted:
+                count_conditions.append(Datasource.deleted_at.is_(None))
 
-            result = self.session.exec(statement)
-            datasources = result.all()
+            # Calculate total count if requested
+            total_count = None
+            if include_total:
+                # For count, we don't need joins or options
+                count_statement = (
+                    select(func.count(func.distinct(Datasource.id)))
+                    .select_from(Datasource)
+                    .where(and_(*count_conditions))
+                )
+                total_count = self.session.exec(count_statement).one()
 
-            # Convert to response objects
-            responses = []
+            # Determine sort field and order
+            sort_field = Datasource.created_at  # default
+            if sort_by == "name":
+                sort_field = Datasource.name
+            elif sort_by == "created_at":
+                sort_field = Datasource.created_at
+            elif sort_by == "updated_at":
+                sort_field = Datasource.modified_at
+            elif sort_by == "engine":
+                sort_field = Datasource.engine
+
+            order_by = sort_field.desc() if sort_order == "desc" else sort_field.asc()
+
+            statement = (
+                select(Datasource)
+                .where(and_(*conditions))
+                .order_by(order_by)
+                .offset(offset)
+                .limit(limit)
+            )
+
+            datasources = self.session.exec(statement).all()
+
+            datasources_list = []
             for datasource in datasources:
                 if with_detailed_data:
-                    response = await self._datasource_to_detailed_response(datasource)
+                    datasource_response = await self._datasource_to_detailed_response(datasource)
                 else:
-                    response = self._datasource_to_response(datasource)
-                responses.append(response)
+                    datasource_response = self._datasource_to_response(datasource)
+                datasources_list.append(datasource_response)
 
-            logger.info(f"Found {len(responses)} datasources for user {self.user_id} and tenant {self.tenant_id}")
-            return responses
+            logger.info(f"Retrieved {len(datasources)} datasources for user {self.user_id} and tenant {self.tenant_id}")
+
+            if include_total:
+                return datasources_list, total_count
+            return datasources_list
         except Exception as e:
             logger.error(f"Error listing datasources for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise DatasourceServiceError(f"Failed to list datasources: {str(e)}") from None
