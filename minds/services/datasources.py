@@ -127,15 +127,6 @@ class DatasourcesService:
             if not include_deleted:
                 conditions.append(Datasource.deleted_at.is_(None))
 
-            # Build base query for counting (without joins and options)
-            count_conditions = [Datasource.user_id == self.user_id, Datasource.tenant_id == self.tenant_id]
-            if name is not None:
-                count_conditions.append(Datasource.name.ilike(f"%{name}%"))
-            if engine is not None:
-                count_conditions.append(Datasource.engine == engine)
-            if not include_deleted:
-                count_conditions.append(Datasource.deleted_at.is_(None))
-
             # Calculate total count if requested
             total_count = None
             if include_total:
@@ -143,7 +134,7 @@ class DatasourcesService:
                 count_statement = (
                     select(func.count(func.distinct(Datasource.id)))
                     .select_from(Datasource)
-                    .where(and_(*count_conditions))
+                    .where(and_(*conditions))
                 )
                 total_count = self.session.exec(count_statement).one()
 

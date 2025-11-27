@@ -127,25 +127,15 @@ class MindsService:
                 conditions.append(Mind.name.ilike(f"%{name}%"))
             if provider is not None:
                 conditions.append(Mind.provider == provider)
-            # not sure if this is needed initially
             if not include_deleted:
                 conditions.append(Mind.deleted_at.is_(None))
-
-            # Build base query for counting (without joins and options)
-            count_conditions = [Mind.user_id == self.user_id, Mind.tenant_id == self.tenant_id]
-            if name is not None:
-                count_conditions.append(Mind.name.ilike(f"%{name}%"))
-            if provider is not None:
-                count_conditions.append(Mind.provider == provider)
-            if not include_deleted:
-                count_conditions.append(Mind.deleted_at.is_(None))
 
             # Calculate total count if requested
             total_count = None
             if include_total:
                 # For count, we don't need joins or options
                 count_statement = (
-                    select(func.count(func.distinct(Mind.id))).select_from(Mind).where(and_(*count_conditions))
+                    select(func.count(func.distinct(Mind.id))).select_from(Mind).where(and_(*conditions))
                 )
                 total_count = self.session.exec(count_statement).one()
 
