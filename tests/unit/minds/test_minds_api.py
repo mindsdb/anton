@@ -130,6 +130,7 @@ class TestMindsAPI:
         mock_minds_service.list_minds.assert_called_once_with(
             name=ANY,
             provider="openai",
+            is_demo=ANY,
             include_deleted=False,
             limit=10,
             offset=0,

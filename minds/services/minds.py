@@ -90,6 +90,7 @@ class MindsService:
         self,
         name: str | None = None,
         provider: str | None = None,
+        is_demo: bool | None = None,
         include_deleted: bool = False,
         limit: int = 50,
         offset: int = 0,
@@ -127,6 +128,8 @@ class MindsService:
                 conditions.append(Mind.name.ilike(f"%{name}%"))
             if provider is not None:
                 conditions.append(Mind.provider == provider)
+            if is_demo is not None:
+                conditions.append(Mind.parameters["is_demo"].as_boolean() == is_demo)
             if not include_deleted:
                 conditions.append(Mind.deleted_at.is_(None))
 
@@ -134,9 +137,7 @@ class MindsService:
             total_count = None
             if include_total:
                 # For count, we don't need joins or options
-                count_statement = (
-                    select(func.count(func.distinct(Mind.id))).select_from(Mind).where(and_(*conditions))
-                )
+                count_statement = select(func.count(func.distinct(Mind.id))).select_from(Mind).where(and_(*conditions))
                 total_count = self.session.exec(count_statement).one()
 
             # Determine sort field and order

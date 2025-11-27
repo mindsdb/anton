@@ -132,9 +132,7 @@ class DatasourcesService:
             if include_total:
                 # For count, we don't need joins or options
                 count_statement = (
-                    select(func.count(func.distinct(Datasource.id)))
-                    .select_from(Datasource)
-                    .where(and_(*conditions))
+                    select(func.count(func.distinct(Datasource.id))).select_from(Datasource).where(and_(*conditions))
                 )
                 total_count = self.session.exec(count_statement).one()
 

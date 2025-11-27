@@ -52,6 +52,7 @@ async def list_minds(
     # Optional query parameters for filtering and pagination
     name: str | None = Query(None, description="Filter by mind name"),
     provider: str | None = Query(None, description="Filter by provider (openai, google, etc.)"),
+    is_demo: bool | None = Query(None, description="Filter by demo status"),
     include_deleted: bool = Query(False, description="Filter by deleted status"),
     limit: int = Query(50, le=100, ge=1, description="Maximum number of minds to return"),
     offset: int = Query(0, ge=0, description="Number of minds to skip for pagination"),
@@ -68,6 +69,7 @@ async def list_minds(
     Query Parameters:
         - provider: Filter by AI provider (openai, google, etc.)
         - include_deleted: Filter by deleted status (true/false)
+        - is_demo: Filter by demo status (true/false)
         - limit: Maximum number of minds to return (1-100, default: 50)
         - offset: Number of minds to skip for pagination (default: 0)
         - include_total: Include total count of minds in response (default: false)
@@ -84,6 +86,7 @@ async def list_minds(
         result = await minds_service.list_minds(
             name=name,
             provider=provider,
+            is_demo=is_demo,
             include_deleted=include_deleted,
             limit=limit,
             offset=offset,
