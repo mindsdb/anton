@@ -43,7 +43,6 @@ class DatasourceResponse(BaseModel):
     engine: str | None = Field(None, description="Database engine")
     created_at: str | None = Field(None, description="Creation timestamp")
     modified_at: str | None = Field(None, description="Last update timestamp")
-    is_demo: bool | None = Field(None, description="Whether this is a demo datasource")
 
 
 class DatasourceConnectionStatus(BaseModel):

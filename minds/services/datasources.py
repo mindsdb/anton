@@ -630,7 +630,6 @@ class DatasourcesService:
             engine=datasource.engine,
             created_at=datasource.created_at.isoformat(),
             modified_at=datasource.modified_at.isoformat(),
-            is_demo=False,
         )
 
     async def _datasource_to_detailed_response(self, datasource: Datasource) -> DatasourceDetailedResponse:

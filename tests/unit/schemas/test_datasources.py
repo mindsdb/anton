@@ -107,7 +107,6 @@ class TestDatasourceResponse:
         assert response.description is None
         assert response.engine is None
         assert response.created_at is None
-        assert response.is_demo is None
 
     def test_response_full(self, test_uuid):
         """Test response with all fields."""
@@ -118,14 +117,12 @@ class TestDatasourceResponse:
             "engine": "postgres",
             "connection_data": {"host": "localhost"},
             "created_at": "2023-01-01T00:00:00Z",
-            "is_demo": True,
         }
         response = DatasourceResponse(**data)
 
         assert response.name == "test-db"
         assert response.description == "A comprehensive test database"
         assert response.engine == "postgres"
-        assert response.is_demo is True
 
 
 class TestDatasourceConnectionStatus:

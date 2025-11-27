@@ -75,7 +75,6 @@ class TestDatasourcesAPI:
             engine="postgres",
             connection_data={"host": "localhost", "port": 5432},
             created_at="2023-01-01T12:00:00",
-            is_demo=False,
         )
 
     @pytest.fixture

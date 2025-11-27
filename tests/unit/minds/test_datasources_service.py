@@ -100,7 +100,6 @@ class TestDatasourcesService:
         assert result.id == sample_datasource.id
         assert result.name == "test_postgres"
         assert result.engine == "postgres"
-        assert result.is_demo is False
 
     @pytest.mark.asyncio
     async def test_list_datasources_empty(self, service, mock_session):
