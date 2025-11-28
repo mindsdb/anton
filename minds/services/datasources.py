@@ -610,7 +610,7 @@ class DatasourcesService:
 
             self.mindsdb_client.databases.drop(datasource_name)
             logger.info(f"Deleted MindsDB database {datasource_name}")
-            
+
             logger.debug(f"Deleted MindsDB database {datasource_name}")
         except Exception as e:
             logger.error(f"Failed to delete MindsDB database {datasource_name}: {str(e)}")
