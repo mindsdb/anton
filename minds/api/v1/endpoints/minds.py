@@ -5,6 +5,8 @@ This module contains endpoints for CRUD operations on minds (agents),
 providing a clean v1 API interface for mind management.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlmodel import Session
 
@@ -48,37 +50,62 @@ def get_data_catalog_loader(request: Request, session: Session = Depends(get_ses
 async def list_minds(
     minds_service: MindsService = Depends(get_minds_service),
     # Optional query parameters for filtering and pagination
+    name: str | None = Query(None, description="Filter by mind name"),
     provider: str | None = Query(None, description="Filter by provider (openai, google, etc.)"),
+    is_demo: bool | None = Query(None, description="Filter by demo status"),
     include_deleted: bool = Query(False, description="Filter by deleted status"),
     limit: int = Query(50, le=100, ge=1, description="Maximum number of minds to return"),
     offset: int = Query(0, ge=0, description="Number of minds to skip for pagination"),
     with_detailed_data: bool = Query(False, description="Include detailed datasource information"),
-) -> list[MindResponse]:
+    include_total: bool = Query(False, description="Include total count of minds in response"),
+    sort_by: Literal["name", "created_at", "updated_at", "provider", "model_name"] | None = Query(
+        None, description="Field to sort by (name, created_at, updated_at, provider, model_name)"
+    ),
+    sort_order: Literal["asc", "desc"] = Query("desc", description="Sort order (asc or desc)"),
+) -> list[MindResponse] | dict[str, list[MindResponse] | int]:
     """
-    List minds for the authenticated user with optional filtering and pagination.
+    List minds for the authenticated user with optional filtering, pagination, sorting, and total count.
 
     Query Parameters:
         - provider: Filter by AI provider (openai, google, etc.)
         - include_deleted: Filter by deleted status (true/false)
+        - is_demo: Filter by demo status (true/false)
         - limit: Maximum number of minds to return (1-100, default: 50)
         - offset: Number of minds to skip for pagination (default: 0)
+        - include_total: Include total count of minds in response (default: false)
+        - sort_by: Field to sort by (name, created_at, updated_at, provider, model_name).
+          Defaults to created_at if not specified.
+        - sort_order: Sort order (asc or desc, default: desc)
 
     Returns:
-        List[MindResponse]: List of mind objects
+        List[MindResponse] or dict with 'minds' and 'total': List of mind objects, optionally with total count
     """
     logger.debug(f"List minds requested (v1) for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
 
     try:
-        minds = await minds_service.list_minds(
+        result = await minds_service.list_minds(
+            name=name,
             provider=provider,
+            is_demo=is_demo,
             include_deleted=include_deleted,
             limit=limit,
             offset=offset,
             with_detailed_data=with_detailed_data,
+            include_total=include_total,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
 
-        logger.info(f"Listed minds for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
-        return minds
+        if include_total:
+            minds, total = result
+            logger.info(
+                f"Listed {len(minds)} minds (total: {total}) "
+                f"for user {minds_service.user_id} in tenant {minds_service.tenant_id} (offset={offset}, limit={limit})"
+            )
+            return {"minds": minds, "total": total}
+        else:
+            logger.info(f"Listed minds for user {minds_service.user_id} in tenant {minds_service.tenant_id}")
+            return result
     except MindsServiceError as e:
         logger.error(
             f"Service error listing minds for user {minds_service.user_id} in tenant {minds_service.tenant_id}: {e}"
