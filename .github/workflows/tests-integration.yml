@@ -27,4 +27,4 @@ jobs:
         run: make test/integration
         env:
           MINDS_API_BASE_URL: ${{ vars.MDB_ENV_URL }}
-          MINDS_API_KEY: ${{ secrets.MINDS_API_KEY }}
+          GATEWAY_INTERNAL_URL: ${{ vars.GATEWAY_INTERNAL_URL }}

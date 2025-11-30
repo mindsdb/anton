@@ -42,6 +42,22 @@ if all(POSTGRES_CONFIG.values()):
 # ----------------------------------
 # API client fixture
 # ----------------------------------
+
+
+def _create_test_user_api_key():
+    """Uses the local endpoint to get a test user from a test env"""
+    gateway_internal_url = os.environ.get("GATEWAY_INTERNAL_URL")
+    if not gateway_internal_url:
+        pytest.fail("GATEWAY_INTERNAL_URL is not set, can't create a test user")
+
+    response = requests.post(f"http://{gateway_internal_url}/cloud/create_test_user")
+    if response.status_code != 200:
+        pytest.fail(f"Failed to create test user: {response.text}")
+
+    print(f'Created test user "{response.json()["email"]}" for MindsDB API access')
+    return response.json()["api_key"]
+
+
 @pytest.fixture(scope="session")
 def api_client():
     """Returns a requests.Session configured for MindsDB API calls."""
@@ -49,6 +65,8 @@ def api_client():
     headers = {"Content-Type": "application/json"}
     if MINDS_API_KEY:
         headers["Authorization"] = f"Bearer {MINDS_API_KEY}"
+    else:
+        headers["Authorization"] = f"Bearer {_create_test_user_api_key()}"
     session.headers.update(headers)
     yield session
     session.close()
