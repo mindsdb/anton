@@ -38,3 +38,13 @@ spec:
                 secretKeyRef:
                   name: mindsdb-secrets
                   key: LANGFUSE_SECRET_KEY
+
+          volumeMounts:
+            - name: minds-datasource-creds
+              mountPath: /app/configs/credentials
+              readOnly: true
+
+      volumes:
+        - name: minds-datasource-creds
+          secret:
+            secretName: minds-datasource-creds
