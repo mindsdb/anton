@@ -101,6 +101,11 @@ deployment:
         secretKeyRef:
           name: mindsdb-secrets
           key: OPENAI_API_KEY
+  
+    - name: MINDSDB_URL
+      value: "http://mindsdb:80"
+
+  extraEnvs:
 
     # Langfuse language chain tracing/debugging/auditing
     - name: LANGFUSE_RELEASE
@@ -124,5 +129,3 @@ deployment:
           name: mindsdb-secrets
           key: LANGFUSE_HOST
 
-    - name: MINDSDB_URL
-      value: "http://mindsdb:80"
