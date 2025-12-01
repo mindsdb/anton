@@ -2,6 +2,7 @@
 
 Minds is a FastAPI-based service that provides an OpenAI-compatible chat completions endpoint. It supports both streaming and non-streaming responses, with comprehensive logging and observability features.
 
+
 ## Features
 
 - OpenAI-compatible `/chat/completions` endpoint
