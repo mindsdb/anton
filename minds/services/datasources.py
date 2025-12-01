@@ -608,15 +608,10 @@ class DatasourcesService:
         try:
             logger.debug(f"Deleting MindsDB database {datasource_name}")
 
-            databases = self.mindsdb_client.databases
+            self.mindsdb_client.databases.drop(datasource_name)
+            logger.info(f"Deleted MindsDB database {datasource_name}")
 
-            # Use databases.drop() method instead of database.drop()
-            try:
-                databases.drop(datasource_name)
-                logger.info(f"Deleted MindsDB database {datasource_name}")
-            except Exception:
-                # Database might not exist in MindsDB, which is fine
-                logger.debug(f"MindsDB database {datasource_name} was not found for deletion")
+            logger.debug(f"Deleted MindsDB database {datasource_name}")
         except Exception as e:
             logger.error(f"Failed to delete MindsDB database {datasource_name}: {str(e)}")
             raise DatasourceServiceError(f"MindsDB database deletion failed: {str(e)}") from None
