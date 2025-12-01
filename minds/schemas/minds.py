@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
-from minds.model.mind_datasource import DataCatalogStatus
+from minds.model.mind_datasource import DataCatalogStatus, DetailedDataCatalogStatus
 
 
 class DatasourceConfig(BaseModel):
@@ -17,8 +17,11 @@ class DatasourceConfig(BaseModel):
 
     name: str = Field(..., description="Name of the datasource")
     tables: list[str] | None = Field(None, description="Specific tables to use (None = all tables)")
-    status: DataCatalogStatus | None = Field(
-        default=DataCatalogStatus.PENDING, description="Data catalog loading status of the datasource"
+    status: DetailedDataCatalogStatus = Field(
+        default_factory=lambda: DetailedDataCatalogStatus(
+            tasks=[], progress=0.0, overall_status=DataCatalogStatus.PENDING
+        ),
+        description="Loading status of the datasource",
     )
 
 
@@ -98,8 +101,8 @@ class MindResponse(BaseModel):
         # TODO: Is this correct? We could have a failed load and others that are running?
         for datasource in self.datasources:
             if (
-                datasource.status in [DataCatalogStatus.PENDING, DataCatalogStatus.LOADING]
-                or datasource.status == DataCatalogStatus.FAILED
+                datasource.status.overall_status in [DataCatalogStatus.PENDING, DataCatalogStatus.LOADING]
+                or datasource.status.overall_status == DataCatalogStatus.FAILED
             ):
-                return datasource.status
+                return datasource.status.overall_status
         return DataCatalogStatus.COMPLETED

@@ -7,14 +7,16 @@ This allows:
 - Proper referential integrity
 """
 
+import asyncio
 from enum import Enum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from async_property import async_property
+from prefect import states
 from pydantic import computed_field
 from sqlalchemy import UniqueConstraint
-from sqlmodel import Field, Relationship
+from sqlmodel import Field, Relationship, SQLModel
 
 from minds.client.prefect import PrefectClient
 from minds.model.base import BaseSQLModel
@@ -31,6 +33,25 @@ class DataCatalogStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class DataCatalogTaskStatus(SQLModel, table=False):
+    """
+    Data catalog task status model.
+    """
+
+    name: str
+    status: DataCatalogStatus
+
+
+class DetailedDataCatalogStatus(SQLModel, table=False):
+    """
+    Detailed data catalog status model.
+    """
+
+    tasks: list[DataCatalogTaskStatus] = Field(default_factory=list)
+    progress: float = 0.0
+    overall_status: DataCatalogStatus = DataCatalogStatus.PENDING
 
 
 class MindDatasource(BaseSQLModel, table=True):
@@ -61,9 +82,9 @@ class MindDatasource(BaseSQLModel, table=True):
     # Ensure each mind-datasource pair is unique
     __table_args__ = (UniqueConstraint("mind_id", "datasource_id", name="unique_mind_datasource_pair"),)
 
-    @computed_field(return_type=DataCatalogStatus)
+    @computed_field(return_type=DetailedDataCatalogStatus)
     @async_property
-    async def status(self) -> DataCatalogStatus:
+    async def status(self) -> DetailedDataCatalogStatus:
         """
         Async: get status of the mind-datasource relationship.
 
@@ -72,17 +93,41 @@ class MindDatasource(BaseSQLModel, table=True):
         """
         prefect_client = PrefectClient()
         if self.flow_run_id:
-            states = await prefect_client.get_flow_run_state(str(self.flow_run_id))
+            # Get task states and overall flow run state concurrently
+            task_states, flow_run_state = await asyncio.gather(
+                prefect_client.get_flow_run_task_states(self.flow_run_id),
+                prefect_client.get_flow_run_state(str(self.flow_run_id)),
+            )
+
+            # Calculate progress based on completed tasks
+            total_tasks = len(task_states)
+            progress = 0.0
+            if total_tasks != 0:
+                completed_tasks = sum(1 for state in task_states.values() if state.is_completed())
+                progress = completed_tasks / total_tasks
+
+            tasks = [
+                DataCatalogTaskStatus(name=task_name, status=self._prefect_state_to_data_catalog_status(task_state))
+                for task_name, task_state in task_states.items()
+            ]
+
             # Get the latest state of the flow run
-            state = states[-1]
-            if state.is_running():
-                return DataCatalogStatus.LOADING
-            elif state.is_completed():
-                return DataCatalogStatus.COMPLETED
-            elif state.is_failed() or state.is_crashed():
-                return DataCatalogStatus.FAILED
-            elif state.is_cancelling() or state.is_cancelled():
-                return DataCatalogStatus.CANCELLED
+            status = self._prefect_state_to_data_catalog_status(flow_run_state[-1])
+
+            return DetailedDataCatalogStatus(tasks=tasks, progress=progress, overall_status=status)
+
+    def _prefect_state_to_data_catalog_status(self, state: states.State) -> DataCatalogStatus:
+        """
+        Convert a Prefect state to a data catalog status.
+        """
+        if state.is_running():
+            return DataCatalogStatus.LOADING
+        elif state.is_completed():
+            return DataCatalogStatus.COMPLETED
+        elif state.is_failed() or state.is_crashed():
+            return DataCatalogStatus.FAILED
+        elif state.is_cancelling() or state.is_cancelled():
+            return DataCatalogStatus.CANCELLED
         return DataCatalogStatus.PENDING
 
     def __repr__(self) -> str:
