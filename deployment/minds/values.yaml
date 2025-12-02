@@ -102,8 +102,18 @@ deployment:
           name: mindsdb-secrets
           key: OPENAI_API_KEY
   
-    - name: MINDSDB_URL
+    - name: MINDSDB__URL
       value: "http://mindsdb:80"
+
+    # ====================================
+    # LAUNCHDARKLY SETTINGS
+    # ====================================
+
+    - name: LAUNCHDARKLY__SDK_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: LAUNCHDARKLY_SDK_KEY
 
   extraEnvs:
 
