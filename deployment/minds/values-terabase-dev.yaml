@@ -33,10 +33,23 @@ deployment:
 
   extraEnvs:
 
-    # Langfuse
-    - name: LANGFUSE_ENVIRONMENT
+    # ====================================
+    # GENERAL SETTINGS
+    # ====================================
+
+    - name: ENV
       value: "terabase-dev"
 
-    # Data Catalog
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "terabase-dev"
+
+    # ====================================
+    # DATA CATALOG SETTINGS
+    # ====================================
+
     - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
       value: "terabase-dev--data-catalog-loader"

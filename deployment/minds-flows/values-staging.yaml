@@ -8,3 +8,10 @@ job:
 
     - name: ENV
       value: "staging"
+
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+    
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "staging"

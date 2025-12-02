@@ -32,10 +32,25 @@ deployment:
 
   extraEnvs:
 
-    # Langfuse
-    - name: LANGFUSE_ENVIRONMENT
+    # ====================================
+    # GENERAL SETTINGS
+    # ====================================
+
+    - name: ENV
       value: "alpha-dev"
 
-    # Data Catalog
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+
+    # Langfuse
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "alpha-dev"
+
+    
+    # ====================================
+    # DATA CATALOG SETTINGS
+    # ====================================
+
     - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
       value: "alpha-dev--data-catalog-loader"

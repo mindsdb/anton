@@ -32,19 +32,23 @@ deployment:
 
   extraEnvs:
 
-    # Langfuse
-    - name: LANGFUSE_ENVIRONMENT
+    # ====================================
+    # GENERAL SETTINGS
+    # ====================================
+
+    - name: ENV
       value: "staging"
 
-    - name: LANGFUSE_TRACING_ENABLED
-      value: "false"
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
 
-    - name: LANGFUSE_PUBLIC_KEY
-      value: "remove"
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "staging"
 
-    - name: LANGFUSE_SECRET_KEY
-      value: "remove"
+    # ====================================
+    # DATA CATALOG SETTINGS
+    # ====================================
 
-    # Data Catalog
     - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
       value: "staging--data-catalog-loader"

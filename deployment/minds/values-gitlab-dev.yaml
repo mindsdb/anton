@@ -32,10 +32,23 @@ deployment:
 
   extraEnvs:
 
-    # Langfuse
-    - name: LANGFUSE_ENVIRONMENT
+    # ====================================
+    # GENERAL SETTINGS
+    # ====================================
+
+    - name: ENV
       value: "gitlab-dev"
 
-    # Data Catalog
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "gitlab-dev"
+
+    # ====================================
+    # DATA CATALOG SETTINGS
+    # ====================================
+
     - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
       value: "gitlab-dev--data-catalog-loader"
