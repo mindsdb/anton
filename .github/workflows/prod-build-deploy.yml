@@ -57,7 +57,7 @@ jobs:
       group: deploy-${{ matrix.deploy-env }}
       cancel-in-progress: false
     env:
-      DATABASE_URI: ${{ secrets.MINDS_DB_URI }}
+      DATABASE__URI: ${{ secrets.MINDS_DB_URI }}
       UV_LINK_MODE: "symlink"
     steps:
       - uses: actions/checkout@v4

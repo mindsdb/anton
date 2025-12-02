@@ -353,7 +353,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URI: postgresql://minds:minds@postgres/minds
+      DATABASE__URI: postgresql://minds:minds@postgres/minds
     restart: "no"
 
   minds-flows:
@@ -382,7 +382,7 @@ services:
       IMAGE_NAME: minds-flows
       IMAGE_TAG: latest
 
-      DATABASE_URI: postgresql://minds:minds@postgres/minds
+      DATABASE__URI: postgresql://minds:minds@postgres/minds
 
       # MindsDB configuration
       MINDSDB__URL: "http://mindsdb:47334"
