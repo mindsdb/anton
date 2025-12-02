@@ -96,7 +96,7 @@ class TestCreateMindsdbClientFromRequest:
         mock_get_token.assert_called_once_with(mock_request)
 
     @patch("minds.client.mindsdb.connect")
-    @patch("minds.client.mindsdb.MINDSDB_URL", "http://localhost:47334")
+    @patch("minds.client.mindsdb.settings.mindsdb.url", "http://localhost:47334")
     def test_full_flow_success(self, mock_connect, context):
         """Test the full flow from request to client creation."""
         # Arrange
@@ -152,7 +152,7 @@ class TestCreateMindsdbClient:
     """Test cases for create_mindsdb_client function."""
 
     @patch("minds.client.mindsdb.connect")
-    @patch("minds.client.mindsdb.MINDSDB_URL", "http://test-server:8080")
+    @patch("minds.client.mindsdb.settings.mindsdb.url", "http://test-server:8080")
     def test_create_mindsdb_client_success(self, mock_connect, context):
         """Test successful client creation with valid API key."""
         # Arrange
@@ -218,7 +218,7 @@ class TestCreateMindsdbClient:
         assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
-    @patch("minds.client.mindsdb.MINDSDB_URL", "https://production-server.com")
+    @patch("minds.client.mindsdb.settings.mindsdb.url", "https://production-server.com")
     def test_create_mindsdb_client_with_production_server(self, mock_connect, context):
         """Test client creation with production server URL."""
         # Arrange
@@ -324,10 +324,10 @@ class TestCreateMindsdbClient:
             create_mindsdb_client_with_credentials("http://x", api_key=123, company_id="c")
 
     @patch("minds.client.mindsdb.connect")
-    @patch("minds.client.mindsdb.MINDSDB_PASSWORD", "password123")
-    @patch("minds.client.mindsdb.MINDSDB_LOGIN", "loginuser")
+    @patch("minds.client.mindsdb.settings.mindsdb.password", "password123")
+    @patch("minds.client.mindsdb.settings.mindsdb.login", "loginuser")
     def test_create_mindsdb_client_uses_minidsb_login_password_when_set(self, mock_connect, context):
-        """If MINDSDB_PASSWORD is configured, create_mindsdb_client should pass
+        """If settings.mindsdb.password is configured, create_mindsdb_client should pass
         login/password when api_key is missing."""
         mock_client = Mock(spec=Server)
         mock_connect.return_value = mock_client

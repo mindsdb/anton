@@ -65,12 +65,12 @@ async def test_format_messages_for_streaming_emits_sse(streaming_mod):
         out.append(chunk)
 
     # Should produce two content SSE events followed by a final "stop" event
-    assert all(ch.startswith("data: ") and ch.endswith("\n\n") for ch in out)
+    assert all(ch.startswith("event: completion\ndata: ") and ch.endswith("\n\n") for ch in out)
     # Expect three chunks: two content chunks and a final stop chunk
     assert len(out) == 3
-    payload0 = json.loads(out[0][len("data: ") :].strip())
-    payload1 = json.loads(out[1][len("data: ") :].strip())
-    payload2 = json.loads(out[2][len("data: ") :].strip())
+    payload0 = json.loads(out[0][len("event: completion\ndata: ") :].strip())
+    payload1 = json.loads(out[1][len("event: completion\ndata: ") :].strip())
+    payload2 = json.loads(out[2][len("event: completion\ndata: ") :].strip())
 
     # Basic schema checks for content chunks
     assert payload0["id"] == "chatcmpl-A"
@@ -130,7 +130,6 @@ async def test_streamer_collector_accumulates_and_close_noop(streaming_mod):
 @pytest.mark.asyncio
 async def test_process_streaming_producer_emits_sse(streaming_mod):
     model = "model_test_process_streaming_producer_emits_sse"
-    trace_name = "trace_name_test_process_streaming_producer_emits_sse"
 
     # type: ignore - avoid module attribute in type annotation in test-local function
     async def producer(streamer):
@@ -142,7 +141,6 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
         producer,
         request_id="chatcmpl-777",
         model=model,
-        trace_name=trace_name,
     )
     # headers & type
     assert resp.media_type == "text/event-stream"
@@ -155,14 +153,14 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
     async for b in resp.body_iterator:
         s = b.decode() if isinstance(b, bytes | bytearray) else b
         chunks.append(s)
-        payload = json.loads(s[len("data: ") :].strip())
+        payload = json.loads(s[len("event: completion\ndata: ") :].strip())
         if payload["choices"][0].get("finish_reason") == "stop":
             found_stop = True
             break
 
     assert found_stop, "Did not find final stop chunk in stream"
-    assert all(ch.startswith("data: ") and ch.endswith("\n\n") for ch in chunks)
-    payloads = [json.loads(ch[len("data: ") :].strip()) for ch in chunks]
+    assert all(ch.startswith("event: completion\ndata: ") and ch.endswith("\n\n") for ch in chunks)
+    payloads = [json.loads(ch[len("event: completion\ndata: ") :].strip()) for ch in chunks]
     assert [p["choices"][0]["delta"]["content"] for p in payloads if p["choices"][0].get("finish_reason") is None] == [
         "hello",
         "world",
@@ -218,7 +216,6 @@ async def test_process_non_streaming_filters_out_system_messages(streaming_mod):
 async def test_process_streaming_producer_includes_system_messages(streaming_mod):
     """Streaming responses should include system-role messages (they are not filtered when streaming)."""
     model = "model_test_streaming_includes_system"
-    trace_name = "trace_streaming_includes_system"
 
     async def producer(streamer):
         await streamer.push(streaming_mod.Role.user, "hello")
@@ -228,7 +225,6 @@ async def test_process_streaming_producer_includes_system_messages(streaming_mod
     resp = await streaming_mod.process_streaming_producer(
         producer,
         request_id="chatcmpl-stream-sys",
-        trace_name=trace_name,
         model=model,
     )
 
@@ -236,7 +232,7 @@ async def test_process_streaming_producer_includes_system_messages(streaming_mod
     found_stop = False
     async for b in resp.body_iterator:
         s = b.decode() if isinstance(b, bytes | bytearray) else b
-        payload = json.loads(s[len("data: ") :].strip())
+        payload = json.loads(s[len("event: completion\ndata: ") :].strip())
         delta = payload["choices"][0]["delta"]
         # Check for the system message content emitted in the stream
         if delta.get("content") == "internal_thought":

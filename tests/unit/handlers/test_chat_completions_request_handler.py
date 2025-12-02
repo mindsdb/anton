@@ -93,7 +93,6 @@ class TestChatCompletionsRequestHandler:
         mock_context,
     ):
         """Test streaming chat completions request handling."""
-        request_id = "test-request-123"
         mock_streaming_response = Mock(spec=StreamingResponse)
 
         with (
@@ -107,7 +106,6 @@ class TestChatCompletionsRequestHandler:
 
             # Call the handler
             result = await handler_mod.chat_completions_request_handler(
-                request_id=request_id,
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -123,12 +121,12 @@ class TestChatCompletionsRequestHandler:
                 model=sample_streaming_chat_request.model,
                 stream=True,
                 metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
+                instrument=True,
             )
 
             # Verify process_streaming_producer was called
             mock_process_streaming.assert_called_once()
             call_args = mock_process_streaming.call_args
-            assert call_args[1]["request_id"] == request_id
             assert call_args[1]["model"] == sample_streaming_chat_request.model
 
             # Verify the producer function works
@@ -145,7 +143,6 @@ class TestChatCompletionsRequestHandler:
         self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request, mock_context
     ):
         """Test non-streaming chat completions request handling."""
-        request_id = "test-request-456"
         mock_json_response = Mock(spec=JSONResponse)
 
         with (
@@ -161,7 +158,6 @@ class TestChatCompletionsRequestHandler:
 
             # Call the handler
             result = await handler_mod.chat_completions_request_handler(
-                request_id=request_id,
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -177,12 +173,12 @@ class TestChatCompletionsRequestHandler:
                 model=sample_chat_request.model,
                 stream=False,
                 metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
+                instrument=True,
             )
 
             # Verify process_non_streaming_producer was called
             mock_process_non_streaming.assert_called_once()
             call_args = mock_process_non_streaming.call_args
-            assert call_args[1]["request_id"] == request_id
             assert call_args[1]["model"] == sample_chat_request.model
 
             # Verify the producer function works
@@ -199,7 +195,6 @@ class TestChatCompletionsRequestHandler:
         self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
     ):
         """Test chat completions request when stream parameter is None (should default to False)."""
-        request_id = "test-request-789"
         mock_json_response = Mock(spec=JSONResponse)
 
         # Create request with stream=None
@@ -223,7 +218,6 @@ class TestChatCompletionsRequestHandler:
 
             # Call the handler
             result = await handler_mod.chat_completions_request_handler(
-                request_id=request_id,
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -239,6 +233,7 @@ class TestChatCompletionsRequestHandler:
                 model=chat_request.model,
                 stream=False,  # Should default to False when None
                 metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
+                instrument=True,
             )
 
             # Verify non-streaming producer was called (not streaming)
@@ -252,7 +247,7 @@ class TestChatCompletionsRequestHandler:
         self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request, mock_context
     ):
         """Test that logging calls are made correctly."""
-        request_id = "test-request-logging"
+        request_id = str(mock_context.request_id)
         mock_json_response = Mock(spec=JSONResponse)
 
         with (
@@ -269,7 +264,6 @@ class TestChatCompletionsRequestHandler:
 
             # Call the handler
             await handler_mod.chat_completions_request_handler(
-                request_id=request_id,
                 mindsdb_client=mock_mindsdb_client,
                 session=mock_session,
                 context=mock_context,
@@ -294,7 +288,7 @@ class TestChatCompletionsRequestHandler:
         self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
     ):
         """Test that parameters are correctly extracted from the request."""
-        request_id = "test-request-params"
+        request_id = str(mock_context.request_id)
         mock_json_response = Mock(spec=JSONResponse)
 
         # Create request with specific parameters
@@ -318,7 +312,6 @@ class TestChatCompletionsRequestHandler:
 
             # Call the handler
             await handler_mod.chat_completions_request_handler(
-                request_id=request_id,
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -334,9 +327,9 @@ class TestChatCompletionsRequestHandler:
                 model="custom-model-v1",  # Custom model
                 stream=False,  # Explicit stream value
                 metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="custom-session"),
+                instrument=True,
             )
 
             # Verify process_non_streaming_producer received correct parameters
             call_args = mock_process_non_streaming.call_args
-            assert call_args[1]["request_id"] == request_id
             assert call_args[1]["model"] == "custom-model-v1"

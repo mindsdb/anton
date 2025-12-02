@@ -67,7 +67,7 @@ class TestDataCatalogLoader:
     async def test_load_sync_mode(self, data_catalog_loader, mock_mind_datasource):
         """Test load operation in synchronous mode."""
         with (
-            patch("minds.services.data_catalog.data_catalog_loader.DATA_CATALOG_EXECUTION_MODE", "synchronous"),
+            patch("minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "synchronous"),
             patch("minds.services.data_catalog.data_catalog_loader.load_data_catalog") as mock_load_flow,
         ):
             # Execute load
@@ -91,7 +91,7 @@ class TestDataCatalogLoader:
             return mock_flow_run
 
         with (
-            patch("minds.services.data_catalog.data_catalog_loader.DATA_CATALOG_EXECUTION_MODE", "asynchronous"),
+            patch("minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "asynchronous"),
             patch(
                 "minds.services.data_catalog.data_catalog_loader.run_deployment", side_effect=mock_run_deployment
             ) as mock_run_deployment_patch,
@@ -120,7 +120,7 @@ class TestDataCatalogLoader:
     async def test_load_invalid_execution_mode(self, data_catalog_loader, mock_mind_datasource):
         """Test load operation with invalid execution mode."""
         with (
-            patch("minds.services.data_catalog.data_catalog_loader.DATA_CATALOG_EXECUTION_MODE", "invalid_mode"),
+            patch("minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "invalid_mode"),
             pytest.raises(ValueError, match="Invalid data catalog execution mode: invalid_mode"),
         ):
             await data_catalog_loader.load(mock_mind_datasource, ["table1", "table2"])
@@ -129,7 +129,7 @@ class TestDataCatalogLoader:
     async def test_load_with_none_table_names(self, data_catalog_loader, mock_mind_datasource):
         """Test load operation with None table_names."""
         with (
-            patch("minds.services.data_catalog.data_catalog_loader.DATA_CATALOG_EXECUTION_MODE", "synchronous"),
+            patch("minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "synchronous"),
             patch("minds.services.data_catalog.data_catalog_loader.load_data_catalog") as mock_load_flow,
         ):
             # Execute load with None table_names
@@ -151,7 +151,7 @@ class TestDataCatalogLoader:
             raise Exception("Deployment failed")
 
         with (
-            patch("minds.services.data_catalog.data_catalog_loader.DATA_CATALOG_EXECUTION_MODE", "asynchronous"),
+            patch("minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "asynchronous"),
             patch("minds.services.data_catalog.data_catalog_loader.run_deployment", side_effect=mock_run_deployment),
             pytest.raises(Exception, match="Deployment failed"),
         ):
@@ -162,7 +162,7 @@ class TestDataCatalogLoader:
     async def test_load_sync_mode_flow_failure(self, data_catalog_loader, mock_mind_datasource):
         """Test load operation in synchronous mode when flow fails."""
         with (
-            patch("minds.services.data_catalog.data_catalog_loader.DATA_CATALOG_EXECUTION_MODE", "synchronous"),
+            patch("minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "synchronous"),
             patch("minds.services.data_catalog.data_catalog_loader.load_data_catalog") as mock_load_flow,
             pytest.raises(DataCatalogLoaderError, match="Flow execution failed"),
         ):

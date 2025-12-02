@@ -27,11 +27,11 @@ def test__create_engine_happy_path_calls_sqlalchemy_with_pooling(monkeypatch, mo
     create_engine_mock = MagicMock(return_value=engine_obj)
 
     # Ensure constants used inside the module have predictable values
-    monkeypatch.setattr(mod, "DB_POOL_SIZE", 3)
-    monkeypatch.setattr(mod, "DB_MAX_OVERFLOW", 7)
-    monkeypatch.setattr(mod, "DB_POOL_TIMEOUT", 55)
-    monkeypatch.setattr(mod, "DB_POOL_RECYCLE", 1200)
-    monkeypatch.setattr(mod, "DB_POOL_PRE_PING", True)
+    monkeypatch.setattr(mod.settings.database, "pool_size", 3)
+    monkeypatch.setattr(mod.settings.database, "max_overflow", 7)
+    monkeypatch.setattr(mod.settings.database, "pool_timeout", 55)
+    monkeypatch.setattr(mod.settings.database, "pool_recycle", 1200)
+    monkeypatch.setattr(mod.settings.database, "pool_pre_ping", True)
     monkeypatch.setattr(mod, "create_engine", create_engine_mock)
 
     uri = "postgresql://test:test@localhost:5432/test"

@@ -413,8 +413,8 @@ class TestDataCatalogRedisCache:
 class TestDataCatalogCacheFactory:
     """Test cases for DataCatalogCacheFactory class."""
 
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "in_memory")
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE", 50)
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_type", "in_memory")
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_max_size", 50)
     def test_create_in_memory_cache(self):
         """Test creating an in-memory cache instance."""
         cache = DataCatalogCacheFactory.create_cache()
@@ -422,8 +422,8 @@ class TestDataCatalogCacheFactory:
         assert isinstance(cache, DataCatalogInMemoryCache)
         assert cache.max_size == 50
 
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "in_memory")
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE", 100)
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_type", "in_memory")
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_max_size", 100)
     def test_create_in_memory_cache_default_size(self):
         """Test creating an in-memory cache with default size."""
         cache = DataCatalogCacheFactory.create_cache()
@@ -431,20 +431,20 @@ class TestDataCatalogCacheFactory:
         assert isinstance(cache, DataCatalogInMemoryCache)
         assert cache.max_size == 100
 
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "redis")
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_type", "redis")
     def test_create_redis_cache_raises_error(self):
         """Test that creating a Redis cache raises an error (not implemented)."""
         with pytest.raises(ValueError, match="Unknown cache type 'redis'"):
             DataCatalogCacheFactory.create_cache()
 
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "unknown")
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_type", "unknown")
     def test_create_unknown_cache_type_raises_error(self):
         """Test that creating an unknown cache type raises an error."""
         with pytest.raises(ValueError, match="Unknown cache type 'unknown'"):
             DataCatalogCacheFactory.create_cache()
 
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_TYPE", "in_memory")
-    @patch("minds.cache.data_catalog.DATA_CATALOG_CACHE_MAX_SIZE", 0)
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_type", "in_memory")
+    @patch("minds.cache.data_catalog.settings.data_catalog.cache_max_size", 0)
     def test_create_cache_with_zero_max_size(self):
         """Test creating a cache with zero max size."""
         cache = DataCatalogCacheFactory.create_cache()

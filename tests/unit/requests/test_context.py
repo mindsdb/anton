@@ -46,7 +46,7 @@ class TestExtractContextFromRequest:
 
     def test_extract_context_with_all_headers(self):
         """Test extracting context when all headers are present and auth is enabled."""
-        with patch("minds.requests.context.DISABLE_AUTH", False):
+        with patch("minds.requests.context.settings.auth.disable", False):
             mock_request = Mock(spec=Request)
             mock_request.headers = {
                 "x-user-id": "1",
@@ -60,7 +60,7 @@ class TestExtractContextFromRequest:
 
     def test_extract_context_with_auth_disabled(self):
         """Test extracting context when auth is disabled."""
-        with patch("minds.requests.context.DISABLE_AUTH", True):
+        with patch("minds.requests.context.settings.auth.disable", True):
             mock_request = Mock(spec=Request)
             # Headers should be ignored when auth is disabled
             mock_request.headers = {
@@ -75,7 +75,7 @@ class TestExtractContextFromRequest:
 
     def test_extract_context_with_missing_headers_raises_http_exception(self):
         """Test that missing headers raise HTTPException when auth is enabled."""
-        with patch("minds.requests.context.DISABLE_AUTH", False):
+        with patch("minds.requests.context.settings.auth.disable", False):
             mock_request = Mock(spec=Request)
             mock_request.headers = {"x-user-id": None, "x-company-id": None}
 
@@ -87,7 +87,7 @@ class TestExtractContextFromRequest:
 
     def test_extract_context_with_invalid_user_id(self):
         """Test extracting context when user ID is not a valid integer."""
-        with patch("minds.requests.context.DISABLE_AUTH", False):
+        with patch("minds.requests.context.settings.auth.disable", False):
             mock_request = Mock(spec=Request)
             mock_request.headers = {
                 "x-user-id": "non-integer",
@@ -101,7 +101,7 @@ class TestExtractContextFromRequest:
 
     def test_extract_context_with_invalid_tenant_id(self):
         """Test extracting context when tenant ID is not a valid integer."""
-        with patch("minds.requests.context.DISABLE_AUTH", False):
+        with patch("minds.requests.context.settings.auth.disable", False):
             mock_request = Mock(spec=Request)
             mock_request.headers = {
                 "x-user-id": "1",
@@ -181,8 +181,11 @@ class TestCreateLangfuseContext:
         assert langfuse_context.metadata.user_id == UUID("00000000-0000-0000-0000-000000000001")
         assert langfuse_context.metadata.tenant_id == UUID("00000000-0000-0000-0000-000000000002")
         assert langfuse_context.tags == [
-            UUID("00000000-0000-0000-0000-000000000001"),
-            UUID("00000000-0000-0000-0000-000000000002"),
+            f"user_id:{UUID("00000000-0000-0000-0000-000000000001")}",
+            f"tenant_id:{UUID("00000000-0000-0000-0000-000000000002")}",
+            f"local",
+            f"request_id:{context.request_id}",
+            context.user_email,
         ]
         assert langfuse_context.trace_id is None
 
@@ -196,8 +199,11 @@ class TestCreateLangfuseContext:
         assert langfuse_context.metadata.user_id == UUID("00000000-0000-0000-0000-000000000000")
         assert langfuse_context.metadata.tenant_id == UUID("00000000-0000-0000-0000-000000000000")
         assert langfuse_context.tags == [
-            UUID("00000000-0000-0000-0000-000000000000"),
-            UUID("00000000-0000-0000-0000-000000000000"),
+            f"user_id:{UUID("00000000-0000-0000-0000-000000000000")}",
+            f"tenant_id:{UUID("00000000-0000-0000-0000-000000000000")}",
+            f"local",
+            f"request_id:{context.request_id}",
+            context.user_email,
         ]
 
     def test_create_langfuse_context_tags_format(self):
@@ -209,7 +215,13 @@ class TestCreateLangfuseContext:
         langfuse_context = create_langfuse_context(context)
 
         # Tags should be [user_email]
-        expected_tags = [UUID("00000000-0000-0000-0000-000000000001"), UUID("00000000-0000-0000-0000-000000000002")]
+        expected_tags = [
+            f"user_id:{UUID("00000000-0000-0000-0000-000000000001")}",
+            f"tenant_id:{UUID("00000000-0000-0000-0000-000000000002")}",
+            f"local",
+            f"request_id:{context.request_id}",
+            context.user_email,
+        ]
         assert langfuse_context.tags == expected_tags
 
     def test_create_langfuse_context_metadata_consistency(self):
