@@ -115,8 +115,6 @@ deployment:
           name: mindsdb-secrets
           key: LAUNCHDARKLY_SDK_KEY
 
-  extraEnvs:
-
     # Langfuse (Variables used by langfuse-python library)
     - name: LANGFUSE_RELEASE
       value: "{{ .Values.global.image.tag }}"
