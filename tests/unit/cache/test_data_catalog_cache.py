@@ -22,6 +22,7 @@ from minds.cache.data_catalog import (
 )
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
+from minds.model.mind_datasource import DetailedDataCatalogStatus
 
 
 class TestDataCatalogCacheMindKey:
@@ -194,7 +195,7 @@ class TestDataCatalogInMemoryCache:
         mock_mind_datasource.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
 
         async def _status_completed():
-            return DataCatalogStatus.COMPLETED
+            return DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.COMPLETED)
 
         mock_mind_datasource.status = _status_completed()
         mock_mind_datasource.datasource = mock_datasource
@@ -237,7 +238,7 @@ class TestDataCatalogInMemoryCache:
         mock_mind_datasource1.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
 
         async def _status_completed_1():
-            return DataCatalogStatus.COMPLETED
+            return DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.COMPLETED)
 
         mock_mind_datasource1.status = _status_completed_1()
         mock_mind_datasource1.datasource = mock_datasource1
@@ -253,7 +254,7 @@ class TestDataCatalogInMemoryCache:
         mock_mind_datasource2.datasource_id = UUID("33333333-4444-5555-6666-777777777777")
 
         async def _status_completed_2():
-            return DataCatalogStatus.COMPLETED
+            return DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.COMPLETED)
 
         mock_mind_datasource2.status = _status_completed_2()
         mock_mind_datasource2.datasource = mock_datasource2
@@ -530,7 +531,7 @@ class TestDataCatalogCacheIntegration:
         mock_mind_datasource1.datasource_id = UUID("11111111-2222-3333-4444-555555555555")
 
         async def _status_completed_a():
-            return DataCatalogStatus.COMPLETED
+            return DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.COMPLETED)
 
         mock_mind_datasource1.status = _status_completed_a()
         mock_mind_datasource1.datasource = mock_datasource1
@@ -546,7 +547,7 @@ class TestDataCatalogCacheIntegration:
         mock_mind_datasource2.datasource_id = UUID("33333333-4444-5555-6666-777777777777")
 
         async def _status_completed_b():
-            return DataCatalogStatus.COMPLETED
+            return DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.COMPLETED)
 
         mock_mind_datasource2.status = _status_completed_b()
         mock_mind_datasource2.datasource = mock_datasource2

@@ -110,11 +110,14 @@ class DataCatalogInMemoryCache(DataCatalogCache):
 
         data_catalogs = []
         for mind_datasource in mind.mind_datasources:
+            logger.info(f"Loading data catalog for mind datasource {mind_datasource.id} for mind {mind.name}")
             status = await mind_datasource.status
-            if status != DataCatalogStatus.COMPLETED:
+            overall_status = status.overall_status
+            logger.info(f"Mind datasource overall status: {overall_status}")
+            if overall_status != DataCatalogStatus.COMPLETED:
                 logger.info(
                     f"Skipping data catalog for mind datasource {mind_datasource.id} "
-                    f"for mind {mind.name} because it is in status {mind_datasource.status}"
+                    f"for mind {mind.name} because it is in status {overall_status}"
                 )
                 continue
 
