@@ -1,4 +1,3 @@
-import uuid
 from unittest.mock import patch
 from uuid import UUID
 
@@ -48,7 +47,7 @@ class TestSetupLangfuseObservation:
         mock_get_client.return_value = mock_client
 
         # Act
-        result = setup_langfuse_observation(test_context)
+        _ = setup_langfuse_observation(test_context)
 
         # Assert
         mock_create_langfuse_context.assert_called_once_with(test_context)
@@ -64,7 +63,7 @@ class TestSetupLangfuseObservation:
         langfuse_context,
     ):
         """Test setup when get_current_trace_id returns None."""
-        
+
         # Arrange
         test_context = context
         test_langfuse_context = langfuse_context
@@ -77,7 +76,7 @@ class TestSetupLangfuseObservation:
         mock_get_client.return_value = mock_client
 
         # Act
-        result = setup_langfuse_observation(test_context)
+        _ = setup_langfuse_observation(test_context)
 
         # Assert
         mock_create_langfuse_context.assert_called_once_with(test_context)
@@ -110,7 +109,7 @@ class TestSetupLangfuseObservation:
         mock_get_client.return_value = mock_client
 
         # Act
-        result = setup_langfuse_observation(test_context)
+        _ = setup_langfuse_observation(test_context)
 
         # Assert
         mock_create_langfuse_context.assert_called_once_with(test_context)
@@ -150,7 +149,7 @@ class TestSetupLangfuseObservation:
         mock_get_client.return_value = mock_client
 
         # Act
-        result = setup_langfuse_observation(test_context)
+        _ = setup_langfuse_observation(test_context)
 
         # Assert
         mock_create_langfuse_context.assert_called_once_with(test_context)
@@ -179,7 +178,7 @@ class TestSetupLangfuseObservation:
         mock_create_langfuse_context.side_effect = test_exception
 
         # Act - the function should catch the exception and return default UUID
-        result = setup_langfuse_observation(test_context)
+        setup_langfuse_observation(test_context)
 
         # Assert
         mock_create_langfuse_context.assert_called_once_with(test_context)

@@ -288,7 +288,6 @@ class TestChatCompletionsRequestHandler:
         self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
     ):
         """Test that parameters are correctly extracted from the request."""
-        request_id = str(mock_context.request_id)
         mock_json_response = Mock(spec=JSONResponse)
 
         # Create request with specific parameters

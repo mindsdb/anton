@@ -74,7 +74,9 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
     )
 
     # 5) Mock the chat completions endpoint dependencies BEFORE importing
-    async def _fake_chat_completions_handler(session, context, mindsdb_client, chat_completions_request, instrument=True):
+    async def _fake_chat_completions_handler(
+        session, context, mindsdb_client, chat_completions_request, instrument=True
+    ):
         from starlette.responses import JSONResponse
 
         from minds.schemas.chat import ChatCompletion, Choice, Message, Usage

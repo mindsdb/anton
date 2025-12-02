@@ -181,9 +181,9 @@ class TestCreateLangfuseContext:
         assert langfuse_context.metadata.user_id == UUID("00000000-0000-0000-0000-000000000001")
         assert langfuse_context.metadata.tenant_id == UUID("00000000-0000-0000-0000-000000000002")
         assert langfuse_context.tags == [
-            f"user_id:{UUID("00000000-0000-0000-0000-000000000001")}",
-            f"tenant_id:{UUID("00000000-0000-0000-0000-000000000002")}",
-            f"local",
+            f"user_id:{UUID('00000000-0000-0000-0000-000000000001')}",
+            f"tenant_id:{UUID('00000000-0000-0000-0000-000000000002')}",
+            "local",
             f"request_id:{context.request_id}",
             context.user_email,
         ]
@@ -199,9 +199,9 @@ class TestCreateLangfuseContext:
         assert langfuse_context.metadata.user_id == UUID("00000000-0000-0000-0000-000000000000")
         assert langfuse_context.metadata.tenant_id == UUID("00000000-0000-0000-0000-000000000000")
         assert langfuse_context.tags == [
-            f"user_id:{UUID("00000000-0000-0000-0000-000000000000")}",
-            f"tenant_id:{UUID("00000000-0000-0000-0000-000000000000")}",
-            f"local",
+            f"user_id:{UUID('00000000-0000-0000-0000-000000000000')}",
+            f"tenant_id:{UUID('00000000-0000-0000-0000-000000000000')}",
+            "local",
             f"request_id:{context.request_id}",
             context.user_email,
         ]
@@ -216,9 +216,9 @@ class TestCreateLangfuseContext:
 
         # Tags should be [user_email]
         expected_tags = [
-            f"user_id:{UUID("00000000-0000-0000-0000-000000000001")}",
-            f"tenant_id:{UUID("00000000-0000-0000-0000-000000000002")}",
-            f"local",
+            f"user_id:{UUID('00000000-0000-0000-0000-000000000001')}",
+            f"tenant_id:{UUID('00000000-0000-0000-0000-000000000002')}",
+            "local",
             f"request_id:{context.request_id}",
             context.user_email,
         ]
