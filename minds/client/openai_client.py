@@ -1,16 +1,13 @@
-from langfuse import observe
+from functools import lru_cache
+
 from openai import AsyncOpenAI
 
 from minds.common.logger import setup_logging
-from minds.common.vars import (
-    OPENAI_API_KEY,
-    OPENAI_API_URL,
-    OPENAI_MAX_TOKENS,
-    OPENAI_MODEL_NAME,
-)
+from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.chat import Message
 
 logger = setup_logging()
+settings = get_app_settings()
 
 
 class OpenAIClient:
@@ -74,9 +71,21 @@ class OpenAIClient:
             raise e
 
 
-open_ai_client = OpenAIClient(
-    api_url=OPENAI_API_URL,
-    api_key=OPENAI_API_KEY,
-    chat_completions_model=OPENAI_MODEL_NAME,
-    max_tokens=OPENAI_MAX_TOKENS,
-)
+@lru_cache
+def get_openai_client() -> OpenAIClient:
+    """Get cached OpenAIClient instance."""
+    return create_openai_client()
+
+
+def create_openai_client(
+    api_url: str = settings.openai.api_url,
+    api_key: str = settings.openai.api_key,
+    chat_completions_model: str = settings.openai.model_name,
+    max_tokens: int = settings.openai.max_tokens,
+) -> OpenAIClient:
+    return OpenAIClient(
+        api_url=api_url,
+        api_key=api_key,
+        chat_completions_model=chat_completions_model,
+        max_tokens=max_tokens,
+    )

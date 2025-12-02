@@ -46,14 +46,14 @@ def _resolve_service_url(url: str) -> str:
 
 class PrefectSettings(BaseModel):
     database_uri: str = Field(
-        default_factory=lambda: os.environ.get("DATABASE_URI", "postgresql://minds:minds@localhost:35432/minds")
+        default_factory=lambda: os.environ.get("DATABASE__URI", "postgresql://minds:minds@localhost:35432/minds")
     )
     mindsdb_url: str = Field(
-        default_factory=lambda: _resolve_service_url(os.environ.get("MINDSDB_URL", "http://localhost:47334"))
+        default_factory=lambda: _resolve_service_url(os.environ.get("MINDSDB__URL", "http://localhost:47334"))
     )
     mindsdb_api_key: str = Field(default_factory=lambda: os.environ.get("MINDSDB_API_KEY", ""))
-    mindsdb_login: str = Field(default_factory=lambda: os.environ.get("MINDSDB_LOGIN", "mindsdb"))
-    mindsdb_password: str = Field(default_factory=lambda: os.environ.get("MINDSDB_PASSWORD", ""))
+    mindsdb_login: str = Field(default_factory=lambda: os.environ.get("MINDSDB__LOGIN", "mindsdb"))
+    mindsdb_password: str = Field(default_factory=lambda: os.environ.get("MINDSDB__PASSWORD", ""))
 
 
 def create_prefect_settings() -> None:

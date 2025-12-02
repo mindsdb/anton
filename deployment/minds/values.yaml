@@ -73,13 +73,13 @@ deployment:
     - name: LOG_LEVEL
       value: "DEBUG"
 
-    - name: REDIS_HOST
+    - name: REDIS__HOST
       value: "redis-master"
-    - name: REDIS_PORT
+    - name: REDIS__PORT
       value: "6379"
-    - name: REDIS_DB
+    - name: REDIS__DB
       value: "0"
-    - name: REDIS_CACHE_TTL
+    - name: REDIS__CACHE_TTL
       value: "3600"
 
     # ====================================
@@ -89,14 +89,14 @@ deployment:
       value: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
 
     # DB settings for sqlalchemy
-    - name: DATABASE_URI
+    - name: DATABASE__URI
       valueFrom:
         secretKeyRef:
           name: minds-db
           key: database_uri
 
     # OpenAI
-    - name: OPENAI_API_KEY
+    - name: OPENAI__API_KEY
       valueFrom:
         secretKeyRef:
           name: mindsdb-secrets
@@ -107,7 +107,7 @@ deployment:
 
   extraEnvs:
 
-    # Langfuse language chain tracing/debugging/auditing
+    # Langfuse (Variables used by langfuse-python library)
     - name: LANGFUSE_RELEASE
       value: "{{ .Values.global.image.tag }}"
 

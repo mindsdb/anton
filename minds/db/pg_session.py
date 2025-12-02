@@ -5,16 +5,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session as SQLModelSession
 
 from minds.common.logger import setup_logging
-from minds.common.vars import (
-    DATABASE_URI,
-    DB_MAX_OVERFLOW,
-    DB_POOL_PRE_PING,
-    DB_POOL_RECYCLE,
-    DB_POOL_SIZE,
-    DB_POOL_TIMEOUT,
-)
+from minds.common.settings.app_settings import get_app_settings
 
 logger = setup_logging()
+settings = get_app_settings()
 
 # Global cache for engines and session factories
 _engines = {}
@@ -30,6 +24,7 @@ def _create_engine(db_uri: str):
     Returns:
         SQLAlchemy engine instance
     """
+
     # Log connection string with a hidden password
     hidden_uri = db_uri.replace(":", ":*****@", 1) if "@" in db_uri else db_uri
     logger.debug(f"Creating PostgreSQL engine with: {hidden_uri}")
@@ -38,11 +33,11 @@ def _create_engine(db_uri: str):
         # Create a regular SQLAlchemy engine
         engine = create_engine(
             db_uri,
-            pool_size=DB_POOL_SIZE,
-            max_overflow=DB_MAX_OVERFLOW,
-            pool_timeout=DB_POOL_TIMEOUT,
-            pool_recycle=DB_POOL_RECYCLE,
-            pool_pre_ping=DB_POOL_PRE_PING,
+            pool_size=settings.database.pool_size,
+            max_overflow=settings.database.max_overflow,
+            pool_timeout=settings.database.pool_timeout,
+            pool_recycle=settings.database.pool_recycle,
+            pool_pre_ping=settings.database.pool_pre_ping,
         )
         # logger.info(f"PostgreSQL engine created successfully")
         return engine
@@ -87,7 +82,7 @@ def get_session_factory(engine):
     return _session_factories[engine_id]
 
 
-def get_session(db_uri: str = DATABASE_URI):
+def get_session(db_uri: str = None):
     """
     FastAPI dependency that provides a database session with automatic cleanup.
 
@@ -101,11 +96,14 @@ def get_session(db_uri: str = DATABASE_URI):
             pass
 
     Args:
-        db_uri: Database connection URI
+        db_uri: Database connection URI (defaults to settings value)
 
     Yields:
         SQLModelSession: Database session that will be automatically closed
     """
+    if db_uri is None:
+        db_uri = settings.database.uri
+
     engine = get_engine(db_uri=db_uri)
     session_factory = get_session_factory(engine)
 

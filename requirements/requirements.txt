@@ -7,7 +7,7 @@ pyodbc>=4.0.39
 openai==1.99.9
 redis==6.4.0
 httpx==0.28.1
-langfuse==3.3.0
+langfuse==3.10.3
 alembic==1.16.4
 sqlmodel==0.0.24
 SQLAlchemy==2.0.43
@@ -17,3 +17,5 @@ mindsdb_sdk==3.4.9
 pandas==2.3.1
 prefect==3.4.18
 async-property==0.2.2
+launchdarkly-server-sdk==9.13.1
+pydantic-settings==2.10.1
