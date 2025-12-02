@@ -1,5 +1,4 @@
 import traceback
-import uuid
 
 try:
     from langfuse import get_client
@@ -26,7 +25,7 @@ from minds.requests.context import Context, create_langfuse_context
 logger = setup_logging()
 
 
-def setup_langfuse_observation(context: Context) -> str:
+def setup_langfuse_observation(context: Context):
     """
     Set up Langfuse observation for the current request context.
     This function creates a Langfuse context from the provided request context,
@@ -37,18 +36,21 @@ def setup_langfuse_observation(context: Context) -> str:
     Returns:
             str: The trace ID for the current observation, or a default request ID if an error occurs.
     """
-    default_request_id = str(uuid.uuid4())
+    logger.debug(f"Setting up Langfuse observation for context: {context}")
 
     try:
         current_langfuse_context = create_langfuse_context(context)
+
+        tags_string = [str(item) for item in current_langfuse_context.tags]
+        metadata_dict = current_langfuse_context.metadata.model_dump()
 
         langfuse_client = get_client()
 
         # Create Langfuse context for tracing
         langfuse_client.update_current_trace(
-            user_id=current_langfuse_context.user_id,
-            metadata=current_langfuse_context.metadata,
-            tags=current_langfuse_context.tags,
+            user_id=str(context.user_id),
+            metadata=metadata_dict,
+            tags=tags_string,
         )
 
         trace_id = langfuse_client.get_current_trace_id()
@@ -56,13 +58,24 @@ def setup_langfuse_observation(context: Context) -> str:
 
         if trace_id:
             logger.debug(f"Created langfuse context with trace ID: {trace_id}")
-            return trace_id
         else:
             logger.error("Failed to retrieve trace ID from Langfuse context.")
-            return default_request_id
 
     except Exception as e:
         logger.error(f"Error updating Langfuse observation: {e}")
         logger.error(traceback.format_exc())
 
-        return default_request_id
+
+def get_langfuse_trace_id():
+    """
+    Get the trace ID for the current Langfuse observation.
+    Returns:
+            str: The trace ID for the current observation, or a default request ID if an error occurs.
+    """
+    try:
+        langfuse_client = get_client()
+        return langfuse_client.get_current_trace_id()
+    except Exception as e:
+        logger.error(f"Error getting Langfuse trace ID: {e}")
+        logger.error(traceback.format_exc())
+        return None

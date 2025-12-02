@@ -11,6 +11,7 @@ from minds.model.mind_datasource import DataCatalogStatus
 logger = setup_logging()
 settings = get_app_settings()
 
+
 class DataCatalogCache(ABC):
     """Base class for storing and retrieving data catalogs."""
 

@@ -1,4 +1,3 @@
-from langfuse import observe
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
 
@@ -26,6 +25,7 @@ class ChatCompletionsHandler:
         model: str,
         stream: bool,
         metadata: ChatCompletionRequestMetadata | None = None,
+        instrument: bool = True,
     ):
         """
         Initialize the ChatCompletionsHandler with a list of messages.
@@ -36,6 +36,7 @@ class ChatCompletionsHandler:
                 messages (List[Message]): List of messages to handle.
                 model (str): The model to use for chat completions.
                 stream (bool): Whether to stream the response.
+                instrument (bool): Whether to instrument the PydanticAIAgent.
         """
         self.session = session
         self.context = context
@@ -44,8 +45,8 @@ class ChatCompletionsHandler:
         self.model = model
         self.stream = stream
         self.metadata = metadata
+        self.instrument = instrument
 
-    @observe(name="Chat Completions Handler")
     async def chat_completions(self, streamer: MessageStreamer) -> str | None:
         """
         OpenAI compatible chat completions handler.
@@ -77,11 +78,15 @@ class ChatCompletionsHandler:
             )
             return None
 
+        enable_charting = self.metadata.enable_charting if self.metadata else False
+
         database_toolkit = DatabaseToolkit(mind=mind, mindsdb_client=self.mindsdb_client)
         database_agent = DatabaseAgent(
             mind=mind,
             database_toolkit=database_toolkit,
-            config=DatabaseAgentConfig(enable_charting=self.metadata.enable_charting) if self.metadata else None,
+            config=DatabaseAgentConfig(enable_charting=enable_charting, instrument=self.instrument),
         )
 
         await database_agent.run_completion(messages=self.messages, streamer=streamer, stream=self.stream)
+
+        return None

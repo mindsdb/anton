@@ -71,7 +71,7 @@ deployment:
 
   globalEnvs:
     - name: LOG_LEVEL
-      value: "DEBUG"
+      value: "INFO"
 
     - name: REDIS__HOST
       value: "redis-master"

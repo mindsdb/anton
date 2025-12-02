@@ -6,11 +6,11 @@ including both streaming and non-streaming responses.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from langfuse import observe
 from sqlmodel import Session
 from starlette.responses import JSONResponse
 
 from minds.client.mindsdb import create_mindsdb_client_from_request
+from minds.common.launch_darkly.disable_langfuse import is_langfuse_disabled
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.handlers.chat_completions_request_handler import (
@@ -18,7 +18,6 @@ from minds.handlers.chat_completions_request_handler import (
 )
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import extract_context_from_request
-from minds.requests.utils import setup_langfuse_observation
 
 # Set up logging
 logger = setup_logging()
@@ -55,7 +54,6 @@ async def options_handler():
 
 
 @router.post("/completions")
-@observe(name="Chat Completions v1", as_type="generation")
 async def chat_completions(
     chat_completions_request: ChatCompletionsRequest,
     request: Request,
@@ -82,24 +80,31 @@ async def chat_completions(
         HTTPException: 500 if there's an error processing the request.
     """
     # Extract user context from request
-    context = extract_context_from_request(request)
+    context = extract_context_from_request(request=request)
     logger.debug(f"🔄 Context: {context.model_dump()}")
 
-    # Set up Langfuse observation
-    request_id = setup_langfuse_observation(context=context)
+    langfuse_disabled = is_langfuse_disabled(context=context)
+    logger.debug(f"🔄 [{context.request_id}] Langfuse is disabled: {langfuse_disabled}")
 
     try:
-        logger.debug(f"🔄 [{request_id}] Starting chat completions v1")
+        logger.debug(f"🔄 [{context.request_id}] Starting chat completions v1")
 
-        response = await chat_completions_request_handler(
-            request_id=request_id,
+        if langfuse_disabled:
+            handler = chat_completions_request_handler.__wrapped__
+            instrument = False
+        else:
+            handler = chat_completions_request_handler
+            instrument = True
+
+        response = await handler(
             context=context,
             session=session,
             mindsdb_client=mindsdb_client,
             chat_completions_request=chat_completions_request,
+            instrument=instrument,
         )
 
         return response
     except Exception as e:
-        logger.error(f"❌ [{request_id}] Error processing chat completions request: {str(e)}", exc_info=True)
+        logger.error(f"❌ [{context.request_id}] Error processing chat completions request: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e

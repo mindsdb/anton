@@ -19,7 +19,6 @@ class OpenAIClient:
 
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.api_url)
 
-    @observe(name="Chat Completions - OpenAI", as_type="generation")
     async def chat_completions(
         self,
         messages: list[Message],

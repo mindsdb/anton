@@ -5,7 +5,7 @@ from uuid import UUID
 import pytest
 
 from minds.requests.context import Context, LangfuseContext, LangfuseContextMetadata
-from minds.requests.utils import setup_langfuse_observation
+from minds.requests.langfuse_tracing import setup_langfuse_observation
 
 
 @pytest.fixture()
