@@ -48,14 +48,14 @@ Create a `.env` file in the root directory with your configuration:
 
 ```env
 # Database Configuration
-DATABASE_URI=postgresql://minds:minds@localhost:35432/minds
-DB_POOL_SIZE=20
-DB_MAX_OVERFLOW=20
-DB_POOL_TIMEOUT=300
-DB_POOL_RECYCLE=300
-DB_POOL_PRE_PING=true
-DB_QUERY_TIMEOUT=300
-DB_STATEMENT_TIMEOUT=300000
+DATABASE__URI=postgresql://minds:minds@localhost:35432/minds
+DATABASE__POOL_SIZE=20
+DATABASE__MAX_OVERFLOW=20
+DATABASE__POOL_TIMEOUT=300
+DATABASE__POOL_RECYCLE=300
+DATABASE__POOL_PRE_PING=true
+DATABASE__QUERY_TIMEOUT=300
+DATABASE__STATEMENT_TIMEOUT=300000
 
 # Docker Compose Database URIs (for containerized deployment)
 MINDS_DB_URI_DOCKER=postgresql://minds:minds@postgres:5432/minds
@@ -74,13 +74,13 @@ MIND_PORT=9010
 LANGFUSE_PORT=3001
 
 # OpenAI Configuration
-OPENAI_API_URL=https://api.openai.com/v1
-OPENAI_API_KEY=your-api-key-here
-OPENAI_MODEL_NAME=gpt-4o
-OPENAI_MAX_TOKENS=400000
+OPENAI__API_URL=https://api.openai.com/v1
+OPENAI__API_KEY=your-api-key-here
+OPENAI__MODEL_NAME=gpt-4o
+OPENAI__MAX_TOKENS=400000
 
 # MindsDB Configuration
-MINDSDB_URL=https://cloud.mindsdb.com
+MINDSDB__URL=https://cloud.mindsdb.com
 
 # Logging Configuration
 LOG_LEVEL=INFO
@@ -133,9 +133,9 @@ If you prefer to use an external PostgreSQL instance:
    GRANT ALL PRIVILEGES ON DATABASE minds TO minds;
    ```
 
-2. **Set the DATABASE_URI environment variable:**
+2. **Set the DATABASE__URI environment variable:**
    ```bash
-   export DATABASE_URI="postgresql://minds:minds@localhost:5432/minds"
+   export DATABASE__URI="postgresql://minds:minds@localhost:5432/minds"
    ```
 
 3. **Run migrations:**
@@ -530,6 +530,124 @@ The service includes comprehensive logging with:
 - Error tracking and stack traces
 - Optional file-based logging with rotation
 - Langfuse integration for distributed tracing
+
+## Feature Flags
+
+The service uses LaunchDarkly for feature flag management, enabling dynamic feature control without code deployments. Feature flags allow you to enable or disable features for specific users, environments, or contexts in real-time.
+
+### LaunchDarkly Integration
+
+The application integrates with LaunchDarkly to manage feature flags across different environments. Feature flags are configured through the [LaunchDarkly dashboard](https://app.launchdarkly.com/projects/default/flags/disable-langfuse/targeting) and evaluated at runtime based on user context.
+
+### Configuration
+
+Configure LaunchDarkly in your `.env` file:
+
+```env
+# LaunchDarkly Configuration
+LAUNCHDARKLY__SDK_KEY=your-sdk-key-here
+LAUNCHDARKLY__OFFLINE_MODE=false
+```
+
+**Configuration Options:**
+
+- `LAUNCHDARKLY__SDK_KEY`: Your LaunchDarkly SDK key for the environment
+- `LAUNCHDARKLY__OFFLINE_MODE`: Set to `true` for local development without LaunchDarkly connectivity (uses default values)
+
+### Available Feature Flags
+
+#### disable-langfuse
+
+Controls whether Langfuse observability tracing is enabled for specific users or environments.
+
+**Configuration:**
+
+```env
+# Feature Flag Configuration
+FEATURE_FLAG_DISABLE_LANGFUSE__NAME=disable-langfuse
+FEATURE_FLAG_DISABLE_LANGFUSE__DEFAULT_VALUE=false
+```
+
+**Usage:**
+
+The flag is evaluated on each chat completion request based on the user's email:
+
+```python
+from minds.common.launch_darkly.disable_langfuse import is_langfuse_disabled
+
+# Check if Langfuse should be disabled for this user
+langfuse_disabled = is_langfuse_disabled(context=context)
+
+if langfuse_disabled:
+    # Use non-instrumented handler
+    handler = chat_completions_request_handler.__wrapped__
+else:
+    # Use instrumented handler with Langfuse tracing
+    handler = chat_completions_request_handler
+```
+
+**Management:**
+
+Feature flags are managed through the LaunchDarkly dashboard, where you can:
+- Enable/disable flags per environment (dev, staging, production, etc.)
+- Target specific users by email
+- Create percentage rollouts
+- Set up rules based on custom attributes
+- Monitor flag usage and changes
+
+Access the LaunchDarkly dashboard: [https://app.launchdarkly.com/projects/default/flags/disable-langfuse/targeting](https://app.launchdarkly.com/projects/default/flags/disable-langfuse/targeting)
+
+### Adding New Feature Flags
+
+To add a new feature flag:
+
+1. **Create the flag in LaunchDarkly dashboard** with appropriate targeting rules
+
+2. **Add configuration to `app_settings.py`:**
+
+```python
+class AppSettings(Settings):
+    feature_flag_your_feature: FeatureFlagSettings = Field(
+        default=FeatureFlagSettings(name="your-feature-name", default_value=False)
+    )
+```
+
+3. **Create a helper function** in `minds/common/launch_darkly/`:
+
+```python
+from minds.common.launch_darkly import ldclient
+from minds.requests.context import Context
+
+def is_your_feature_enabled(context: Context) -> bool:
+    """Check if your feature is enabled."""
+    settings = get_app_settings()
+    
+    ld_context = (
+        ldclient.Context.builder(str(context.user_email))
+        .kind("user")
+        .name(context.user_email)
+        .set("email", context.user_email)
+        .build()
+    )
+    
+    return ldclient.get().variation(
+        settings.feature_flag_your_feature.name,
+        ld_context,
+        settings.feature_flag_your_feature.default_value
+    )
+```
+
+4. **Use the flag** in your code to conditionally enable/disable features
+
+### Local Development
+
+For local development without LaunchDarkly connectivity:
+
+```env
+LAUNCHDARKLY__OFFLINE_MODE=true
+```
+
+When offline mode is enabled, all feature flags will use their configured default values.
 
 ## Contributing
 
