@@ -76,7 +76,7 @@ def api_client():
 # Polling function
 # ----------------------------------
 IN_PROGRESS_STATUSES = ["PENDING", "LOADING"]
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", 10))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 60))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 2))
 
 
