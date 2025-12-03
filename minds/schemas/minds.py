@@ -17,7 +17,7 @@ class DatasourceConfig(BaseModel):
 
     name: str = Field(..., description="Name of the datasource")
     tables: list[str] | None = Field(None, description="Specific tables to use (None = all tables)")
-    status: DetailedDataCatalogStatus = Field(
+    status: DetailedDataCatalogStatus | None = Field(
         default_factory=lambda: DetailedDataCatalogStatus(
             tasks=[], progress=0.0, overall_status=DataCatalogStatus.PENDING
         ),
