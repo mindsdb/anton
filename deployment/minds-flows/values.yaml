@@ -9,7 +9,7 @@ globalEnvsAlias: &globalEnvsYamlAlias
       value: "INFO"
       
     - name: IMAGE_TAG
-      value: "latest"
+      value: "{{ .Values.global.image.tag }}"
 
     # ====================================
     # PREFECT SETTINGS (for ETL flows)

@@ -52,5 +52,5 @@ deployment:
     # DATA CATALOG SETTINGS
     # ====================================
 
-    - name: DATA_CATALOG_JOB_DEPLOYMENT_NAME
+    - name: DATA_CATALOG__JOB_DEPLOYMENT_NAME
       value: "alpha-dev--data-catalog-loader"
