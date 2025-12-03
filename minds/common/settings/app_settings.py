@@ -123,8 +123,7 @@ class AppSettings(Settings):
     minds: MindsSettings = Field(default_factory=MindsSettings)  # MINDS__*
     auth: AuthSettings = Field(default_factory=AuthSettings)  # AUTH__*
     redis: RedisSettings = Field(default_factory=RedisSettings)  # REDIS__*
-    
-    
+
     launchdarkly: LaunchDarklySettings = Field(default_factory=LaunchDarklySettings)  # LAUNCHDARKLY__*
     feature_flag_disable_langfuse: FeatureFlagSettings = Field(
         default=FeatureFlagSettings(name="disable-langfuse", default_value=False)
