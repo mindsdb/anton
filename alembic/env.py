@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, pool
 from sqlmodel import SQLModel
 
 from alembic import context
-from minds.common.vars import DATABASE_URI
+from minds.common.settings.app_settings import get_app_settings
 
 # Import all models so they are registered with SQLModel.metadata
 from minds.model.mind import Mind  # noqa: F401
@@ -43,7 +43,8 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url", DATABASE_URI)
+    database_uri = get_app_settings().database.uri
+    url = database_uri or config.get_main_option("sqlalchemy.url", database_uri)
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -64,7 +65,8 @@ def run_migrations_online() -> None:
 
     """
     # Use the PostgreSQL URI directly, falling back to config if needed
-    url = DATABASE_URI or config.get_main_option("sqlalchemy.url", DATABASE_URI)
+    database_uri = get_app_settings().database.uri
+    url = database_uri or config.get_main_option("sqlalchemy.url", database_uri)
     connectable = create_engine(url, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:

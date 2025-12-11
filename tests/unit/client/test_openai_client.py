@@ -3,12 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from minds.client.openai_client import OpenAIClient
-from minds.common.vars import (
-    OPENAI_API_KEY,
-    OPENAI_API_URL,
-    OPENAI_MAX_TOKENS,
-    OPENAI_MODEL_NAME,
-)
+from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.chat import Message, Role
 
 
@@ -22,11 +17,12 @@ def sample_messages():
 
 @pytest.fixture
 def client():
+    settings = get_app_settings()
     return OpenAIClient(
-        api_url=OPENAI_API_URL,
-        api_key=OPENAI_API_KEY,
-        chat_completions_model=OPENAI_MODEL_NAME,
-        max_tokens=OPENAI_MAX_TOKENS,
+        api_url=settings.openai.api_url,
+        api_key=settings.openai.api_key,
+        chat_completions_model=settings.openai.model_name,
+        max_tokens=settings.openai.max_tokens,
     )
 
 
@@ -48,8 +44,9 @@ class TestOpenAIClient:
             async for content in client.chat_completions(messages=sample_messages, stream=False):
                 results.append(content)
 
+            settings = get_app_settings()
             mock_create.assert_awaited_once_with(
-                model=OPENAI_MODEL_NAME,
+                model=settings.openai.model_name,
                 messages=sample_messages,
                 stream=False,
                 temperature=None,

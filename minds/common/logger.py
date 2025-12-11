@@ -92,7 +92,7 @@ def setup_file_logging(log_dir: str = "logs", max_bytes: int = 10485760, backup_
 
     # All logs file
     all_logs_handler = logging.handlers.RotatingFileHandler(
-        log_path / "cw_summary.log", maxBytes=max_bytes, backupCount=backup_count
+        log_path / "minds.log", maxBytes=max_bytes, backupCount=backup_count
     )
     all_logs_handler.setFormatter(
         logging.Formatter(

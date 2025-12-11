@@ -8,3 +8,11 @@ job:
 
     - name: ENV
       value: "dev"
+
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+    
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "dev"
+

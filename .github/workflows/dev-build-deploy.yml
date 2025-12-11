@@ -74,7 +74,7 @@ jobs:
       group: deploy-${{ matrix.deploy-env }}
       cancel-in-progress: false
     env:
-      DATABASE_URI: ${{ secrets.MINDS_DB_URI }}
+      DATABASE__URI: ${{ secrets.MINDS_DB_URI }}
       UV_LINK_MODE: "symlink"
     steps:
       - uses: actions/checkout@v4
@@ -114,16 +114,6 @@ jobs:
           repository: mindsdb/github-actions
           path: github-actions
       - uses: ./github-actions/setup-env
-      - name: Update IMAGE_TAG in values.yaml
-        run: |
-          # Install yq if not available
-          if ! command -v yq &> /dev/null; then
-            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-            sudo chmod +x /usr/local/bin/yq
-          fi
-          # Update IMAGE_TAG environment variable value
-          yq -i '(.globalEnvsAlias.globalEnvs[] | select(.name == "IMAGE_TAG") | .value) = "development-${{ env.SLUG }}"' deployment/minds-flows/values.yaml
-          cat deployment/minds-flows/values.yaml
       - name: Notify of deployment starting
         id: slack
         uses: ./github-actions/slack-deploy-msg

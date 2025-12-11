@@ -7,6 +7,7 @@ from minds.common.logger import setup_logging
 from minds.handlers.chat_completions_handler import ChatCompletionsHandler
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import Context
+from minds.requests.langfuse_tracing import get_langfuse_trace_id, setup_langfuse_observation
 from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
@@ -16,13 +17,13 @@ from minds.requests.stream import (
 logger = setup_logging()
 
 
-@observe(name="Chat Completions Request")
+@observe(name="Chat Completions Handler v1", as_type="generation")
 async def chat_completions_request_handler(
-    request_id: str,
     session: Session,
     context: Context,
     mindsdb_client: Server,
     chat_completions_request: ChatCompletionsRequest,
+    instrument: bool = True,
 ) -> StreamingResponse | JSONResponse:
     """
     Handle chat completions requests.
@@ -32,10 +33,15 @@ async def chat_completions_request_handler(
             session (Session): The SQLAlchemy session for database operations.
             mindsdb_client (Server): The MindsDB client for database operations.
             chat_completions_request (ChatCompletionsRequest): The request object containing chat completion parameters.
+            instrument (bool): Whether to instrument the PydanticAIAgent.
     Returns:
             Union[StreamingResponse, JSONResponse]: A streaming response if the request is for streaming,
                 otherwise a JSON response.
     """
+
+    # Set up Langfuse observation
+    setup_langfuse_observation(context=context)
+    request_id = get_langfuse_trace_id() or str(context.request_id)
 
     logger.debug(f"🔄[{request_id}] Chat Completion Request: {chat_completions_request.model_dump()}")
 
@@ -59,6 +65,7 @@ async def chat_completions_request_handler(
         model=model,
         stream=stream,
         metadata=metadata,
+        instrument=instrument,
     )
 
     if stream:
@@ -67,7 +74,6 @@ async def chat_completions_request_handler(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
-            trace_name="Chat Completions",
         )
     else:
         logger.debug(f"🔄[{request_id}] Chat completions request is non-streaming.")

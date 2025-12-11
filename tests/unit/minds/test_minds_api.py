@@ -22,6 +22,7 @@ from minds.api.v1.endpoints.minds import (
     list_minds,
     update_mind,
 )
+from minds.model.mind_datasource import DataCatalogStatus, DetailedDataCatalogStatus
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
 from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
@@ -69,7 +70,11 @@ class TestMindsAPI:
             provider="openai",
             parameters={"temperature": 0.7},
             datasources=[
-                DatasourceConfig(name="test-datasource", tables=["test-table"]),
+                DatasourceConfig(
+                    name="test-datasource",
+                    tables=["test-table"],
+                    status=DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.PENDING),
+                ),
             ],
             created_at="2024-01-01T00:00:00Z",
             modified_at="2024-01-01T00:00:00Z",
@@ -83,7 +88,13 @@ class TestMindsAPI:
             "provider": "openai",
             "model_name": "gpt-4o",
             "parameters": {"temperature": 0.8},
-            "datasources": [DatasourceConfig(name="datasource1", tables=["table1"])],
+            "datasources": [
+                DatasourceConfig(
+                    name="datasource1",
+                    tables=["table1"],
+                    status=DetailedDataCatalogStatus(tasks=[], progress=0.0, overall_status=DataCatalogStatus.PENDING),
+                )
+            ],
         }
 
     @pytest.fixture

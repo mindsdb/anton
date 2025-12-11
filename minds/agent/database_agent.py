@@ -16,8 +16,6 @@ from minds.schemas.chat import Message, Role
 
 logger = setup_logging()
 
-PydanticAIAgent.instrument_all()
-
 
 @dataclass
 class DatabaseDeps:
@@ -33,6 +31,7 @@ class DatabaseAgentConfig:
     """Config for the database agent."""
 
     enable_charting: bool = False
+    instrument: bool = True
 
 
 class DatabaseAgent:
@@ -55,9 +54,14 @@ class DatabaseAgent:
             database_toolkit: DatabaseToolkit instance for executing database operations.
             config: Config for the database agent.
         """
+
         self.mind = mind
         self.deps = DatabaseDeps(toolkit=database_toolkit)
+        if not config:
+            config = DatabaseAgentConfig()
         self.config = config
+
+        PydanticAIAgent.instrument_all(instrument=self.config.instrument)
 
         self._pydantic_agent = self._setup_agent()
 

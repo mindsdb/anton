@@ -8,3 +8,10 @@ job:
 
     - name: ENV
       value: "prod"
+
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+    
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "prod"

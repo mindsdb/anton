@@ -4,11 +4,12 @@ from mindsdb_sdk.server import Server
 
 from minds.common import get_authorization_bearer_token, get_headers_for_mindsdb_client
 from minds.common.logger import setup_logging
-from minds.common.vars import MINDSDB_LOGIN, MINDSDB_PASSWORD, MINDSDB_URL
+from minds.common.settings.app_settings import get_app_settings
 from minds.requests.context import Context
 
 # Set up logging
 logger = setup_logging()
+settings = get_app_settings()
 
 
 def create_mindsdb_client_from_request(request: Request, context: Context) -> Server:
@@ -38,15 +39,15 @@ def create_mindsdb_client(api_key: str | None, headers: dict | None) -> Server:
     # If no API key is provided, try connecting without authentication
     if api_key is None or not api_key or not api_key.strip():
         # For MindsDB without authentication, don't pass login/password at all
-        if not MINDSDB_PASSWORD:
-            logger.debug(f"Creating MindsDB client without authentication with URL: {MINDSDB_URL}")
-            return connect(url=MINDSDB_URL, headers=headers)
+        if not settings.mindsdb.password:
+            logger.debug(f"Creating MindsDB client without authentication with URL: {settings.mindsdb.url}")
+            return connect(url=settings.mindsdb.url, headers=headers)
         else:
-            logger.debug(f"Creating MindsDB client with authentication with URL: {MINDSDB_URL}")
+            logger.debug(f"Creating MindsDB client with authentication with URL: {settings.mindsdb.url}")
             return connect(
-                url=MINDSDB_URL,
-                login=MINDSDB_LOGIN,
-                password=MINDSDB_PASSWORD,
+                url=settings.mindsdb.url,
+                login=settings.mindsdb.login,
+                password=settings.mindsdb.password,
                 headers=headers,
             )
 
@@ -54,7 +55,7 @@ def create_mindsdb_client(api_key: str | None, headers: dict | None) -> Server:
         raise ValueError("API key must be a string")
 
     return connect(
-        url=MINDSDB_URL,
+        url=settings.mindsdb.url,
         api_key=api_key,
         headers=headers,
     )

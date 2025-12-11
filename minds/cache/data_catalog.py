@@ -3,12 +3,13 @@ from collections import OrderedDict
 from datetime import datetime
 
 from minds.common.logger import setup_logging
-from minds.common.vars import DATA_CATALOG_CACHE_MAX_SIZE, DATA_CATALOG_CACHE_TYPE
+from minds.common.settings.app_settings import get_app_settings
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus
 
 logger = setup_logging()
+settings = get_app_settings()
 
 
 class DataCatalogCache(ABC):
@@ -187,7 +188,7 @@ class DataCatalogCacheFactory:
     @staticmethod
     def create_cache() -> DataCatalogCache:
         """Create a DataCatalogCache instance based on the cache type."""
-        if DATA_CATALOG_CACHE_TYPE == "in_memory":
-            return DataCatalogInMemoryCache(max_size=DATA_CATALOG_CACHE_MAX_SIZE)
+        if settings.data_catalog.cache_type == "in_memory":
+            return DataCatalogInMemoryCache(max_size=settings.data_catalog.cache_max_size)
         else:
-            raise ValueError(f"Unknown cache type '{DATA_CATALOG_CACHE_TYPE}'")
+            raise ValueError(f"Unknown cache type '{settings.data_catalog.cache_type}'")

@@ -8,3 +8,10 @@ job:
 
     - name: ENV
       value: "alpha-dev"
+
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+    
+    - name: LANGFUSE_TRACING_ENVIRONMENT
+      value: "alpha-dev"

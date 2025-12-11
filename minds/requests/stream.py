@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
-from langfuse import get_client, observe
+from langfuse import get_client
 from pydantic import BaseModel
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -122,7 +122,7 @@ async def format_messages_for_streaming(
         last_message_id = msg.id
         async_index += 1
         # Yield immediately (no peek)
-        yield f"data: {chunk.model_dump_json()}\n\n"
+        yield f"event: completion\ndata: {chunk.model_dump_json()}\n\n"
 
     # After the producer finished, emit a final small chunk marking completion
     # with finish_reason="stop".
@@ -138,14 +138,12 @@ async def format_messages_for_streaming(
                 )
             ],
         )
-        yield f"data: {final_chunk.model_dump_json()}\n\n"
+        yield f"event: completion\ndata: {final_chunk.model_dump_json()}\n\n"
 
 
-@observe(name="Process Streaming Producer")
 async def process_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
-    trace_name: str,
     model: str,
 ) -> StreamingResponse:
     """
@@ -169,11 +167,9 @@ async def process_streaming_producer(
     logger.debug(f"Trace ID - Streaming Producer: {trace_id}")
     logger.debug(f"Observation ID - Streaming Producer: {observation_id}")
 
-    @observe()
     async def stream():
         streamer = Streamer(request_id=request_id)
 
-        @observe(name=trace_name)
         async def run_producer():
             try:
                 await producer(streamer)
@@ -181,12 +177,7 @@ async def process_streaming_producer(
                 # Ensure the sentinel is always sent so the consumer loop terminates
                 await streamer.close()
 
-        task = asyncio.create_task(
-            run_producer(
-                langfuse_trace_id=trace_id,
-                langfuse_parent_observation_id=observation_id,
-            )
-        )
+        task = asyncio.create_task(run_producer())
         async for message in streamer:
             logger.debug(f"Message: {message}")
             yield message
@@ -194,10 +185,7 @@ async def process_streaming_producer(
 
     return StreamingResponse(
         format_messages_for_streaming(
-            message_generator=stream(
-                langfuse_trace_id=trace_id,
-                langfuse_parent_observation_id=observation_id,
-            ),
+            message_generator=stream(),
             model=model,
         ),
         media_type="text/event-stream",
@@ -242,7 +230,6 @@ async def _build_json_response_from_messages(messages: list[StreamMessage], mode
     return JSONResponse(response.model_dump())
 
 
-@observe(name="Process Non-Streaming Producer", as_type="generation")
 async def process_non_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,

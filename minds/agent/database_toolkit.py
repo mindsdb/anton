@@ -16,11 +16,7 @@ from minds.agent.prompt_templates import (
 )
 from minds.cache import data_catalog_cache
 from minds.common.logger import setup_logging
-from minds.common.vars import (
-    MAX_COLUMN_WIDTH,
-    MAX_DISPLAY_ROWS,
-    MAX_SQL_RETRIES,
-)
+from minds.common.settings.app_settings import get_app_settings
 from minds.model.data_catalog import DataCatalog
 from minds.model.database_agent import QueryGenerationResult, QueryGenerationResultRetry, QueryPlanResult
 from minds.model.mind import Mind
@@ -28,6 +24,7 @@ from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Role
 
 logger = setup_logging()
+settings = get_app_settings()
 
 
 class DatabaseToolkit:
@@ -60,8 +57,8 @@ class DatabaseToolkit:
         last_query = ""
 
         await streamer.push(role=Role.system, content="I will now generate the SQL query to answer your question.")
-        for attempt in range(MAX_SQL_RETRIES):
-            logger.info(f"Attempt {attempt + 1} of {MAX_SQL_RETRIES}")
+        for attempt in range(settings.minds.max_sql_retries):
+            logger.info(f"Attempt {attempt + 1} of {settings.minds.max_sql_retries}")
 
             try:
                 query = None
@@ -69,7 +66,7 @@ class DatabaseToolkit:
                 if attempt == 0:
                     query = await self.generate_sql(conversation_context)
                 # Middle attempts: use correction with error context
-                elif attempt < MAX_SQL_RETRIES - 1:
+                elif attempt < settings.minds.max_sql_retries - 1:
                     query = await self._generate_corrected_sql(conversation_context, last_query, str(last_error))
                 # Final attempt: generate corrected SQL from scratch without error context
                 else:
@@ -89,11 +86,11 @@ class DatabaseToolkit:
             except Exception as e:
                 last_error = e
 
-                if attempt == MAX_SQL_RETRIES - 1:
+                if attempt == settings.minds.max_sql_retries - 1:
                     # Final attempt failed
                     return (
                         f"Sorry, I'm having an issue querying the data I need. "
-                        f"Tried {MAX_SQL_RETRIES} times. Final error: {str(e)}"
+                        f"Tried {settings.minds.max_sql_retries} times. Final error: {str(e)}"
                     )
 
                 logger.info(f"SQL attempt {attempt + 1} failed, retrying: {str(e)}")
@@ -380,14 +377,14 @@ class DatabaseToolkit:
 
             # Truncate large DataFrames and format nicely
             # Use constants for max rows and column width
-            max_rows = min(MAX_DISPLAY_ROWS, row_count)
+            max_rows = min(settings.minds.max_display_rows, row_count)
 
             # Format the DataFrame with truncation options
             table_str = df.to_string(
                 index=False,  # Don't show row indices
                 max_rows=max_rows,  # Limit number of rows
                 max_cols=None,  # Show all columns
-                max_colwidth=MAX_COLUMN_WIDTH,  # Truncate wide column values
+                max_colwidth=settings.minds.max_column_width,  # Truncate wide column values
                 justify="left",  # Left align text
                 na_rep="NULL",  # Show NULL values clearly
             )

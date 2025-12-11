@@ -14,11 +14,12 @@ from prefect.exceptions import PrefectException
 from sqlmodel import Session
 
 from minds.common.logger import setup_logging
-from minds.common.vars import DATA_CATALOG_EXECUTION_MODE, DATA_CATALOG_JOB_DEPLOYMENT_NAME, DATA_CATALOG_JOB_NAME
+from minds.common.settings.app_settings import get_app_settings
 from minds.jobs.data_catalog_loader_flow import load_data_catalog
 from minds.model.mind_datasource import MindDatasource
 
 logger = setup_logging()
+settings = get_app_settings()
 
 
 class DataCatalogExecutionMode(str, Enum):
@@ -48,13 +49,14 @@ class DataCatalogLoader:
             mind_datasource (MindDatasource): The mind-datasource relationship to load the catalog for.
             table_names (list[str] | None): Optional list of table names to filter by. If None, load all tables.
         """
-        if DATA_CATALOG_EXECUTION_MODE not in [mode.value for mode in DataCatalogExecutionMode]:
-            raise ValueError(f"Invalid data catalog execution mode: {DATA_CATALOG_EXECUTION_MODE}")
 
-        logger.debug(f"Running the data catalog loader flow in {DATA_CATALOG_EXECUTION_MODE} mode")
-        if DataCatalogExecutionMode.ASYNC.value == DATA_CATALOG_EXECUTION_MODE:
+        if settings.data_catalog.execution_mode not in [mode.value for mode in DataCatalogExecutionMode]:
+            raise ValueError(f"Invalid data catalog execution mode: {settings.data_catalog.execution_mode}")
+
+        logger.debug(f"Running the data catalog loader flow in {settings.data_catalog.execution_mode} mode")
+        if DataCatalogExecutionMode.ASYNC.value == settings.data_catalog.execution_mode:
             flow_run = await run_deployment(
-                name=f"{DATA_CATALOG_JOB_NAME}/{DATA_CATALOG_JOB_DEPLOYMENT_NAME}",
+                name=f"{settings.data_catalog.job_name}/{settings.data_catalog.job_deployment_name}",
                 parameters={
                     "mind_datasource_id": mind_datasource.id,
                     "tenant_id": self.tenant_id,
