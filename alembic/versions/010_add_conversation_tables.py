@@ -36,9 +36,10 @@ def upgrade() -> None:
 
     role_enum = postgresql.ENUM(
         *[e.value for e in Role],
-        name='message_role'
+        name='message_role',
+        create_type=False,
     )
-    role_enum.create(op.get_bind())
+    role_enum.create(op.get_bind(), checkfirst=True)
 
     op.create_table('messages',
         sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text('gen_random_uuid()'), nullable=False),
@@ -98,21 +99,23 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
+
     # Drop triggers
-    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_messages ON messages;')
-    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_conversations ON conversations;')
+    op.execute("DROP TRIGGER IF EXISTS trigger_soft_delete_messages ON conversations;")
+    op.execute("DROP TRIGGER IF EXISTS update_messages_modified_at ON messages;")
+    op.execute("DROP TRIGGER IF EXISTS update_conversations_modified_at ON conversations;")
 
     # Drop functions
-    op.execute('DROP FUNCTION IF EXISTS soft_delete_messages();')
-    op.execute('DROP FUNCTION IF EXISTS soft_delete_conversations();')
+    op.execute("DROP FUNCTION IF EXISTS soft_delete_messages();")
 
     # Drop indexes
-    op.drop_index('ix_messages_conversation_id', 'messages')
-    op.drop_index('ix_conversations_user_id', 'conversations')
+    op.drop_index("ix_messages_conversation_id", table_name="messages")
+    op.drop_index("ix_conversations_user_id", table_name="conversations")
 
     # Drop tables
-    op.drop_table('messages')
-    op.drop_table('conversations')
+    op.drop_table("messages")
+    op.drop_table("conversations")
 
-    # Drop enum
-    op.execute('DROP TYPE IF EXISTS message_role;')
+    # Drop enum type
+    role_enum = postgresql.ENUM(name="message_role")
+    role_enum.drop(op.get_bind(), checkfirst=True)
