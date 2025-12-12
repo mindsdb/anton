@@ -15,4 +15,4 @@ class Conversation(BaseSQLModel, table=True):
     user_id: UUID = Field(description="ID of the user who owns this mind", index=True)
     topic: str = Field(description="Topic of the conversation", max_length=255)
 
-    messages: list["Message"] = Relationship(back_populates="conversation")
+    messages: list["Message"] = Relationship()
