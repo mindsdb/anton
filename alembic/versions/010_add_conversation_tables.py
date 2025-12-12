@@ -45,7 +45,7 @@ def upgrade() -> None:
         sa.Column('tenant_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('conversation_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('role', role_enum, nullable=False),
-        sa.Column('content', sa.JSONB(), nullable=False),
+        sa.Column('content', postgresql.JSONB(), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=True, server_default=sa.text('now()')),
         sa.Column('modified_at', sa.DateTime(timezone=True), nullable=True, server_default=sa.text('now()')),
         sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
