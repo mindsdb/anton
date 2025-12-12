@@ -98,4 +98,21 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
-    pass
+    # Drop triggers
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_messages ON messages;')
+    op.execute('DROP TRIGGER IF EXISTS trigger_soft_delete_conversations ON conversations;')
+
+    # Drop functions
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_messages();')
+    op.execute('DROP FUNCTION IF EXISTS soft_delete_conversations();')
+
+    # Drop indexes
+    op.drop_index('ix_messages_conversation_id', 'messages')
+    op.drop_index('ix_conversations_user_id', 'conversations')
+
+    # Drop tables
+    op.drop_table('messages')
+    op.drop_table('conversations')
+
+    # Drop enum
+    op.execute('DROP TYPE IF EXISTS message_role;')
