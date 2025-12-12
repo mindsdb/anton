@@ -112,6 +112,10 @@ class DatabaseAgent:
             direction that provides the most actionable insights, unless otherwise specified.
         """).strip()
 
+        # Add Mind-specific system prompt if available
+        if self.mind.parameters.get("system_prompt"):
+            prompt += "\n\n" + self.mind.parameters.get("system_prompt")
+
         # Add charting instructions if enabled
         if self.config and getattr(self.config, "enable_charting", False):
             prompt += "\n\n" + CHART_GENERATION_INSTRUCTIONS
