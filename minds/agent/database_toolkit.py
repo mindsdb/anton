@@ -181,7 +181,9 @@ class DatabaseToolkit:
             context=catalog_context, conversation_context=conversation_context
         )
         if self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template"):
-            planning_prompt += "\n" + (self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template"))
+            planning_prompt += "\n" + (
+                self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template")
+            )
 
         planning_agent = PydanticAIAgent(
             model=llm_config,
@@ -253,7 +255,9 @@ class DatabaseToolkit:
             error_message=error_message,
         )
         if self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template"):
-            retry_prompt += "\n" + (self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template"))
+            retry_prompt += "\n" + (
+                self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template")
+            )
 
         # Log the retry prompt
         logger.info(f"Retry prompt for SQL correction ({len(retry_prompt)} chars):")
@@ -334,7 +338,9 @@ class DatabaseToolkit:
         generation_prompt = prompt_template.format(context=catalog_context)
 
         if self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template"):
-            generation_prompt += "\n" + (self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template"))
+            generation_prompt += "\n" + (
+                self.mind.parameters.get("system_prompt") or self.mind.parameters.get("prompt_template")
+            )
 
         # Log the final system prompt being sent to the LLM
         logger.info(f"Final system prompt for SQL generation ({len(generation_prompt)} chars):")
