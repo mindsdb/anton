@@ -10,8 +10,7 @@ from sqlmodel import Session, and_, func, select
 from minds.common.logger import setup_logging
 from minds.model.conversation import Conversation
 from minds.model.message import Message
-from minds.schemas.conversations import ConversationCreateRequest, ConversationDetailedResponse, ConversationResponse
-from minds.schemas.messages import MessageResponse
+from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 
 logger = setup_logging()
 
@@ -123,16 +122,15 @@ class ConversationsService:
             logger.error(f"Error listing conversations for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to list conversations: {str(e)}") from None
 
-    async def get_conversation(self, conversation_id: UUID, with_messages: bool = False) -> ConversationResponse | ConversationDetailedResponse:
+    async def get_conversation(self, conversation_id: UUID) -> ConversationResponse:
         """
         Get a conversation by ID.
 
         Args:
             conversation_id: ID of the conversation to get.
-            with_messages: Whether to include messages in the conversation.
 
         Returns:
-            ConversationResponse | ConversationDetailedResponse: Conversation.
+            ConversationResponse: Conversation.
 
         Raises:
             ConversationNotFoundError: If conversation with the given ID does not exist.
@@ -145,10 +143,7 @@ class ConversationsService:
             if not conversation:
                 raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
 
-            if with_messages:
-                return await self._conversation_to_detailed_response(conversation)
-            else:
-                return await self._conversation_to_response(conversation)
+            return await self._conversation_to_response(conversation)
         except Exception as e:
             logger.error(f"Error getting conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to get conversation: {str(e)}") from None
@@ -167,14 +162,14 @@ class ConversationsService:
             ConversationAlreadyExistsError: If conversation with the same topic already exists.
             ConversationsServiceError: If there is an error creating the conversation.
         """
-        logger.debug(f"Creating conversation {conversation_data.topic} for user {self.user_id} and tenant {self.tenant_id}")
+        logger.debug(f"Creating conversation {conversation_data.metadata.topic} for user {self.user_id} and tenant {self.tenant_id}")
 
         try:
             # Check if conversation already exists
             existing_conversation = self.session.exec(
                 select(Conversation).where(
                     and_(
-                        Conversation.topic == conversation_data.topic,
+                        Conversation.topic == conversation_data.metadata.topic,
                         Conversation.user_id == self.user_id,
                         Conversation.tenant_id == self.tenant_id,
                     )
@@ -182,25 +177,40 @@ class ConversationsService:
             ).first()
 
             if existing_conversation:
-                raise ConversationAlreadyExistsError(f"Conversation with topic '{conversation_data.topic}' already exists")
+                raise ConversationAlreadyExistsError(f"Conversation with topic '{conversation_data.metadata.topic}' already exists")
 
             new_conversation = Conversation(
-                topic=conversation_data.topic,
+                topic=conversation_data.metadata.topic,
                 user_id=self.user_id,
                 tenant_id=self.tenant_id,
             )
 
             self.session.add(new_conversation)
-            self.session.commit()
-            self.session.refresh(new_conversation)
+            self.session.flush()
 
-            logger.info(f"Created conversation {conversation_data.topic} for user {self.user_id} and tenant {self.tenant_id}")
+            if conversation_data.items:
+                new_messages = []
+                for item in conversation_data.items:
+                    new_message = Message(
+                        tenant_id=self.tenant_id,
+                        conversation_id=new_conversation.id,
+                        role=item.role,
+                        content=item.content,
+                    )
+                    new_messages.append(new_message)
+                self.session.add_all(new_messages)
+
+            self.session.commit()
+
+            logger.info(f"Created conversation {conversation_data.metadata.topic} for user {self.user_id} and tenant {self.tenant_id}")
 
             return await self._conversation_to_response(new_conversation)
         except ConversationAlreadyExistsError:
+            self.session.rollback()
             raise
         except Exception as e:
-            logger.error(f"Error creating conversation {conversation_data.topic} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(f"Error creating conversation {conversation_data.metadata.topic} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            self.session.rollback()
             raise ConversationsServiceError(f"Failed to create conversation: {str(e)}") from None
 
     async def _conversation_to_response(self, conversation: Conversation) -> ConversationResponse:
@@ -215,43 +225,7 @@ class ConversationsService:
         """
         return ConversationResponse(
             id=conversation.id,
-            topic=conversation.topic,
+            metadata=ConversationMetadata(topic=conversation.topic),
             created_at=conversation.created_at.isoformat(),
             modified_at=conversation.modified_at.isoformat(),
         )
-
-    async def _conversation_to_detailed_response(self, conversation: Conversation) -> ConversationDetailedResponse:
-        """
-        Convert Conversation database model to ConversationDetailedResponse object.
-
-        Args:
-            conversation: Conversation database model.
-
-        Returns:
-            ConversationDetailedResponse: Conversation detailed response object.
-        """
-        return ConversationDetailedResponse(
-            id=conversation.id,
-            topic=conversation.topic,
-            created_at=conversation.created_at.isoformat(),
-            modified_at=conversation.modified_at.isoformat(),
-            messages=await self._messages_to_response(conversation.messages),
-        )
-
-    async def _messages_to_response(self, messages: list[Message]) -> list[MessageResponse]:
-        """
-        Convert Message database model to MessageResponse object.
-
-        Args:
-            messages: List of Message database models.
-
-        Returns:
-            list[MessageResponse]: List of Message response objects.
-        """
-        return [MessageResponse(
-            id=message.id,
-            role=message.role,
-            content=message.content,
-            created_at=message.created_at.isoformat(),
-            modified_at=message.modified_at.isoformat(),
-        ) for message in messages]

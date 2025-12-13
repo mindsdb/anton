@@ -12,7 +12,6 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from minds.schemas.chat import Message
-from minds.schemas.messages import MessageResponse
 
 
 class ConversationMetadata(BaseModel):
@@ -49,12 +48,8 @@ class ConversationResponse(BaseModel):
     """Response model for conversation data."""
 
     id: UUID = Field(..., description="Conversation ID")
-    topic: str = Field(..., description="Topic of the conversation")
+    metadata: ConversationMetadata = Field(..., description="Metadata of the conversation")
     created_at: str | None = Field(None, description="Creation timestamp")
+    # TODO: This is not returned by the OpenAI API. Should it be included?
     modified_at: str | None = Field(None, description="Last update timestamp")
-
-
-class ConversationDetailedResponse(ConversationResponse):
-    """Response model for conversation data with messages."""
-
-    messages: list[MessageResponse] = Field(..., description="Messages in the conversation")
+    object: Literal["conversation"] = Field(default="conversation", description="Object type")

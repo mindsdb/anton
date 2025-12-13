@@ -14,7 +14,7 @@ from sqlmodel import Session
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.requests.context import extract_context_from_request
-from minds.schemas.conversations import ConversationCreateRequest, ConversationDetailedResponse, ConversationResponse
+from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.services.conversations import ConversationsService, ConversationAlreadyExistsError, ConversationNotFoundError, ConversationsServiceError
 
 logger = setup_logging()
@@ -88,21 +88,17 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: UUID,
     conversations_service: ConversationsService = Depends(get_conversations_service),
-    with_messages: bool = Query(False, description="Include messages in the conversation"),
-) -> ConversationResponse | ConversationDetailedResponse:
+) -> ConversationResponse:
     """
     Get a conversation by ID.
 
-    Query Parameters:
-        - with_messages: Include messages in the conversation
-
     Returns:
-        ConversationResponse | ConversationDetailedResponse: Conversation.
+        ConversationResponse: Conversation.
     """
     logger.debug(f"Get conversation requested (v1) for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
 
     try:
-        conversation = await conversations_service.get_conversation(conversation_id, with_messages=with_messages)
+        conversation = await conversations_service.get_conversation(conversation_id)
         logger.info(f"Retrieved conversation {conversation_id} for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
         return conversation
     except ConversationNotFoundError as e:
@@ -134,7 +130,6 @@ async def create_conversation(
     
     try:
         conversation = await conversations_service.create_conversation(conversation_data)
-        logger.info(f"Created conversation {conversation_data.topic} for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
         return conversation
     except ConversationAlreadyExistsError as e:
         logger.warning(f"Conversation already exists for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")

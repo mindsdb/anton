@@ -2,6 +2,7 @@ from typing import Any
 from uuid import UUID
 
 
+from pydantic import BaseModel
 from sqlmodel import Column, Field
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -16,6 +17,6 @@ class Message(BaseSQLModel, table=True):
         ..., foreign_key="conversations.id", description="ID of the conversation that this message belongs to", index=True
     )
     role: Role = Field(description="Role of the message")
-    content: dict[str, Any] = Field(
+    content: dict[str, Any] | BaseModel | str | list[Any] = Field(
         default_factory=dict, sa_column=Column(JSONB), description="Content of the message as JSON"
     )
