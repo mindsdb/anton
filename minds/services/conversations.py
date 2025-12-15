@@ -2,6 +2,7 @@
 Conversations service for managing conversation operations.
 """
 
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
@@ -139,11 +140,11 @@ class ConversationsService:
         logger.debug(f"Getting conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id}")
 
         try:
-            conversation = self.session.get(Conversation, conversation_id)
-            if not conversation:
-                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+            conversation = await self._get_conversation(conversation_id)
 
             return await self._conversation_to_response(conversation)
+        except ConversationNotFoundError:
+            raise
         except Exception as e:
             logger.error(f"Error getting conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to get conversation: {str(e)}") from None
@@ -212,6 +213,65 @@ class ConversationsService:
             logger.error(f"Error creating conversation {conversation_data.metadata.topic} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             self.session.rollback()
             raise ConversationsServiceError(f"Failed to create conversation: {str(e)}") from None
+
+    async def delete_conversation(self, conversation_id: UUID) -> None:
+        """
+        Delete a conversation.
+
+        Args:
+            conversation_id: ID of the conversation to delete.
+
+        Returns:
+            None.
+
+        Raises:
+            ConversationNotFoundError: If conversation with the given ID does not exist.
+            ConversationsServiceError: If there is an error deleting the conversation.
+        """
+        logger.debug(f"Deleting conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id}")
+
+        try:
+            conversation = await self._get_conversation(conversation_id)
+
+            conversation.deleted_at = datetime.now(timezone.utc)
+            self.session.add(conversation)
+            self.session.commit()
+
+            logger.info(f"Deleted conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id}")
+        except ConversationNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            raise ConversationsServiceError(f"Failed to delete conversation: {str(e)}") from None
+
+    async def _get_conversation(self, conversation_id: UUID) -> Conversation:
+        """
+        Utility function to get a conversation by ID.
+
+        Args:
+            conversation_id: ID of the conversation to get.
+
+        Returns:
+            Conversation: Conversation.
+
+        Raises:
+            ConversationNotFoundError: If conversation with the given ID does not exist.
+        """
+        statement = (
+            select(Conversation)
+            .where(
+                and_(
+                    Conversation.id == conversation_id,
+                    Conversation.deleted_at.is_(None),
+                    Conversation.user_id == self.user_id,
+                    Conversation.tenant_id == self.tenant_id,
+                )
+            )
+        )
+        conversation = self.session.exec(statement).first()
+        if not conversation:
+            raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+        return conversation
 
     async def _conversation_to_response(self, conversation: Conversation) -> ConversationResponse:
         """

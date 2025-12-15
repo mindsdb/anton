@@ -92,6 +92,9 @@ async def get_conversation(
     """
     Get a conversation by ID.
 
+    Args:
+        conversation_id: ID of the conversation to get.
+
     Returns:
         ConversationResponse: Conversation.
     """
@@ -139,4 +142,34 @@ async def create_conversation(
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error in create_conversation for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.delete("/{conversation_id}")
+async def delete_conversation(
+    conversation_id: UUID,
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> None:
+    """
+    Delete a conversation by ID.
+
+    Args:
+        conversation_id: ID of the conversation to delete.
+
+    Returns:
+        None: 204 No Content on successful deletion
+    """
+    logger.debug(f"Delete conversation requested (v1) for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
+    try:
+        await conversations_service.delete_conversation(conversation_id)
+        logger.info(f"Deleted conversation {conversation_id} for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
+        # Return nothing for 204 No Content
+    except ConversationNotFoundError as e:
+        logger.warning(f"Conversation not found for deletion for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except ConversationsServiceError as e:
+        logger.error(f"Service error in delete_conversation for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception as e:
+        logger.error(f"Unexpected error in delete_conversation for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error") from None
