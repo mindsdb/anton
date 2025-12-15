@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
@@ -243,6 +244,53 @@ class ConversationsService:
         except Exception as e:
             logger.error(f"Error deleting conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to delete conversation: {str(e)}") from None
+
+    async def get_conversation_model_with_messages(self, conversation_id: UUID) -> Conversation:
+        """
+        Get a conversation by ID with its messages eagerly loaded.
+
+        This method is intended for internal use when you need the actual Conversation database model rather than the API response schema.
+
+        Args:
+            conversation_id: ID of the conversation to get.
+
+        Returns:
+            Conversation: Conversation with its messages.
+
+        Raises:
+            ConversationNotFoundError: If conversation with the given ID does not exist.
+        """
+        logger.debug(f"Getting conversation {conversation_id} with messages for user {self.user_id} and tenant {self.tenant_id}")
+
+        try:
+            statement = (
+                select(Conversation)
+                .where(
+                    and_(
+                        Conversation.id == conversation_id,
+                        Conversation.deleted_at.is_(None),
+                        Conversation.user_id == self.user_id,
+                        Conversation.tenant_id == self.tenant_id,
+                    )
+                )
+                .options(
+                    selectinload(Conversation.messages),
+                    with_loader_criteria(
+                        Message,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                )
+            )
+            conversation = self.session.exec(statement).first()
+            if not conversation:
+                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+            return conversation
+        except ConversationNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting conversation {conversation_id} with messages for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            raise ConversationsServiceError(f"Failed to get conversation with messages: {str(e)}") from None
 
     async def _get_conversation(self, conversation_id: UUID) -> Conversation:
         """

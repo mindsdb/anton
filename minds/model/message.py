@@ -7,7 +7,7 @@ from sqlmodel import Column, Field
 from sqlalchemy.dialects.postgresql import JSONB
 
 from minds.model.base import BaseSQLModel
-from minds.schemas.chat import Role
+from minds.schemas.chat import Message as ChatMessage, Role
 
 
 class Message(BaseSQLModel, table=True):
@@ -20,3 +20,9 @@ class Message(BaseSQLModel, table=True):
     content: dict[str, Any] | BaseModel | str | list[Any] = Field(
         default_factory=dict, sa_column=Column(JSONB), description="Content of the message as JSON"
     )
+
+    def to_chat_message(self) -> ChatMessage:
+        return ChatMessage(
+            role=self.role,
+            content=self.content,
+        )
