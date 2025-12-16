@@ -88,22 +88,21 @@ class ResponsesHandler:
                     for message in self.input:
                         conversation_items.append(
                             ConversationItem(
-                                role=message.user,
+                                role=message.role,
                                 content=message.content
                             )
                         )
 
-            conversation = await conversation_service.create_conversation(
+            new_conversation = await conversation_service.create_conversation(
                 ConversationCreateRequest(
                     items=conversation_items
                 )
             )
-            conversation_id = conversation.id
+            conversation_id = new_conversation.id
 
         # Get the conversation along with it's messages
         # This will reflect the conversation ID provided or the new one created (with an updated list of messages)
-        if self.conversation:
-            conversation = await conversation_service.get_conversation_model_with_messages(conversation_id)
+        conversation = await conversation_service.get_conversation_model_with_messages(conversation_id)
 
         # Convert the Message object to chat completions compatible Message (Role and Content) objects
         messages = []

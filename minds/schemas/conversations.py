@@ -34,8 +34,8 @@ class ConversationItem(Message):
 class ConversationCreateRequest(BaseModel):
     """Request model for creating a new conversation."""
 
-    metadata: ConversationMetadata | None = Field(
-        default=None,
+    metadata: ConversationMetadata = Field(
+        default_factory=ConversationMetadata,
         description="Metadata for the conversation"
     )
     items: list[ConversationItem] = Field(
