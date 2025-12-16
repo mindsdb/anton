@@ -12,7 +12,7 @@ from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
 )
-from minds.schemas.chat import Role, StreamMessage
+from minds.schemas.chat import ChatCompletion, ChatCompletionChunk, Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem
 from minds.services.conversations import ConversationsService
 
@@ -115,16 +115,20 @@ async def responses_request_handler(
     )
 
 
-    async def save_assistant_response(message_chunks: list[StreamMessage]):
+    async def save_assistant_response(message: list[ChatCompletionChunk] | ChatCompletion):
         """
         Save the assistant response to the database.
 
         Args:
             message_chunks (list[StreamMessage]): The list of message chunks to save.
         """
-        content = ""
-        for message_chunk in message_chunks:
-            content += message_chunk.content
+        if isinstance(message, ChatCompletion):
+            content = message.choices[0].message.content
+        elif isinstance(message, list) and len(message) > 0 and isinstance(message[0], ChatCompletionChunk):
+            content = ""
+            for message_chunk in message:
+                if message_chunk.choices and message_chunk.choices[0].delta.content:
+                    content += message_chunk.choices[0].delta.content or ""
 
         await conversation_service.add_message_to_conversation(conversation_id=conversation_id, role=Role.assistant, content=content)
 
@@ -143,6 +147,7 @@ async def responses_request_handler(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
+            on_complete_callback=save_assistant_response,
         )
 
     return response

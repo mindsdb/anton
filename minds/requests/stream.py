@@ -84,7 +84,9 @@ class StreamerCollector(MessageStreamer):
 
 
 async def format_messages_for_streaming(
-    message_generator: AsyncGenerator[StreamMessage, Any], model: str
+    message_generator: AsyncGenerator[StreamMessage, Any],
+    model: str,
+    on_complete_callback: Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Format messages for streaming as SSE events.
@@ -92,7 +94,7 @@ async def format_messages_for_streaming(
     Args:
             message_generator: An async generator that yields Message objects
             model (str): The model name to include in the SSE event.
-
+            on_complete_callback (Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None): A callback function to call after the messages are processed.
     Returns:
             An async generator yielding SSE formatted events
     """
@@ -102,6 +104,7 @@ async def format_messages_for_streaming(
     # Emit each incoming message immediately. After the producer finishes,
     # emit a small final chunk that indicates finish_reason="stop" so clients
     # can detect completion without requiring us to peek the next message.
+    assistant_messages = []
     async for msg in message_generator:
         # Properly serialize BaseModel content
         content = msg.content
@@ -121,6 +124,8 @@ async def format_messages_for_streaming(
 
         last_message_id = msg.id
         async_index += 1
+        if msg.role == Role.assistant:
+            assistant_messages.append(chunk)
         # Yield immediately (no peek)
         yield f"event: completion\ndata: {chunk.model_dump_json()}\n\n"
 
@@ -140,12 +145,15 @@ async def format_messages_for_streaming(
         )
         yield f"event: completion\ndata: {final_chunk.model_dump_json()}\n\n"
 
+    if on_complete_callback:
+        await on_complete_callback(assistant_messages)
+
 
 async def process_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
     model: str,
-    on_complete_callback: Callable[[list[StreamMessage]], Awaitable[None]] | None = None,
+    on_complete_callback: Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None = None,
 ) -> StreamingResponse:
     """
     Run a push-based producer that emits StreamMessage objects to an streamer, and
@@ -159,7 +167,7 @@ async def process_streaming_producer(
         request_id (str): The unique ID for the request, used to identify the stream.
         trace_name (str): The name of the original trace.
         model (str): The model name to include in the SSE event.
-        on_complete_callback (Callable[[list[StreamMessage]], Awaitable[None]] | None): A callback function to call after the messages are processed.
+        on_complete_callback (Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None): A callback function to call after the messages are processed.
     Returns:
             StreamingResponse: A response that streams the messages as Server-Sent Events (SSE).
     """
@@ -183,14 +191,7 @@ async def process_streaming_producer(
         assistant_messages = []
         async for message in streamer:
             logger.debug(f"Message: {message}")
-
-            if message.role == Role.assistant:
-                assistant_messages.append(message)
-
             yield message
-
-        if on_complete_callback:
-            await on_complete_callback(assistant_messages)
 
         await task
 
@@ -198,6 +199,7 @@ async def process_streaming_producer(
         format_messages_for_streaming(
             message_generator=stream(),
             model=model,
+            on_complete_callback=on_complete_callback,
         ),
         media_type="text/event-stream",
         headers={
@@ -210,13 +212,14 @@ async def process_streaming_producer(
     )
 
 
-async def _build_json_response_from_messages(messages: list[StreamMessage], model: str) -> JSONResponse:
+async def _build_json_response_from_messages(messages: list[StreamMessage], model: str, on_complete_callback: Callable[[ChatCompletion], Awaitable[None]] | None = None) -> JSONResponse:
     """
     Build a JSON response from a list of StreamMessage objects.
 
     Args:
             messages (list[StreamMessage]): A list of StreamMessage objects.
             model (str): The model name to include in the response.
+            on_complete_callback (Callable[[ChatCompletion], Awaitable[None]] | None): A callback function to call after the messages are processed.
     Returns:
             JSONResponse: A response that contains the ChatCompletion built from the messages.
     """
@@ -238,6 +241,8 @@ async def _build_json_response_from_messages(messages: list[StreamMessage], mode
             choices.append(choice)
 
     response = ChatCompletion(id=message_id, model=model, choices=choices)
+    if on_complete_callback:
+        await on_complete_callback(response)
     return JSONResponse(response.model_dump())
 
 
@@ -245,6 +250,7 @@ async def process_non_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
     model: str,
+    on_complete_callback: Callable[[ChatCompletion], Awaitable[None]] | None = None,
 ) -> JSONResponse:
     """
     Run a push-based producer and return a non-streaming JSON ChatCompletion built
@@ -255,10 +261,11 @@ async def process_non_streaming_producer(
             producer (Callable[[Any], Awaitable[None]]): An async function that takes a
                     `StreamerCollector` instance and emits `StreamMessage` objects.
             request_id (str): The unique ID for the request, used to identify the stream.
-            model (str): The model name to include in the response.
+            model (str): The model name to include in the response. 
+            on_complete_callback (Callable[[ChatCompletion], Awaitable[None]] | None): A callback function to call after the messages are processed.
     Returns:
             JSONResponse: A response that contains the ChatCompletion built from the messages.
     """
     collector = StreamerCollector(request_id=request_id)
     await producer(collector)
-    return await _build_json_response_from_messages(messages=collector.messages, model=model)
+    return await _build_json_response_from_messages(messages=collector.messages, model=model, on_complete_callback=on_complete_callback)
