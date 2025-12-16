@@ -145,6 +145,7 @@ async def process_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
     model: str,
+    on_complete_callback: Callable[[list[StreamMessage]], Awaitable[None]] | None = None,
 ) -> StreamingResponse:
     """
     Run a push-based producer that emits StreamMessage objects to an streamer, and
@@ -153,11 +154,12 @@ async def process_streaming_producer(
     The producer must accept a single argument `streamer` exposing `emit(StreamMessage)` and `close()`.
 
     Args:
-            producer (Callable[[Any], Awaitable[None]]): An async function that takes a
-                    `MessageStreamer` instance and emits `StreamMessage` objects.
-            request_id (str): The unique ID for the request, used to identify the stream.
-            trace_name (str): The name of the original trace.
-            model (str): The model name to include in the SSE event.
+        producer (Callable[[Any], Awaitable[None]]): An async function that takes a
+                `MessageStreamer` instance and emits `StreamMessage` objects.
+        request_id (str): The unique ID for the request, used to identify the stream.
+        trace_name (str): The name of the original trace.
+        model (str): The model name to include in the SSE event.
+        on_complete_callback (Callable[[list[StreamMessage]], Awaitable[None]] | None): A callback function to call after the messages are processed.
     Returns:
             StreamingResponse: A response that streams the messages as Server-Sent Events (SSE).
     """
@@ -178,9 +180,18 @@ async def process_streaming_producer(
                 await streamer.close()
 
         task = asyncio.create_task(run_producer())
+        assistant_messages = []
         async for message in streamer:
             logger.debug(f"Message: {message}")
+
+            if message.role == Role.assistant:
+                assistant_messages.append(message)
+
             yield message
+
+        if on_complete_callback:
+            await on_complete_callback(assistant_messages)
+
         await task
 
     return StreamingResponse(

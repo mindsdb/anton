@@ -12,7 +12,7 @@ from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
 )
-from minds.schemas.chat import Role
+from minds.schemas.chat import Role, StreamMessage
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem
 from minds.services.conversations import ConversationsService
 
@@ -114,12 +114,28 @@ async def responses_request_handler(
         instrument=instrument
     )
 
+
+    async def save_assistant_response(message_chunks: list[StreamMessage]):
+        """
+        Save the assistant response to the database.
+
+        Args:
+            message_chunks (list[StreamMessage]): The list of message chunks to save.
+        """
+        content = ""
+        for message_chunk in message_chunks:
+            content += message_chunk.content
+
+        await conversation_service.add_message_to_conversation(conversation_id=conversation_id, role=Role.assistant, content=content)
+
+
     if stream:
         logger.debug(f"🔄[{request_id}] Responses API request is streaming.")
         response = await process_streaming_producer(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
+            on_complete_callback=save_assistant_response,
         )
     else:
         logger.debug(f"🔄[{request_id}] Responses API request is non-streaming.")

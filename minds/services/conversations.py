@@ -12,6 +12,7 @@ from sqlmodel import Session, and_, func, select
 from minds.common.logger import setup_logging
 from minds.model.conversation import Conversation
 from minds.model.message import Message
+from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 
 logger = setup_logging()
@@ -291,6 +292,39 @@ class ConversationsService:
         except Exception as e:
             logger.error(f"Error getting conversation {conversation_id} with messages for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to get conversation with messages: {str(e)}") from None
+
+    async def add_message_to_conversation(self, conversation_id: UUID, role: Role, content: str) -> None:
+        """
+        Add a message to a conversation.
+
+        Args:
+            conversation_id: ID of the conversation to add the message to.
+            role: Role of the message.
+            content: Content of the message.
+        """
+        logger.debug(f"Adding message to conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id} with role {role} and content {content}")\
+
+        # Check if conversation exists
+        conversation = await self._get_conversation(conversation_id)
+        if not conversation:
+            raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+
+        try:
+            new_message = Message(
+                tenant_id=self.tenant_id,
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+            )
+            self.session.add(new_message)
+            self.session.commit()
+
+            logger.info(f"Added message to conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id} with role {role} and content {content}")
+        except ConversationNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error adding message to conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            raise ConversationsServiceError(f"Failed to add message to conversation: {str(e)}") from None
 
     async def _get_conversation(self, conversation_id: UUID) -> Conversation:
         """
