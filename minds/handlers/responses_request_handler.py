@@ -4,7 +4,7 @@ from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.handlers.responses_handler import ResponsesHandler
+from minds.handlers.chat_completions_handler import ChatCompletionsHandler
 from minds.requests.context import Context
 from minds.requests.langfuse_tracing import get_langfuse_trace_id, setup_langfuse_observation
 from minds.requests.responses_request import ResponsesRequest
@@ -12,6 +12,9 @@ from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
 )
+from minds.schemas.chat import Role
+from minds.schemas.conversations import ConversationCreateRequest, ConversationItem
+from minds.services.conversations import ConversationsService
 
 logger = setup_logging()
 
@@ -22,6 +25,7 @@ async def responses_request_handler(
     context: Context,
     mindsdb_client: Server,
     responses_request: ResponsesRequest,
+    conversation_service: ConversationsService,
     instrument: bool = True,
 ) -> StreamingResponse | JSONResponse:
     """
@@ -32,6 +36,7 @@ async def responses_request_handler(
         context (Context): The context of the request.
         mindsdb_client (Server): The MindsDB client for database operations.
         responses_request (ResponsesRequest): The request object containing Responses API parameters.
+        conversation_service (ConversationsService): The conversation service for database operations.
         instrument (bool): Whether to instrument the PydanticAIAgent.
     Returns:
         Union[StreamingResponse, JSONResponse]: A streaming response if the request is for streaming,
@@ -58,28 +63,68 @@ async def responses_request_handler(
     # metadata = responses_request.metadata
     # logger.debug(f"🔄[{request_id}] Metadata: {metadata}")
 
-    responses_handler = ResponsesHandler(
+    conversation_id = conversation
+
+    # If no conversation is provided, create a new conversation
+    # Add items included as messages of that conversation
+    if not conversation_id:
+        conversation_items = []
+
+        if input:
+            if isinstance(input, str):
+                conversation_items.append(
+                    ConversationItem(
+                        role=Role.user,
+                        content=input,
+                    )
+                )
+            elif isinstance(input, list):
+                for message in input:
+                    conversation_items.append(
+                        ConversationItem(
+                            role=message.role,
+                            content=message.content
+                        )
+                    )
+
+        new_conversation = await conversation_service.create_conversation(
+            ConversationCreateRequest(
+                items=conversation_items
+            )
+        )
+        conversation_id = new_conversation.id
+
+    # Get the conversation along with it's messages
+    # This will reflect the conversation ID provided or the new one created (with an updated list of messages)
+    conversation = await conversation_service.get_conversation_model_with_messages(conversation_id)
+
+    # Convert the Message object to chat completions compatible Message (Role and Content) objects
+    messages = []
+    for message in conversation.messages:
+        messages.append(message.to_chat_message())
+
+    # Use the chat completions handler (as a wrapper) to handle the responses request
+    chat_completions_handler = ChatCompletionsHandler(
         session=session,
         context=context,
         mindsdb_client=mindsdb_client,
-        conversation=conversation,
-        input=input,
+        messages=messages,
         model=model,
         stream=stream,
-        instrument=instrument,
+        instrument=instrument
     )
 
     if stream:
         logger.debug(f"🔄[{request_id}] Responses API request is streaming.")
         response = await process_streaming_producer(
-            producer=lambda streamer: responses_handler.responses(streamer=streamer),
+            producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
         )
     else:
         logger.debug(f"🔄[{request_id}] Responses API request is non-streaming.")
         response = await process_non_streaming_producer(
-            producer=lambda streamer: responses_handler.responses(streamer=streamer),
+            producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
         )

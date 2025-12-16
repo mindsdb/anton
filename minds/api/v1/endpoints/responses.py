@@ -18,6 +18,7 @@ from minds.handlers.responses_request_handler import (
 )
 from minds.requests.responses_request import ResponsesRequest
 from minds.requests.context import extract_context_from_request
+from minds.services.conversations import ConversationsService
 
 logger = setup_logging()
 
@@ -31,6 +32,14 @@ def get_mindsdb_client(request: Request):
     context = extract_context_from_request(request)
     mindsdb_client = create_mindsdb_client_from_request(request, context)
     return mindsdb_client
+
+
+def get_conversations_service(request: Request, session: Session = Depends(get_session)) -> ConversationsService:
+    """
+    Dependency function to create ConversationsService with user context.
+    """
+    context = extract_context_from_request(request)
+    return ConversationsService(session=session, user_id=context.user_id, tenant_id=context.tenant_id)
 
 
 @router.options("/")
@@ -57,6 +66,7 @@ async def responses(
     request: Request,
     mindsdb_client=Depends(get_mindsdb_client),
     session: Session = Depends(get_session),
+    conversations_service: ConversationsService = Depends(get_conversations_service),
 ):
     """
     Handle Responses API requests (API v1).
@@ -66,9 +76,11 @@ async def responses(
     AI model management and includes comprehensive observability.
 
     Args:
-        responses_request (ResponsesRequest): The request containing
-            chat messages and other parameters.
+        responses_request (ResponsesRequest): The request containing chat messages and other parameters.
         request (Request): The FastAPI request object to extract context.
+        mindsdb_client (Server): The MindsDB client for MindsDB operations.
+        session (Session): The SQLAlchemy session for database operations.
+        conversations_service (ConversationsService): The conversation service for database operations.
 
     Returns:
         StreamingResponse | JSONResponse: A streaming response if stream=True,
@@ -99,6 +111,7 @@ async def responses(
             session=session,
             mindsdb_client=mindsdb_client,
             responses_request=responses_request,
+            conversation_service=conversations_service,
             instrument=instrument,
         )
 
