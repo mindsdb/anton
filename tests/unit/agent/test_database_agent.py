@@ -58,6 +58,7 @@ class TestDatabaseAgent:
         mind.model_name = "gpt-3.5-turbo"
         mind.user_id = "test-user"
         mind.tenant_id = "test-tenant"
+        mind.parameters = {}  # Initialize as empty dict to avoid Mock return values
         return mind
 
     @pytest.fixture
