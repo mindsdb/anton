@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
+from uuid import UUID
 
 from langfuse import get_client
 from pydantic import BaseModel
@@ -8,7 +9,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
 from minds.schemas.chat import ChatCompletion, ChatCompletionChunk, Choice, Message, Role, StreamChoice, StreamMessage
-from minds.schemas.responses import Response, ResponseDelta, ResponseOutput, ResponseOutputContent, ResponseStatus, StreamingResponse as StreamingResponseSchema, StreamingResponseType 
+from minds.schemas.responses import Response, ResponseDelta, ResponseOutput, ResponseOutputContent, ResponseStatus, StreamingResponse as StreamingResponseSchema, StreamingResponseEvent 
 
 # Set up logging
 logger = setup_logging()
@@ -151,7 +152,8 @@ async def format_messages_for_streaming_chat_completions_api(
 async def format_messages_for_streaming_responses_api(
     message_generator: AsyncGenerator[StreamMessage, Any],
     model: str,
-    on_complete_callback: Callable[[Response], Awaitable[None]] | None = None,
+    on_complete_callback: Callable[[str], Awaitable[None]],
+    message_id: UUID,
     **kwargs
 ) -> AsyncGenerator[str, None]:
     """
@@ -160,27 +162,27 @@ async def format_messages_for_streaming_responses_api(
     Args:
         message_generator: An async generator that yields StreamMessage objects
         model (str): The model name to include in the SSE event.
-        on_complete_callback (Callable[[Response], Awaitable[None]] | None): A callback function to call after the messages are processed.
+        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after the messages are processed.
+        message_id: UUID, The ID of the message to include in the response.
 
     Returns:
         An async generator yielding SSE formatted events
     """
     async_index = 1
-    last_message_id: str | None = None
 
     # First emit a chunk with status set to 'created' with no output
     created_chunk = StreamingResponseSchema(
-        type=StreamingResponseType.created.value,
+        type=StreamingResponseEvent.created.value,
         sequence_number=0,
         response=Response(
             model=model,
             status=ResponseStatus.in_progress.value,
         ),
     )
-    yield f"event: {created_chunk.type}\ndata: {created_chunk.model_dump_json()}\n\n"
+    yield f"event: {created_chunk.type.value}\ndata: {created_chunk.model_dump_json()}\n\n"
 
     # Emit each incoming message immediately. After the producer finishes,
-    assistant_messages = []
+    assistant_content = ""
     async for msg in message_generator:
         # Properly serialize BaseModel content
         content = msg.content
@@ -188,41 +190,55 @@ async def format_messages_for_streaming_responses_api(
             content = content.model_dump()
 
         delta_chunk = StreamingResponseSchema(
-            type=StreamingResponseType.output_text_delta.value,
+            type=StreamingResponseEvent.output_text_delta.value,
             sequence_number=async_index,
             response=ResponseDelta(
+                item_id=str(message_id),
                 delta=content,
             ),
         )
 
-        last_message_id = msg.id
         async_index += 1
         if msg.role == Role.assistant:
-            assistant_messages.append(delta_chunk)
+            assistant_content += content
         # Yield immediately (no peek)
-        yield f"event: {delta_chunk.type}\ndata: {delta_chunk.model_dump_json()}\n\n"
+        yield f"event: {delta_chunk.type.value}\ndata: {delta_chunk.model_dump_json()}\n\n"
 
     # After the producer finished, emit a final small chunk marking completion
     # with status set to 'completed'.
-    if last_message_id is not None:
-        completed_chunk = StreamingResponseSchema(
-            type=StreamingResponseType.completed.value,
-            sequence_number=async_index,
-            response=Response(
-                model=model,
-                status=ResponseStatus.completed.value,
-            ),
-        )
-        yield f"event: {completed_chunk.type}\ndata: {completed_chunk.model_dump_json()}\n\n"
+    # The response ID should be the same as first (created) chunk.
+    completed_chunk = StreamingResponseSchema(
+        type=StreamingResponseEvent.completed.value,
+        sequence_number=async_index,
+        response=Response(
+            id=created_chunk.response.id,
+            model=model,
+            status=ResponseStatus.completed.value,
+            output=[
+                ResponseOutput(
+                    id=str(message_id),
+                    status=ResponseStatus.completed.value,
+                    role=Role.assistant.value,
+                    content=[
+                        ResponseOutputContent(
+                            text=assistant_content
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
+    yield f"event: {completed_chunk.type.value}\ndata: {completed_chunk.model_dump_json()}\n\n"
 
     if on_complete_callback:
-        await on_complete_callback(assistant_messages)
+        await on_complete_callback(assistant_content)
 
 
 async def process_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
     format_func: Callable[..., AsyncGenerator[str, None]],
+    message_id: UUID,
     **format_kwargs
 ) -> StreamingResponse:
     """
@@ -236,6 +252,7 @@ async def process_streaming_producer(
                 `MessageStreamer` instance and emits `StreamMessage` objects.
         request_id (str): The unique ID for the request, used to identify the stream.
         format_func (Callable[..., AsyncGenerator[str, None]]): The format function to use for formatting messages.
+        message_id: UUID, The ID of the message to include in the response.
         **format_kwargs: Additional keyword arguments to pass to the format function.
 
     Returns:
@@ -267,6 +284,7 @@ async def process_streaming_producer(
     return StreamingResponse(
         format_func(
             message_generator=stream(),
+            message_id=message_id,
             **format_kwargs
         ),
         media_type="text/event-stream",
@@ -322,7 +340,8 @@ async def format_messages_for_non_streaming_chat_completions_api(
 async def format_messages_for_non_streaming_responses_api(
     messages: list[StreamMessage],
     model: str,
-    on_complete_callback: Callable[[Response], Awaitable[None]] | None = None,
+    on_complete_callback: Callable[[str], Awaitable[None]],
+    message_id: UUID,
     **kwargs
 ) -> JSONResponse:
     """
@@ -331,12 +350,12 @@ async def format_messages_for_non_streaming_responses_api(
     Args:
         messages (list[StreamMessage]): A list of StreamMessage objects.
         model (str): The model name to include in the response.
-        on_complete_callback (Callable[[Response], Awaitable[None]] | None): A callback function to call after the messages are processed.
+        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after the messages are processed.
+        message_id: UUID, The ID of the message to include in the response.
 
     Returns:
         JSONResponse: A Response object built from the messages.
     """
-    message_id = messages[-1].id if messages else ""
     output = []
     for _, search_message in enumerate(messages):
         # Skip system messages (thoughts) in the final response.
@@ -348,20 +367,20 @@ async def format_messages_for_non_streaming_responses_api(
 
             output.append(
                 ResponseOutput(
+                    id=str(message_id),
                     status=ResponseStatus.completed.value,
                     content=[ResponseOutputContent(text=content)]
                 )
             )
 
     response = Response(
-        id=message_id,
         model=model,
         output=output,
         status=ResponseStatus.completed.value,
     )
 
     if on_complete_callback:
-        await on_complete_callback(response)
+        await on_complete_callback(response.output[0].content[0].text)
 
     return JSONResponse(response.model_dump())
 
@@ -370,6 +389,7 @@ async def process_non_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
     format_func: Callable[..., Awaitable[JSONResponse]],
+    message_id: UUID,
     **format_kwargs
 ) -> JSONResponse:
     """
@@ -383,6 +403,7 @@ async def process_non_streaming_producer(
                 `StreamerCollector` instance and emits `StreamMessage` objects.
         request_id (str): The unique ID for the request, used to identify the stream.
         format_func (Callable[..., Awaitable[JSONResponse]]): The format function to use for formatting messages.
+        message_id: UUID, The ID of the message to include in the response.
         **format_kwargs: Additional keyword arguments to pass to the format function.
 
     Returns:
@@ -390,4 +411,4 @@ async def process_non_streaming_producer(
     """
     collector = StreamerCollector(request_id=request_id)
     await producer(collector)
-    return await format_func(messages=collector.messages, **format_kwargs)
+    return await format_func(messages=collector.messages, message_id=message_id, **format_kwargs)

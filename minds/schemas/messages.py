@@ -5,6 +5,7 @@ This module contains Pydantic models for message management operations
 including creation, updates, retrieval, and deletion.
 """
 
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,6 @@ class MessageResponse(BaseModel):
 
     id: UUID = Field(..., description="Message ID")
     role: Role = Field(..., description="Role of the message")
-    content: dict = Field(..., description="Content of the message")
+    content: dict | BaseModel | str | list[Any] = Field(..., description="Content of the message")
     created_at: str | None = Field(None, description="Creation timestamp")
     modified_at: str | None = Field(None, description="Last update timestamp")

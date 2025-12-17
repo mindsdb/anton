@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
+from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, func, select
 
@@ -14,6 +15,7 @@ from minds.model.conversation import Conversation
 from minds.model.message import Message
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
+from minds.schemas.messages import MessageResponse
 
 logger = setup_logging()
 
@@ -293,16 +295,30 @@ class ConversationsService:
             logger.error(f"Error getting conversation {conversation_id} with messages for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to get conversation with messages: {str(e)}") from None
 
-    async def add_message_to_conversation(self, conversation_id: UUID, role: Role, content: str) -> None:
+    async def create_message_placeholder(
+        self, 
+        conversation_id: UUID, 
+        role: Role
+    ) -> Message:
         """
-        Add a message to a conversation.
+        Create a message placeholder with empty content and flush to get the ID.
+        The message will be updated with actual content later via the update_message_content method.
 
         Args:
             conversation_id: ID of the conversation to add the message to.
             role: Role of the message.
-            content: Content of the message.
+
+        Returns:
+            Message: The created message object with generated ID.
+
+        Raises:
+            ConversationNotFoundError: If conversation with the given ID does not exist.
+            ConversationsServiceError: If there is an error creating the message.
         """
-        logger.debug(f"Adding message to conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id} with role {role} and content {content}")\
+        logger.debug(
+            f"Creating message placeholder in conversation {conversation_id} "
+            f"for user {self.user_id} and tenant {self.tenant_id} with role {role}"
+        )
 
         # Check if conversation exists
         conversation = await self._get_conversation(conversation_id)
@@ -314,17 +330,90 @@ class ConversationsService:
                 tenant_id=self.tenant_id,
                 conversation_id=conversation_id,
                 role=role,
-                content=content,
+                content="",  # Placeholder - will be updated later
             )
             self.session.add(new_message)
-            self.session.commit()
+            self.session.flush()  # Flush to get the ID, but don't commit yet
 
-            logger.info(f"Added message to conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id} with role {role} and content {content}")
+            logger.info(
+                f"Created message placeholder {new_message.id} in conversation {conversation_id} "
+                f"for user {self.user_id} and tenant {self.tenant_id}"
+            )
+
+            return new_message  # Return the message object so caller can access .id
         except ConversationNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error adding message to conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
-            raise ConversationsServiceError(f"Failed to add message to conversation: {str(e)}") from None
+            logger.error(
+                f"Error creating message placeholder in conversation {conversation_id} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to create message placeholder: {str(e)}") from None
+
+    async def update_message_content(
+        self,
+        message: Message,
+        content: str
+    ) -> MessageResponse:
+        """
+        Update the content of an existing message.
+
+        Args:
+            message: The message object to update.
+            content: The new content for the message.
+
+        Returns:
+            MessageResponse: Updated message response object.
+
+        Raises:
+            ConversationsServiceError: If there is an error updating the message.
+        """
+        logger.debug(
+            f"Updating message {message.id} content for user {self.user_id} and tenant {self.tenant_id}"
+        )
+
+        try:
+            # Handle potential rollback state - if session was rolled back, clear it first
+            try:
+                # Try to access session state to check if rollback is needed
+                if hasattr(self.session, '_transaction') and self.session._transaction is None:
+                    # Session was rolled back, need to start fresh
+                    pass
+            except Exception:
+                pass
+            
+            # Modify the content - object should already be in session from create_message_placeholder
+            # Don't call add() again as it's already tracked
+            message.content = content
+            # Flush to send changes to DB, then commit
+            self.session.flush()
+            self.session.commit()
+
+            logger.info(
+                f"Updated message {message.id} content for user {self.user_id} and tenant {self.tenant_id}"
+            )
+
+            return await self._message_to_response(message)
+        except PendingRollbackError:
+            # Session was rolled back, clear the state and retry
+            self.session.rollback()
+            # Re-merge the object to ensure it's tracked
+            message = self.session.merge(message)
+            message.content = content
+            self.session.flush()
+            self.session.commit()
+            
+            logger.info(
+                f"Updated message {message.id} content for user {self.user_id} and tenant {self.tenant_id} (after rollback recovery)"
+            )
+            
+            return await self._message_to_response(message)
+        except Exception as e:
+            self.session.rollback()
+            logger.error(
+                f"Error updating message {message.id} content for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to update message content: {str(e)}") from None
 
     async def _get_conversation(self, conversation_id: UUID) -> Conversation:
         """
@@ -370,4 +459,22 @@ class ConversationsService:
             metadata=ConversationMetadata(topic=conversation.topic),
             created_at=conversation.created_at.isoformat(),
             modified_at=conversation.modified_at.isoformat(),
+        )
+
+    async def _message_to_response(self, message: Message) -> MessageResponse:
+        """
+        Convert Message database model to MessageResponse object.
+
+        Args:
+            message: Message database model.
+
+        Returns:
+            MessageResponse: Message response object.
+        """
+        return MessageResponse(
+            id=message.id,
+            role=message.role,
+            content=message.content,
+            created_at=message.created_at.isoformat(),
+            modified_at=message.modified_at.isoformat(),
         )

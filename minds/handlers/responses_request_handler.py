@@ -1,4 +1,3 @@
-from re import S
 from langfuse import observe
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
@@ -17,7 +16,6 @@ from minds.requests.stream import (
 )
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem
-from minds.schemas.responses import Response, StreamingResponse as StreamingResponseSchema
 from minds.services.conversations import ConversationsService
 
 logger = setup_logging()
@@ -118,23 +116,24 @@ async def responses_request_handler(
         instrument=instrument
     )
 
+    message = await conversation_service.create_message_placeholder(
+        conversation_id=conversation_id,
+        role=Role.assistant,
+    )
+    message_id = message.id
 
-    async def save_assistant_response(message: Response | list[StreamingResponseSchema]):
+
+    async def save_assistant_response(content: str):
         """
         Save the assistant response to the database.
 
         Args:
-            message_chunks (list[StreamMessage]): The list of message chunks to save.
+            content (str): The content of the assistant response to save.
         """
-        if isinstance(message, Response):
-            content = message.output[0].content[0].text
-        elif isinstance(message, list) and len(message) > 0 and isinstance(message[0], StreamingResponseSchema):
-            content = ""
-            for message_chunk in message:
-                if message_chunk.response and message_chunk.response.delta:
-                    content += message_chunk.response.delta or ""
-
-        await conversation_service.add_message_to_conversation(conversation_id=conversation_id, role=Role.assistant, content=content)
+        await conversation_service.update_message_content(
+            message=message,
+            content=content,
+        )
 
 
     if stream:
@@ -145,6 +144,7 @@ async def responses_request_handler(
             format_func=format_messages_for_streaming_responses_api,
             model=model,
             on_complete_callback=save_assistant_response,
+            message_id=message_id,
         )
     else:
         logger.debug(f"🔄[{request_id}] Responses API request is non-streaming.")
@@ -154,6 +154,7 @@ async def responses_request_handler(
             format_func=format_messages_for_non_streaming_responses_api,
             model=model,
             on_complete_callback=save_assistant_response,
+            message_id=message_id,
         )
 
     return response
