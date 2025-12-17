@@ -1,3 +1,4 @@
+from re import S
 from langfuse import observe
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
@@ -9,11 +10,14 @@ from minds.requests.context import Context
 from minds.requests.langfuse_tracing import get_langfuse_trace_id, setup_langfuse_observation
 from minds.requests.responses_request import ResponsesRequest
 from minds.requests.stream import (
+    format_messages_for_non_streaming_responses_api,
+    format_messages_for_streaming_responses_api,
     process_non_streaming_producer,
     process_streaming_producer,
 )
-from minds.schemas.chat import ChatCompletion, ChatCompletionChunk, Role
+from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem
+from minds.schemas.responses import Response, StreamingResponse as StreamingResponseSchema
 from minds.services.conversations import ConversationsService
 
 logger = setup_logging()
@@ -115,20 +119,20 @@ async def responses_request_handler(
     )
 
 
-    async def save_assistant_response(message: list[ChatCompletionChunk] | ChatCompletion):
+    async def save_assistant_response(message: Response | list[StreamingResponseSchema]):
         """
         Save the assistant response to the database.
 
         Args:
             message_chunks (list[StreamMessage]): The list of message chunks to save.
         """
-        if isinstance(message, ChatCompletion):
-            content = message.choices[0].message.content
-        elif isinstance(message, list) and len(message) > 0 and isinstance(message[0], ChatCompletionChunk):
+        if isinstance(message, Response):
+            content = message.output[0].content[0].text
+        elif isinstance(message, list) and len(message) > 0 and isinstance(message[0], StreamingResponseSchema):
             content = ""
             for message_chunk in message:
-                if message_chunk.choices and message_chunk.choices[0].delta.content:
-                    content += message_chunk.choices[0].delta.content or ""
+                if message_chunk.response and message_chunk.response.delta:
+                    content += message_chunk.response.delta or ""
 
         await conversation_service.add_message_to_conversation(conversation_id=conversation_id, role=Role.assistant, content=content)
 
@@ -138,6 +142,7 @@ async def responses_request_handler(
         response = await process_streaming_producer(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
+            format_func=format_messages_for_streaming_responses_api,
             model=model,
             on_complete_callback=save_assistant_response,
         )
@@ -146,6 +151,7 @@ async def responses_request_handler(
         response = await process_non_streaming_producer(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
+            format_func=format_messages_for_non_streaming_responses_api,
             model=model,
             on_complete_callback=save_assistant_response,
         )
