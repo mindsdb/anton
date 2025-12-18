@@ -15,6 +15,7 @@ from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.requests.context import extract_context_from_request
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
+from minds.schemas.messages import MessageResponse
 from minds.services.conversations import ConversationsService, ConversationAlreadyExistsError, ConversationNotFoundError, ConversationsServiceError
 
 logger = setup_logging()
@@ -112,6 +113,30 @@ async def get_conversation(
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error in get_conversation for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.get("/{conversation_id}/items")
+async def get_conversation_messages(
+    conversation_id: UUID,
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> dict[str, list[MessageResponse] | str, bool]:
+    """
+    Get the messages of a conversation by ID.
+    """
+    logger.debug(f"Get conversation messages requested (v1) for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
+
+    try:
+        messages = await conversations_service.get_conversation_messages(conversation_id)
+        return {
+            "object": "list",
+            "data": messages,
+        }
+    except ConversationsServiceError as e:
+        logger.error(f"Service error in get_conversation_messages for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_conversation_messages for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 

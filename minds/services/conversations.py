@@ -15,7 +15,7 @@ from minds.model.conversation import Conversation
 from minds.model.message import Message
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
-from minds.schemas.messages import MessageResponse
+from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse
 
 logger = setup_logging()
 
@@ -248,47 +248,39 @@ class ConversationsService:
             logger.error(f"Error deleting conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to delete conversation: {str(e)}") from None
 
-    async def get_conversation_model_with_messages(self, conversation_id: UUID) -> Conversation:
+    async def get_conversation_messages(self, conversation_id: UUID) -> list[MessageResponse]:
         """
-        Get a conversation by ID with its messages eagerly loaded.
-
-        This method is intended for internal use when you need the actual Conversation database model rather than the API response schema.
+        Get the messages of a conversation by ID.
 
         Args:
-            conversation_id: ID of the conversation to get.
+            conversation_id: ID of the conversation to get the messages from.
 
         Returns:
-            Conversation: Conversation with its messages.
-
-        Raises:
-            ConversationNotFoundError: If conversation with the given ID does not exist.
+            List[MessageResponse]: List of messages.
         """
         logger.debug(f"Getting conversation {conversation_id} with messages for user {self.user_id} and tenant {self.tenant_id}")
 
         try:
-            statement = (
-                select(Conversation)
-                .where(
-                    and_(
-                        Conversation.id == conversation_id,
-                        Conversation.deleted_at.is_(None),
-                        Conversation.user_id == self.user_id,
-                        Conversation.tenant_id == self.tenant_id,
-                    )
-                )
-                .options(
-                    selectinload(Conversation.messages),
-                    with_loader_criteria(
-                        Message,
-                        lambda cls: cls.deleted_at.is_(None),
-                        include_aliases=True,
-                    ),
-                )
-            )
-            conversation = self.session.exec(statement).first()
+            conversation = await self._get_conversation(conversation_id)
             if not conversation:
                 raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
-            return conversation
+
+            statement = (
+                select(Message)
+                .where(
+                    and_(
+                        Message.conversation_id == conversation_id,
+                        Message.deleted_at.is_(None),
+                        Message.tenant_id == self.tenant_id,
+                    )
+                )
+                .order_by(Message.created_at.asc())
+            )
+            messages = self.session.exec(statement).all()
+            messages_list = []
+            for message in messages:
+                messages_list.append(await self._message_to_response(message))
+            return messages_list
         except ConversationNotFoundError:
             raise
         except Exception as e:
@@ -471,10 +463,14 @@ class ConversationsService:
         Returns:
             MessageResponse: Message response object.
         """
+        content = MessageContent(
+            type=MessageContentType.output_text if message.role == Role.assistant else MessageContentType.input_text,
+            text=message.content
+        )
         return MessageResponse(
             id=message.id,
             role=message.role,
-            content=message.content,
+            content=content,
             created_at=message.created_at.isoformat(),
             modified_at=message.modified_at.isoformat(),
         )

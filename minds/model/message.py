@@ -21,8 +21,3 @@ class Message(BaseSQLModel, table=True):
         default_factory=dict, sa_column=Column(JSONB), description="Content of the message as JSON"
     )
 
-    def to_chat_message(self) -> ChatMessage:
-        return ChatMessage(
-            role=self.role,
-            content=self.content,
-        )

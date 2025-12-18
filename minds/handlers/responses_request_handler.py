@@ -14,7 +14,7 @@ from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
 )
-from minds.schemas.chat import Role
+from minds.schemas.chat import Role, Message
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem
 from minds.services.conversations import ConversationsService
 
@@ -98,12 +98,17 @@ async def responses_request_handler(
 
     # Get the conversation along with it's messages
     # This will reflect the conversation ID provided or the new one created (with an updated list of messages)
-    conversation = await conversation_service.get_conversation_model_with_messages(conversation_id)
+    conversation_messages = await conversation_service.get_conversation_messages(conversation_id)
 
     # Convert the Message object to chat completions compatible Message (Role and Content) objects
     messages = []
-    for message in conversation.messages:
-        messages.append(message.to_chat_message())
+    for message in conversation_messages:
+        messages.append(
+            Message(
+                role=message.role,
+                content=message.content,
+            )
+        )
 
     # Use the chat completions handler (as a wrapper) to handle the responses request
     chat_completions_handler = ChatCompletionsHandler(
@@ -116,6 +121,8 @@ async def responses_request_handler(
         instrument=instrument
     )
 
+    # Create a message placeholder for the assistant response
+    # This is done to get the message ID to include in the response
     message = await conversation_service.create_message_placeholder(
         conversation_id=conversation_id,
         role=Role.assistant,
