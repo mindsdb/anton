@@ -96,6 +96,23 @@ async def responses_request_handler(
         )
         conversation_id = new_conversation.id
 
+    # If a conversation is provided, add the input as a new message to the conversation
+    else:
+        if input:
+            if isinstance(input, str):
+                await conversation_service.create_conversation_message(
+                    conversation_id=conversation_id,
+                    role=Role.user,
+                    content=input,
+                )
+            elif isinstance(input, list):
+                for message in input:
+                    await conversation_service.create_conversation_message(
+                        conversation_id=conversation_id,
+                        role=message.role,
+                        content=message.content,
+                    )
+
     # Get the conversation along with it's messages
     # This will reflect the conversation ID provided or the new one created (with an updated list of messages)
     conversation_messages = await conversation_service.get_conversation_messages(conversation_id)
@@ -106,7 +123,7 @@ async def responses_request_handler(
         messages.append(
             Message(
                 role=message.role,
-                content=message.content,
+                content=message.content.text
             )
         )
 
@@ -123,7 +140,7 @@ async def responses_request_handler(
 
     # Create a message placeholder for the assistant response
     # This is done to get the message ID to include in the response
-    message = await conversation_service.create_message_placeholder(
+    message = await conversation_service.create_conversation_message_placeholder(
         conversation_id=conversation_id,
         role=Role.assistant,
     )
@@ -137,7 +154,7 @@ async def responses_request_handler(
         Args:
             content (str): The content of the assistant response to save.
         """
-        await conversation_service.update_message_content(
+        await conversation_service.update_conversation_message_content(
             message=message,
             content=content,
         )

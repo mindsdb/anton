@@ -287,7 +287,39 @@ class ConversationsService:
             logger.error(f"Error getting conversation {conversation_id} with messages for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to get conversation with messages: {str(e)}") from None
 
-    async def create_message_placeholder(
+    async def create_conversation_message(
+        self,
+        conversation_id: UUID,
+        role: Role,
+        content: str
+    ) -> MessageResponse:
+        """
+        Create a new message in a conversation.
+        """
+        logger.debug(f"Creating message in conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id} with role {role} and content {content}")
+
+        try:
+            conversation = await self._get_conversation(conversation_id)
+            if not conversation:
+                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+
+            new_message = Message(
+                tenant_id=self.tenant_id,
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+            )
+            self.session.add(new_message)
+            self.session.commit()
+
+            return await self._message_to_response(new_message)
+        except ConversationNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error creating message in conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            raise ConversationsServiceError(f"Failed to create message: {str(e)}") from None
+
+    async def create_conversation_message_placeholder(
         self, 
         conversation_id: UUID, 
         role: Role
@@ -342,7 +374,7 @@ class ConversationsService:
             )
             raise ConversationsServiceError(f"Failed to create message placeholder: {str(e)}") from None
 
-    async def update_message_content(
+    async def update_conversation_message_content(
         self,
         message: Message,
         content: str

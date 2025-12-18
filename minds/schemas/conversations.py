@@ -38,8 +38,8 @@ class ConversationCreateRequest(BaseModel):
         default_factory=ConversationMetadata,
         description="Metadata for the conversation"
     )
-    items: list[ConversationItem] = Field(
-        ...,
+    items: list[ConversationItem] | None = Field(
+        default=None,
         description="Items in the conversation"
     )
 
