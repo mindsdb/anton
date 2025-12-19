@@ -8,7 +8,7 @@ providing a clean v1 API interface for conversation management.
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlmodel import Session
 
 from minds.client.mindsdb import create_mindsdb_client_from_request
@@ -241,4 +241,35 @@ async def get_conversation_message_result(
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error in get_conversation_message_result for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.get("/{conversation_id}/items/{message_id}/export")
+async def export_conversation_message_result(
+    conversation_id: UUID,
+    message_id: UUID,
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> Response:
+    """
+    Export the result of a message by ID.
+    """
+    logger.debug(f"Export conversation message result requested (v1) for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
+
+    try:
+        result = await conversations_service.export_conversation_message_result(conversation_id, message_id)
+        return Response(content=result, media_type="text/csv")
+    except ConversationNotFoundError as e:
+        logger.warning(f"Conversation not found for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotFoundError as e:
+        logger.warning(f"Message not found for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotAssistantError as e:
+        logger.warning(f"Message is not an assistant message for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ConversationsServiceError as e:
+        logger.error(f"Service error in export_conversation_message_result for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception as e:
+        logger.error(f"Unexpected error in export_conversation_message_result for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error") from None

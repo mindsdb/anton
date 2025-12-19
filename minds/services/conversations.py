@@ -2,7 +2,9 @@
 Conversations service for managing conversation operations.
 """
 
+import csv
 from datetime import datetime, timezone
+import io
 from typing import Literal
 from uuid import UUID
 
@@ -540,6 +542,51 @@ class ConversationsService:
         except Exception as e:
             logger.error(f"Error getting message result for conversation {conversation_id} and message {message_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise ConversationsServiceError(f"Failed to get message result: {str(e)}") from None
+
+    async def export_conversation_message_result(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+    ) -> bytes:
+        """
+        Export the result of a message by ID.
+        """
+        logger.debug(f"Exporting message result for conversation {conversation_id} and message {message_id} for user {self.user_id} and tenant {self.tenant_id}")
+
+        try:
+            conversation = await self._get_conversation(conversation_id)
+            if not conversation:
+                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+
+            message = await self._get_message(message_id)
+            if not message:
+                raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
+
+            if message.role != Role.assistant:
+                raise MessageNotAssistantError(f"Message with ID '{message_id}' is not an assistant message")
+
+            if message.sql_query is None:
+                raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
+
+            sql_query = message.sql_query
+
+            result = self.mindsdb_client.query(sql_query).fetch()
+
+            # Convert DataFrame to structured response
+            column_names = result.columns.tolist()
+            data = result.to_dict(orient="records")
+            # Write to CSV
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=column_names, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(data)
+
+            return buf.getvalue().encode("utf-8")
+        except (ConversationNotFoundError, MessageNotFoundError, MessageNotAssistantError, MessageNoSQLQueryError):
+            raise
+        except Exception as e:
+            logger.error(f"Error exporting message result for conversation {conversation_id} and message {message_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            raise ConversationsServiceError(f"Failed to export message result: {str(e)}") from None
 
     async def _get_conversation(self, conversation_id: UUID) -> Conversation:
         """
