@@ -271,7 +271,7 @@ async def process_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
     format_func: Callable[..., AsyncGenerator[str, None]],
-    message_id: UUID,
+    message_id: UUID | None = None,
     **format_kwargs
 ) -> StreamingResponse:
     """
@@ -285,7 +285,7 @@ async def process_streaming_producer(
                 `MessageStreamer` instance and emits `StreamMessage` objects.
         request_id (str): The unique ID for the request, used to identify the stream.
         format_func (Callable[..., AsyncGenerator[str, None]]): The format function to use for formatting messages.
-        message_id: UUID, The ID of the message to include in the response.
+        message_id (UUID | None): Optional ID of the message to include in the response. Required for responses API.
         **format_kwargs: Additional keyword arguments to pass to the format function.
 
     Returns:
@@ -314,12 +314,16 @@ async def process_streaming_producer(
 
         await task
 
+    # Conditionally include message_id in format_func call only if provided
+    format_args = {
+        "message_generator": stream(),
+        **format_kwargs
+    }
+    if message_id is not None:
+        format_args["message_id"] = message_id
+
     return StreamingResponse(
-        format_func(
-            message_generator=stream(),
-            message_id=message_id,
-            **format_kwargs
-        ),
+        format_func(**format_args),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -430,7 +434,7 @@ async def process_non_streaming_producer(
     producer: Callable[[Any], Awaitable[None]],
     request_id: str,
     format_func: Callable[..., Awaitable[JSONResponse]],
-    message_id: UUID,
+    message_id: UUID | None = None,
     **format_kwargs
 ) -> JSONResponse:
     """
@@ -444,7 +448,7 @@ async def process_non_streaming_producer(
                 `StreamerCollector` instance and emits `StreamMessage` objects.
         request_id (str): The unique ID for the request, used to identify the stream.
         format_func (Callable[..., Awaitable[JSONResponse]]): The format function to use for formatting messages.
-        message_id: UUID, The ID of the message to include in the response.
+        message_id (UUID | None): Optional ID of the message to include in the response. Required for responses API.
         **format_kwargs: Additional keyword arguments to pass to the format function.
 
     Returns:
@@ -452,4 +456,13 @@ async def process_non_streaming_producer(
     """
     collector = StreamerCollector(request_id=request_id)
     await producer(collector)
-    return await format_func(messages=collector.messages, message_id=message_id, **format_kwargs)
+    
+    # Conditionally include message_id in format_func call only if provided
+    format_args = {
+        "messages": collector.messages,
+        **format_kwargs
+    }
+    if message_id is not None:
+        format_args["message_id"] = message_id
+    
+    return await format_func(**format_args)

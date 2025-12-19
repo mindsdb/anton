@@ -39,7 +39,8 @@ def get_conversations_service(request: Request, session: Session = Depends(get_s
     Dependency function to create ConversationsService with user context.
     """
     context = extract_context_from_request(request)
-    return ConversationsService(session=session, user_id=context.user_id, tenant_id=context.tenant_id)
+    mindsdb_client = create_mindsdb_client_from_request(request, context)
+    return ConversationsService(session=session, user_id=context.user_id, tenant_id=context.tenant_id, mindsdb_client=mindsdb_client)
 
 
 @router.options("/")
