@@ -465,7 +465,7 @@ class ConversationsService:
             self.session.rollback()
             # Re-query the message to ensure it exists in the database
             # (it may not exist if it was only flushed and not committed)
-            message_from_db = await self._get_message(message.id)
+            message_from_db = await self._get_message(message.conversation_id, message.id)
             if message_from_db is None:
                 # Message doesn't exist, create it
                 message_from_db = Message(
@@ -526,7 +526,7 @@ class ConversationsService:
             if not conversation:
                 raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
 
-            message = await self._get_message(message_id)
+            message = await self._get_message(conversation_id, message_id)
             if not message:
                 raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
 
@@ -600,7 +600,7 @@ class ConversationsService:
             if not conversation:
                 raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
 
-            message = await self._get_message(message_id)
+            message = await self._get_message(conversation_id, message_id)
             if not message:
                 raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
 
@@ -659,13 +659,14 @@ class ConversationsService:
             raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
         return conversation
 
-    async def _get_message(self, message_id: UUID) -> Message:
+    async def _get_message(self, conversation_id: UUID, message_id: UUID) -> Message:
         """
         Utility function to get a message by ID.
         """
         statement = select(Message).where(
             and_(
                 Message.id == message_id,
+                Message.conversation_id == conversation_id,
                 Message.deleted_at.is_(None),
                 Message.tenant_id == self.tenant_id,
             )
