@@ -377,7 +377,8 @@ class ConversationsService:
     async def update_conversation_message_content(
         self,
         message: Message,
-        content: str
+        content: str,
+        sql_query: str | None = None
     ) -> MessageResponse:
         """
         Update the content of an existing message.
@@ -385,6 +386,7 @@ class ConversationsService:
         Args:
             message: The message object to update.
             content: The new content for the message.
+            sql_query: The SQL query for the message.
 
         Returns:
             MessageResponse: Updated message response object.
@@ -392,25 +394,19 @@ class ConversationsService:
         Raises:
             ConversationsServiceError: If there is an error updating the message.
         """
-        logger.debug(
+        logger.info(
             f"Updating message {message.id} content for user {self.user_id} and tenant {self.tenant_id}"
         )
 
         try:
-            # Handle potential rollback state - if session was rolled back, clear it first
-            try:
-                # Try to access session state to check if rollback is needed
-                if hasattr(self.session, '_transaction') and self.session._transaction is None:
-                    # Session was rolled back, need to start fresh
-                    pass
-            except Exception:
-                pass
+            # Ensure the message object is tracked by the session
+            # Merge ensures the object is properly attached and tracked for updates
+            message = self.session.merge(message)
             
-            # Modify the content - object should already be in session from create_message_placeholder
-            # Don't call add() again as it's already tracked
+            # Modify the content and sql_query
             message.content = content
-            # Flush to send changes to DB, then commit
-            self.session.flush()
+            message.sql_query = sql_query
+            # Commit will automatically flush any pending changes
             self.session.commit()
 
             logger.info(
@@ -419,19 +415,33 @@ class ConversationsService:
 
             return await self._message_to_response(message)
         except PendingRollbackError:
-            # Session was rolled back, clear the state and retry
+            # Session was rolled back, clear the state and retry once
             self.session.rollback()
-            # Re-merge the object to ensure it's tracked
-            message = self.session.merge(message)
-            message.content = content
-            self.session.flush()
+            # Re-query the message to ensure it exists in the database
+            # (it may not exist if it was only flushed and not committed)
+            message_from_db = self.session.get(Message, message.id)
+            if message_from_db is None:
+                # Message doesn't exist, create it
+                message_from_db = Message(
+                    id=message.id,
+                    tenant_id=self.tenant_id,
+                    conversation_id=message.conversation_id,
+                    role=message.role,
+                    content=content,
+                    sql_query=sql_query,
+                )
+                self.session.add(message_from_db)
+            else:
+                # Message exists, update it
+                message_from_db.content = content
+                message_from_db.sql_query = sql_query
             self.session.commit()
             
             logger.info(
-                f"Updated message {message.id} content for user {self.user_id} and tenant {self.tenant_id} (after rollback recovery)"
+                f"Updated message {message_from_db.id} content for user {self.user_id} and tenant {self.tenant_id} (after rollback recovery)"
             )
             
-            return await self._message_to_response(message)
+            return await self._message_to_response(message_from_db)
         except Exception as e:
             self.session.rollback()
             logger.error(

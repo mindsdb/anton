@@ -147,7 +147,7 @@ async def responses_request_handler(
     message_id = message.id
 
 
-    async def save_assistant_response(content: str):
+    async def save_assistant_response(content: str, sql_query: str | None = None):
         """
         Save the assistant response to the database.
 
@@ -157,6 +157,7 @@ async def responses_request_handler(
         await conversation_service.update_conversation_message_content(
             message=message,
             content=content,
+            sql_query=sql_query,
         )
 
 
