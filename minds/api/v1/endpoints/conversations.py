@@ -11,12 +11,21 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlmodel import Session
 
+from minds.client.mindsdb import create_mindsdb_client_from_request
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.requests.context import extract_context_from_request
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
-from minds.schemas.messages import MessageResponse
-from minds.services.conversations import ConversationsService, ConversationAlreadyExistsError, ConversationNotFoundError, ConversationsServiceError
+from minds.schemas.messages import MessageResponse, MessageResultResponse
+from minds.services.conversations import (
+    ConversationsService,
+    ConversationAlreadyExistsError,
+    ConversationNotFoundError,
+    ConversationsServiceError,
+    MessageNotFoundError,
+    MessageNotAssistantError,
+    MessageNoSQLQueryError,
+)
 
 logger = setup_logging()
 
@@ -28,7 +37,8 @@ def get_conversations_service(request: Request, session: Session = Depends(get_s
     Dependency function to create ConversationsService with user context.
     """
     context = extract_context_from_request(request)
-    return ConversationsService(session=session, user_id=context.user_id, tenant_id=context.tenant_id)
+    mindsdb_client = create_mindsdb_client_from_request(request, context)
+    return ConversationsService(session=session, mindsdb_client=mindsdb_client, user_id=context.user_id, tenant_id=context.tenant_id)
 
 
 @router.get("/")
@@ -197,4 +207,38 @@ async def delete_conversation(
         raise HTTPException(status_code=400, detail=str(e)) from None
     except Exception as e:
         logger.error(f"Unexpected error in delete_conversation for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.get("/{conversation_id}/items/{message_id}/result")
+async def get_conversation_message_result(
+    conversation_id: UUID,
+    message_id: UUID,
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> MessageResultResponse:
+    """
+    Get the result of a message by ID.
+    """
+    logger.debug(f"Get conversation message result requested (v1) for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}")
+
+    try:
+        result = await conversations_service.get_conversation_message_result(conversation_id, message_id)
+        return result
+    except ConversationNotFoundError as e:
+        logger.warning(f"Conversation not found for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotFoundError as e:
+        logger.warning(f"Message not found for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotAssistantError as e:
+        logger.warning(f"Message is not an assistant message for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except MessageNoSQLQueryError as e:
+        logger.warning(f"Message does not have a SQL query for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ConversationsServiceError as e:
+        logger.error(f"Service error in get_conversation_message_result for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception as e:
+        logger.error(f"Unexpected error in get_conversation_message_result for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error") from None

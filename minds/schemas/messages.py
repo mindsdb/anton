@@ -6,7 +6,7 @@ including creation, updates, retrieval, and deletion.
 """
 
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -36,3 +36,10 @@ class MessageResponse(BaseModel):
     content: MessageContent = Field(..., description="Content of the message")
     created_at: str | None = Field(None, description="Creation timestamp")
     modified_at: str | None = Field(None, description="Last update timestamp")
+
+
+class MessageResultResponse(BaseModel):
+    """Response model for message result data."""
+
+    data: list[list[Any]] = Field(..., description="Result data as array of arrays")
+    column_names: list[str] = Field(..., description="Column names for the data")
