@@ -5,13 +5,12 @@ from minds.schemas.chat import Message
 
 class ResponsesRequest(BaseModel):
     input: str | list[Message] | None = Field(
-        default=None,
-        description="Input for the responses request, either a string or a list of messages"
+        default=None, description="Input for the responses request, either a string or a list of messages"
     )
     # TODO: The OpenAI API also supports a conversation object?
     conversation: str | None = Field(
         default=None,
-        description="Conversation ID for the responses request, if not provided, a new conversation will be created"
+        description="Conversation ID for the responses request, if not provided, a new conversation will be created",
     )
     model: str = Field(description="Model name for the chat completion request")
     stream: bool | None = Field(

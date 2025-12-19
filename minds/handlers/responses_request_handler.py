@@ -14,7 +14,7 @@ from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
 )
-from minds.schemas.chat import Role, Message
+from minds.schemas.chat import Message, Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem
 from minds.services.conversations import ConversationsService
 
@@ -82,17 +82,10 @@ async def responses_request_handler(
                 )
             elif isinstance(input, list):
                 for message in input:
-                    conversation_items.append(
-                        ConversationItem(
-                            role=message.role,
-                            content=message.content
-                        )
-                    )
+                    conversation_items.append(ConversationItem(role=message.role, content=message.content))
 
         new_conversation = await conversation_service.create_conversation(
-            ConversationCreateRequest(
-                items=conversation_items
-            )
+            ConversationCreateRequest(items=conversation_items)
         )
         conversation_id = new_conversation.id
 
@@ -120,12 +113,7 @@ async def responses_request_handler(
     # Convert the Message object to chat completions compatible Message (Role and Content) objects
     messages = []
     for message in conversation_messages:
-        messages.append(
-            Message(
-                role=message.role,
-                content=message.content.text
-            )
-        )
+        messages.append(Message(role=message.role, content=message.content.text))
 
     # Use the chat completions handler (as a wrapper) to handle the responses request
     chat_completions_handler = ChatCompletionsHandler(
@@ -135,7 +123,7 @@ async def responses_request_handler(
         messages=messages,
         model=model,
         stream=stream,
-        instrument=instrument
+        instrument=instrument,
     )
 
     # Create a message placeholder for the assistant response
@@ -145,7 +133,6 @@ async def responses_request_handler(
         role=Role.assistant,
     )
     message_id = message.id
-
 
     async def save_assistant_response(content: str, sql_query: str | None = None):
         """
@@ -159,7 +146,6 @@ async def responses_request_handler(
             content=content,
             sql_query=sql_query,
         )
-
 
     if stream:
         logger.debug(f"🔄[{request_id}] Responses API request is streaming.")

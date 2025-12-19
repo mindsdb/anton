@@ -3,15 +3,14 @@ Conversations service for managing conversation operations.
 """
 
 import csv
-from datetime import datetime, timezone
 import io
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
 from mindsdb_sdk.server import Server
 from mindsdb_sql_parser import parse_sql
 from sqlalchemy.exc import PendingRollbackError
-from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
@@ -26,30 +25,37 @@ logger = setup_logging()
 
 class ConversationAlreadyExistsError(Exception):
     """Exception for when a conversation already exists."""
+
     pass
 
 
 class ConversationNotFoundError(Exception):
     """Exception for when a conversation is not found."""
+
     pass
 
 
 class ConversationsServiceError(Exception):
     """Base exception for conversations service errors."""
+
     pass
 
 
 class MessageNotFoundError(Exception):
     """Exception for when a message is not found."""
+
     pass
 
 
 class MessageNotAssistantError(Exception):
     """Exception for when a message is not an assistant message."""
+
     pass
+
 
 class MessageNoSQLQueryError(Exception):
     """Exception for when a message does not have a SQL query."""
+
     pass
 
 
@@ -97,9 +103,11 @@ class ConversationsService:
         Raises:
             ConversationsServiceError: If there is an error listing conversations.
         """
-        logger.debug(f"Listing conversations for user {self.user_id} and tenant {self.tenant_id} with filters: "
-                     f"topic={topic}, include_deleted={include_deleted}, limit={limit}, offset={offset}, "
-                     f"include_total={include_total}, sort_by={sort_by}, sort_order={sort_order}")
+        logger.debug(
+            f"Listing conversations for user {self.user_id} and tenant {self.tenant_id} with filters: "
+            f"topic={topic}, include_deleted={include_deleted}, limit={limit}, offset={offset}, "
+            f"include_total={include_total}, sort_by={sort_by}, sort_order={sort_order}"
+        )
 
         try:
             # Build query conditions
@@ -113,7 +121,11 @@ class ConversationsService:
             total_count = None
             if include_total:
                 # For count, we don't need joins or options
-                count_statement = select(func.count(func.distinct(Conversation.id))).select_from(Conversation).where(and_(*conditions))
+                count_statement = (
+                    select(func.count(func.distinct(Conversation.id)))
+                    .select_from(Conversation)
+                    .where(and_(*conditions))
+                )
                 total_count = self.session.exec(count_statement).one()
 
             # Determine sort field and order
@@ -137,7 +149,10 @@ class ConversationsService:
                 conversation_response = await self._conversation_to_response(conversation)
                 conversations_list.append(conversation_response)
 
-            logger.info(f"Retrieved {len(conversations_list)} conversations for user {self.user_id} and tenant {self.tenant_id} (offset={offset}, limit={limit})")
+            logger.info(
+                f"Retrieved {len(conversations_list)} conversations "
+                f"for user {self.user_id} in tenant {self.tenant_id} (offset={offset}, limit={limit})"
+            )
 
             if include_total:
                 return conversations_list, total_count
@@ -169,7 +184,10 @@ class ConversationsService:
         except ConversationNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error getting conversation {conversation_id} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise ConversationsServiceError(f"Failed to get conversation: {str(e)}") from None
 
     async def create_conversation(self, conversation_data: ConversationCreateRequest) -> ConversationResponse:
@@ -186,7 +204,10 @@ class ConversationsService:
             ConversationAlreadyExistsError: If conversation with the same topic already exists.
             ConversationsServiceError: If there is an error creating the conversation.
         """
-        logger.debug(f"Creating conversation {conversation_data.metadata.topic} for user {self.user_id} and tenant {self.tenant_id}")
+        logger.debug(
+            f"Creating conversation {conversation_data.metadata.topic} "
+            f"for user {self.user_id} in tenant {self.tenant_id}"
+        )
 
         try:
             # Check if conversation already exists
@@ -201,7 +222,9 @@ class ConversationsService:
             ).first()
 
             if existing_conversation:
-                raise ConversationAlreadyExistsError(f"Conversation with topic '{conversation_data.metadata.topic}' already exists")
+                raise ConversationAlreadyExistsError(
+                    f"Conversation with topic '{conversation_data.metadata.topic}' already exists"
+                )
 
             new_conversation = Conversation(
                 topic=conversation_data.metadata.topic,
@@ -226,14 +249,20 @@ class ConversationsService:
 
             self.session.commit()
 
-            logger.info(f"Created conversation {conversation_data.metadata.topic} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.info(
+                f"Created conversation {conversation_data.metadata.topic} "
+                f"for user {self.user_id} in tenant {self.tenant_id}"
+            )
 
             return await self._conversation_to_response(new_conversation)
         except ConversationAlreadyExistsError:
             self.session.rollback()
             raise
         except Exception as e:
-            logger.error(f"Error creating conversation {conversation_data.metadata.topic} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error creating conversation {conversation_data.metadata.topic} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             self.session.rollback()
             raise ConversationsServiceError(f"Failed to create conversation: {str(e)}") from None
 
@@ -264,7 +293,10 @@ class ConversationsService:
         except ConversationNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error deleting conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error deleting conversation {conversation_id} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise ConversationsServiceError(f"Failed to delete conversation: {str(e)}") from None
 
     async def get_conversation_messages(self, conversation_id: UUID) -> list[MessageResponse]:
@@ -277,7 +309,9 @@ class ConversationsService:
         Returns:
             List[MessageResponse]: List of messages.
         """
-        logger.debug(f"Getting conversation {conversation_id} with messages for user {self.user_id} and tenant {self.tenant_id}")
+        logger.debug(
+            f"Getting conversation {conversation_id} with messages for user {self.user_id} and tenant {self.tenant_id}"
+        )
 
         try:
             conversation = await self._get_conversation(conversation_id)
@@ -303,19 +337,20 @@ class ConversationsService:
         except ConversationNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting conversation {conversation_id} with messages for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error getting conversation {conversation_id} with messages "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise ConversationsServiceError(f"Failed to get conversation with messages: {str(e)}") from None
 
-    async def create_conversation_message(
-        self,
-        conversation_id: UUID,
-        role: Role,
-        content: str
-    ) -> MessageResponse:
+    async def create_conversation_message(self, conversation_id: UUID, role: Role, content: str) -> MessageResponse:
         """
         Create a new message in a conversation.
         """
-        logger.debug(f"Creating message in conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id} with role {role} and content {content}")
+        logger.debug(
+            f"Creating message in conversation {conversation_id} "
+            f"for user {self.user_id} in tenant {self.tenant_id} with role {role} and content {content}"
+        )
 
         try:
             conversation = await self._get_conversation(conversation_id)
@@ -335,14 +370,13 @@ class ConversationsService:
         except ConversationNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error creating message in conversation {conversation_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error creating message in conversation {conversation_id} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise ConversationsServiceError(f"Failed to create message: {str(e)}") from None
 
-    async def create_conversation_message_placeholder(
-        self, 
-        conversation_id: UUID, 
-        role: Role
-    ) -> Message:
+    async def create_conversation_message_placeholder(self, conversation_id: UUID, role: Role) -> Message:
         """
         Create a message placeholder with empty content and flush to get the ID.
         The message will be updated with actual content later via the update_message_content method.
@@ -394,10 +428,7 @@ class ConversationsService:
             raise ConversationsServiceError(f"Failed to create message placeholder: {str(e)}") from None
 
     async def update_conversation_message_content(
-        self,
-        message: Message,
-        content: str,
-        sql_query: str | None = None
+        self, message: Message, content: str, sql_query: str | None = None
     ) -> MessageResponse:
         """
         Update the content of an existing message.
@@ -413,24 +444,20 @@ class ConversationsService:
         Raises:
             ConversationsServiceError: If there is an error updating the message.
         """
-        logger.info(
-            f"Updating message {message.id} content for user {self.user_id} and tenant {self.tenant_id}"
-        )
+        logger.info(f"Updating message {message.id} content for user {self.user_id} and tenant {self.tenant_id}")
 
         try:
             # Ensure the message object is tracked by the session
             # Merge ensures the object is properly attached and tracked for updates
             message = self.session.merge(message)
-            
+
             # Modify the content and sql_query
             message.content = content
             message.sql_query = sql_query
             # Commit will automatically flush any pending changes
             self.session.commit()
 
-            logger.info(
-                f"Updated message {message.id} content for user {self.user_id} and tenant {self.tenant_id}"
-            )
+            logger.info(f"Updated message {message.id} content for user {self.user_id} and tenant {self.tenant_id}")
 
             return await self._message_to_response(message)
         except PendingRollbackError:
@@ -455,16 +482,18 @@ class ConversationsService:
                 message_from_db.content = content
                 message_from_db.sql_query = sql_query
             self.session.commit()
-            
+
             logger.info(
-                f"Updated message {message_from_db.id} content for user {self.user_id} and tenant {self.tenant_id} (after rollback recovery)"
+                f"Updated message {message_from_db.id} content "
+                f"for user {self.user_id} in tenant {self.tenant_id} (after rollback recovery)"
             )
-            
+
             return await self._message_to_response(message_from_db)
         except Exception as e:
             self.session.rollback()
             logger.error(
-                f"Error updating message {message.id} content for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"Error updating message {message.id} content "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to update message content: {str(e)}") from None
 
@@ -487,7 +516,10 @@ class ConversationsService:
         Returns:
             MessageResultResponse: Message result response object.
         """
-        logger.debug(f"Getting message result for conversation {conversation_id} and message {message_id} for user {self.user_id} and tenant {self.tenant_id}")
+        logger.debug(
+            f"Getting message result for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in tenant {self.tenant_id}"
+        )
 
         try:
             conversation = await self._get_conversation(conversation_id)
@@ -533,14 +565,21 @@ class ConversationsService:
             column_names = result.columns.tolist()
             data = result.values.tolist()
 
-            return MessageResultResponse(
-                data=data,
-                column_names=column_names,
-            ), total_rows, is_pagination_consistent
+            return (
+                MessageResultResponse(
+                    data=data,
+                    column_names=column_names,
+                ),
+                total_rows,
+                is_pagination_consistent,
+            )
         except (ConversationNotFoundError, MessageNotFoundError, MessageNotAssistantError, MessageNoSQLQueryError):
             raise
         except Exception as e:
-            logger.error(f"Error getting message result for conversation {conversation_id} and message {message_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error getting message result for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise ConversationsServiceError(f"Failed to get message result: {str(e)}") from None
 
     async def export_conversation_message_result(
@@ -551,7 +590,10 @@ class ConversationsService:
         """
         Export the result of a message by ID.
         """
-        logger.debug(f"Exporting message result for conversation {conversation_id} and message {message_id} for user {self.user_id} and tenant {self.tenant_id}")
+        logger.debug(
+            f"Exporting message result for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in tenant {self.tenant_id}"
+        )
 
         try:
             conversation = await self._get_conversation(conversation_id)
@@ -585,7 +627,10 @@ class ConversationsService:
         except (ConversationNotFoundError, MessageNotFoundError, MessageNotAssistantError, MessageNoSQLQueryError):
             raise
         except Exception as e:
-            logger.error(f"Error exporting message result for conversation {conversation_id} and message {message_id} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error exporting message result for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+            )
             raise ConversationsServiceError(f"Failed to export message result: {str(e)}") from None
 
     async def _get_conversation(self, conversation_id: UUID) -> Conversation:
@@ -601,15 +646,12 @@ class ConversationsService:
         Raises:
             ConversationNotFoundError: If conversation with the given ID does not exist.
         """
-        statement = (
-            select(Conversation)
-            .where(
-                and_(
-                    Conversation.id == conversation_id,
-                    Conversation.deleted_at.is_(None),
-                    Conversation.user_id == self.user_id,
-                    Conversation.tenant_id == self.tenant_id,
-                )
+        statement = select(Conversation).where(
+            and_(
+                Conversation.id == conversation_id,
+                Conversation.deleted_at.is_(None),
+                Conversation.user_id == self.user_id,
+                Conversation.tenant_id == self.tenant_id,
             )
         )
         conversation = self.session.exec(statement).first()
@@ -662,7 +704,7 @@ class ConversationsService:
         """
         content = MessageContent(
             type=MessageContentType.output_text if message.role == Role.assistant else MessageContentType.input_text,
-            text=message.content
+            text=message.content,
         )
         return MessageResponse(
             id=message.id,

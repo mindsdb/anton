@@ -9,7 +9,17 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
 from minds.schemas.chat import ChatCompletion, ChatCompletionChunk, Choice, Message, Role, StreamChoice, StreamMessage
-from minds.schemas.responses import Response, ResponseDelta, ResponseOutput, ResponseOutputContent, ResponseStatus, StreamingResponse as StreamingResponseSchema, StreamingResponseEvent 
+from minds.schemas.responses import (
+    Response,
+    ResponseDelta,
+    ResponseOutput,
+    ResponseOutputContent,
+    ResponseStatus,
+    StreamingResponseEvent,
+)
+from minds.schemas.responses import (
+    StreamingResponse as StreamingResponseSchema,
+)
 
 # Set up logging
 logger = setup_logging()
@@ -89,7 +99,7 @@ async def format_messages_for_streaming_chat_completions_api(
     message_generator: AsyncGenerator[StreamMessage, Any],
     model: str,
     on_complete_callback: Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None = None,
-    **kwargs
+    **kwargs,
 ) -> AsyncGenerator[str, None]:
     """
     Format messages for streaming for chat completions API as SSE events.
@@ -97,7 +107,8 @@ async def format_messages_for_streaming_chat_completions_api(
     Args:
             message_generator: An async generator that yields Message objects
             model (str): The model name to include in the SSE event.
-            on_complete_callback (Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None): Optional callback function (ignored for chat completions API).
+            on_complete_callback (Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None): Optional callback
+                    function (ignored for chat completions API).
     Returns:
             An async generator yielding SSE formatted events
     """
@@ -154,7 +165,7 @@ async def format_messages_for_streaming_responses_api(
     model: str,
     on_complete_callback: Callable[[str], Awaitable[None]],
     message_id: UUID,
-    **kwargs
+    **kwargs,
 ) -> AsyncGenerator[str, None]:
     """
     Format messages for streaming for responses API as SSE events.
@@ -162,7 +173,8 @@ async def format_messages_for_streaming_responses_api(
     Args:
         message_generator: An async generator that yields StreamMessage objects
         model (str): The model name to include in the SSE event.
-        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after the messages are processed.
+        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after
+                the messages are processed.
         message_id: UUID, The ID of the message to include in the response.
 
     Returns:
@@ -206,13 +218,9 @@ async def format_messages_for_streaming_responses_api(
                             id=str(message_id),
                             status=ResponseStatus.in_progress.value,
                             role=Role.system.value,
-                            content=[
-                                ResponseOutputContent(
-                                    text=content
-                                )
-                            ],
+                            content=[ResponseOutputContent(text=content)],
                         )
-                    ]
+                    ],
                 ),
             )
 
@@ -252,13 +260,9 @@ async def format_messages_for_streaming_responses_api(
                     id=str(message_id),
                     status=ResponseStatus.completed.value,
                     role=Role.assistant.value,
-                    content=[
-                        ResponseOutputContent(
-                            text=assistant_content
-                        )
-                    ],
+                    content=[ResponseOutputContent(text=assistant_content)],
                 )
-            ]
+            ],
         ),
     )
     yield f"event: {completed_chunk.type.value}\ndata: {completed_chunk.model_dump_json()}\n\n"
@@ -272,7 +276,7 @@ async def process_streaming_producer(
     request_id: str,
     format_func: Callable[..., AsyncGenerator[str, None]],
     message_id: UUID | None = None,
-    **format_kwargs
+    **format_kwargs,
 ) -> StreamingResponse:
     """
     Run a push-based producer that emits StreamMessage objects to an streamer, and
@@ -315,10 +319,7 @@ async def process_streaming_producer(
         await task
 
     # Conditionally include message_id in format_func call only if provided
-    format_args = {
-        "message_generator": stream(),
-        **format_kwargs
-    }
+    format_args = {"message_generator": stream(), **format_kwargs}
     if message_id is not None:
         format_args["message_id"] = message_id
 
@@ -339,7 +340,7 @@ async def format_messages_for_non_streaming_chat_completions_api(
     messages: list[StreamMessage],
     model: str,
     on_complete_callback: Callable[[ChatCompletion], Awaitable[None]] | None = None,
-    **kwargs
+    **kwargs,
 ) -> JSONResponse:
     """
     Format messages for non-streaming for chat completions API.
@@ -347,7 +348,8 @@ async def format_messages_for_non_streaming_chat_completions_api(
     Args:
         messages (list[StreamMessage]): A list of StreamMessage objects.
         model (str): The model name to include in the response.
-        on_complete_callback (Callable[[ChatCompletion], Awaitable[None]] | None): Optional callback function (ignored for chat completions API).
+        on_complete_callback (Callable[[ChatCompletion], Awaitable[None]] | None): Optional callback
+            function (ignored for chat completions API). Required for responses API.
 
     Returns:
             JSONResponse: A response that contains the ChatCompletion built from the messages.
@@ -379,7 +381,7 @@ async def format_messages_for_non_streaming_responses_api(
     model: str,
     on_complete_callback: Callable[[str], Awaitable[None]],
     message_id: UUID,
-    **kwargs
+    **kwargs,
 ) -> JSONResponse:
     """
     Format messages for non-streaming for responses API.
@@ -387,7 +389,8 @@ async def format_messages_for_non_streaming_responses_api(
     Args:
         messages (list[StreamMessage]): A list of StreamMessage objects.
         model (str): The model name to include in the response.
-        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after the messages are processed.
+        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after the
+                messages are processed.
         message_id: UUID, The ID of the message to include in the response.
 
     Returns:
@@ -414,7 +417,7 @@ async def format_messages_for_non_streaming_responses_api(
                 ResponseOutput(
                     id=str(message_id),
                     status=ResponseStatus.completed.value,
-                    content=[ResponseOutputContent(text=content)]
+                    content=[ResponseOutputContent(text=content)],
                 )
             )
 
@@ -435,7 +438,7 @@ async def process_non_streaming_producer(
     request_id: str,
     format_func: Callable[..., Awaitable[JSONResponse]],
     message_id: UUID | None = None,
-    **format_kwargs
+    **format_kwargs,
 ) -> JSONResponse:
     """
     Run a push-based producer and return a non-streaming JSON response built
@@ -456,13 +459,10 @@ async def process_non_streaming_producer(
     """
     collector = StreamerCollector(request_id=request_id)
     await producer(collector)
-    
+
     # Conditionally include message_id in format_func call only if provided
-    format_args = {
-        "messages": collector.messages,
-        **format_kwargs
-    }
+    format_args = {"messages": collector.messages, **format_kwargs}
     if message_id is not None:
         format_args["message_id"] = message_id
-    
+
     return await format_func(**format_args)

@@ -16,12 +16,14 @@ from minds.schemas.chat import Role
 
 class MessageContentType(Enum):
     """Type of a message content."""
+
     input_text = "input_text"
     output_text = "output_text"
 
 
 class MessageContent(BaseModel):
     """Content of a message."""
+
     type: MessageContentType = MessageContentType.output_text
     text: str = Field(..., description="Text of the message")
 

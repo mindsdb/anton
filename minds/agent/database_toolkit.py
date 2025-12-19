@@ -79,7 +79,7 @@ class DatabaseToolkit:
 
                 await streamer.push(
                     role=Role.system,
-                    content=f"Here is the generated SQL query:",
+                    content="Here is the generated SQL query:",
                 )
                 await streamer.push(
                     role=Role.system,
