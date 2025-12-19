@@ -215,7 +215,7 @@ async def get_conversation_message_result(
     conversation_id: UUID,
     message_id: UUID,
     conversations_service: ConversationsService = Depends(get_conversations_service),
-) -> MessageResultResponse:
+) -> dict[str, MessageResultResponse | int | bool]:
     """
     Get the result of a message by ID.
     """
@@ -223,7 +223,7 @@ async def get_conversation_message_result(
 
     try:
         result = await conversations_service.get_conversation_message_result(conversation_id, message_id)
-        return result
+        return {"data": result[0], "total": result[1], "is_pagination_consistent": result[2]}
     except ConversationNotFoundError as e:
         logger.warning(f"Conversation not found for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}")
         raise HTTPException(status_code=404, detail=str(e)) from None
