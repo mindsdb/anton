@@ -27,6 +27,12 @@ deployment:
           - path: /api/v1/tree
             serviceName: minds
             servicePort: 80
+          - path: /api/v1/conversations
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/responses
+            serviceName: minds
+            servicePort: 80
 
   extraEnvs:
 
