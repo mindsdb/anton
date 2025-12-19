@@ -496,6 +496,8 @@ class TestConversationsAPI:
         result = await get_conversation_message_result(
             conversation_id=conversation_id,
             message_id=message_id,
+            limit=100,
+            offset=0,
             conversations_service=mock_conversations_service,
         )
 
@@ -505,7 +507,9 @@ class TestConversationsAPI:
         assert "is_pagination_consistent" in result
         assert result["total"] == 2
         assert result["is_pagination_consistent"] is True
-        mock_conversations_service.get_conversation_message_result.assert_called_once_with(conversation_id, message_id)
+        mock_conversations_service.get_conversation_message_result.assert_called_once_with(
+            conversation_id, message_id, limit=100, offset=0
+        )
 
     @pytest.mark.asyncio
     async def test_get_conversation_message_result_conversation_not_found(self, mock_conversations_service):

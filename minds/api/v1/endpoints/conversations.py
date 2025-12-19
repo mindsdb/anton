@@ -284,6 +284,8 @@ async def delete_conversation(
 async def get_conversation_message_result(
     conversation_id: UUID,
     message_id: UUID,
+    limit: int = Query(100, le=1000, ge=1, description="Maximum number of rows to return"),
+    offset: int = Query(0, ge=0, description="Number of rows to skip for pagination"),
     conversations_service: ConversationsService = Depends(get_conversations_service),
 ) -> dict[str, MessageResultResponse | int | bool]:
     """
@@ -295,7 +297,12 @@ async def get_conversation_message_result(
     )
 
     try:
-        result = await conversations_service.get_conversation_message_result(conversation_id, message_id)
+        result = await conversations_service.get_conversation_message_result(
+            conversation_id,
+            message_id,
+            limit=limit,
+            offset=offset,
+        )
         return {"data": result[0], "total": result[1], "is_pagination_consistent": result[2]}
     except ConversationNotFoundError as e:
         logger.warning(
