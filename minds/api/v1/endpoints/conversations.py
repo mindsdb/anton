@@ -303,7 +303,7 @@ async def get_conversation_message_result(
             limit=limit,
             offset=offset,
         )
-        return {"data": result[0], "total": result[1], "is_pagination_consistent": result[2]}
+        return {"result": result[0], "total": result[1], "is_pagination_consistent": result[2]}
     except ConversationNotFoundError as e:
         logger.warning(
             f"Conversation not found "

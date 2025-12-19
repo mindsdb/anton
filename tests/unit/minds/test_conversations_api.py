@@ -502,7 +502,7 @@ class TestConversationsAPI:
         )
 
         assert isinstance(result, dict)
-        assert "data" in result
+        assert "result" in result
         assert "total" in result
         assert "is_pagination_consistent" in result
         assert result["total"] == 2
