@@ -61,7 +61,7 @@ async def test_format_messages_for_streaming_emits_sse(streaming_mod):
         yield streaming_mod.StreamMessage(id="chatcmpl-B", role=streaming_mod.Role.assistant, content="test")
 
     out = []
-    async for chunk in streaming_mod.format_messages_for_streaming(gen(), model):
+    async for chunk in streaming_mod.format_messages_for_streaming_chat_completions_api(gen(), model):
         out.append(chunk)
 
     # Should produce two content SSE events followed by a final "stop" event
@@ -140,6 +140,7 @@ async def test_process_streaming_producer_emits_sse(streaming_mod):
     resp = await streaming_mod.process_streaming_producer(
         producer,
         request_id="chatcmpl-777",
+        format_func=streaming_mod.format_messages_for_streaming_chat_completions_api,
         model=model,
     )
     # headers & type
@@ -180,7 +181,12 @@ async def test_process_non_streaming_producer_returns_json(streaming_mod):
         await collector.push(streaming_mod.Role.user, "u")
         await collector.push(streaming_mod.Role.assistant, "a")
 
-    resp = await streaming_mod.process_non_streaming_producer(producer, request_id="chatcmpl-42", model=model)
+    resp = await streaming_mod.process_non_streaming_producer(
+        producer,
+        request_id="chatcmpl-42",
+        format_func=streaming_mod.format_messages_for_non_streaming_chat_completions_api,
+        model=model,
+    )
     assert resp.status_code == 200
     data = json.loads(resp.body.decode())
     assert data["model"] == model
@@ -201,7 +207,12 @@ async def test_process_non_streaming_filters_out_system_messages(streaming_mod):
         await collector.push(streaming_mod.Role.system, "thought")
         await collector.push(streaming_mod.Role.assistant, "a")
 
-    resp = await streaming_mod.process_non_streaming_producer(producer, request_id="chatcmpl-sys", model=model)
+    resp = await streaming_mod.process_non_streaming_producer(
+        producer,
+        request_id="chatcmpl-sys",
+        format_func=streaming_mod.format_messages_for_non_streaming_chat_completions_api,
+        model=model,
+    )
     assert resp.status_code == 200
     data = json.loads(resp.body.decode())
     assert data["model"] == model
@@ -225,6 +236,7 @@ async def test_process_streaming_producer_includes_system_messages(streaming_mod
     resp = await streaming_mod.process_streaming_producer(
         producer,
         request_id="chatcmpl-stream-sys",
+        format_func=streaming_mod.format_messages_for_streaming_chat_completions_api,
         model=model,
     )
 
