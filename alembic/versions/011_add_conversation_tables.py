@@ -1,7 +1,7 @@
 """add_conversation_tables
 
-Revision ID: 010_add_conversation_tables
-Revises: 009_drop_connection_data_col
+Revision ID: 011_add_conversation_tables
+Revises: 010_fix_string_col_types
 Create Date: 2025-12-11 15:28:20.750356
 
 """
@@ -15,8 +15,8 @@ from minds.schemas.chat import Role
 
 
 # revision identifiers, used by Alembic.
-revision: str = '010_add_conversation_tables'
-down_revision: Union[str, None] = '009_drop_connection_data_col'
+revision: str = '011_add_conversation_tables'
+down_revision: Union[str, None] = '010_fix_string_col_types'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
