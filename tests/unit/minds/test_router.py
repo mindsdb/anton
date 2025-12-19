@@ -158,7 +158,9 @@ class TestAPIV1Router:
                 "/api/v1/health",
                 "/api/v1/minds",
                 "/api/v1/chat",
+                "/api/v1/conversations",
                 "/api/v1/datasources",
+                "/api/v1/responses",
                 "/api/v1/tree",
             ]
             assert any(route.path.startswith(prefix) for prefix in expected_prefixes), (
