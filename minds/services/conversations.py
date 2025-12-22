@@ -555,12 +555,8 @@ class ConversationsService:
             # may have a LIMIT or OFFSET clause.
             # TODO: Are there situations where we don't need to execute the query?
             # or put it in the nested subquery?
-            sql_query = f"SELECT * FROM ({sql_query}) AS paginated_rows LIMIT {limit} OFFSET {offset}"
-            result = self.mindsdb_client.query(sql_query).fetch()
-            # Convert DataFrame to structured response
-            column_names = result.columns.tolist()
-            data = result.values.tolist()
-            result = self.mindsdb_client.query(message.sql_query).fetch()
+            paginated_sql_query = f"SELECT * FROM ({sql_query}) AS paginated_rows LIMIT {limit} OFFSET {offset}"
+            result = self.mindsdb_client.query(paginated_sql_query).fetch()
             # Convert DataFrame to structured response
             column_names = result.columns.tolist()
             data = result.values.tolist()
