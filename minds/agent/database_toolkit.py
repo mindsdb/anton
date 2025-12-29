@@ -83,7 +83,7 @@ class DatabaseToolkit:
                 )
                 await streamer.push(
                     role=Role.system,
-                    content=sanitized_query,
+                    content={"type": "sql_query", "query": sanitized_query},
                 )
 
                 return execution_result

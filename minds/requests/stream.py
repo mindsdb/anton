@@ -95,6 +95,21 @@ class StreamerCollector(MessageStreamer):
         return None
 
 
+def extract_sql_query_from_thoughts(content: Any) -> str | None:
+    """
+    Extract the SQL query from the content if it exists.
+
+    Args:
+        content (Any): The content of the message, can be a string or any other type.
+
+    Returns:
+        str | None: The SQL query if it exists, otherwise None.
+    """
+    if isinstance(content, dict) and content.get("type") == "sql_query":
+        return content.get("query")
+    return None
+
+
 async def format_messages_for_streaming_chat_completions_api(
     message_generator: AsyncGenerator[StreamMessage, Any],
     model: str,
@@ -124,6 +139,11 @@ async def format_messages_for_streaming_chat_completions_api(
         content = msg.content
         if isinstance(content, BaseModel):
             content = content.model_dump()
+
+        # Extract the SQL query from the content if it exists
+        sql_query = extract_sql_query_from_thoughts(content)
+        if sql_query:
+            content = sql_query
 
         chunk = ChatCompletionChunk(
             id=msg.id,
@@ -196,7 +216,6 @@ async def format_messages_for_streaming_responses_api(
     # Emit each incoming message immediately.
     assistant_content = ""
     sql_query = None
-    count_of_thoughts = 0
     async for msg in message_generator:
         # Properly serialize BaseModel content
         content = msg.content
@@ -205,7 +224,10 @@ async def format_messages_for_streaming_responses_api(
 
         # Emit thoughts (system messages) separately as an in-progress chunks
         if msg.role == Role.system:
-            count_of_thoughts += 1
+            # Extract the SQL query from the system message if it exists
+            sql_query = extract_sql_query_from_thoughts(content)
+            if sql_query:
+                content = sql_query
 
             chunk = StreamingResponseSchema(
                 type=StreamingResponseEvent.in_progress.value,
@@ -223,11 +245,6 @@ async def format_messages_for_streaming_responses_api(
                     ],
                 ),
             )
-
-            # The third thought is the SQL query
-            # TODO: This should be handled better. If we increase the number of thoughts, this will break.``
-            if count_of_thoughts == 3:
-                sql_query = content
 
         # Emit assistant messages as delta chunks
         if msg.role == Role.assistant:
@@ -364,6 +381,11 @@ async def format_messages_for_non_streaming_chat_completions_api(
             if isinstance(content, BaseModel):
                 content = content.model_dump()
 
+            # Extract the SQL query from the content if it exists
+            sql_query = extract_sql_query_from_thoughts(content)
+            if sql_query:
+                content = sql_query
+
             choice = Choice(
                 index=index,
                 message=Message(role=search_message.role, content=content),
@@ -398,14 +420,13 @@ async def format_messages_for_non_streaming_responses_api(
     """
     output = []
     sql_query = None
-    count_of_thoughts = 0
     for _, search_message in enumerate(messages):
         # Skip system messages (thoughts) in the final response,
         # but extract the SQL query.
         if search_message.role == Role.system:
-            count_of_thoughts += 1
-            if count_of_thoughts == 3:
-                sql_query = search_message.content
+            sql_query = extract_sql_query_from_thoughts(search_message.content)
+            if sql_query:
+                content = sql_query
 
         if search_message.role != Role.system:
             # Properly serialize BaseModel content
