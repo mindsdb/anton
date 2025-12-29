@@ -47,7 +47,7 @@ def get_conversations_service(request: Request, session: Session = Depends(get_s
 async def list_conversations(
     conversations_service: ConversationsService = Depends(get_conversations_service),
     topic: str | None = Query(None, description="Filter by topic"),
-    include_deleted: bool = Query(False, description="Filter by deleted status"),
+    # include_deleted: bool = Query(False, description="Filter by deleted status"),
     limit: int = Query(50, le=100, ge=1, description="Maximum number of conversations to return"),
     offset: int = Query(0, ge=0, description="Number of conversations to skip for pagination"),
     include_total: bool = Query(False, description="Include total count of conversations in response"),
@@ -61,7 +61,6 @@ async def list_conversations(
 
     Query Parameters:
         - topic: Filter by topic
-        - include_deleted: Filter by deleted status
         - limit: Maximum number of conversations to return
         - offset: Number of conversations to skip for pagination
         - include_total: Include total count of conversations in response
@@ -79,7 +78,6 @@ async def list_conversations(
     try:
         result = await conversations_service.list_conversations(
             topic=topic,
-            include_deleted=include_deleted,
             limit=limit,
             offset=offset,
             include_total=include_total,
