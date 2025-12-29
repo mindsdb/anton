@@ -22,6 +22,7 @@ from minds.services.conversations import (
     ConversationNotFoundError,
     ConversationsService,
     ConversationsServiceError,
+    InvalidSQLQueryError,
     MessageNoSQLQueryError,
     MessageNotAssistantError,
     MessageNotFoundError,
@@ -326,6 +327,18 @@ async def get_conversation_message_result(
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
+    except InvalidSQLQueryError as e:
+        logger.warning(
+            f"Invalid SQL query "
+            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ValueError as e:
+        logger.warning(
+            f"Invalid pagination parameters "
+            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in get_conversation_message_result "
@@ -372,6 +385,12 @@ async def export_conversation_message_result(
     except MessageNotAssistantError as e:
         logger.warning(
             f"Message is not an assistant message "
+            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except InvalidSQLQueryError as e:
+        logger.warning(
+            f"Invalid SQL query "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None

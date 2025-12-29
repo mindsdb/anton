@@ -10,6 +10,8 @@ from uuid import UUID
 
 from mindsdb_sdk.server import Server
 from mindsdb_sql_parser import parse_sql
+from mindsdb_sql_parser.ast import Select
+from mindsdb_sql_parser.exceptions import ParsingException
 from sqlalchemy.exc import PendingRollbackError
 from sqlmodel import Session, and_, func, select
 
@@ -58,6 +60,11 @@ class MessageNoSQLQueryError(Exception):
 
     pass
 
+
+class InvalidSQLQueryError(Exception):
+    """Exception for when a SQL query is invalid."""
+
+    pass
 
 class ConversationsService:
     """
@@ -537,24 +544,35 @@ class ConversationsService:
 
             sql_query = message.sql_query
 
+            # Validate the SQL query to prevent SQL injection.
+            parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
+
             # First off, we need to get a count of the total number of rows in the result
             count_sql_query = f"SELECT COUNT(*) FROM ({sql_query}) AS total_rows"
             count_result = self.mindsdb_client.query(count_sql_query).fetch()
             total_rows = count_result.values[0][0]
 
             # Then we need to get the data from the result with pagination
-            # First, we need to check if the SQL query has a ORDER BY clause,
+            # We need to check if the SQL query has a ORDER BY clause,
             # this is to ensure that the pagination is consistent.
             is_pagination_consistent = False
-            parsed_sql_query = parse_sql(sql_query)
             if parsed_sql_query.order_by:
                 is_pagination_consistent = True
+
+            # Validate and coerce pagination parameters to integers to avoid SQL injection.
+            try:
+                limit_int = int(limit)
+                offset_int = int(offset)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid pagination parameters: limit and offset must be integers")
+            if limit_int < 0 or offset_int < 0:
+                raise ValueError("Invalid pagination parameters: limit and offset must be non-negative")
 
             # This SQL query should also be within a subquery because the query itself,
             # may have a LIMIT or OFFSET clause.
             # TODO: Are there situations where we don't need to execute the query?
             # or put it in the nested subquery?
-            paginated_sql_query = f"SELECT * FROM ({sql_query}) AS paginated_rows LIMIT {limit} OFFSET {offset}"
+            paginated_sql_query = f"SELECT * FROM ({sql_query}) AS paginated_rows LIMIT {limit_int} OFFSET {offset_int}"
             result = self.mindsdb_client.query(paginated_sql_query).fetch()
             # Convert DataFrame to structured response
             column_names = result.columns.tolist()
@@ -568,7 +586,7 @@ class ConversationsService:
                 total_rows,
                 is_pagination_consistent,
             )
-        except (ConversationNotFoundError, MessageNotFoundError, MessageNotAssistantError, MessageNoSQLQueryError):
+        except (ConversationNotFoundError, MessageNotFoundError, MessageNotAssistantError, MessageNoSQLQueryError, ValueError):
             raise
         except Exception as e:
             logger.error(
@@ -607,6 +625,9 @@ class ConversationsService:
 
             sql_query = message.sql_query
 
+            # Validate the SQL query to prevent SQL injection.
+            _ = self._validate_and_parse_sql_query(sql_query)
+
             result = self.mindsdb_client.query(sql_query).fetch()
 
             # Convert DataFrame to structured response
@@ -627,6 +648,31 @@ class ConversationsService:
                 f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to export message result: {str(e)}") from None
+
+    def _validate_and_parse_sql_query(self, sql_query: str) -> Select:
+        """
+        Validate and parse the SQL query to ensure it is valid and a SELECT query.
+
+        Args:
+            sql_query: The SQL query to validate and parse.
+
+        Raises:
+            InvalidSQLQueryError: If the SQL query is invalid or not a SELECT query.
+
+        Returns:
+            Select: The parsed SQL query.
+        """
+        try:
+            parsed_sql_query = parse_sql(sql_query)
+        except ParsingException as e:
+            raise InvalidSQLQueryError(f"Invalid SQL query: {e}") from e
+
+        # Ensure the SQL query is a SELECT query to avoid SQL injection.
+        # This is an extra guardrail since we control the SQL query stored in the database.
+        if not isinstance(parsed_sql_query, Select):
+            raise InvalidSQLQueryError(f"SQL query is not a SELECT query: {parsed_sql_query}")
+
+        return parsed_sql_query
 
     async def _get_conversation(self, conversation_id: UUID) -> Conversation:
         """
