@@ -116,7 +116,6 @@ class TestConversationsAPI:
         result = await list_conversations(
             conversations_service=mock_conversations_service,
             topic=None,
-            include_deleted=False,
             limit=50,
             offset=0,
             include_total=False,
@@ -128,7 +127,6 @@ class TestConversationsAPI:
         assert result[0].metadata.topic == "Test Conversation"
         mock_conversations_service.list_conversations.assert_called_once_with(
             topic=None,
-            include_deleted=False,
             limit=50,
             offset=0,
             include_total=False,
@@ -144,7 +142,6 @@ class TestConversationsAPI:
         result = await list_conversations(
             conversations_service=mock_conversations_service,
             topic=None,
-            include_deleted=False,
             limit=50,
             offset=0,
             include_total=True,
@@ -180,7 +177,6 @@ class TestConversationsAPI:
         result = await list_conversations(
             conversations_service=mock_conversations_service,
             topic="Test",
-            include_deleted=True,
             limit=10,
             offset=5,
             include_total=False,
@@ -191,7 +187,6 @@ class TestConversationsAPI:
         assert len(result) == 1
         mock_conversations_service.list_conversations.assert_called_once_with(
             topic="Test",
-            include_deleted=True,
             limit=10,
             offset=5,
             include_total=False,
@@ -214,7 +209,7 @@ class TestConversationsAPI:
                 sort_order="desc",
             )
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Service error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
@@ -276,7 +271,7 @@ class TestConversationsAPI:
                 conversations_service=mock_conversations_service,
             )
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Service error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
@@ -326,7 +321,7 @@ class TestConversationsAPI:
                 conversations_service=mock_conversations_service,
             )
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Service error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
@@ -398,7 +393,7 @@ class TestConversationsAPI:
                 conversations_service=mock_conversations_service,
             )
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Service error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
@@ -464,7 +459,7 @@ class TestConversationsAPI:
                 conversations_service=mock_conversations_service,
             )
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Service error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
@@ -603,7 +598,7 @@ class TestConversationsAPI:
                 conversations_service=mock_conversations_service,
             )
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Service error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
@@ -719,7 +714,7 @@ class TestConversationsAPI:
                 conversations_service=mock_conversations_service,
             )
 
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 500
         assert "Service error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio

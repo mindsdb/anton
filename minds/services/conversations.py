@@ -66,6 +66,7 @@ class InvalidSQLQueryError(Exception):
 
     pass
 
+
 class ConversationsService:
     """
     Service class for conversation management operations.
@@ -520,7 +521,8 @@ class ConversationsService:
             offset: Number of rows to skip.
 
         Returns:
-            tuple[MessageResultResponse, int, bool]: Message result response object, total number of rows, and whether the pagination is consistent.
+            tuple[MessageResultResponse, int, bool]: Message result response object,
+                total number of rows, and whether the pagination is consistent.
         """
         logger.debug(
             f"Getting message result for conversation {conversation_id} and message {message_id} "
@@ -563,8 +565,8 @@ class ConversationsService:
             try:
                 limit_int = int(limit)
                 offset_int = int(offset)
-            except (TypeError, ValueError):
-                raise ValueError("Invalid pagination parameters: limit and offset must be integers")
+            except (TypeError, ValueError) as err:
+                raise ValueError("Invalid pagination parameters: limit and offset must be integers") from err
             if limit_int < 0 or offset_int < 0:
                 raise ValueError("Invalid pagination parameters: limit and offset must be non-negative")
 
@@ -586,7 +588,13 @@ class ConversationsService:
                 total_rows,
                 is_pagination_consistent,
             )
-        except (ConversationNotFoundError, MessageNotFoundError, MessageNotAssistantError, MessageNoSQLQueryError, ValueError):
+        except (
+            ConversationNotFoundError,
+            MessageNotFoundError,
+            MessageNotAssistantError,
+            MessageNoSQLQueryError,
+            ValueError,
+        ):
             raise
         except Exception as e:
             logger.error(

@@ -335,8 +335,9 @@ async def process_streaming_producer(
 
         await task
 
-    # Conditionally include message_id in format_func call only if provided
     format_args = {"message_generator": stream(), **format_kwargs}
+    # Conditionally include message_id in format_func call only if provided
+    # This is only required for responses API.
     if message_id is not None:
         format_args["message_id"] = message_id
 
@@ -482,6 +483,7 @@ async def process_non_streaming_producer(
     await producer(collector)
 
     # Conditionally include message_id in format_func call only if provided
+    # This is only required for responses API.
     format_args = {"messages": collector.messages, **format_kwargs}
     if message_id is not None:
         format_args["message_id"] = message_id
