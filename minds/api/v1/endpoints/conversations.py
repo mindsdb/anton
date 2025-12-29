@@ -162,7 +162,7 @@ async def get_conversation(
 async def get_conversation_messages(
     conversation_id: UUID,
     conversations_service: ConversationsService = Depends(get_conversations_service),
-) -> dict[str, list[MessageResponse] | str, bool]:
+) -> dict[Literal["object", "data"], list[MessageResponse] | str]:
     """
     Get the messages of a conversation by ID.
     """
@@ -285,7 +285,7 @@ async def get_conversation_message_result(
     limit: int = Query(100, le=1000, ge=1, description="Maximum number of rows to return"),
     offset: int = Query(0, ge=0, description="Number of rows to skip for pagination"),
     conversations_service: ConversationsService = Depends(get_conversations_service),
-) -> dict[str, MessageResultResponse | int | bool]:
+) -> dict[Literal["result", "total", "is_pagination_consistent"], MessageResultResponse | int | bool]:
     """
     Get the result of a message by ID.
     """

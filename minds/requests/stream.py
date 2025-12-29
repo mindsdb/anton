@@ -427,7 +427,7 @@ async def format_messages_for_non_streaming_responses_api(
         status=ResponseStatus.completed.value,
     )
 
-    if on_complete_callback:
+    if on_complete_callback and response.output and response.output[0].content:
         await on_complete_callback(response.output[0].content[0].text, sql_query)
 
     return JSONResponse(response.model_dump())
