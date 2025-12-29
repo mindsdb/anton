@@ -103,7 +103,7 @@ async def list_conversations(
             f"Service error in list_conversations "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in list_conversations "
@@ -149,7 +149,7 @@ async def get_conversation(
             f"Service error in get_conversation "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in get_conversation "
@@ -182,7 +182,7 @@ async def get_conversation_messages(
             f"Service error in get_conversation_messages "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in get_conversation_messages "
@@ -224,7 +224,7 @@ async def create_conversation(
             f"Service error in create_conversation "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in create_conversation "
@@ -269,7 +269,7 @@ async def delete_conversation(
             f"Service error in delete_conversation "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in delete_conversation "
@@ -331,7 +331,7 @@ async def get_conversation_message_result(
             f"Service error in get_conversation_message_result "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in get_conversation_message_result "
@@ -380,7 +380,7 @@ async def export_conversation_message_result(
             f"Service error in export_conversation_message_result "
             f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
-        raise HTTPException(status_code=400, detail=str(e)) from None
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in export_conversation_message_result "
