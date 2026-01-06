@@ -6,6 +6,7 @@ synchronous and asynchronous execution modes.
 Asynchronous executions are run via Prefect.
 """
 
+import re
 from typing import Any
 from uuid import UUID
 
@@ -562,6 +563,17 @@ def normalize_distinct_count(val: Any) -> int | None:
         return None
 
 
+def _clean_string(val: str) -> str:
+    """
+    Remove problematic control characters (like NUL and other non-printables)
+    but keep legitimate whitespace such as tabs, newlines, and spaces.
+    """
+    if not isinstance(val, str):
+        return val
+    # Matches ASCII control characters except \t (tab), \n (newline), and \r (carriage return)
+    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", val)
+
+
 def _convert_row_to_column_statistics(row: pd.Series, tenant_id: UUID, column_id: UUID) -> ColumnStatistics:
     """
     Convert a metadata row to a ColumnStatistics object.
@@ -581,8 +593,8 @@ def _convert_row_to_column_statistics(row: pd.Series, tenant_id: UUID, column_id
         most_common_frequencies=row["MOST_COMMON_FREQS"],
         null_percentage=row["NULL_FRAC"],
         distinct_values_count=normalize_distinct_count(row["N_DISTINCT"]),
-        min_value=row["MIN_VALUE"],
-        max_value=row["MAX_VALUE"],
+        min_value=_clean_string(row["MIN_VALUE"]),
+        max_value=_clean_string(row["MAX_VALUE"]),
     )
 
 
