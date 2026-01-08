@@ -137,6 +137,9 @@ class TestDatabaseAgent:
             "This is a conversation history. Please respond to the most recent user message "
             "while considering the full context:\n\n"
             "User: Hello\n\nAssistant: Hi there!\n\nUser: How are you?"
+            "IMPORTANT: Use the prior conversation only for context and intent. "
+            "Do not copy or reuse previous answers, even if the same or similar questions appear, "
+            "as the underlying data, schema, or results may have changed."
         )
         assert context == expected
 
@@ -152,6 +155,9 @@ class TestDatabaseAgent:
             "This is a conversation history. Please respond to the most recent user message "
             "while considering the full context:\n\n"
             "System: You are a helpful assistant\n\nUser: Hello"
+            "IMPORTANT: Use the prior conversation only for context and intent. "
+            "Do not copy or reuse previous answers, even if the same or similar questions appear, "
+            "as the underlying data, schema, or results may have changed."
         )
         assert context == expected
 
@@ -168,6 +174,9 @@ class TestDatabaseAgent:
             "This is a conversation history. Please respond to the most recent user message "
             "while considering the full context:\n\n"
             "User: \n\nAssistant: Response"
+            "IMPORTANT: Use the prior conversation only for context and intent. "
+            "Do not copy or reuse previous answers, even if the same or similar questions appear, "
+            "as the underlying data, schema, or results may have changed."
         )
         assert context == expected
 
@@ -270,6 +279,9 @@ class TestDatabaseAgent:
             "This is a conversation history. Please respond to the most recent user message "
             "while considering the full context:\n\n"
             "User: Hello\n\nAssistant: Hi there!\n\nUser: How are you?"
+            "IMPORTANT: Use the prior conversation only for context and intent. "
+            "Do not copy or reuse previous answers, even if the same or similar questions appear, "
+            "as the underlying data, schema, or results may have changed."
         )
         assert database_agent.deps.conversation_context == expected_context
 
@@ -360,6 +372,9 @@ class TestDatabaseAgent:
             "This is a conversation history. Please respond to the most recent user message "
             "while considering the full context:\n\n"
             "User: Hello! How are you? I'm fine.\n\nAssistant: Great! I'm doing well too. 😊"
+            "IMPORTANT: Use the prior conversation only for context and intent. "
+            "Do not copy or reuse previous answers, even if the same or similar questions appear, "
+            "as the underlying data, schema, or results may have changed."
         )
         assert context == expected
 
