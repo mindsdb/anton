@@ -43,6 +43,30 @@ def upgrade() -> None:
     )
     role_enum.create(op.get_bind(), checkfirst=True)
 
+    # Create function to handle soft deletes for conversations
+    op.execute('''
+        CREATE OR REPLACE FUNCTION soft_delete_conversations()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            UPDATE conversations
+            SET deleted_at = NEW.deleted_at
+            WHERE mind_id = NEW.id
+            AND deleted_at IS NULL;
+            
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    ''')
+
+    # Create trigger to handle soft deletes for conversations
+    op.execute('''
+        CREATE TRIGGER trigger_soft_delete_conversations
+        AFTER UPDATE OF deleted_at ON minds
+        FOR EACH ROW
+        WHEN (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+        EXECUTE FUNCTION soft_delete_conversations();
+    ''')
+
     op.create_table('messages',
         sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text('gen_random_uuid()'), nullable=False),
         sa.Column('tenant_id', postgresql.UUID(as_uuid=True), nullable=False),
