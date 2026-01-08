@@ -7,7 +7,7 @@ MindsDB is only used for datasource validation, not for minds storage.
 """
 
 from datetime import datetime, timezone
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindsdb_sdk.server import Server
 from prefect.exceptions import PrefectException
@@ -21,6 +21,7 @@ from minds.model.conversation import Conversation
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+from minds.schemas.conversations import ConversationResponse
 from minds.schemas.minds import (
     DatasourceConfig,
     DetailedDatasourceConfig,
@@ -28,7 +29,6 @@ from minds.schemas.minds import (
     MindResponse,
     MindUpdateRequest,
 )
-from minds.schemas.conversations import ConversationResponse
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 
 if TYPE_CHECKING:
@@ -210,7 +210,9 @@ class MindsService:
             logger.error(f"Error listing minds for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
 
-    async def get_mind(self, mind_name: str, conversations_service: "ConversationsService", with_detailed_data: bool = False) -> MindResponse:
+    async def get_mind(
+        self, mind_name: str, conversations_service: "ConversationsService", with_detailed_data: bool = False
+    ) -> MindResponse:
         """
         Get a specific mind by name.
 
@@ -255,15 +257,18 @@ class MindsService:
                 )
             )
             mind = self.session.exec(statement).first()
+            
+            if not mind:
+                raise MindNotFoundError(f"Mind '{mind_name}' not found")
+            
             conversations = []
             for conversation in mind.conversations:
                 conversation_response = await conversations_service.conversation_to_response(conversation)
                 conversations.append(conversation_response)
 
-            if not mind:
-                raise MindNotFoundError(f"Mind '{mind_name}' not found")
-
-            mind_response = await self._mind_to_response(mind, with_detailed_data=with_detailed_data, conversations=conversations)
+            mind_response = await self._mind_to_response(
+                mind, with_detailed_data=with_detailed_data, conversations=conversations
+            )
             logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return mind_response
         except MindNotFoundError:
@@ -566,7 +571,11 @@ class MindsService:
         return self.session.exec(statement).first()
 
     async def _mind_to_response(
-        self, mind: Mind, datasource_configs: list[DatasourceConfig] = None, with_detailed_data: bool = False, conversations: list[ConversationResponse] = []
+        self,
+        mind: Mind,
+        datasource_configs: list[DatasourceConfig] = None,
+        with_detailed_data: bool = False,
+        conversations: list[ConversationResponse] = None,
     ) -> MindResponse:
         """
         Convert Mind database model to MindResponse object.
@@ -635,7 +644,7 @@ class MindsService:
             datasources=datasources,
             created_at=mind.created_at.isoformat(),
             modified_at=mind.modified_at.isoformat(),
-            conversations=conversations,
+            conversations=conversations or [],
         )
 
     async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:

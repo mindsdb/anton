@@ -149,7 +149,14 @@ class ConversationsService:
 
             order_by = sort_field.desc() if sort_order == "desc" else sort_field.asc()
 
-            statement = select(Conversation).options(selectinload(Conversation.mind)).where(and_(*conditions)).order_by(order_by).offset(offset).limit(limit)
+            statement = (
+                select(Conversation)
+                .options(selectinload(Conversation.mind))
+                .where(and_(*conditions))
+                .order_by(order_by)
+                .offset(offset)
+                .limit(limit)
+            )
 
             conversations = self.session.exec(statement).all()
 
@@ -199,7 +206,9 @@ class ConversationsService:
             )
             raise ConversationsServiceError(f"Failed to get conversation: {str(e)}") from None
 
-    async def create_conversation(self, conversation_data: ConversationCreateRequest, mind_service: MindsService) -> ConversationResponse:
+    async def create_conversation(
+        self, conversation_data: ConversationCreateRequest, mind_service: MindsService
+    ) -> ConversationResponse:
         """
         Create a new conversation.
 
@@ -702,12 +711,16 @@ class ConversationsService:
         Raises:
             ConversationNotFoundError: If conversation with the given ID does not exist.
         """
-        statement = select(Conversation).options(selectinload(Conversation.mind)).where(
-            and_(
-                Conversation.id == conversation_id,
-                Conversation.deleted_at.is_(None),
-                Conversation.user_id == self.user_id,
-                Conversation.tenant_id == self.tenant_id,
+        statement = (
+            select(Conversation)
+            .options(selectinload(Conversation.mind))
+            .where(
+                and_(
+                    Conversation.id == conversation_id,
+                    Conversation.deleted_at.is_(None),
+                    Conversation.user_id == self.user_id,
+                    Conversation.tenant_id == self.tenant_id,
+                )
             )
         )
         conversation = self.session.exec(statement).first()

@@ -17,6 +17,7 @@ from sqlmodel import Session
 
 from minds.model.mind import Mind
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindUpdateRequest
+from minds.services.conversations import ConversationsService
 from minds.services.minds import (
     MindAlreadyExistsError,
     MindNotFoundError,
@@ -43,6 +44,11 @@ class TestMindsService:
     def mock_mindsdb_client(self):
         """Mock MindsDB client."""
         return Mock()
+
+    @pytest.fixture
+    def mock_conversations_service(self):
+        """Mock ConversationsService instance."""
+        return Mock(spec=ConversationsService)
 
     @pytest.fixture
     def minds_service(self, mock_session, mock_mindsdb_client, user_id=uuid4(), tenant_id=uuid4()):
@@ -113,11 +119,11 @@ class TestMindsService:
         assert service.user_id == "user-123"
 
     @pytest.mark.asyncio
-    async def test_list_minds_success(self, minds_service, mock_session, sample_mind):
+    async def test_list_minds_success(self, minds_service, mock_session, sample_mind, mock_conversations_service):
         """Test successful minds listing."""
         mock_session.exec.return_value.all.return_value = [sample_mind]
 
-        result = await minds_service.list_minds(limit=10, offset=0)
+        result = await minds_service.list_minds(mock_conversations_service, limit=10, offset=0)
 
         assert len(result) == 1
         assert result[0].name == "test-mind"
@@ -125,63 +131,63 @@ class TestMindsService:
         mock_session.exec.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_list_minds_with_filters(self, minds_service, mock_session, sample_mind):
+    async def test_list_minds_with_filters(self, minds_service, mock_session, sample_mind, mock_conversations_service):
         """Test minds listing with filters."""
         mock_session.exec.return_value.all.return_value = [sample_mind]
 
-        result = await minds_service.list_minds(provider="openai", include_deleted=False, limit=5, offset=10)
+        result = await minds_service.list_minds(mock_conversations_service, provider="openai", include_deleted=False, limit=5, offset=10)
 
         assert len(result) == 1
         mock_session.exec.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_list_minds_empty_result(self, minds_service, mock_session):
+    async def test_list_minds_empty_result(self, minds_service, mock_session, mock_conversations_service):
         """Test minds listing with no results."""
         mock_session.exec.return_value.all.return_value = []
 
-        result = await minds_service.list_minds()
+        result = await minds_service.list_minds(mock_conversations_service)
 
         assert result == []
         mock_session.exec.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_list_minds_database_error(self, minds_service, mock_session):
+    async def test_list_minds_database_error(self, minds_service, mock_session, mock_conversations_service):
         """Test minds listing with database error."""
         mock_session.exec.side_effect = Exception("Database error")
 
         with pytest.raises(MindsServiceError) as exc_info:
-            await minds_service.list_minds()
+            await minds_service.list_minds(mock_conversations_service)
 
         assert "Failed to list minds" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_get_mind_success(self, minds_service, mock_session, sample_mind):
+    async def test_get_mind_success(self, minds_service, mock_session, sample_mind, mock_conversations_service):
         """Test successful mind retrieval."""
         mock_session.exec.return_value.first.return_value = sample_mind
 
-        result = await minds_service.get_mind("test-mind")
+        result = await minds_service.get_mind("test-mind", mock_conversations_service)
 
         assert result.name == "test-mind"
         assert result.provider == "openai"
         mock_session.exec.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_get_mind_not_found(self, minds_service, mock_session):
+    async def test_get_mind_not_found(self, minds_service, mock_session, mock_conversations_service):
         """Test mind retrieval when mind doesn't exist."""
         mock_session.exec.return_value.first.return_value = None
 
         with pytest.raises(MindNotFoundError) as exc_info:
-            await minds_service.get_mind("nonexistent-mind")
+            await minds_service.get_mind("nonexistent-mind", mock_conversations_service)
 
         assert "Mind 'nonexistent-mind' not found" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_get_mind_database_error(self, minds_service, mock_session):
+    async def test_get_mind_database_error(self, minds_service, mock_session, mock_conversations_service):
         """Test mind retrieval with database error."""
         mock_session.exec.side_effect = Exception("Database error")
 
         with pytest.raises(MindsServiceError) as exc_info:
-            await minds_service.get_mind("test-mind")
+            await minds_service.get_mind("test-mind", mock_conversations_service)
 
         assert "Failed to get mind" in str(exc_info.value)
 

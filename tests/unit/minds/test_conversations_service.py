@@ -3,7 +3,7 @@ Unit tests for ConversationsService.
 """
 
 from datetime import datetime, timezone
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import pandas as pd
@@ -13,6 +13,7 @@ from sqlmodel import Session
 
 from minds.model.conversation import Conversation
 from minds.model.message import Message
+from minds.model.mind import Mind
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContentType, MessageResponse, MessageResultResponse
@@ -24,6 +25,7 @@ from minds.services.conversations import (
     MessageNoSQLQueryError,
     MessageNotAssistantError,
 )
+from minds.services.minds import MindsService
 
 
 class TestConversationsService:
@@ -71,14 +73,26 @@ class TestConversationsService:
     @pytest.fixture
     def sample_conversation(self, user_id, tenant_id):
         """Sample conversation for testing."""
-        return Conversation(
+        mind_id = uuid4()
+        mind = Mind(
+            id=mind_id,
+            name="test-model",
+            provider="openai",
+            model_name="gpt-4",
+            user_id=UUID(user_id),
+        )
+        conversation = Conversation(
             id=uuid4(),
             topic="Test Conversation",
             user_id=UUID(user_id),
             tenant_id=UUID(tenant_id),
+            mind_id=mind_id,
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )
+        # Set the mind relationship
+        conversation.mind = mind
+        return conversation
 
     @pytest.fixture
     def sample_message(self, sample_conversation, tenant_id):
@@ -97,8 +111,26 @@ class TestConversationsService:
     def sample_create_request(self):
         """Sample create request."""
         return ConversationCreateRequest(
-            metadata=ConversationMetadata(topic="New Conversation"),
+            metadata=ConversationMetadata(topic="New Conversation", model_name="test-model"),
         )
+
+    @pytest.fixture
+    def mock_mind_service(self):
+        """Mock MindsService instance."""
+        service = Mock(spec=MindsService)
+        return service
+
+    @pytest.fixture
+    def mock_mind(self, user_id):
+        """Mock Mind object."""
+        mind = Mind(
+            id=uuid4(),
+            name="test-model",
+            provider="openai",
+            model_name="gpt-4",
+            user_id=UUID(user_id),
+        )
+        return mind
 
     def test_service_initialization(self, mock_session, mock_mindsdb_client, user_id, tenant_id):
         """Test service initialization."""
@@ -220,12 +252,17 @@ class TestConversationsService:
             await service.get_conversation(conversation_id)
 
     @pytest.mark.asyncio
-    async def test_create_conversation_success(self, service, mock_session, sample_create_request):
+    async def test_create_conversation_success(
+        self, service, mock_session, sample_create_request, mock_mind_service, mock_mind
+    ):
         """Test successful conversation creation."""
         # Mock the check for existing conversation
         mock_result = Mock()
         mock_result.first.return_value = None
         mock_session.exec.return_value = mock_result
+
+        # Mock mind_service.get_mind_model
+        mock_mind_service.get_mind_model = AsyncMock(return_value=mock_mind)
 
         # Mock flush to set ID
         def mock_flush():
@@ -234,10 +271,12 @@ class TestConversationsService:
                 conversation.id = uuid4()
                 conversation.created_at = datetime.now(timezone.utc)
                 conversation.modified_at = datetime.now(timezone.utc)
+                # Set mind relationship
+                conversation.mind = mock_mind
 
         mock_session.flush.side_effect = mock_flush
 
-        result = await service.create_conversation(sample_create_request)
+        result = await service.create_conversation(sample_create_request, mock_mind_service)
 
         assert isinstance(result, ConversationResponse)
         assert result.metadata.topic == "New Conversation"
@@ -245,7 +284,9 @@ class TestConversationsService:
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_create_conversation_with_items(self, service, mock_session, sample_create_request):
+    async def test_create_conversation_with_items(
+        self, service, mock_session, sample_create_request, mock_mind_service, mock_mind
+    ):
         """Test creating conversation with initial items."""
         from minds.schemas.chat import Message as ChatMessage
 
@@ -260,6 +301,9 @@ class TestConversationsService:
         mock_result.first.return_value = None
         mock_session.exec.return_value = mock_result
 
+        # Mock mind_service.get_mind_model
+        mock_mind_service.get_mind_model = AsyncMock(return_value=mock_mind)
+
         # Mock flush to set ID
         def mock_flush():
             if mock_session.add.call_args:
@@ -267,10 +311,12 @@ class TestConversationsService:
                 conversation.id = uuid4()
                 conversation.created_at = datetime.now(timezone.utc)
                 conversation.modified_at = datetime.now(timezone.utc)
+                # Set mind relationship
+                conversation.mind = mock_mind
 
         mock_session.flush.side_effect = mock_flush
 
-        result = await service.create_conversation(sample_create_request)
+        result = await service.create_conversation(sample_create_request, mock_mind_service)
 
         assert isinstance(result, ConversationResponse)
         mock_session.add.assert_called_once()  # For conversation
@@ -279,7 +325,7 @@ class TestConversationsService:
 
     @pytest.mark.asyncio
     async def test_create_conversation_already_exists(
-        self, service, mock_session, sample_create_request, sample_conversation
+        self, service, mock_session, sample_create_request, sample_conversation, mock_mind_service
     ):
         """Test create conversation when it already exists."""
         mock_result = Mock()
@@ -290,18 +336,23 @@ class TestConversationsService:
             ConversationAlreadyExistsError,
             match="Conversation with topic 'New Conversation' already exists",
         ):
-            await service.create_conversation(sample_create_request)
+            await service.create_conversation(sample_create_request, mock_mind_service)
 
     @pytest.mark.asyncio
-    async def test_create_conversation_database_error(self, service, mock_session, sample_create_request):
+    async def test_create_conversation_database_error(
+        self, service, mock_session, sample_create_request, mock_mind_service, mock_mind
+    ):
         """Test create conversation with database error."""
         mock_result = Mock()
         mock_result.first.return_value = None
         mock_session.exec.return_value = mock_result
         mock_session.add.side_effect = Exception("Database error")
 
+        # Mock mind_service.get_mind_model
+        mock_mind_service.get_mind_model = AsyncMock(return_value=mock_mind)
+
         with pytest.raises(ConversationsServiceError, match="Failed to create conversation"):
-            await service.create_conversation(sample_create_request)
+            await service.create_conversation(sample_create_request, mock_mind_service)
 
     @pytest.mark.asyncio
     async def test_delete_conversation_success(self, service, mock_session, sample_conversation):
@@ -594,12 +645,13 @@ class TestConversationsService:
 
     @pytest.mark.asyncio
     async def test_conversation_to_response(self, service, sample_conversation):
-        """Test _conversation_to_response conversion."""
-        result = await service._conversation_to_response(sample_conversation)
+        """Test conversation_to_response conversion."""
+        result = await service.conversation_to_response(sample_conversation)
 
         assert isinstance(result, ConversationResponse)
         assert result.id == sample_conversation.id
         assert result.metadata.topic == "Test Conversation"
+        assert result.metadata.model_name == "test-model"
 
     @pytest.mark.asyncio
     async def test_message_to_response(self, service, sample_message):

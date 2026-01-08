@@ -7,8 +7,8 @@ from sqlmodel import JSON, Column, Field, Relationship
 from minds.model.base import BaseSQLModel
 
 if TYPE_CHECKING:
-    from minds.model.mind_datasource import MindDatasource
     from minds.model.conversation import Conversation
+    from minds.model.mind_datasource import MindDatasource
 
 
 class Mind(BaseSQLModel, table=True):

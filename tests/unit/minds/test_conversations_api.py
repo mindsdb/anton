@@ -29,6 +29,7 @@ from minds.services.conversations import (
     MessageNotAssistantError,
     MessageNotFoundError,
 )
+from minds.services.minds import MindsService
 
 
 class TestConversationsAPI:
@@ -64,6 +65,11 @@ class TestConversationsAPI:
         return service
 
     @pytest.fixture
+    def mock_mind_service(self):
+        """Mock MindsService instance."""
+        return Mock(spec=MindsService)
+
+    @pytest.fixture
     def test_uuid(self):
         """Test UUID for responses."""
         return uuid4()
@@ -73,7 +79,7 @@ class TestConversationsAPI:
         """Sample ConversationResponse for testing."""
         return ConversationResponse(
             id=test_uuid,
-            metadata=ConversationMetadata(topic="Test Conversation"),
+            metadata=ConversationMetadata(topic="Test Conversation", model_name="test-model"),
             created_at="2023-01-01T12:00:00",
             modified_at="2023-01-01T12:00:00",
         )
@@ -340,21 +346,24 @@ class TestConversationsAPI:
         assert "Internal server error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
-    async def test_create_conversation_success(self, mock_conversations_service, sample_conversation_response):
+    async def test_create_conversation_success(
+        self, mock_conversations_service, mock_mind_service, sample_conversation_response
+    ):
         """Test successful conversation creation."""
         mock_conversations_service.create_conversation = AsyncMock(return_value=sample_conversation_response)
 
         create_request = ConversationCreateRequest(
-            metadata=ConversationMetadata(topic="New Conversation"),
+            metadata=ConversationMetadata(topic="New Conversation", model_name="test-model"),
         )
 
         result = await create_conversation(
             conversation_data=create_request,
             conversations_service=mock_conversations_service,
+            mind_service=mock_mind_service,
         )
 
         assert result.metadata.topic == "Test Conversation"
-        mock_conversations_service.create_conversation.assert_called_once_with(create_request)
+        mock_conversations_service.create_conversation.assert_called_once_with(create_request, mock_mind_service)
 
     @pytest.mark.asyncio
     async def test_create_conversation_already_exists(self, mock_conversations_service):
@@ -364,7 +373,7 @@ class TestConversationsAPI:
         )
 
         create_request = ConversationCreateRequest(
-            metadata=ConversationMetadata(topic="Existing Conversation"),
+            metadata=ConversationMetadata(topic="Existing Conversation", model_name="test-model"),
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -384,7 +393,7 @@ class TestConversationsAPI:
         )
 
         create_request = ConversationCreateRequest(
-            metadata=ConversationMetadata(topic="New Conversation"),
+            metadata=ConversationMetadata(topic="New Conversation", model_name="test-model"),
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -402,7 +411,7 @@ class TestConversationsAPI:
         mock_conversations_service.create_conversation = AsyncMock(side_effect=Exception("Unexpected error"))
 
         create_request = ConversationCreateRequest(
-            metadata=ConversationMetadata(topic="New Conversation"),
+            metadata=ConversationMetadata(topic="New Conversation", model_name="test-model"),
         )
 
         with pytest.raises(HTTPException) as exc_info:

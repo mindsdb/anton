@@ -96,7 +96,7 @@ def sample_conversation_response():
     """Sample ConversationResponse for testing."""
     return ConversationResponse(
         id=uuid4(),
-        metadata=ConversationMetadata(topic="Test Conversation"),
+        metadata=ConversationMetadata(topic="Test Conversation", model_name="gpt-3.5-turbo"),
         created_at="2023-01-01T12:00:00",
         modified_at="2023-01-01T12:00:00",
     )
@@ -368,6 +368,7 @@ class TestResponsesRequestHandler:
         mock_mindsdb_client,
         mock_context,
         mock_conversation_service,
+        sample_conversation_response,
         sample_message_responses,
     ):
         """Test responses request with existing conversation ID."""
@@ -394,6 +395,7 @@ class TestResponsesRequestHandler:
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
+            mock_conversation_service.get_conversation = AsyncMock(return_value=sample_conversation_response)
             mock_conversation_service.create_conversation_message = AsyncMock()
             mock_conversation_service.get_conversation_messages = AsyncMock(return_value=sample_message_responses)
             mock_message = Mock()
@@ -505,6 +507,7 @@ class TestResponsesRequestHandler:
         mock_mindsdb_client,
         mock_context,
         mock_conversation_service,
+        sample_conversation_response,
         sample_message_responses,
     ):
         """Test responses request with existing conversation and list of messages."""
@@ -535,6 +538,7 @@ class TestResponsesRequestHandler:
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
+            mock_conversation_service.get_conversation = AsyncMock(return_value=sample_conversation_response)
             mock_conversation_service.create_conversation_message = AsyncMock()
             mock_conversation_service.get_conversation_messages = AsyncMock(return_value=sample_message_responses)
             mock_message = Mock()
