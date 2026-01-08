@@ -563,12 +563,28 @@ class ConversationsService:
             if limit_int < 0 or offset_int < 0:
                 raise ValueError("Invalid pagination parameters: limit and offset must be non-negative")
 
-            # This SQL query should also be within a subquery because the query itself,
-            # may have a LIMIT or OFFSET clause.
-            # TODO: Are there situations where we don't need to execute the query?
-            # or put it in the nested subquery?
-            paginated_sql_query = f"SELECT * FROM ({sql_query}) AS paginated_rows LIMIT {limit_int} OFFSET {offset_int}"
-            result = self.mindsdb_client.query(paginated_sql_query).fetch()
+            # TODO: This is a temporary solution to handle pagination for MSSQL.
+            # This is because the MSSQL integration for MindsDB does not support LIMIT and OFFSET.
+            # This should be fixed in MindsDB itself and removed from here.
+            # Get the database engine of the query
+            database_engine = self.mindsdb_client.databases.get(parsed_sql_query.from_table.parts[0]).engine
+            # If is is MSSQL, execute the original query without LIMIT and OFFSET
+            # Execute pagination in memory.
+            if database_engine == "mssql":
+                result = self.mindsdb_client.query(sql_query).fetch()
+                result = result.iloc[offset_int : offset_int + limit_int]
+
+            # For all other database engines, execute the query with LIMIT and OFFSET
+            else:
+                # This SQL query should also be within a subquery because the query itself,
+                # may have a LIMIT or OFFSET clause.
+                # TODO: Are there situations where we don't need to execute the query?
+                # or put it in the nested subquery?
+                paginated_sql_query = (
+                    f"SELECT * FROM ({sql_query}) AS paginated_rows LIMIT {limit_int} OFFSET {offset_int}"
+                )
+                result = self.mindsdb_client.query(paginated_sql_query).fetch()
+
             # Convert DataFrame to structured response
             column_names = result.columns.tolist()
             data = result.values.tolist()

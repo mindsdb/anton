@@ -514,12 +514,10 @@ class TestConversationsService:
         mock_session.exec.side_effect = [mock_conv_result, mock_msg_result]
 
         # Mock MindsDB query results
-        # The service calls query multiple times: count query, paginated query, and one more time
+        # The service calls query twice: count query and paginated query
         # COUNT(*) returns a DataFrame with values array
         count_df = pd.DataFrame([[10]], columns=["count"])
         data_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
-        # The service also calls query one more time at line 563 (seems like a bug but we need to mock it)
-        data_df2 = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
 
         # Create separate mock queries for each call
         mock_count_query = Mock()
@@ -528,11 +526,16 @@ class TestConversationsService:
         mock_data_query = Mock()
         mock_data_query.fetch.return_value = data_df
 
-        mock_data_query2 = Mock()
-        mock_data_query2.fetch.return_value = data_df2
+        # The service calls query twice: count and paginated
+        mock_mindsdb_client.query.side_effect = [mock_count_query, mock_data_query]
 
-        # The service calls query 3 times: count, paginated, and one more
-        mock_mindsdb_client.query.side_effect = [mock_count_query, mock_data_query, mock_data_query2]
+        # Mock databases.get() to return a mock database with engine attribute
+        # The service accesses: self.mindsdb_client.databases.get(parsed_sql_query.from_table.parts[0]).engine
+        # For SQL "SELECT * FROM test_table ORDER BY col1", from_table.parts[0] is "test_table"
+        mock_database = Mock()
+        mock_database.engine = "postgresql"  # Not "mssql", so it uses LIMIT/OFFSET path
+        mock_mindsdb_client.databases = Mock()
+        mock_mindsdb_client.databases.get.return_value = mock_database
 
         result = await service.get_conversation_message_result(sample_conversation.id, assistant_message.id)
 
