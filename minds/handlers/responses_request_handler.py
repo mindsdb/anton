@@ -91,6 +91,11 @@ async def responses_request_handler(
 
     # If a conversation is provided, add the input as a new message to the conversation
     else:
+        # First check if the conversation exists and it is associated with the current mind
+        conversation = await conversation_service.get_conversation(conversation_id)
+        if conversation.metadata.model_name != model:
+            raise ValueError(f"Conversation {conversation_id} is not associated with the current mind {model}")
+
         if input:
             if isinstance(input, str):
                 await conversation_service.create_conversation_message(
