@@ -135,7 +135,14 @@ class TestMindsService:
         """Test minds listing with filters."""
         mock_session.exec.return_value.all.return_value = [sample_mind]
 
-        result = await minds_service.list_minds(mock_conversations_service, provider="openai", include_deleted=False, limit=5, offset=10)
+        result = await minds_service.list_minds(
+            mock_conversations_service,
+            provider="openai",
+            include_deleted=False,
+            limit=5,
+            offset=10,
+            with_detailed_data=False,
+        )
 
         assert len(result) == 1
         mock_session.exec.assert_called_once()

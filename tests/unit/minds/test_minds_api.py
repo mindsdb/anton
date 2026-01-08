@@ -207,7 +207,11 @@ class TestMindsAPI:
         result = await get_mind(mind_name="test-mind", minds_service=mock_minds_service, with_detailed_data=True)
 
         assert result.name == "test-mind"
-        mock_minds_service.get_mind.assert_called_once_with(mind_name="test-mind", conversations_service=ANY, with_detailed_data=True)
+        mock_minds_service.get_mind.assert_called_once_with(
+            mind_name="test-mind",
+            conversations_service=ANY,
+            with_detailed_data=True,
+        )
 
     @pytest.mark.asyncio
     async def test_get_mind_not_found(self, mock_minds_service):
