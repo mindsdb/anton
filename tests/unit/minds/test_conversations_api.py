@@ -21,7 +21,6 @@ from minds.api.v1.endpoints.conversations import (
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse, MessageResultResponse
 from minds.services.conversations import (
-    ConversationAlreadyExistsError,
     ConversationNotFoundError,
     ConversationsService,
     ConversationsServiceError,
@@ -364,26 +363,6 @@ class TestConversationsAPI:
 
         assert result.metadata.topic == "Test Conversation"
         mock_conversations_service.create_conversation.assert_called_once_with(create_request, mock_mind_service)
-
-    @pytest.mark.asyncio
-    async def test_create_conversation_already_exists(self, mock_conversations_service):
-        """Test create conversation when it already exists."""
-        mock_conversations_service.create_conversation = AsyncMock(
-            side_effect=ConversationAlreadyExistsError("Already exists")
-        )
-
-        create_request = ConversationCreateRequest(
-            metadata=ConversationMetadata(topic="Existing Conversation", model_name="test-model"),
-        )
-
-        with pytest.raises(HTTPException) as exc_info:
-            await create_conversation(
-                conversation_data=create_request,
-                conversations_service=mock_conversations_service,
-            )
-
-        assert exc_info.value.status_code == 409
-        assert "Already exists" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
     async def test_create_conversation_service_error(self, mock_conversations_service):

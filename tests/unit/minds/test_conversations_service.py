@@ -18,7 +18,6 @@ from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContentType, MessageResponse, MessageResultResponse
 from minds.services.conversations import (
-    ConversationAlreadyExistsError,
     ConversationNotFoundError,
     ConversationsService,
     ConversationsServiceError,
@@ -322,21 +321,6 @@ class TestConversationsService:
         mock_session.add.assert_called_once()  # For conversation
         mock_session.add_all.assert_called_once()  # For messages
         mock_session.commit.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_create_conversation_already_exists(
-        self, service, mock_session, sample_create_request, sample_conversation, mock_mind_service
-    ):
-        """Test create conversation when it already exists."""
-        mock_result = Mock()
-        mock_result.first.return_value = sample_conversation
-        mock_session.exec.return_value = mock_result
-
-        with pytest.raises(
-            ConversationAlreadyExistsError,
-            match="Conversation with topic 'New Conversation' already exists",
-        ):
-            await service.create_conversation(sample_create_request, mock_mind_service)
 
     @pytest.mark.asyncio
     async def test_create_conversation_database_error(

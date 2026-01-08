@@ -18,7 +18,6 @@ from minds.requests.context import extract_context_from_request
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.schemas.messages import MessageResponse, MessageResultResponse
 from minds.services.conversations import (
-    ConversationAlreadyExistsError,
     ConversationNotFoundError,
     ConversationsService,
     ConversationsServiceError,
@@ -232,12 +231,6 @@ async def create_conversation(
             f"Mind not found for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
-    except ConversationAlreadyExistsError as e:
-        logger.warning(
-            f"Conversation already exists "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
-        )
-        raise HTTPException(status_code=409, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in create_conversation "

@@ -257,10 +257,10 @@ class MindsService:
                 )
             )
             mind = self.session.exec(statement).first()
-            
+
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
-            
+
             conversations = []
             for conversation in mind.conversations:
                 conversation_response = await conversations_service.conversation_to_response(conversation)

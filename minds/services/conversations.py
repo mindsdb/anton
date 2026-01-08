@@ -27,12 +27,6 @@ from minds.services.minds import MindNotFoundError, MindsService
 logger = setup_logging()
 
 
-class ConversationAlreadyExistsError(Exception):
-    """Exception for when a conversation already exists."""
-
-    pass
-
-
 class ConversationNotFoundError(Exception):
     """Exception for when a conversation is not found."""
 
@@ -220,7 +214,6 @@ class ConversationsService:
             ConversationResponse: Created conversation.
 
         Raises:
-            ConversationAlreadyExistsError: If conversation with the same topic already exists.
             ConversationsServiceError: If there is an error creating the conversation.
         """
         logger.debug(
@@ -229,22 +222,6 @@ class ConversationsService:
         )
 
         try:
-            # Check if conversation already exists
-            existing_conversation = self.session.exec(
-                select(Conversation).where(
-                    and_(
-                        Conversation.topic == conversation_data.metadata.topic,
-                        Conversation.user_id == self.user_id,
-                        Conversation.tenant_id == self.tenant_id,
-                    )
-                )
-            ).first()
-
-            if existing_conversation:
-                raise ConversationAlreadyExistsError(
-                    f"Conversation with topic '{conversation_data.metadata.topic}' already exists"
-                )
-
             # Check if Mind exists
             mind = await mind_service.get_mind_model(conversation_data.metadata.model_name)
 
@@ -278,7 +255,7 @@ class ConversationsService:
             )
 
             return await self.conversation_to_response(new_conversation)
-        except (ConversationAlreadyExistsError, MindNotFoundError):
+        except MindNotFoundError:
             self.session.rollback()
             raise
         except Exception as e:
