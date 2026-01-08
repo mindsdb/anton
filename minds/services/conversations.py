@@ -155,7 +155,7 @@ class ConversationsService:
 
             conversations_list = []
             for conversation in conversations:
-                conversation_response = await self._conversation_to_response(conversation)
+                conversation_response = await self.conversation_to_response(conversation)
                 conversations_list.append(conversation_response)
 
             logger.info(
@@ -189,7 +189,7 @@ class ConversationsService:
         try:
             conversation = await self._get_conversation(conversation_id)
 
-            return await self._conversation_to_response(conversation)
+            return await self.conversation_to_response(conversation)
         except ConversationNotFoundError:
             raise
         except Exception as e:
@@ -268,7 +268,7 @@ class ConversationsService:
                 f"for user {self.user_id} in tenant {self.tenant_id}"
             )
 
-            return await self._conversation_to_response(new_conversation)
+            return await self.conversation_to_response(new_conversation)
         except (ConversationAlreadyExistsError, MindNotFoundError):
             self.session.rollback()
             raise
@@ -732,7 +732,7 @@ class ConversationsService:
             raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
         return message
 
-    async def _conversation_to_response(self, conversation: Conversation) -> ConversationResponse:
+    async def conversation_to_response(self, conversation: Conversation) -> ConversationResponse:
         """
         Convert Conversation database model to ConversationResponse object.
 

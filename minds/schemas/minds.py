@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field, computed_field, field_validator
 
 from minds.model.mind_datasource import DataCatalogStatus, DetailedDataCatalogStatus
+from minds.schemas.conversations import ConversationResponse
 
 
 class DatasourceConfig(BaseModel):
@@ -91,6 +92,7 @@ class MindResponse(BaseModel):
     )
     created_at: str | None = Field(None, description="Creation timestamp")
     modified_at: str | None = Field(None, description="Last update timestamp")
+    conversations: list[ConversationResponse] = Field(default_factory=list, description="List of conversations")
 
     @computed_field
     @property
