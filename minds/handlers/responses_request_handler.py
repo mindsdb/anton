@@ -21,6 +21,12 @@ from minds.services.conversations import ConversationsService
 logger = setup_logging()
 
 
+class ConversationMindMismatchError(Exception):
+    """Exception for when a conversation is not associated with the current mind."""
+
+    pass
+
+
 @observe(name="Responses Handler v1", as_type="generation")
 async def responses_request_handler(
     session: Session,
@@ -97,7 +103,9 @@ async def responses_request_handler(
         # First check if the conversation exists and it is associated with the current mind
         conversation = await conversation_service.get_conversation(conversation_id)
         if conversation.metadata.model_name != model:
-            raise ValueError(f"Conversation {conversation_id} is not associated with the current mind {model}")
+            raise ConversationMindMismatchError(
+                f"Conversation {conversation_id} is not associated with the current mind {model}"
+            )
 
         if input:
             if isinstance(input, str):
