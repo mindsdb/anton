@@ -27,6 +27,7 @@ from minds.services.conversations import (
     MessageNotAssistantError,
     MessageNotFoundError,
 )
+from minds.services.minds import MindNotFoundError, MindsService
 
 logger = setup_logging()
 
@@ -42,6 +43,15 @@ def get_conversations_service(request: Request, session: Session = Depends(get_s
     return ConversationsService(
         session=session, mindsdb_client=mindsdb_client, user_id=context.user_id, tenant_id=context.tenant_id
     )
+
+
+def get_mind_service(request: Request, session: Session = Depends(get_session)) -> MindsService:
+    """
+    Dependency function to create MindsService with user context.
+    """
+    context = extract_context_from_request(request)
+    mindsdb_client = create_mindsdb_client_from_request(request, context)
+    return MindsService(session=session, mindsdb_client=mindsdb_client, user_id=context.user_id, tenant_id=context.tenant_id)
 
 
 @router.get("/")
@@ -196,6 +206,7 @@ async def get_conversation_messages(
 async def create_conversation(
     conversation_data: ConversationCreateRequest,
     conversations_service: ConversationsService = Depends(get_conversations_service),
+    mind_service: MindsService = Depends(get_mind_service),
 ) -> ConversationResponse:
     """
     Create a new conversation.
@@ -212,8 +223,14 @@ async def create_conversation(
     )
 
     try:
-        conversation = await conversations_service.create_conversation(conversation_data)
+        conversation = await conversations_service.create_conversation(conversation_data, mind_service)
         return conversation
+    except MindNotFoundError as e:
+        logger.warning(
+            f"Mind not found "
+            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
     except ConversationAlreadyExistsError as e:
         logger.warning(
             f"Conversation already exists "

@@ -13,6 +13,7 @@ from mindsdb_sql_parser import parse_sql
 from mindsdb_sql_parser.ast import Select
 from mindsdb_sql_parser.exceptions import ParsingException
 from sqlalchemy.exc import PendingRollbackError
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
@@ -21,6 +22,7 @@ from minds.model.message import Message
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse, MessageResultResponse
+from minds.services.minds import MindNotFoundError, MindsService
 
 logger = setup_logging()
 
@@ -147,7 +149,7 @@ class ConversationsService:
 
             order_by = sort_field.desc() if sort_order == "desc" else sort_field.asc()
 
-            statement = select(Conversation).where(and_(*conditions)).order_by(order_by).offset(offset).limit(limit)
+            statement = select(Conversation).options(selectinload(Conversation.mind)).where(and_(*conditions)).order_by(order_by).offset(offset).limit(limit)
 
             conversations = self.session.exec(statement).all()
 
@@ -197,12 +199,13 @@ class ConversationsService:
             )
             raise ConversationsServiceError(f"Failed to get conversation: {str(e)}") from None
 
-    async def create_conversation(self, conversation_data: ConversationCreateRequest) -> ConversationResponse:
+    async def create_conversation(self, conversation_data: ConversationCreateRequest, mind_service: MindsService) -> ConversationResponse:
         """
         Create a new conversation.
 
         Args:
             conversation_data: Conversation data to create.
+            mind_service: MindsService instance to get the mind.
 
         Returns:
             ConversationResponse: Created conversation.
@@ -233,10 +236,14 @@ class ConversationsService:
                     f"Conversation with topic '{conversation_data.metadata.topic}' already exists"
                 )
 
+            # Check if Mind exists
+            mind = await mind_service.get_mind_model(conversation_data.metadata.model_name)
+
             new_conversation = Conversation(
                 topic=conversation_data.metadata.topic,
                 user_id=self.user_id,
                 tenant_id=self.tenant_id,
+                mind_id=mind.id,
             )
 
             self.session.add(new_conversation)
@@ -262,7 +269,7 @@ class ConversationsService:
             )
 
             return await self._conversation_to_response(new_conversation)
-        except ConversationAlreadyExistsError:
+        except (ConversationAlreadyExistsError, MindNotFoundError):
             self.session.rollback()
             raise
         except Exception as e:
@@ -695,7 +702,7 @@ class ConversationsService:
         Raises:
             ConversationNotFoundError: If conversation with the given ID does not exist.
         """
-        statement = select(Conversation).where(
+        statement = select(Conversation).options(selectinload(Conversation.mind)).where(
             and_(
                 Conversation.id == conversation_id,
                 Conversation.deleted_at.is_(None),
@@ -737,7 +744,10 @@ class ConversationsService:
         """
         return ConversationResponse(
             id=conversation.id,
-            metadata=ConversationMetadata(topic=conversation.topic),
+            metadata=ConversationMetadata(
+                topic=conversation.topic,
+                model_name=conversation.mind.name,
+            ),
             created_at=conversation.created_at.isoformat(),
             modified_at=conversation.modified_at.isoformat(),
         )

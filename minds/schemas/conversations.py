@@ -21,6 +21,7 @@ class ConversationMetadata(BaseModel):
         description="Topic of the conversation. If not provided, defaults to the creation timestamp.",
         default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
     )
+    model_name: str = Field(description="Model (Mind) name that this conversation belongs to")
 
 
 class ConversationItem(Message):
