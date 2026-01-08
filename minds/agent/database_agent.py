@@ -164,6 +164,9 @@ class DatabaseAgent:
             conversation_context = (
                 "This is a conversation history. Please respond to the most recent user message "
                 f"while considering the full context:\n\n{conversation_context}"
+                "IMPORTANT: Use the prior conversation only for context and intent. "
+                "Do not copy or reuse previous answers, even if the same or similar questions appear, "
+                "as the underlying data, schema, or results may have changed."
             )
 
         return conversation_context
