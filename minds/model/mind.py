@@ -7,6 +7,7 @@ from sqlmodel import JSON, Column, Field, Relationship
 from minds.model.base import BaseSQLModel
 
 if TYPE_CHECKING:
+    from minds.model.conversation import Conversation
     from minds.model.mind_datasource import MindDatasource
 
 
@@ -33,6 +34,7 @@ class Mind(BaseSQLModel, table=True):
 
     # Relationships - Many-to-many with datasources through junction table
     mind_datasources: list["MindDatasource"] = Relationship(back_populates="mind")
+    conversations: list["Conversation"] = Relationship(back_populates="mind")
 
     # Database constraints
     __table_args__ = (UniqueConstraint("name", "user_id", name="unique_mind_name_per_user"),)

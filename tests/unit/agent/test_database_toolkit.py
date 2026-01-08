@@ -164,7 +164,7 @@ class TestDatabaseToolkit:
             mock_generate.assert_called_once_with(conversation_context)
             mock_sanitize.assert_called_once_with(expected_sql)
             mock_execute.assert_called_once_with(expected_sql, raise_on_error=True)
-            assert mock_streamer.push.call_count == 2
+            assert mock_streamer.push.call_count == 3
 
     @pytest.mark.asyncio
     async def test_generate_and_execute_with_retry_success_after_retry(self, database_toolkit, mock_streamer):

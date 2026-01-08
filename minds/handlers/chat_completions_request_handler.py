@@ -9,6 +9,8 @@ from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import Context
 from minds.requests.langfuse_tracing import get_langfuse_trace_id, setup_langfuse_observation
 from minds.requests.stream import (
+    format_messages_for_non_streaming_chat_completions_api,
+    format_messages_for_streaming_chat_completions_api,
     process_non_streaming_producer,
     process_streaming_producer,
 )
@@ -73,6 +75,7 @@ async def chat_completions_request_handler(
         response = await process_streaming_producer(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
+            format_func=format_messages_for_streaming_chat_completions_api,
             model=model,
         )
     else:
@@ -81,6 +84,7 @@ async def chat_completions_request_handler(
             producer=lambda streamer: chat_completions_handler.chat_completions(streamer=streamer),
             request_id=request_id,
             model=model,
+            format_func=format_messages_for_non_streaming_chat_completions_api,
         )
 
     return response

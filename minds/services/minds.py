@@ -7,7 +7,7 @@ MindsDB is only used for datasource validation, not for minds storage.
 """
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from mindsdb_sdk.server import Server
 from prefect.exceptions import PrefectException
@@ -17,9 +17,11 @@ from sqlmodel import Session, and_, func, select
 from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
 from minds.common.utilities import safe_parse
+from minds.model.conversation import Conversation
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+from minds.schemas.conversations import ConversationResponse
 from minds.schemas.minds import (
     DatasourceConfig,
     DetailedDatasourceConfig,
@@ -28,6 +30,9 @@ from minds.schemas.minds import (
     MindUpdateRequest,
 )
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
+
+if TYPE_CHECKING:
+    from minds.services.conversations import ConversationsService
 
 # Set up logging
 logger = setup_logging()
@@ -88,6 +93,7 @@ class MindsService:
 
     async def list_minds(
         self,
+        conversations_service: "ConversationsService",
         name: str | None = None,
         provider: str | None = None,
         is_demo: bool | None = None,
@@ -162,9 +168,18 @@ class MindsService:
                 .offset(offset)
                 .limit(limit)
                 .options(
-                    selectinload(Mind.mind_datasources.and_(MindDatasource.deleted_at.is_(None))).selectinload(
-                        MindDatasource.datasource
-                    )
+                    selectinload(Mind.mind_datasources).selectinload(MindDatasource.datasource),
+                    with_loader_criteria(
+                        MindDatasource,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                    selectinload(Mind.conversations),
+                    with_loader_criteria(
+                        Conversation,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
                 )
             )
 
@@ -172,7 +187,15 @@ class MindsService:
 
             minds_list = []
             for mind in minds:
-                mind_response = await self._mind_to_response(mind, with_detailed_data=with_detailed_data)
+                conversations = []
+                for conversation in mind.conversations:
+                    conversation_response = await conversations_service.conversation_to_response(conversation)
+                    conversations.append(conversation_response)
+                mind_response = await self._mind_to_response(
+                    mind,
+                    with_detailed_data=with_detailed_data,
+                    conversations=conversations,
+                )
                 minds_list.append(mind_response)
 
             logger.info(
@@ -187,12 +210,15 @@ class MindsService:
             logger.error(f"Error listing minds for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
             raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
 
-    async def get_mind(self, mind_name: str, with_detailed_data: bool = False) -> MindResponse:
+    async def get_mind(
+        self, mind_name: str, conversations_service: "ConversationsService", with_detailed_data: bool = False
+    ) -> MindResponse:
         """
         Get a specific mind by name.
 
         Args:
             mind_name (str): Name of the mind
+            conversations_service (ConversationsService): Conversations service
             with_detailed_data (bool): Include detailed datasource/knowledge base data
 
         Returns:
@@ -205,12 +231,44 @@ class MindsService:
             mind_name = mind_name.lower()
             logger.debug(f"Getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
 
-            mind = await self._get_mind_with_datasources(mind_name)
+            statement = (
+                select(Mind)
+                .where(
+                    and_(
+                        Mind.name == mind_name,
+                        Mind.user_id == self.user_id,
+                        Mind.deleted_at.is_(None),
+                        Mind.tenant_id == self.tenant_id,
+                    )
+                )
+                .options(
+                    selectinload(Mind.conversations),
+                    with_loader_criteria(
+                        Conversation,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                    selectinload(Mind.mind_datasources),
+                    with_loader_criteria(
+                        MindDatasource,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                )
+            )
+            mind = self.session.exec(statement).first()
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
-            mind_response = await self._mind_to_response(mind, with_detailed_data=with_detailed_data)
+            conversations = []
+            for conversation in mind.conversations:
+                conversation_response = await conversations_service.conversation_to_response(conversation)
+                conversations.append(conversation_response)
+
+            mind_response = await self._mind_to_response(
+                mind, with_detailed_data=with_detailed_data, conversations=conversations
+            )
             logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
             return mind_response
         except MindNotFoundError:
@@ -496,6 +554,12 @@ class MindsService:
                 )
             )
             .options(
+                selectinload(Mind.conversations),
+                with_loader_criteria(
+                    Conversation,
+                    lambda cls: cls.deleted_at.is_(None),
+                    include_aliases=True,
+                ),
                 selectinload(Mind.mind_datasources),
                 with_loader_criteria(
                     MindDatasource,
@@ -507,7 +571,11 @@ class MindsService:
         return self.session.exec(statement).first()
 
     async def _mind_to_response(
-        self, mind: Mind, datasource_configs: list[DatasourceConfig] = None, with_detailed_data: bool = False
+        self,
+        mind: Mind,
+        datasource_configs: list[DatasourceConfig] = None,
+        with_detailed_data: bool = False,
+        conversations: list[ConversationResponse] = None,
     ) -> MindResponse:
         """
         Convert Mind database model to MindResponse object.
@@ -516,6 +584,7 @@ class MindsService:
             mind (Mind): Mind database model
             datasource_configs (list[DatasourceConfig]): Optional explicit datasource configs
             with_detailed_data (bool): Include detailed datasource/knowledge base data
+            conversations (list[ConversationResponse]): List of conversations
 
         Returns:
             MindResponse: Mind response object
@@ -575,6 +644,7 @@ class MindsService:
             datasources=datasources,
             created_at=mind.created_at.isoformat(),
             modified_at=mind.modified_at.isoformat(),
+            conversations=conversations or [],
         )
 
     async def _validate_datasources(self, datasource_configs: list[DatasourceConfig]) -> None:

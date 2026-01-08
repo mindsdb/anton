@@ -22,7 +22,10 @@ from minds.common.authentication import get_company_id
 from minds.common.logger import setup_logging
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
+from minds.model.conversation import Conversation  # noqa: F401
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
+from minds.model.message import Message  # noqa: F401
+from minds.model.mind import Mind  # noqa: F401
 from minds.model.mind_datasource import MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
 

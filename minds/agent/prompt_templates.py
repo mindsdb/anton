@@ -381,6 +381,7 @@ When generating SQL queries, follow these guidelines:
 6. Role and semantic disambiguation: determine the real-world role implied by the question (e.g., buyer, seller, investor, investee) and map to the correct column accordingly. Do not rely on generic column names like "Company", "Name", or "Amount" to infer role.
 7. Example mappings: "What company invested…?" → return the investor column (provider). "What company received the investment…?" → return the company/investee column (receiver). "Who sold…?" → seller column. "Who bought…?" → buyer column.
 8. Always prioritize semantic intent over literal column names.
+9. When possible, add an ORDER BY clause to the query to sort the results by the most relevant column.
 """
 
 # Salesforce SOQL instructions (extracted from SOQL_PROMPT_TEMPLATE)
