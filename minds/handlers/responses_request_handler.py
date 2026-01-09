@@ -17,6 +17,7 @@ from minds.requests.stream import (
 from minds.schemas.chat import Message, Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem, ConversationMetadata
 from minds.services.conversations import ConversationsService
+from minds.services.minds import MindsService
 
 logger = setup_logging()
 
@@ -94,7 +95,13 @@ async def responses_request_handler(
             ConversationCreateRequest(
                 metadata=ConversationMetadata(model_name=model),
                 items=conversation_items,
-            )
+            ),
+            MindsService(
+                session=session,
+                mindsdb_client=mindsdb_client,
+                user_id=context.user_id,
+                tenant_id=context.tenant_id,
+            ),
         )
         conversation_id = new_conversation.id
 
