@@ -6,11 +6,6 @@
 name: minds-flows
 prefect-version: 3.4.18
 
-# pull section allows you to provide instructions for cloning this project in remote locations
-# pull:
-# - prefect.deployments.steps.set_working_directory:
-#     directory: /minds
-
 definitions:
   tags: &common_tags
     - "minds"
