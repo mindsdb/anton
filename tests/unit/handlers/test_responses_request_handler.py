@@ -184,6 +184,7 @@ class TestResponsesRequestHandler:
                 messages=[Message(role=Role.user, content="Hello"), Message(role=Role.assistant, content="Hi there!")],
                 model=sample_streaming_responses_request.model,
                 stream=True,
+                metadata=None,
                 instrument=True,
             )
 
@@ -267,6 +268,7 @@ class TestResponsesRequestHandler:
                 messages=[Message(role=Role.user, content="Hello"), Message(role=Role.assistant, content="Hi there!")],
                 model=sample_responses_request.model,
                 stream=False,
+                metadata=None,
                 instrument=True,
             )
 
@@ -351,6 +353,7 @@ class TestResponsesRequestHandler:
                 messages=[Message(role=Role.user, content="Hello"), Message(role=Role.assistant, content="Hi there!")],
                 model="gpt-4",
                 stream=False,  # Should default to False when None
+                metadata=None,
                 instrument=True,
             )
 
@@ -691,6 +694,7 @@ class TestResponsesRequestHandler:
                 messages=[Message(role=Role.user, content="Hello"), Message(role=Role.assistant, content="Hi there!")],
                 model="custom-model-v1",  # Custom model
                 stream=False,  # Explicit stream value
+                metadata=None,
                 instrument=True,
             )
 

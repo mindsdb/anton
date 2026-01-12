@@ -69,8 +69,8 @@ async def responses_request_handler(
     model = responses_request.model
     logger.debug(f"🔄[{request_id}] Model: {model}")
 
-    # metadata = responses_request.metadata
-    # logger.debug(f"🔄[{request_id}] Metadata: {metadata}")
+    metadata = responses_request.metadata
+    logger.debug(f"🔄[{request_id}] Metadata: {metadata}")
 
     conversation_id = conversation
 
@@ -146,6 +146,7 @@ async def responses_request_handler(
         messages=messages,
         model=model,
         stream=stream,
+        metadata=metadata,
         instrument=instrument,
     )
 

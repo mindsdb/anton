@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
 from minds.schemas.chat import Message
 
 
@@ -17,4 +18,7 @@ class ResponsesRequest(BaseModel):
         default=False,
         description="Whether the chat completion request is streaming or not",
     )
-    # TODO: Metadata has not been added? Is it needed?
+    metadata: ChatCompletionRequestMetadata | None = Field(
+        default=None,
+        description="Metadata for the responses request, including enable_charting",
+    )
