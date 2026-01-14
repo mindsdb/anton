@@ -103,7 +103,7 @@ jobs:
         run: |
           export NAMESPACE=prod
           kubectl -n $NAMESPACE delete job --ignore-not-found minds-flows
-      - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v5
+      - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v6
         with:
           environment-slug: prod
           k8s-namespace: prod
