@@ -128,7 +128,7 @@ jobs:
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
           kubectl -n $NAMESPACE delete job --ignore-not-found minds-flows
-      - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v4
+      - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v6
         with:
           environment-slug: ${{matrix.deploy-env}}
           k8s-namespace: ${{matrix.deploy-env}}
