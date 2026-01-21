@@ -10,13 +10,14 @@ from uuid import UUID
 
 from mindsdb_sdk.server import Server
 from mindsdb_sql_parser import parse_sql
-from mindsdb_sql_parser.ast import Select
+from mindsdb_sql_parser.ast import Identifier, Select
 from mindsdb_sql_parser.exceptions import ParsingException
 from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
+from minds.common.mindsdb import query_traversal
 from minds.model.conversation import Conversation
 from minds.model.message import Message
 from minds.schemas.chat import Role
@@ -567,10 +568,18 @@ class ConversationsService:
             # This is because the MSSQL integration for MindsDB does not support LIMIT and OFFSET.
             # This should be fixed in MindsDB itself and removed from here.
             # Get the database engine of the query
-            database_engine = self.mindsdb_client.databases.get(parsed_sql_query.from_table.parts[0]).engine
+            database_engines = []
+            def find_databases(node, is_table, **kwargs):
+                if is_table and isinstance(node, Identifier):
+                    database = node.parts[0]
+                    database_engine = self.mindsdb_client.databases.get(database).engine
+                    if database_engine not in database_engines:
+                        database_engines.append(database_engine)
+            query_traversal(parsed_sql_query, find_databases)
+            # database_engine = self.mindsdb_client.databases.get(parsed_sql_query.from_table.parts[0]).engine
             # If is is MSSQL, execute the original query without LIMIT and OFFSET
             # Execute pagination in memory.
-            if database_engine == "mssql":
+            if "mssql" in database_engines:
                 result = self.mindsdb_client.query(sql_query).fetch()
                 result = result.iloc[offset_int : offset_int + limit_int]
 
