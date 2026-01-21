@@ -84,7 +84,7 @@ def query_traversal(node, callback, is_table=False, is_target=False, parent_quer
                 array.append(node_out)
             node.order_by = array
 
-    elif isinstance(node, (ast.Union, ast.Intersect, ast.Except)):
+    elif isinstance(node, ast.Union | ast.Intersect | ast.Except):
         node_out = query_traversal(node.left, callback, parent_query=node, stack=stack2)
         if node_out is not None:
             node.left = node_out
@@ -104,19 +104,20 @@ def query_traversal(node, callback, is_table=False, is_target=False, parent_quer
             if node_out is not None:
                 node.condition = node_out
 
-    elif isinstance(node, (ast.Function, ast.BinaryOperation, ast.UnaryOperation, ast.BetweenOperation,
-                           ast.Exists, ast.NotExists)):
+    elif isinstance(
+        node,
+        ast.Function | ast.BinaryOperation | ast.UnaryOperation | ast.BetweenOperation | ast.Exists | ast.NotExists,
+    ):
         array = []
         for arg in node.args:
             node_out = query_traversal(arg, callback, parent_query=parent_query, stack=stack2) or arg
             array.append(node_out)
         node.args = array
 
-        if isinstance(node, ast.Function):
-            if node.from_arg is not None:
-                node_out = query_traversal(node.from_arg, callback, parent_query=parent_query, stack=stack2)
-                if node_out is not None:
-                    node.from_arg = node_out
+        if isinstance(node, ast.Function) and node.from_arg is not None:
+            node_out = query_traversal(node.from_arg, callback, parent_query=parent_query, stack=stack2)
+            if node_out is not None:
+                node.from_arg = node_out
 
     elif isinstance(node, ast.WindowFunction):
         query_traversal(node.function, callback, parent_query=parent_query, stack=stack2)

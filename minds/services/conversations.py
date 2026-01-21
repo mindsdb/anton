@@ -569,12 +569,14 @@ class ConversationsService:
             # This should be fixed in MindsDB itself and removed from here.
             # Get the database engine of the query
             database_engines = []
+
             def find_databases(node, is_table, **kwargs):
                 if is_table and isinstance(node, Identifier):
                     database = node.parts[0]
                     database_engine = self.mindsdb_client.databases.get(database).engine
                     if database_engine not in database_engines:
                         database_engines.append(database_engine)
+
             query_traversal(parsed_sql_query, find_databases)
             # database_engine = self.mindsdb_client.databases.get(parsed_sql_query.from_table.parts[0]).engine
             # If is is MSSQL, execute the original query without LIMIT and OFFSET
