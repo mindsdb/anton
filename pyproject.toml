@@ -49,6 +49,7 @@ select = [
 ignore = ["B008"]  # Allow Depends() calls in FastAPI function signatures
 
 [tool.ruff.lint.per-file-ignores]
+"alembic/versions/*.py" = ["E501"]
 "tests/e2e/evals/*.py" = ["E501"]
 "minds/agent/prompt_templates.py" = ["E501"]
 [tool.ruff.lint.pycodestyle]

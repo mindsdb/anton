@@ -108,13 +108,25 @@ deployment:
     # ====================================
     # LAUNCHDARKLY SETTINGS
     # ====================================
-
+    - name: LAUNCHDARKLY__OFFLINE_MODE
+      value: "False"
+      
     - name: LAUNCHDARKLY__SDK_KEY
       valueFrom:
         secretKeyRef:
           name: mindsdb-secrets
           key: LAUNCHDARKLY_SDK_KEY
-
+    - name: LAUNCHDARKLY__BASE_URI
+      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
+    - name: LAUNCHDARKLY__STREAM_URI
+      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
+    - name: LAUNCHDARKLY__EVENTS_URI
+      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
+    - name: LAUNCHDARKLY__DIAGNOSTIC_OPT_OUT
+      value: "True"
+    - name: LAUNCHDARKLY__SEND_EVENTS
+      value: "False"
+    
     # Langfuse (Variables used by langfuse-python library)
     - name: LANGFUSE_RELEASE
       value: "{{ .Values.global.image.tag }}"

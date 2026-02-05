@@ -52,7 +52,8 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
     from minds.requests.context import Context
 
     def _fake_extract_context(request):
-        return Context(user_id="test-user-123", user_email="test@example.com")
+        # Context.user_id is a UUID in the application schema
+        return Context(user_id="00000000-0000-0000-0000-000000000001", user_email="test@example.com")
 
     monkeypatch.setattr(
         "minds.requests.context.extract_context_from_request",
@@ -64,7 +65,7 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
     class MockMindsDBClient:
         pass
 
-    def _fake_create_mindsdb_client(request, **kwargs):
+    def _fake_create_mindsdb_client(request, context=None, **kwargs):
         return MockMindsDBClient()
 
     monkeypatch.setattr(

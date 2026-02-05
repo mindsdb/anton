@@ -84,12 +84,19 @@ globalEnvsAlias: &globalEnvsYamlAlias
     # ====================================
     # LAUNCHDARKLY SETTINGS
     # ====================================
-
+    - name: LAUNCHDARKLY__OFFLINE_MODE
+      value: "False"
     - name: LAUNCHDARKLY__SDK_KEY
       valueFrom:
         secretKeyRef:
           name: mindsdb-secrets
           key: LAUNCHDARKLY_SDK_KEY
+    - name: LAUNCHDARKLY__BASE_URI
+      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
+    - name: LAUNCHDARKLY__STREAM_URI
+      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
+    - name: LAUNCHDARKLY__EVENTS_URI
+      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
 
 job:
   # Job configuration

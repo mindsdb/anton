@@ -99,8 +99,41 @@ class AuthSettings(Settings):
 class LaunchDarklySettings(Settings):
     sdk_key: str = Field(default="not set", description="The LaunchDarkly SDK key")  # LAUNCHDARKLY__SDK_KEY
     offline_mode: bool = Field(
-        default=False, description="Whether LaunchDarkly is in offline mode"
+        default=True, description="Whether LaunchDarkly is in offline mode"
     )  # LAUNCHDARKLY__OFFLINE_MODE
+
+    # Optional Relay Proxy (or custom endpoint) configuration. When set, the SDK
+    # will connect to these URLs instead of LaunchDarkly-hosted endpoints.
+    #
+    # For LaunchDarkly Relay Proxy, these typically all point to the proxy URL.
+    base_uri: str | None = Field(
+        default="", description="Override LaunchDarkly base URI (relay proxy URL)"
+    )  # LAUNCHDARKLY__BASE_URI
+    stream_uri: str | None = Field(
+        default="", description="Override LaunchDarkly stream URI (relay proxy URL)"
+    )  # LAUNCHDARKLY__STREAM_URI
+    events_uri: str | None = Field(
+        default="", description="Override LaunchDarkly events URI (relay proxy URL)"
+    )  # LAUNCHDARKLY__EVENTS_URI
+
+    # HTTP timeouts for SDK -> relay (or SDK -> LaunchDarkly if not using relay).
+    # These map to ldclient.config.HTTPConfig.
+    http_connect_timeout: float = Field(
+        default=20.0, description="HTTP connect timeout (seconds) for LaunchDarkly SDK"
+    )  # LAUNCHDARKLY__HTTP_CONNECT_TIMEOUT
+    http_read_timeout: float = Field(
+        default=30.0, description="HTTP read timeout (seconds) for LaunchDarkly SDK"
+    )  # LAUNCHDARKLY__HTTP_READ_TIMEOUT
+
+    # If your cluster blocks egress from the relay to LaunchDarkly's events service,
+    # you'll see repeated HTTP 503s when the SDK tries to post diagnostics/analytics.
+    # These do not affect flag evaluation; they only affect telemetry.
+    send_events: bool = Field(
+        default=False, description="Whether to send analytics/diagnostic events"
+    )  # LAUNCHDARKLY__SEND_EVENTS
+    diagnostic_opt_out: bool = Field(
+        default=False, description="Disable diagnostic events reporting"
+    )  # LAUNCHDARKLY__DIAGNOSTIC_OPT_OUT
 
 
 class FeatureFlagSettings(Settings):

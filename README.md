@@ -615,7 +615,9 @@ class AppSettings(Settings):
 3. **Create a helper function** in `minds/common/launch_darkly/`:
 
 ```python
-from minds.common.launch_darkly import ldclient
+from ldclient.context import Context as LDContext
+
+from minds.common.launch_darkly import get_client
 from minds.requests.context import Context
 
 def is_your_feature_enabled(context: Context) -> bool:
@@ -623,14 +625,14 @@ def is_your_feature_enabled(context: Context) -> bool:
     settings = get_app_settings()
     
     ld_context = (
-        ldclient.Context.builder(str(context.user_email))
+        LDContext.builder(str(context.user_email))
         .kind("user")
         .name(context.user_email)
         .set("email", context.user_email)
         .build()
     )
     
-    return ldclient.get().variation(
+    return get_client().variation(
         settings.feature_flag_your_feature.name,
         ld_context,
         settings.feature_flag_your_feature.default_value
