@@ -30,7 +30,7 @@ class TestDataCatalogLoader:
         """Mock mind datasource."""
         mind_datasource = Mock(spec=MindDatasource)
         mind_datasource.id = UUID("12345678-1234-5678-1234-567812345678")
-        mind_datasource.tenant_id = "test_tenant_456"
+        mind_datasource.organization_id = "test_organization_456"
         mind_datasource.datasource_id = UUID("87654321-4321-8765-4321-876543218765")
         mind_datasource.flow_run_id = None
 
@@ -47,7 +47,7 @@ class TestDataCatalogLoader:
         """Create DataCatalogLoader instance with mocked dependencies."""
         return DataCatalogLoader(
             session=mock_session,
-            tenant_id="test_tenant_456",
+            organization_id="test_organization_456",
             user_id="test_user_123",
         )
 
@@ -55,12 +55,12 @@ class TestDataCatalogLoader:
         """Test DataCatalogLoader initialization."""
         loader = DataCatalogLoader(
             session=mock_session,
-            tenant_id="test_tenant_456",
+            organization_id="test_organization_456",
             user_id="test_user_123",
         )
 
         assert loader.session == mock_session
-        assert loader.tenant_id == "test_tenant_456"
+        assert loader.organization_id == "test_organization_456"
         assert loader.user_id == "test_user_123"
 
     @pytest.mark.asyncio
@@ -78,7 +78,7 @@ class TestDataCatalogLoader:
             # Verify the flow was called with correct parameters
             mock_load_flow.assert_called_once_with(
                 mind_datasource_id=mock_mind_datasource.id,
-                tenant_id="test_tenant_456",
+                organization_id="test_organization_456",
                 user_id="test_user_123",
                 table_names=["table1", "table2"],
             )
@@ -106,13 +106,13 @@ class TestDataCatalogLoader:
             # Verify the deployment was called with correct parameters
             mock_run_deployment_patch.assert_called_once_with(
                 name="load-data-catalog/local--data-catalog-loader",
-                timeout=0,
                 parameters={
                     "mind_datasource_id": mock_mind_datasource.id,
-                    "tenant_id": "test_tenant_456",
+                    "organization_id": "test_organization_456",
                     "user_id": "test_user_123",
                     "table_names": ["table1", "table2"],
                 },
+                timeout=0,
             )
 
             # Verify flow_run_id was set and session was committed
@@ -146,7 +146,7 @@ class TestDataCatalogLoader:
             # Verify the flow was called with None table_names
             mock_load_flow.assert_called_once_with(
                 mind_datasource_id=mock_mind_datasource.id,
-                tenant_id="test_tenant_456",
+                organization_id="test_organization_456",
                 user_id="test_user_123",
                 table_names=None,
             )

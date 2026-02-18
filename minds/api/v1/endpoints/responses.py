@@ -9,9 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 from starlette.responses import JSONResponse
 
-from minds.client.mindsdb import create_mindsdb_client_from_request
-from minds.common.launch_darkly.disable_langfuse import is_langfuse_disabled
+from minds.api.v1.deps import get_conversations_service, get_limits_service, get_mindsdb_client
+from minds.common.guards import ResourceType, require_usage_available
 from minds.common.logger import setup_logging
+from minds.common.statsig import is_langfuse_enabled
 from minds.db.pg_session import get_session
 from minds.handlers.responses_request_handler import (
     ConversationMindMismatchError,
@@ -20,30 +21,11 @@ from minds.handlers.responses_request_handler import (
 from minds.requests.context import extract_context_from_request
 from minds.requests.responses_request import ResponsesRequest
 from minds.services.conversations import ConversationsService
+from minds.services.limits import LimitsService
 
 logger = setup_logging()
 
 router = APIRouter()
-
-
-def get_mindsdb_client(request: Request):
-    """
-    Dependency function to create MindsDB client from request.
-    """
-    context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request, context)
-    return mindsdb_client
-
-
-def get_conversations_service(request: Request, session: Session = Depends(get_session)) -> ConversationsService:
-    """
-    Dependency function to create ConversationsService with user context.
-    """
-    context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request, context)
-    return ConversationsService(
-        session=session, user_id=context.user_id, tenant_id=context.tenant_id, mindsdb_client=mindsdb_client
-    )
 
 
 @router.options("/")
@@ -71,6 +53,7 @@ async def responses(
     mindsdb_client=Depends(get_mindsdb_client),
     session: Session = Depends(get_session),
     conversations_service: ConversationsService = Depends(get_conversations_service),
+    limits_service: LimitsService = Depends(get_limits_service),
 ):
     """
     Handle Responses API requests (API v1).
@@ -91,19 +74,23 @@ async def responses(
             otherwise a JSON response containing Responses API messages.
 
     Raises:
+        HTTPException: 429 if usage limit exceeded.
         HTTPException: 500 if there's an error processing the request.
     """
     # Extract user context from request
     context = extract_context_from_request(request=request)
     logger.debug(f"🔄 Context: {context.model_dump()}")
 
-    langfuse_disabled = is_langfuse_disabled(context=context)
-    logger.debug(f"🔄 [{context.request_id}] Langfuse is disabled: {langfuse_disabled}")
+    # Check usage limits before processing
+    await require_usage_available(limits_service, ResourceType.QUESTIONS)
+
+    langfuse_enabled = is_langfuse_enabled(context=context)
+    logger.debug(f"🔄 [{context.request_id}] Langfuse is enabled: {langfuse_enabled}")
 
     try:
         logger.debug(f"🔄 [{context.request_id}] Starting Responses API v1")
 
-        if langfuse_disabled:
+        if not langfuse_enabled:
             handler = responses_request_handler.__wrapped__
             instrument = False
         else:

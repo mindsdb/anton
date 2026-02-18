@@ -44,7 +44,7 @@ class TestDatabaseToolkit:
         mind.provider = "openai"
         mind.model_name = "gpt-3.5-turbo"
         mind.user_id = "test-user"
-        mind.tenant_id = "test-tenant"
+        mind.organization_id = "test-organization"
         mind.parameters = {}  # Initialize as empty dict to avoid Mock return values
         return mind
 
@@ -68,7 +68,7 @@ class TestDatabaseToolkit:
         datasource.created_at = datetime.now()
         datasource.modified_at = datetime.now()
         datasource.deleted_at = None
-        datasource.tenant_id = "test-tenant"
+        datasource.organization_id = "test-organization"
         return datasource
 
     @pytest.fixture
@@ -82,7 +82,7 @@ class TestDatabaseToolkit:
         mind_datasource.created_at = datetime.now()
         mind_datasource.modified_at = datetime.now()
         mind_datasource.deleted_at = None
-        mind_datasource.tenant_id = "test-tenant"
+        mind_datasource.organization_id = "test-organization"
         mind_datasource.status = "active"
         # Provide a default list of mind_datasource_tables compatible with
         # the DatabaseToolkit expectations. Each entry should have a `.table`

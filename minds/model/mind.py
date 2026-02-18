@@ -1,5 +1,4 @@
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from sqlalchemy import Text, UniqueConstraint
 from sqlmodel import JSON, Column, Field, Relationship
@@ -16,11 +15,8 @@ class Mind(BaseSQLModel, table=True):
 
     # Basic mind information
     name: str = Field(description="Name of the mind", max_length=256, index=True)
-    provider: str = Field(description="AI provider (openai, google, etc.)", max_length=50)
-    model_name: str = Field(description="Model name to use", max_length=256)
-
-    # User ownership
-    user_id: UUID = Field(description="ID of the user who owns this mind", index=True)
+    provider: str | None = Field(default=None, description="AI provider (openai, google, etc.)", max_length=50)
+    model_name: str | None = Field(default=None, description="Model name to use", max_length=256)
 
     # Configuration
     parameters: dict[str, Any] | None = Field(
@@ -31,6 +27,8 @@ class Mind(BaseSQLModel, table=True):
     description: str | None = Field(
         default=None, sa_column=Column(Text), description="Optional description of the mind"
     )
+
+    is_sample: bool = Field(default=False, description="Whether the mind is a sample", nullable=False)
 
     # Relationships - Many-to-many with datasources through junction table
     mind_datasources: list["MindDatasource"] = Relationship(back_populates="mind")

@@ -9,30 +9,23 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 from starlette.responses import JSONResponse
 
-from minds.client.mindsdb import create_mindsdb_client_from_request
-from minds.common.launch_darkly.disable_langfuse import is_langfuse_disabled
+from minds.api.v1.deps import get_limits_service, get_mindsdb_client
+from minds.common.guards import ResourceType, require_usage_available
 from minds.common.logger import setup_logging
+from minds.common.statsig import is_langfuse_enabled
 from minds.db.pg_session import get_session
 from minds.handlers.chat_completions_request_handler import (
     chat_completions_request_handler,
 )
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import extract_context_from_request
+from minds.services.limits import LimitsService
 
 # Set up logging
 logger = setup_logging()
 
 # Create router for chat completion endpoints
 router = APIRouter()
-
-
-def get_mindsdb_client(request: Request):
-    """
-    Dependency function to create MindsDB client from request.
-    """
-    context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request, context)
-    return mindsdb_client
 
 
 @router.options("/completions")
@@ -59,6 +52,7 @@ async def chat_completions(
     request: Request,
     mindsdb_client=Depends(get_mindsdb_client),
     session: Session = Depends(get_session),
+    limits_service: LimitsService = Depends(get_limits_service),
 ):
     """
     Handle chat completions for documents (API v1).
@@ -77,19 +71,23 @@ async def chat_completions(
             otherwise a JSON response containing chat completion messages.
 
     Raises:
+        HTTPException: 429 if usage limit exceeded.
         HTTPException: 500 if there's an error processing the request.
     """
     # Extract user context from request
     context = extract_context_from_request(request=request)
     logger.debug(f"🔄 Context: {context.model_dump()}")
 
-    langfuse_disabled = is_langfuse_disabled(context=context)
-    logger.debug(f"🔄 [{context.request_id}] Langfuse is disabled: {langfuse_disabled}")
+    # Check usage limits before processing
+    await require_usage_available(limits_service, ResourceType.QUESTIONS)
+
+    langfuse_enabled = is_langfuse_enabled(context=context)
+    logger.debug(f"🔄 [{context.request_id}] Langfuse is enabled: {langfuse_enabled}")
 
     try:
         logger.debug(f"🔄 [{context.request_id}] Starting chat completions v1")
 
-        if langfuse_disabled:
+        if not langfuse_enabled:
             handler = chat_completions_request_handler.__wrapped__
             instrument = False
         else:

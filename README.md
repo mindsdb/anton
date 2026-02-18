@@ -651,6 +651,83 @@ LAUNCHDARKLY__OFFLINE_MODE=true
 
 When offline mode is enabled, all feature flags will use their configured default values.
 
+## Resource Usage Limits
+
+The service enforces per-user resource consumption limits to prevent abuse and support billing. Limits are fetched dynamically from [Statsig](https://statsig.com/) via the `mind-usage-limits` dynamic config and are evaluated on every resource-creating request.
+
+### How It Works
+
+1. **Limit retrieval** – `LimitsService.get_mind_limits()` reads the current limit thresholds from the Statsig dynamic config (`mind-usage-limits`) and computes usage counts from the database. In self-hosted mode, all limits default to **unlimited**.
+
+2. **Guard system** – A centralised guard module (`minds/common/guards/usage.py`) provides the `require_usage_available` function. Endpoints call this guard before performing any resource-creating operation:
+
+```python
+from minds.common.guards import require_usage_available, ResourceType
+
+await require_usage_available(limits_service, ResourceType.MINDS)
+```
+
+3. **HTTP 429 rejection** – When usage meets or exceeds the configured limit (monthly *or* lifetime), the guard raises `UsageLimitExceededError`, returning an **HTTP 429 Too Many Requests** response with a descriptive message.
+
+### Protected Endpoints
+
+| Endpoint | Resource Type | Guard checks |
+|---|---|---|
+| `POST /chat/completions` | `QUESTIONS` | Monthly & lifetime question limits |
+| `POST /responses` | `QUESTIONS` | Monthly & lifetime question limits |
+| `POST /minds` (create) | `MINDS` | Monthly & lifetime mind limits |
+| `POST /datasources` (create) | `DATASOURCES` | Monthly & lifetime datasource limits |
+
+### ResourceType Enum
+
+The `ResourceType` enum identifies the four tracked resource categories:
+
+- `MINDS` – number of minds created
+- `DATASOURCES` – number of datasources created
+- `TOKENS` – total tokens consumed
+- `QUESTIONS` – number of questions asked
+
+### Usage Tracking: Lifetime vs. Billing Cycle
+
+Each resource tracks two usage counters via the `UsageConfig` schema:
+
+- **`lifetime`** – total count across all time
+- **`billing_cycle`** – count since the start of the current billing period
+
+The billing period start is communicated by the upstream gateway via the `X-Billing-Period-Start` request header in **ISO-8601** format (e.g. `2025-07-01T00:00:00Z`). When this header is present, the service filters resource counts to only include records created on or after that timestamp. When absent, billing-cycle usage defaults to the lifetime count.
+
+### Configuration
+
+Limits are configured per user/organisation in the Statsig dashboard under the `mind-usage-limits` dynamic config. Each resource section has the shape:
+
+```json
+{
+  "minds": {
+    "limit": { "lifetime": 10, "monthly": 5 }
+  },
+  "datasources": {
+    "limit": { "lifetime": 30, "monthly": 10 }
+  },
+  "tokens": {
+    "limit": { "lifetime": -1, "monthly": 1000000 }
+  },
+  "questions": {
+    "limit": { "lifetime": -1, "monthly": 250 }
+  }
+}
+```
+
+A limit value of `-1` means **unlimited** (the resource is uncapped).
+
+### Extending with New Guard Types
+
+The `minds/common/guards/` package is designed to be generic. To add a new guard category (e.g. permissions, feature access):
+
+1. Create a new module under `minds/common/guards/` (e.g. `permissions.py`).
+2. Implement a guard function following the same pattern as `require_usage_available`.
+3. Export it from `minds/common/guards/__init__.py`.
+4. Inject the guard as a dependency in the relevant endpoints.
+
 ## Contributing
 
 1. Fork the repository

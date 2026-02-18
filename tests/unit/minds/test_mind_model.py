@@ -27,7 +27,7 @@ class TestMindModel:
             "provider": "openai",
             "model_name": "gpt-4o",
             "user_id": UUID("00000000-0000-0000-0000-000000000123"),
-            "tenant_id": UUID("00000000-0000-0000-0000-000000000456"),
+            "organization_id": UUID("00000000-0000-0000-0000-000000000456"),
             "parameters": {"temperature": 0.7, "max_tokens": 100},
             "description": "Test mind for unit tests",
             "deleted_at": None,
@@ -41,6 +41,7 @@ class TestMindModel:
         assert mind.provider == "openai"
         assert mind.model_name == "gpt-4o"
         assert mind.user_id == UUID("00000000-0000-0000-0000-000000000123")
+        assert mind.organization_id == UUID("00000000-0000-0000-0000-000000000456")
         assert mind.parameters == {"temperature": 0.7, "max_tokens": 100}
         assert mind.mind_datasources == []  # No relationships set in this basic test
         assert mind.description == "Test mind for unit tests"
@@ -53,12 +54,14 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id=UUID("00000000-0000-0000-0000-000000000123"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000456"),
         )
 
         assert mind.name == "minimal-mind"
         assert mind.provider == "openai"
         assert mind.model_name == "gpt-4o"
         assert mind.user_id == UUID("00000000-0000-0000-0000-000000000123")
+        assert mind.organization_id == UUID("00000000-0000-0000-0000-000000000456")
 
         # Test default values
         assert mind.parameters == {}
@@ -73,6 +76,7 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id=UUID("00000000-0000-0000-0000-000000000123"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000456"),
         )
 
         # Test that default factories create new instances
@@ -85,6 +89,7 @@ class TestMindModel:
             provider="openai",
             model_name="gpt-4o",
             user_id=UUID("00000000-0000-0000-0000-000000000123"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000456"),
         )
 
         mind.parameters["test"] = "value"
@@ -96,7 +101,11 @@ class TestMindModel:
     def test_mind_datasources_relationship_exists(self):
         """Test that mind_datasources relationship is properly configured."""
         mind = Mind(
-            name="test", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000123")
+            name="test",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000456"),
         )
 
         # Test that the relationship exists and is empty by default
@@ -107,10 +116,18 @@ class TestMindModel:
     def test_mind_parameters_default_factory(self):
         """Test that parameters field has proper default factory."""
         mind1 = Mind(
-            name="test1", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000123")
+            name="test1",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000456"),
         )
         mind2 = Mind(
-            name="test2", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000456")
+            name="test2",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000456"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000456"),
         )
 
         # Test that each instance gets its own parameters dict
@@ -123,7 +140,11 @@ class TestMindModel:
     def test_active_mind_field_types(self):
         """Test active Mind field types and validation."""
         mind = Mind(
-            name="test", provider="openai", model_name="gpt-4o", user_id=UUID("00000000-0000-0000-0000-000000000123")
+            name="test",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=UUID("00000000-0000-0000-0000-000000000123"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000456"),
         )
 
         # Test field types
@@ -235,9 +256,11 @@ class TestMindModel:
         # Test that indexed fields are properly configured
         name_field = Mind.__table__.columns["name"]
         user_id_field = Mind.__table__.columns["user_id"]
+        organization_id_field = Mind.__table__.columns["organization_id"]
 
         assert name_field.index is True
         assert user_id_field.index is True
+        assert organization_id_field.index is True
 
     def test_mind_json_fields(self):
         """Test Mind JSON field handling."""

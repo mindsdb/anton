@@ -79,7 +79,7 @@ def get_openai_client() -> OpenAIClient:
 def create_openai_client(
     api_url: str = settings.openai.api_url,
     api_key: str = settings.openai.api_key,
-    chat_completions_model: str = settings.openai.model_name,
+    chat_completions_model: str = settings.default_models.openai_model,
     max_tokens: int = settings.openai.max_tokens,
 ) -> OpenAIClient:
     return OpenAIClient(

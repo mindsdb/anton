@@ -8,7 +8,7 @@ Tests the FastAPI endpoints for minds management including:
 - Input validation
 """
 
-from unittest.mock import ANY, AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -23,7 +23,9 @@ from minds.api.v1.endpoints.minds import (
     update_mind,
 )
 from minds.model.mind_datasource import DataCatalogStatus, DetailedDataCatalogStatus
+from minds.schemas.limits import LimitsConfig, MindLimitsConfig, ResourceUsageConfig, UsageConfig
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindResponse, MindUpdateRequest
+from minds.services.limits import LimitsService
 from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
 
@@ -34,7 +36,7 @@ class TestMindsAPI:
     def mock_request(self):
         """Mock FastAPI request object."""
         request = Mock()
-        request.headers = {"x-user-id": "test-user-123", "x-company-id": "test-company-456"}
+        request.headers = {"X-User-Id": "test-user-123", "X-Organization-Id": "test-company-456"}
         return request
 
     @pytest.fixture
@@ -51,7 +53,7 @@ class TestMindsAPI:
         """Mock MindsService instance."""
         service = Mock(spec=MindsService)
         service.user_id = "test-user-123"
-        service.tenant_id = "test-tenant-456"
+        service.organization_id = "test-organization-456"
         return service
 
     @pytest.fixture
@@ -62,10 +64,18 @@ class TestMindsAPI:
         return loader
 
     @pytest.fixture
+    def mock_limits_service(self):
+        """Mock LimitsService that allows all operations (under limit)."""
+        service = Mock(spec=LimitsService)
+        service.get_mind_limits = AsyncMock(return_value=MindLimitsConfig())
+        return service
+
+    @pytest.fixture
     def sample_mind_response(self):
         """Sample MindResponse for testing."""
         return MindResponse(
             name="test-mind",
+            is_sample=False,
             model_name="gpt-4o",
             provider="openai",
             parameters={"temperature": 0.7},
@@ -104,20 +114,17 @@ class TestMindsAPI:
 
     def test_get_minds_service_dependency(self, mock_request, mock_session):
         """Test the get_minds_service dependency function."""
-        with (
-            patch("minds.api.v1.endpoints.minds.extract_context_from_request") as mock_extract,
-            patch("minds.api.v1.endpoints.minds.create_mindsdb_client_from_request") as mock_create_client,
-        ):
-            mock_extract.return_value.user_id = "test-user-123"
-            mock_mindsdb_client = Mock()
-            mock_create_client.return_value = mock_mindsdb_client
+        mock_context = Mock()
+        mock_context.user_id = "test-user-123"
+        mock_context.organization_id = "test-organization-456"
+        mock_mindsdb_client = Mock()
 
-            service = get_minds_service(mock_request, mock_session)
+        service = get_minds_service(context=mock_context, session=mock_session, mindsdb_client=mock_mindsdb_client)
 
-            assert isinstance(service, MindsService)
-            assert service.session == mock_session
-            assert service.user_id == "test-user-123"
-            assert service.mindsdb_client == mock_mindsdb_client
+        assert isinstance(service, MindsService)
+        assert service.session == mock_session
+        assert service.user_id == "test-user-123"
+        assert service.mindsdb_client == mock_mindsdb_client
 
     @pytest.mark.asyncio
     async def test_list_minds_success(self, mock_minds_service, sample_mind_response):
@@ -142,7 +149,7 @@ class TestMindsAPI:
             conversations_service=ANY,
             name=ANY,
             provider="openai",
-            is_demo=ANY,
+            is_sample=ANY,
             include_deleted=False,
             limit=10,
             offset=0,
@@ -269,32 +276,71 @@ class TestMindsAPI:
 
     @pytest.mark.asyncio
     async def test_create_mind_success(
-        self, mock_minds_service, mock_data_catalog_loader, create_request_data, sample_mind_response
+        self,
+        mock_minds_service,
+        mock_data_catalog_loader,
+        mock_limits_service,
+        create_request_data,
+        sample_mind_response,
     ):
         """Test successful mind creation."""
         mock_minds_service.create_mind = AsyncMock(return_value=sample_mind_response)
         request = MindCreateRequest(**create_request_data)
 
         result = await create_mind(
-            mind_data=request, minds_service=mock_minds_service, data_catalog_loader=mock_data_catalog_loader
+            mind_data=request,
+            minds_service=mock_minds_service,
+            data_catalog_loader=mock_data_catalog_loader,
+            limits_service=mock_limits_service,
         )
 
         assert result.name == "test-mind"
         mock_minds_service.create_mind.assert_called_once_with(request, mock_data_catalog_loader)
 
     @pytest.mark.asyncio
-    async def test_create_mind_already_exists(self, mock_minds_service, mock_data_catalog_loader, create_request_data):
+    async def test_create_mind_already_exists(
+        self, mock_minds_service, mock_data_catalog_loader, mock_limits_service, create_request_data
+    ):
         """Test mind creation when mind already exists."""
         mock_minds_service.create_mind = AsyncMock(side_effect=MindAlreadyExistsError("Mind already exists"))
         request = MindCreateRequest(**create_request_data)
 
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(
-                mind_data=request, minds_service=mock_minds_service, data_catalog_loader=mock_data_catalog_loader
+                mind_data=request,
+                minds_service=mock_minds_service,
+                data_catalog_loader=mock_data_catalog_loader,
+                limits_service=mock_limits_service,
             )
 
         assert exc_info.value.status_code == 409
         assert "Mind already exists" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_create_mind_rejects_when_limit_exceeded(
+        self, mock_minds_service, mock_data_catalog_loader, create_request_data
+    ):
+        """Test that create_mind returns 429 when minds limit is exceeded."""
+        exceeded_limits = MindLimitsConfig(
+            minds=ResourceUsageConfig(
+                limit=LimitsConfig(lifetime=5, monthly=5),
+                usage=UsageConfig(lifetime=5, billing_cycle=5),
+            ),
+        )
+        limits_service = Mock(spec=LimitsService)
+        limits_service.get_mind_limits = AsyncMock(return_value=exceeded_limits)
+
+        request = MindCreateRequest(**create_request_data)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await create_mind(
+                mind_data=request,
+                minds_service=mock_minds_service,
+                data_catalog_loader=mock_data_catalog_loader,
+                limits_service=limits_service,
+            )
+
+        assert exc_info.value.status_code == 429
 
     @pytest.mark.asyncio
     async def test_update_mind_success(
@@ -377,6 +423,8 @@ class TestMindsAPI:
         mock_minds_service.create_mind = AsyncMock(side_effect=MindAlreadyExistsError("Already exists"))
         mock_data_catalog_loader = Mock()
         mock_data_catalog_loader.load = AsyncMock()
+        mock_limits_service = Mock(spec=LimitsService)
+        mock_limits_service.get_mind_limits = AsyncMock(return_value=MindLimitsConfig())
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(
                 mind_data=MindCreateRequest(
@@ -386,6 +434,7 @@ class TestMindsAPI:
                 ),
                 minds_service=mock_minds_service,
                 data_catalog_loader=mock_data_catalog_loader,
+                limits_service=mock_limits_service,
             )
         assert exc_info.value.status_code == 409
 
@@ -409,7 +458,7 @@ class TestMindsAPIErrorHandling:
         """Test get_mind with MindsServiceError (lines 112-114)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.get_mind = AsyncMock(side_effect=MindsServiceError("Database connection failed"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -423,7 +472,7 @@ class TestMindsAPIErrorHandling:
         """Test get_mind with unexpected Exception (lines 115-117)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.get_mind = AsyncMock(side_effect=ValueError("Unexpected error"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -437,8 +486,11 @@ class TestMindsAPIErrorHandling:
         """Test create_mind with MindsServiceError (lines 147-149)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.create_mind = AsyncMock(side_effect=MindsServiceError("Validation failed"))
+
+        mock_limits_service = Mock(spec=LimitsService)
+        mock_limits_service.get_mind_limits = AsyncMock(return_value=MindLimitsConfig())
 
         request = MindCreateRequest(name="test", provider="openai", datasources=[])
         mock_data_catalog_loader = Mock()
@@ -446,7 +498,10 @@ class TestMindsAPIErrorHandling:
 
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(
-                mind_data=request, minds_service=mock_service, data_catalog_loader=mock_data_catalog_loader
+                mind_data=request,
+                minds_service=mock_service,
+                data_catalog_loader=mock_data_catalog_loader,
+                limits_service=mock_limits_service,
             )
 
         assert exc_info.value.status_code == 400
@@ -457,8 +512,11 @@ class TestMindsAPIErrorHandling:
         """Test create_mind with unexpected Exception (lines 150-152)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.create_mind = AsyncMock(side_effect=RuntimeError("Database error"))
+
+        mock_limits_service = Mock(spec=LimitsService)
+        mock_limits_service.get_mind_limits = AsyncMock(return_value=MindLimitsConfig())
 
         request = MindCreateRequest(name="test", provider="openai", datasources=[])
         mock_data_catalog_loader = Mock()
@@ -466,7 +524,10 @@ class TestMindsAPIErrorHandling:
 
         with pytest.raises(HTTPException) as exc_info:
             await create_mind(
-                mind_data=request, minds_service=mock_service, data_catalog_loader=mock_data_catalog_loader
+                mind_data=request,
+                minds_service=mock_service,
+                data_catalog_loader=mock_data_catalog_loader,
+                limits_service=mock_limits_service,
             )
 
         assert exc_info.value.status_code == 500
@@ -477,7 +538,7 @@ class TestMindsAPIErrorHandling:
         """Test update_mind with MindsServiceError (lines 184-186)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.update_mind = AsyncMock(side_effect=MindsServiceError("Invalid parameters"))
 
         request = MindUpdateRequest(name="updated-test")
@@ -500,7 +561,7 @@ class TestMindsAPIErrorHandling:
         """Test update_mind with unexpected Exception (lines 187-189)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.update_mind = AsyncMock(side_effect=KeyError("Missing key"))
 
         request = MindUpdateRequest(name="updated-test")
@@ -523,7 +584,7 @@ class TestMindsAPIErrorHandling:
         """Test delete_mind with MindsServiceError (lines 219-221)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.delete_mind = AsyncMock(side_effect=MindsServiceError("Cannot delete mind"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -537,7 +598,7 @@ class TestMindsAPIErrorHandling:
         """Test delete_mind with unexpected Exception (lines 222-224)."""
         mock_service = Mock(spec=MindsService)
         mock_service.user_id = "test-user"
-        mock_service.tenant_id = "test-tenant"
+        mock_service.organization_id = "test-organization"
         mock_service.delete_mind = AsyncMock(side_effect=OSError("File system error"))
 
         with pytest.raises(HTTPException) as exc_info:
@@ -558,10 +619,10 @@ class TestMindsAPIValidation:
         assert request.name == "test-mind"
         assert request.provider == "openai"
 
-        # Valid request - provider has default value, so it's not required
+        # Valid request - provider is optional and defaults to None
         request_minimal = MindCreateRequest(name="test", datasources=[])
         assert request_minimal.name == "test"
-        assert request_minimal.provider == "openai"  # Default value
+        assert request_minimal.provider is None  # Optional unless explicitly provided
 
     def test_mind_update_request_validation(self):
         """Test MindUpdateRequest validation."""

@@ -11,12 +11,32 @@ globalEnvsAlias: &globalEnvsYamlAlias
     - name: IMAGE_TAG
       value: "{{ .Values.global.image.tag }}"
 
+    - name: DEPLOYMENT_MODE
+      value: "cloud"
+
     # ====================================
     # PREFECT SETTINGS (for ETL flows)
     # ====================================
     - name: PREFECT_API_URL
       value: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
     
+    # ====================================
+    # STATSIG SETTINGS
+    # ====================================
+
+    - name: STATSIG__SDK_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: STATSIG_SDK_KEY
+
+    - name: STATSIG__DISABLE_NETWORK
+      value: "false"
+
+    - name: STATSIG__DISABLE_ALL_LOGGING
+      value: "false"
+          
+
     # ====================================
     # LANGFUSE SETTINGS
     # ====================================
@@ -75,28 +95,21 @@ globalEnvsAlias: &globalEnvsYamlAlias
           key: OPENAI_API_KEY
 
     # ====================================
+    # ANTHROPIC SETTINGS
+    # ====================================
+
+    - name: ANTHROPIC__API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: ANTHROPIC_API_KEY
+
+    # ====================================
     # MINDSDB SETTINGS
     # ====================================
 
     - name: MINDSDB__URL
       value: "http://mindsdb:80"
-
-    # ====================================
-    # LAUNCHDARKLY SETTINGS
-    # ====================================
-    - name: LAUNCHDARKLY__OFFLINE_MODE
-      value: "False"
-    - name: LAUNCHDARKLY__SDK_KEY
-      valueFrom:
-        secretKeyRef:
-          name: mindsdb-secrets
-          key: LAUNCHDARKLY_SDK_KEY
-    - name: LAUNCHDARKLY__BASE_URI
-      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
-    - name: LAUNCHDARKLY__STREAM_URI
-      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
-    - name: LAUNCHDARKLY__EVENTS_URI
-      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
 
 job:
   # Job configuration

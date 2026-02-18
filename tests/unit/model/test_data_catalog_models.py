@@ -658,7 +658,8 @@ class TestDataCatalog:
         mind_datasource.deleted_at = None
         mind_datasource.mind_id = uuid4()
         mind_datasource.datasource_id = uuid4()
-        mind_datasource.tenant_id = UUID("00000000-0000-0000-0000-000000000001")
+        mind_datasource.organization_id = UUID("00000000-0000-0000-0000-000000000001")
+        mind_datasource.user_id = UUID("00000000-0000-0000-0000-000000000002")
         mind_datasource.status = "COMPLETED"
         mind_datasource.flow_run_id = None  # Set to None instead of Mock
         mind_datasource.datasource = mock_datasource

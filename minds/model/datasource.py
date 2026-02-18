@@ -6,7 +6,6 @@ while adding user attribution for multi-user support.
 """
 
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, Relationship
@@ -36,8 +35,9 @@ class Datasource(BaseSQLModel, table=True):
     description: str | None = Field(None, description="Description of the datasource")
     engine: str = Field(..., max_length=50, description="Database engine (postgres, mysql, etc.)")
 
-    user_id: UUID = Field(..., description="ID of the user who created this datasource")
     engine_info: str | None = Field(None, description="Engine information")
+
+    is_sample: bool = Field(default=False, description="Whether the datasource is a sample", nullable=False)
 
     # Relationships - Many-to-many with minds through junction table
     mind_datasources: list["MindDatasource"] = Relationship(back_populates="datasource")

@@ -17,7 +17,8 @@ from minds.requests.context import Context
 def context():
     """Fixture for a sample Context object."""
     return Context(
-        user_id=UUID("11111111-1111-1111-1111-111111111111"), tenant_id=UUID("22222222-2222-2222-2222-222222222222")
+        user_id=UUID("11111111-1111-1111-1111-111111111111"),
+        organization_id=UUID("22222222-2222-2222-2222-222222222222"),
     )
 
 
@@ -41,8 +42,12 @@ class TestCreateMindsdbClientFromRequest:
 
         # Assert
         mock_get_token.assert_called_once_with(mock_request)
-        # The request should forward headers (company-id) to the created client
-        expected_headers = {"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"}
+        # The request should forward headers (company-id and user-id) to the created client
+        expected_headers = {
+            "company-id": str(context.organization_id),
+            "user-id": str(context.user_id),
+            "enforce-user-id": "false",
+        }
         mock_create_client.assert_called_once_with(mock_api_key, headers=expected_headers)
         assert result == mock_client
 
@@ -112,7 +117,11 @@ class TestCreateMindsdbClientFromRequest:
         mock_connect.assert_called_once_with(
             url="http://localhost:47334",
             api_key="test-token-123",
-            headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"},
+            headers={
+                "company-id": str(context.organization_id),
+                "user-id": str(context.user_id),
+                "enforce-user-id": "false",
+            },
         )
         assert result == mock_client
 
@@ -162,14 +171,14 @@ class TestCreateMindsdbClient:
 
         # Act
         result = create_mindsdb_client(
-            api_key, headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"}
+            api_key, headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"}
         )
 
         # Assert
         mock_connect.assert_called_once_with(
             url="http://test-server:8080",
             api_key=api_key,
-            headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"},
+            headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"},
         )
         assert result == mock_client
 
@@ -181,7 +190,9 @@ class TestCreateMindsdbClient:
         mock_connect.return_value = mock_client
 
         # Act
-        result = create_mindsdb_client(None, headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"})
+        result = create_mindsdb_client(
+            None, headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"}
+        )
 
         # Assert - should connect without auth when no API key
         mock_connect.assert_called_once()
@@ -194,7 +205,9 @@ class TestCreateMindsdbClient:
         mock_client = Mock(spec=Server)
         mock_connect.return_value = mock_client
 
-        result = create_mindsdb_client("", headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"})
+        result = create_mindsdb_client(
+            "", headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"}
+        )
 
         # Assert - should connect without auth when empty API key
         mock_connect.assert_called_once()
@@ -209,7 +222,7 @@ class TestCreateMindsdbClient:
 
         # Act
         result = create_mindsdb_client(
-            "   ", headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"}
+            "   ", headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"}
         )
 
         # Assert - should connect without auth when whitespace API key
@@ -228,14 +241,14 @@ class TestCreateMindsdbClient:
 
         # Act
         result = create_mindsdb_client(
-            api_key, headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"}
+            api_key, headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"}
         )
 
         # Assert
         mock_connect.assert_called_once_with(
             url="https://production-server.com",
             api_key=api_key,
-            headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"},
+            headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"},
         )
         assert result == mock_client
 
@@ -248,7 +261,9 @@ class TestCreateMindsdbClient:
 
         # Act & Assert
         with pytest.raises(ConnectionError, match="Unable to connect to MindsDB server"):
-            create_mindsdb_client(api_key, headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"})
+            create_mindsdb_client(
+                api_key, headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"}
+            )
 
         mock_connect.assert_called_once()
 
@@ -261,7 +276,9 @@ class TestCreateMindsdbClient:
 
         # Act & Assert
         with pytest.raises(Exception, match="Authentication failed"):
-            create_mindsdb_client(api_key, headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"})
+            create_mindsdb_client(
+                api_key, headers={"company-id": f"{str(context.organization_id)}_{str(context.user_id)}"}
+            )
 
         mock_connect.assert_called_once()
 
@@ -274,13 +291,17 @@ class TestCreateMindsdbClient:
         mock_connect.return_value = mock_client
 
         result = create_mindsdb_client_with_credentials(
-            url, api_key=api_key, company_id=f"{str(context.tenant_id)}_{str(context.user_id)}"
+            url, api_key=api_key, organization_id=str(context.organization_id), user_id=str(context.user_id)
         )
 
         mock_connect.assert_called_once_with(
             url=url,
             api_key=api_key,
-            headers={"company-id": f"{str(context.tenant_id)}_{str(context.user_id)}"},
+            headers={
+                "company-id": str(context.organization_id),
+                "user-id": str(context.user_id),
+                "enforce-user-id": "false",
+            },
         )
         assert result == mock_client
 
@@ -290,10 +311,16 @@ class TestCreateMindsdbClient:
         url = "http://no-auth-test:9000"
         mock_client = Mock(spec=Server)
         mock_connect.return_value = mock_client
+        organization_id = str(context.organization_id)
+        user_id = str(context.user_id)
 
-        result = create_mindsdb_client_with_credentials(url, api_key=None, company_id="company-xyz")
+        result = create_mindsdb_client_with_credentials(
+            url, api_key=None, organization_id=organization_id, user_id=user_id
+        )
 
-        mock_connect.assert_called_once_with(url=url, headers={"company-id": "company-xyz"})
+        mock_connect.assert_called_once_with(
+            url=url, headers={"company-id": organization_id, "user-id": user_id, "enforce-user-id": "false"}
+        )
         assert result == mock_client
 
     @patch("minds.client.mindsdb.connect")
@@ -302,16 +329,18 @@ class TestCreateMindsdbClient:
         url = "http://login-test:9000"
         mock_client = Mock(spec=Server)
         mock_connect.return_value = mock_client
+        organization_id = str(context.organization_id)
+        user_id = str(context.user_id)
 
         result = create_mindsdb_client_with_credentials(
-            url, api_key=None, login="user", password="pass", company_id="company-abc"
+            url, api_key=None, login="user", password="pass", organization_id=organization_id, user_id=user_id
         )
 
         mock_connect.assert_called_once_with(
             url=url,
             login="user",
             password="pass",
-            headers={"company-id": "company-abc"},
+            headers={"company-id": organization_id, "user-id": user_id, "enforce-user-id": "false"},
         )
         assert result == mock_client
 
@@ -321,7 +350,11 @@ class TestCreateMindsdbClient:
         # validating its type, which raises AttributeError for non-string input.
         # Accept any Exception to be robust to implementation details.
         with pytest.raises(AttributeError):
-            create_mindsdb_client_with_credentials("http://x", api_key=123, company_id="c")
+            organization_id = str(context.organization_id)
+            user_id = str(context.user_id)
+            create_mindsdb_client_with_credentials(
+                "http://x", api_key=123, organization_id=organization_id, user_id=user_id
+            )
 
     @patch("minds.client.mindsdb.connect")
     @patch("minds.client.mindsdb.settings.mindsdb.password", "password123")
@@ -333,14 +366,16 @@ class TestCreateMindsdbClient:
         mock_connect.return_value = mock_client
 
         # Call with no api_key so branch for login/password is used
-        result = create_mindsdb_client(None, headers={"company-id": "cid"})
+        organization_id = str(context.organization_id)
+        user_id = str(context.user_id)
+        result = create_mindsdb_client(None, headers={"company-id": organization_id, "user-id": user_id})
 
         # Ensure connect was invoked with login/password in kwargs
         assert mock_connect.called
         called_args, called_kwargs = mock_connect.call_args
         assert called_kwargs.get("login") == "loginuser"
         assert called_kwargs.get("password") == "password123"
-        assert called_kwargs.get("headers") == {"company-id": "cid"}
+        assert called_kwargs.get("headers") == {"company-id": organization_id, "user-id": user_id}
         assert result == mock_client
 
     def test_create_mindsdb_client_non_string_api_key_raises_value_error(self):
@@ -349,11 +384,15 @@ class TestCreateMindsdbClient:
         with pytest.raises(ValueError):
             create_mindsdb_client(b"bytes", headers=None)
 
-    def test_create_mindsdb_client_with_credentials_non_string_api_key_raises_value_error(self):
+    def test_create_mindsdb_client_with_credentials_non_string_api_key_raises_value_error(self, context):
         """create_mindsdb_client_with_credentials should raise ValueError for non-string
         api_key that implements strip()."""
         with pytest.raises(ValueError):
-            create_mindsdb_client_with_credentials("http://x", api_key=b"bytes", company_id="c")
+            organization_id = str(context.organization_id)
+            user_id = str(context.user_id)
+            create_mindsdb_client_with_credentials(
+                "http://x", api_key=b"bytes", organization_id=organization_id, user_id=user_id
+            )
 
     @patch("minds.client.mindsdb.get_authorization_bearer_token")
     @patch("minds.client.mindsdb.get_headers_for_mindsdb_client")

@@ -55,36 +55,36 @@ class TestConversationsService:
         return str(uuid4())
 
     @pytest.fixture
-    def tenant_id(self):
-        """Test tenant ID."""
+    def organization_id(self):
+        """Test organization ID."""
         return str(uuid4())
 
     @pytest.fixture
-    def service(self, mock_session, mock_mindsdb_client, user_id, tenant_id):
+    def service(self, mock_session, mock_mindsdb_client, user_id, organization_id):
         """Create ConversationsService instance."""
         return ConversationsService(
             session=mock_session,
             mindsdb_client=mock_mindsdb_client,
             user_id=user_id,
-            tenant_id=tenant_id,
+            organization_id=organization_id,
         )
 
     @pytest.fixture
-    def sample_conversation(self, user_id, tenant_id):
+    def sample_conversation(self, user_id, organization_id):
         """Sample conversation for testing."""
         mind_id = uuid4()
         mind = Mind(
             id=mind_id,
             name="test-model",
             provider="openai",
-            model_name="gpt-4",
+            model_name="gpt-4o",
             user_id=UUID(user_id),
         )
         conversation = Conversation(
             id=uuid4(),
             topic="Test Conversation",
             user_id=UUID(user_id),
-            tenant_id=UUID(tenant_id),
+            organization_id=UUID(organization_id),
             mind_id=mind_id,
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
@@ -94,14 +94,15 @@ class TestConversationsService:
         return conversation
 
     @pytest.fixture
-    def sample_message(self, sample_conversation, tenant_id):
+    def sample_message(self, sample_conversation, organization_id):
         """Sample message for testing."""
         return Message(
             id=uuid4(),
             conversation_id=sample_conversation.id,
-            tenant_id=UUID(tenant_id),
+            organization_id=UUID(organization_id),
             role=Role.user,
             content="Hello, world!",
+            request_id="test-request-id",
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )
@@ -126,23 +127,23 @@ class TestConversationsService:
             id=uuid4(),
             name="test-model",
             provider="openai",
-            model_name="gpt-4",
+            model_name="gpt-4o",
             user_id=UUID(user_id),
         )
         return mind
 
-    def test_service_initialization(self, mock_session, mock_mindsdb_client, user_id, tenant_id):
+    def test_service_initialization(self, mock_session, mock_mindsdb_client, user_id, organization_id):
         """Test service initialization."""
         service = ConversationsService(
             session=mock_session,
             mindsdb_client=mock_mindsdb_client,
             user_id=user_id,
-            tenant_id=tenant_id,
+            organization_id=organization_id,
         )
 
         assert service.session == mock_session
         assert service.user_id == user_id
-        assert service.tenant_id == tenant_id
+        assert service.organization_id == organization_id
         assert service.mindsdb_client == mock_mindsdb_client
 
     @pytest.mark.asyncio
@@ -413,9 +414,10 @@ class TestConversationsService:
         created_message = Message(
             id=uuid4(),
             conversation_id=sample_conversation.id,
-            tenant_id=UUID(service.tenant_id),
+            organization_id=UUID(service.organization_id),
             role=Role.user,
             content="Test message",
+            request_id="test-request-id",
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )
@@ -466,7 +468,10 @@ class TestConversationsService:
         mock_session.merge.return_value = sample_message
 
         result = await service.update_conversation_message_content(
-            sample_message, "Updated content", "SELECT * FROM test"
+            sample_message,
+            "Updated content",
+            sql_query="SELECT * FROM test",
+            request_id="test-request-id",
         )
 
         assert isinstance(result, MessageResponse)
@@ -483,7 +488,11 @@ class TestConversationsService:
         mock_session.merge.side_effect = [PendingRollbackError("Rollback needed"), sample_message]
         mock_session.exec.return_value.first.return_value = sample_message
 
-        result = await service.update_conversation_message_content(sample_message, "Updated content")
+        result = await service.update_conversation_message_content(
+            sample_message,
+            "Updated content",
+            request_id="test-request-id",
+        )
 
         assert isinstance(result, MessageResponse)
         mock_session.rollback.assert_called()
@@ -498,10 +507,11 @@ class TestConversationsService:
         assistant_message = Message(
             id=uuid4(),
             conversation_id=sample_conversation.id,
-            tenant_id=UUID(service.tenant_id),
+            organization_id=UUID(service.organization_id),
             role=Role.assistant,
             content="Query result",
             sql_query="SELECT * FROM test_table ORDER BY col1",
+            request_id="test-request-id",
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )
@@ -565,10 +575,11 @@ class TestConversationsService:
         assistant_message = Message(
             id=uuid4(),
             conversation_id=sample_conversation.id,
-            tenant_id=UUID(service.tenant_id),
+            organization_id=UUID(service.organization_id),
             role=Role.assistant,
             content="No SQL",
             sql_query=None,
+            request_id="test-request-id",
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )
@@ -590,10 +601,11 @@ class TestConversationsService:
         assistant_message = Message(
             id=uuid4(),
             conversation_id=sample_conversation.id,
-            tenant_id=UUID(service.tenant_id),
+            organization_id=UUID(service.organization_id),
             role=Role.assistant,
             content="Query result",
             sql_query="SELECT * FROM test_table",
+            request_id="test-request-id",
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )
@@ -656,9 +668,10 @@ class TestConversationsService:
         assistant_message = Message(
             id=uuid4(),
             conversation_id=sample_conversation.id,
-            tenant_id=UUID(service.tenant_id),
+            organization_id=UUID(service.organization_id),
             role=Role.assistant,
             content="Assistant response",
+            request_id="test-request-id",
             created_at=datetime.now(timezone.utc),
             modified_at=datetime.now(timezone.utc),
         )

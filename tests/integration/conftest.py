@@ -141,7 +141,7 @@ def temporary_mind(api_client: Session, temporary_datasource):
     payload = {
         "name": unique_name,
         "provider": "openai",
-        "model_name": "gpt-4",
+        "model_name": "gpt-4o",
         "parameters": {},
         "datasources": [{"name": ds_name, "tables": [config["sample_table"]]}],
     }

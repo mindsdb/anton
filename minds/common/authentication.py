@@ -12,6 +12,20 @@ class AuthHeaders(BaseModel):
     authorization: str | None = None
 
 
+class MindsDBHeaders(BaseModel):
+    organization_id: UUID
+    user_id: UUID
+
+    def to_dict(self) -> dict:
+        return {
+            "company-id": str(
+                self.organization_id
+            ),  # Going to rename to organization_id in MindsDB in the future for consistency
+            "user-id": str(self.user_id),
+            "enforce-user-id": "false",
+        }
+
+
 def get_authorization_bearer_token(
     request_or_headers: Request | dict | AuthHeaders,
 ) -> str:
@@ -85,22 +99,6 @@ def get_api_key_from_headers(headers: dict) -> str:
     return get_authorization_bearer_token(headers)
 
 
-def get_company_id(user_id: UUID, tenant_id: UUID) -> str:
-    """
-    Get the company ID from the context.
-    This will be a combination of tenant ID and user ID concatenated with an underscore.
-    Ideally, MindsDB should support multi-tenant natively in the future.
-
-    Args:
-        user_id: The user ID
-        tenant_id: The tenant ID
-
-    Returns:
-        str: The company ID
-    """
-    return f"{str(tenant_id)}_{str(user_id)}"
-
-
 def get_headers_for_mindsdb_client(context: Context) -> dict:
     """
     Get the headers for MindsDB client from the context.
@@ -111,6 +109,4 @@ def get_headers_for_mindsdb_client(context: Context) -> dict:
     Returns:
         dict: The headers for MindsDB client.
     """
-    return {
-        "company-id": get_company_id(context.user_id, context.tenant_id),
-    }
+    return MindsDBHeaders(organization_id=context.organization_id, user_id=context.user_id).to_dict()

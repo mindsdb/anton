@@ -1,21 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from minds.client.mindsdb import create_mindsdb_client_from_request
-from minds.requests.context import extract_context_from_request
+from minds.api.v1.deps import get_tree_service
 from minds.schemas.tree import TreeNodeResponse
 from minds.services.tree import TreeService
 
 router = APIRouter()
-
-
-def get_tree_service(request: Request) -> TreeService:
-    """
-    Dependency function to create TreeService with user context and MindsDB client.
-    """
-    context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request, context)
-
-    return TreeService(mindsdb_client=mindsdb_client, user_id=context.user_id)
 
 
 @router.get("/", response_model=list[TreeNodeResponse])

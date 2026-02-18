@@ -55,7 +55,8 @@ def mock_mindsdb_client():
 def mock_context():
     """Mock Context."""
     return Context(
-        user_id=UUID("00000000-0000-0000-0000-000000000001"), tenant_id=UUID("00000000-0000-0000-0000-000000000002")
+        user_id=UUID("00000000-0000-0000-0000-000000000001"),
+        organization_id=UUID("00000000-0000-0000-0000-000000000002"),
     )
 
 
@@ -109,7 +110,7 @@ class TestChatCompletionsHandler:
         self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
     ):
         """Test ChatCompletionsHandler initialization."""
-        model = "gpt-4"
+        model = "gpt-4o"
         stream = True
 
         handler = handler_mod.ChatCompletionsHandler(
@@ -394,7 +395,7 @@ class TestChatCompletionsHandler:
             context=mock_context,
             mindsdb_client=mock_mindsdb_client,
             messages=[],
-            model="gpt-4",
+            model="gpt-4o",
             stream=True,
         )
 

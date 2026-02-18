@@ -47,7 +47,8 @@ def mock_mindsdb_client():
 def mock_context():
     """Mock Context."""
     return Context(
-        user_id=UUID("00000000-0000-0000-0000-000000000001"), tenant_id=UUID("00000000-0000-0000-0000-000000000002")
+        user_id=UUID("00000000-0000-0000-0000-000000000001"),
+        organization_id=UUID("00000000-0000-0000-0000-000000000002"),
     )
 
 
@@ -113,16 +114,28 @@ class TestChatCompletionsRequestHandler:
             )
 
             # Verify ChatCompletionsHandler was created with correct parameters
-            mock_handler_class.assert_called_once_with(
-                session=mock_session,
-                context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                messages=sample_streaming_chat_request.messages,
-                model=sample_streaming_chat_request.model,
-                stream=True,
-                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
-                instrument=True,
-            )
+            mock_handler_class.assert_called_once()
+            kwargs = mock_handler_class.call_args.kwargs
+            assert kwargs["session"] == mock_session
+            assert kwargs["context"] == mock_context
+            assert kwargs["mindsdb_client"] == mock_mindsdb_client
+            assert kwargs["messages"] == sample_streaming_chat_request.messages
+            assert kwargs["model"] == sample_streaming_chat_request.model
+            assert kwargs["stream"] is True
+            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="test-session")
+            assert kwargs["instrument"] is True
+            assert callable(kwargs["on_complete_callback"])
+
+            usage = Mock(input_tokens=11, output_tokens=7)
+            await kwargs["on_complete_callback"](usage)
+            saved = mock_session.add.call_args.args[0]
+            assert saved.organization_id == mock_context.organization_id
+            assert saved.user_id == mock_context.user_id
+            assert saved.model_name == sample_streaming_chat_request.model
+            assert saved.request_id == str(mock_context.request_id)
+            assert saved.input_tokens == 11
+            assert saved.output_tokens == 7
+            mock_session.commit.assert_called()
 
             # Verify process_streaming_producer was called
             mock_process_streaming.assert_called_once()
@@ -165,16 +178,26 @@ class TestChatCompletionsRequestHandler:
             )
 
             # Verify ChatCompletionsHandler was created with correct parameters
-            mock_handler_class.assert_called_once_with(
-                session=mock_session,
-                context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                messages=sample_chat_request.messages,
-                model=sample_chat_request.model,
-                stream=False,
-                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
-                instrument=True,
-            )
+            mock_handler_class.assert_called_once()
+            kwargs = mock_handler_class.call_args.kwargs
+            assert kwargs["session"] == mock_session
+            assert kwargs["context"] == mock_context
+            assert kwargs["mindsdb_client"] == mock_mindsdb_client
+            assert kwargs["messages"] == sample_chat_request.messages
+            assert kwargs["model"] == sample_chat_request.model
+            assert kwargs["stream"] is False
+            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="test-session")
+            assert kwargs["instrument"] is True
+            assert callable(kwargs["on_complete_callback"])
+
+            usage = Mock(input_tokens=5, output_tokens=3)
+            await kwargs["on_complete_callback"](usage)
+            saved = mock_session.add.call_args.args[0]
+            assert saved.model_name == sample_chat_request.model
+            assert saved.request_id == str(mock_context.request_id)
+            assert saved.input_tokens == 5
+            assert saved.output_tokens == 3
+            mock_session.commit.assert_called()
 
             # Verify process_non_streaming_producer was called
             mock_process_non_streaming.assert_called_once()
@@ -199,7 +222,7 @@ class TestChatCompletionsRequestHandler:
 
         # Create request with stream=None
         chat_request = ChatCompletionsRequest(
-            model="gpt-4",
+            model="gpt-4o",
             messages=sample_messages,
             stream=None,
             metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
@@ -225,16 +248,26 @@ class TestChatCompletionsRequestHandler:
             )
 
             # Verify ChatCompletionsHandler was created with stream=False (default)
-            mock_handler_class.assert_called_once_with(
-                session=mock_session,
-                context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                messages=chat_request.messages,
-                model=chat_request.model,
-                stream=False,  # Should default to False when None
-                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
-                instrument=True,
-            )
+            mock_handler_class.assert_called_once()
+            kwargs = mock_handler_class.call_args.kwargs
+            assert kwargs["session"] == mock_session
+            assert kwargs["context"] == mock_context
+            assert kwargs["mindsdb_client"] == mock_mindsdb_client
+            assert kwargs["messages"] == chat_request.messages
+            assert kwargs["model"] == chat_request.model
+            assert kwargs["stream"] is False  # Should default to False when None
+            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="test-session")
+            assert kwargs["instrument"] is True
+            assert callable(kwargs["on_complete_callback"])
+
+            usage = Mock(input_tokens=9, output_tokens=2)
+            await kwargs["on_complete_callback"](usage)
+            saved = mock_session.add.call_args.args[0]
+            assert saved.model_name == chat_request.model
+            assert saved.request_id == str(mock_context.request_id)
+            assert saved.input_tokens == 9
+            assert saved.output_tokens == 2
+            mock_session.commit.assert_called()
 
             # Verify non-streaming producer was called (not streaming)
             mock_process_non_streaming.assert_called_once()
@@ -318,16 +351,26 @@ class TestChatCompletionsRequestHandler:
             )
 
             # Verify parameters were extracted and passed correctly
-            mock_handler_class.assert_called_once_with(
-                session=mock_session,
-                context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                messages=sample_messages,  # Original messages
-                model="custom-model-v1",  # Custom model
-                stream=False,  # Explicit stream value
-                metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="custom-session"),
-                instrument=True,
-            )
+            mock_handler_class.assert_called_once()
+            kwargs = mock_handler_class.call_args.kwargs
+            assert kwargs["session"] == mock_session
+            assert kwargs["context"] == mock_context
+            assert kwargs["mindsdb_client"] == mock_mindsdb_client
+            assert kwargs["messages"] == sample_messages  # Original messages
+            assert kwargs["model"] == "custom-model-v1"  # Custom model
+            assert kwargs["stream"] is False  # Explicit stream value
+            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="custom-session")
+            assert kwargs["instrument"] is True
+            assert callable(kwargs["on_complete_callback"])
+
+            usage = Mock(input_tokens=13, output_tokens=6)
+            await kwargs["on_complete_callback"](usage)
+            saved = mock_session.add.call_args.args[0]
+            assert saved.model_name == "custom-model-v1"
+            assert saved.request_id == str(mock_context.request_id)
+            assert saved.input_tokens == 13
+            assert saved.output_tokens == 6
+            mock_session.commit.assert_called()
 
             # Verify process_non_streaming_producer received correct parameters
             call_args = mock_process_non_streaming.call_args

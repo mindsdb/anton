@@ -7,8 +7,9 @@ including creation, updates, and relationship management.
 
 from typing import Any
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+from minds.common.llm_provider import validate_provider_and_model_name
 from minds.model.mind_datasource import DataCatalogStatus, DetailedDataCatalogStatus
 from minds.schemas.conversations import ConversationResponse
 
@@ -40,10 +41,11 @@ class MindCreateRequest(BaseModel):
     """Request model for creating a new mind."""
 
     name: str = Field(..., description="Name of the mind", min_length=1, max_length=256)
-    provider: str = Field(default="openai", description="AI provider (openai, google, etc.)")
+    provider: str | None = Field(None, description="AI provider (openai, google, etc.)")
     model_name: str | None = Field(None, description="Model name to use")
     parameters: dict[str, Any] = Field(default_factory=dict, description="Mind parameters and configuration")
     datasources: list[DatasourceConfig] = Field(default_factory=list, description="List of datasource names to attach")
+    is_sample: bool = Field(default=False, description="Whether the mind is a sample")
 
     @field_validator("name", mode="before")
     def lowercase_name(cls, v: str) -> str:
@@ -56,6 +58,13 @@ class MindCreateRequest(BaseModel):
         for ds in v:
             ds.name = ds.name.lower()
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_provider_and_model_name(cls, data: dict[str, Any]) -> dict[str, Any]:
+        validate_provider_and_model_name(provider=data.get("provider"), model_name=data.get("model_name"))
+
+        return data
 
 
 class MindUpdateRequest(BaseModel):
@@ -79,17 +88,25 @@ class MindUpdateRequest(BaseModel):
             ds.name = ds.name.lower()
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_provider_and_model_name(cls, data: dict[str, Any]) -> dict[str, Any]:
+        validate_provider_and_model_name(provider=data.get("provider"), model_name=data.get("model_name"))
+
+        return data
+
 
 class MindResponse(BaseModel):
     """Response model for mind data."""
 
     name: str = Field(..., description="Mind name")
-    provider: str = Field(..., description="AI provider")
-    model_name: str = Field(..., description="Model name")
+    provider: str | None = Field(None, description="AI provider")
+    model_name: str | None = Field(None, description="Model name")
     parameters: dict[str, Any] = Field(..., description="Mind parameters and configuration")
     datasources: list[DatasourceConfig] | list[DetailedDatasourceConfig] = Field(
         ..., description="List of attached datasources"
     )
+    is_sample: bool = Field(default=False, description="Whether the mind is a sample")
     created_at: str | None = Field(None, description="Creation timestamp")
     modified_at: str | None = Field(None, description="Last update timestamp")
     conversations: list[ConversationResponse] = Field(default_factory=list, description="List of conversations")

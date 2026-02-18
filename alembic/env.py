@@ -5,9 +5,20 @@ from sqlmodel import SQLModel
 
 from alembic import context
 from minds.common.settings.app_settings import get_app_settings
+from minds.model.chat_completion import ChatCompletion  # noqa: F401
+from minds.model.conversation import Conversation  # noqa: F401
+from minds.model.data_catalog.column import Column  # noqa: F401
+from minds.model.data_catalog.column_statistics import ColumnStatistics  # noqa: F401
+from minds.model.data_catalog.foreign_key_constraint import ForeignKeyConstraint  # noqa: F401
+from minds.model.data_catalog.primary_key_constraint import PrimaryKeyConstraint  # noqa: F401
+from minds.model.data_catalog.table import Table  # noqa: F401
+from minds.model.datasource import Datasource  # noqa: F401
+from minds.model.message import Message  # noqa: F401
 
 # Import all models so they are registered with SQLModel.metadata
 from minds.model.mind import Mind  # noqa: F401
+from minds.model.mind_datasource import MindDatasource  # noqa: F401
+from minds.model.mind_datasource_table import MindDatasourceTable  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

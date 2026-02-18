@@ -55,15 +55,15 @@ deployment:
       nginx.ingress.kubernetes.io/cors-allow-origin: "http://localhost:3000"
       nginx.ingress.kubernetes.io/cors-allow-headers: >-
         DNT,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,
-        Authorization,X-CSRF-Token,Accept,Origin,Access-Control-Allow-Origin,X-File-Name,Set-Cookie,X-User-Id,X-User-Email,X-Company-Id,X-Forwarded-User
+        Authorization,X-CSRF-Token,Accept,Origin,Access-Control-Allow-Origin,X-File-Name,Set-Cookie,X-User-Id,X-User-Email,X-Organization-Id,X-User-Roles,X-Forwarded-User
       nginx.ingress.kubernetes.io/cors-max-age: "3600"
       nginx.ingress.kubernetes.io/use-regex: "true"
       
-      # Forward auth configuration using your gateway service
-      nginx.ingress.kubernetes.io/auth-url: "auth-url" # Needs to be set in the environment values file
+
+      nginx.ingress.kubernetes.io/auth-url: "auth-url" # Modify per environment
       nginx.ingress.kubernetes.io/auth-method: "GET"
       nginx.ingress.kubernetes.io/auth-response-headers: >-
-        X-Company-Id,X-User-Id,X-User-Email,X-Forwarded-User
+        X-Organization-Id,X-User-Id,X-User-Email,X-User-Roles,X-Forwarded-User
       nginx.ingress.kubernetes.io/auth-request-headers: "Authorization,Cookie"
 
   service:
@@ -72,6 +72,9 @@ deployment:
   globalEnvs:
     - name: LOG_LEVEL
       value: "INFO"
+
+    - name: DEPLOYMENT_MODE
+      value: "cloud"
 
     - name: REDIS__HOST
       value: "redis-master"
@@ -101,33 +104,38 @@ deployment:
         secretKeyRef:
           name: mindsdb-secrets
           key: OPENAI_API_KEY
+
+    # Anthropic
+    - name: ANTHROPIC__API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: ANTHROPIC_API_KEY
   
     - name: MINDSDB__URL
       value: "http://mindsdb:80"
 
     # ====================================
-    # LAUNCHDARKLY SETTINGS
+    # STATSIG SETTINGS
     # ====================================
-    - name: LAUNCHDARKLY__OFFLINE_MODE
-      value: "False"
-      
-    - name: LAUNCHDARKLY__SDK_KEY
+
+    - name: STATSIG__SDK_KEY
       valueFrom:
         secretKeyRef:
           name: mindsdb-secrets
-          key: LAUNCHDARKLY_SDK_KEY
-    - name: LAUNCHDARKLY__BASE_URI
-      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
-    - name: LAUNCHDARKLY__STREAM_URI
-      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
-    - name: LAUNCHDARKLY__EVENTS_URI
-      value: "http://ld-relay.infrastructure.svc.cluster.local:8030"
-    - name: LAUNCHDARKLY__DIAGNOSTIC_OPT_OUT
-      value: "True"
-    - name: LAUNCHDARKLY__SEND_EVENTS
-      value: "False"
+          key: STATSIG_SDK_KEY
+
+    - name: STATSIG__DISABLE_NETWORK
+      value: "false"
+
+    - name: STATSIG__DISABLE_ALL_LOGGING
+      value: "false"
+
     
-    # Langfuse (Variables used by langfuse-python library)
+    # ====================================
+    # LANGFUSE SETTINGS
+    # ====================================
+    
     - name: LANGFUSE_RELEASE
       value: "{{ .Values.global.image.tag }}"
 
@@ -148,4 +156,17 @@ deployment:
         secretKeyRef:
           name: mindsdb-secrets
           key: LANGFUSE_HOST
+
+    # ====================================
+    # MIND CASTLE SETTINGS
+    # ====================================
+
+    - name: MIND_CASTLE__ENCRYPTION_TYPE
+      value: "awskms"
+
+    - name: MIND_CASTLE_AWS_USE_ENV_AUTH
+      value: "true"
+
+    - name: MIND_CASTLE_AWS_REGION
+      value: "us-east-1"
 

@@ -10,7 +10,8 @@ from minds.requests.langfuse_tracing import setup_langfuse_observation
 @pytest.fixture()
 def context():
     return Context(
-        user_id=UUID("00000000-0000-0000-0000-000000000001"), tenant_id=UUID("00000000-0000-0000-0000-000000000002")
+        user_id=UUID("00000000-0000-0000-0000-000000000001"),
+        organization_id=UUID("00000000-0000-0000-0000-000000000002"),
     )
 
 

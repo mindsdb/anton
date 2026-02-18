@@ -187,7 +187,7 @@ class TestDataCatalogInMemoryCache:
         # Create a proper mock MindDatasource with valid field types
         mock_mind_datasource = Mock(spec=MindDatasource)
         mock_mind_datasource.id = UUID("12345678-1234-5678-1234-567812345678")
-        mock_mind_datasource.tenant_id = "test-tenant"
+        mock_mind_datasource.organization_id = "test-organization"
         mock_mind_datasource.created_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource.modified_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource.deleted_at = None
@@ -230,7 +230,7 @@ class TestDataCatalogInMemoryCache:
         # Create proper mock MindDatasource objects
         mock_mind_datasource1 = Mock(spec=MindDatasource)
         mock_mind_datasource1.id = UUID("12345678-1234-5678-1234-567812345678")
-        mock_mind_datasource1.tenant_id = "test-tenant"
+        mock_mind_datasource1.organization_id = "test-organization"
         mock_mind_datasource1.created_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource1.modified_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource1.deleted_at = None
@@ -246,7 +246,7 @@ class TestDataCatalogInMemoryCache:
 
         mock_mind_datasource2 = Mock(spec=MindDatasource)
         mock_mind_datasource2.id = UUID("22222222-3333-4444-5555-666666666666")
-        mock_mind_datasource2.tenant_id = "test-tenant"
+        mock_mind_datasource2.organization_id = "test-organization"
         mock_mind_datasource2.created_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource2.modified_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource2.deleted_at = None
@@ -523,7 +523,7 @@ class TestDataCatalogCacheIntegration:
         # Create proper mock MindDatasource objects
         mock_mind_datasource1 = Mock(spec=MindDatasource)
         mock_mind_datasource1.id = UUID("11111111-2222-3333-4444-555555555555")
-        mock_mind_datasource1.tenant_id = "test-tenant"
+        mock_mind_datasource1.organization_id = "test-organization"
         mock_mind_datasource1.created_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource1.modified_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource1.deleted_at = None
@@ -539,7 +539,7 @@ class TestDataCatalogCacheIntegration:
 
         mock_mind_datasource2 = Mock(spec=MindDatasource)
         mock_mind_datasource2.id = UUID("22222222-3333-4444-5555-666666666666")
-        mock_mind_datasource2.tenant_id = "test-tenant"
+        mock_mind_datasource2.organization_id = "test-organization"
         mock_mind_datasource2.created_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource2.modified_at = datetime(2024, 1, 1, 12, 0, 0)
         mock_mind_datasource2.deleted_at = None

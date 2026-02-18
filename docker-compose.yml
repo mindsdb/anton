@@ -347,7 +347,6 @@ services:
     build:
       context: .
     <<: *autoRestartOnFailure
-    platform: linux/amd64
     command: ["python", "-m", "alembic", "upgrade", "head"]
     depends_on:
       postgres:
@@ -355,13 +354,14 @@ services:
     environment:
       DATABASE__URI: postgresql://minds:minds@postgres/minds
     restart: "no"
+    volumes:
+      - .:/minds
 
   minds-flows:
     build:
       context: .
     image: minds-flows:latest
     <<: *autoRestartOnFailure
-    platform: linux/amd64
     command: ["make", "prefect/docker/deploy/full"]
     restart: "no"
     depends_on:
@@ -410,7 +410,6 @@ services:
     build:
       context: .
     <<: *autoRestartOnFailure
-    platform: linux/amd64
     entrypoint: sh -c "python -m watchfiles --filter python 'python -m uvicorn minds.server:app --workers 1 --host 0.0.0.0 --port 9010' ."
     restart: unless-stopped
     depends_on:
@@ -466,6 +465,8 @@ services:
       LANGFUSE_ENABLED: "${LANGFUSE_ENABLED}"
     env_file:
       - .env
+    volumes:
+      - .:/minds
 
 volumes:
   postgres:

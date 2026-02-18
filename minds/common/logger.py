@@ -139,7 +139,7 @@ def setup_console_handler():
 
 def setup_logging():
     """Setup comprehensive logging configuration"""
-    log_level_str = os.getenv("LOG_LEVEL", "INFO")
+    log_level_str = os.getenv("LOG_LEVEL", "WARNING")
     enable_file_logging = os.getenv("ENABLE_FILE_LOGGING", "false").lower() == "true"
     log_dir = os.getenv("LOG_DIR", "logs")
 
@@ -153,7 +153,7 @@ def setup_logging():
     }
 
     # Default to INFO if an invalid level is provided
-    log_level = log_level_map.get(log_level_str.upper(), logging.INFO)
+    log_level = log_level_map.get(log_level_str.upper(), logging.WARNING)
 
     # Clear any existing handlers
     root_logger = logging.getLogger()

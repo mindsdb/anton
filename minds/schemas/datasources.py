@@ -19,6 +19,7 @@ class DatasourceCreateRequest(BaseModel):
     description: str | None = Field(None, description="Description of the datasource")
     engine: str = Field(..., description="Database engine (postgres, mysql, etc.)")
     connection_data: dict[str, Any] = Field(..., description="Connection parameters")
+    is_sample: bool = Field(default=False, description="Whether the datasource is a sample")
 
     @field_validator("name", "engine", mode="before")
     def lowercase_fields(cls, v: str) -> str:
@@ -41,6 +42,7 @@ class DatasourceResponse(BaseModel):
     description: str | None = Field(None, description="Description of the datasource")
     name: str = Field(..., description="Datasource name")
     engine: str | None = Field(None, description="Database engine")
+    is_sample: bool = Field(default=False, description="Whether the datasource is a sample")
     created_at: str | None = Field(None, description="Creation timestamp")
     modified_at: str | None = Field(None, description="Last update timestamp")
 
@@ -75,3 +77,85 @@ class DatasourceTableSampleResponse(BaseModel):
 
     data: list[list[Any]] = Field(..., description="Sample data as array of arrays")
     column_names: list[str] = Field(..., description="Column names for the data")
+
+
+class ColumnStatisticsResponse(BaseModel):
+    """Response model for column statistics."""
+
+    most_common_values: list[Any] | None = Field(default=None, description="List of most common values")
+    most_common_frequencies: list[float] | None = Field(default=None, description="List of most common frequencies")
+    null_percentage: float | None = Field(default=None, description="Null percentage")
+    distinct_values_count: int | None = Field(default=None, description="Distinct values count")
+    min_value: str | None = Field(default=None, description="Minimum value")
+    max_value: str | None = Field(default=None, description="Maximum value")
+
+
+class ColumnResponse(BaseModel):
+    """Response model for column metadata."""
+
+    name: str = Field(..., description="Column name")
+    data_type: str = Field(..., description="Column data type")
+    description: str | None = Field(default=None, description="Column description/comment")
+    default_value: str | None = Field(default=None, description="Column default value")
+    is_nullable: bool = Field(default=True, description="Whether the column is nullable")
+    statistics: ColumnStatisticsResponse | None = Field(default=None, description="Column statistics")
+
+
+class PrimaryKeyConstraintResponse(BaseModel):
+    """Response model for primary key constraint."""
+
+    column_name: str = Field(..., description="Column name")
+    ordinal_position: int | None = Field(default=None, description="Ordinal position")
+    constraint_name: str | None = Field(default=None, description="Constraint name")
+
+
+class ForeignKeyConstraintResponse(BaseModel):
+    """Response model for foreign key constraint."""
+
+    column_name: str = Field(..., description="Column name")
+    referenced_table_name: str = Field(..., description="Referenced table name")
+    referenced_column_name: str = Field(..., description="Referenced column name")
+    constraint_name: str | None = Field(default=None, description="Constraint name")
+    ordinal_position: int | None = Field(default=None, description="Ordinal position")
+
+
+class TableResponse(BaseModel):
+    """Response model for table metadata."""
+
+    name: str = Field(..., description="Table name")
+    # Note: 'schema' field name shadows BaseModel.schema, but this is intentional
+    # for database schema names. The field works correctly despite the warning.
+    schema: str | None = Field(default=None, description="Schema name")
+    description: str | None = Field(default=None, description="Table description/comment")
+    type: str | None = Field(default=None, description="Table type")
+    row_count: int | None = Field(default=None, description="Row count")
+    columns: list[ColumnResponse] = Field(default_factory=list, description="Table columns")
+    primary_key_constraints: list[PrimaryKeyConstraintResponse] = Field(
+        default_factory=list, description="Primary key constraints"
+    )
+    foreign_key_constraints: list[ForeignKeyConstraintResponse] = Field(
+        default_factory=list, description="Foreign key constraints"
+    )
+
+
+class DataCatalogResponse(BaseModel):
+    """Response model for data catalog."""
+
+    datasource: DatasourceResponse = Field(..., description="Datasource information")
+    tables: list[TableResponse] = Field(default_factory=list, description="List of cataloged tables")
+
+
+class UpdateTableDescriptionRequest(BaseModel):
+    """Request model for updating table description."""
+
+    description: str | None = Field(
+        None, description="New description for the table. Set to null to clear the description."
+    )
+
+
+class UpdateColumnDescriptionRequest(BaseModel):
+    """Request model for updating column description."""
+
+    description: str | None = Field(
+        None, description="New description for the column. Set to null to clear the description."
+    )

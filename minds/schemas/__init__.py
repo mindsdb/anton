@@ -6,6 +6,11 @@ organized by domain.
 """
 
 from .chat import ChatCompletion, ChatCompletionChunk, Choice, Message, Role, StreamChoice, Usage
+from .limits import (
+    LimitsConfig,
+    MindLimitsConfig,
+    ResourceUsageConfig,
+)
 from .minds import (
     MindCreateRequest,
     MindResponse,
@@ -25,4 +30,8 @@ __all__ = [
     "MindCreateRequest",
     "MindUpdateRequest",
     "MindResponse",
+    # Limits schemas
+    "LimitsConfig",
+    "ResourceUsageConfig",
+    "MindLimitsConfig",
 ]

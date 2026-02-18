@@ -3,6 +3,7 @@ from mindsdb_sdk import connect
 from mindsdb_sdk.server import Server
 
 from minds.common import get_authorization_bearer_token, get_headers_for_mindsdb_client
+from minds.common.authentication import MindsDBHeaders
 from minds.common.logger import setup_logging
 from minds.common.settings.app_settings import get_app_settings
 from minds.requests.context import Context
@@ -61,14 +62,13 @@ def create_mindsdb_client(api_key: str | None, headers: dict | None) -> Server:
     )
 
 
-# This is used in the data catalog loader flow
-# TODO: Remove thise once the settings are configured better
 def create_mindsdb_client_with_credentials(
     url: str,
     api_key: str | None = None,
     login: str | None = None,
     password: str | None = None,
-    company_id: str | None = None,
+    organization_id: str | None = None,
+    user_id: str | None = None,
 ) -> Server:
     """
     Create a MindsDB client with explicit credentials.
@@ -78,14 +78,14 @@ def create_mindsdb_client_with_credentials(
       api_key: The API key to use for the client. Can be None if MindsDB doesn't require auth.
       login: The login username for authentication.
       password: The password for authentication.
-
+      organization_id: The organization ID.
+      user_id: The user ID.
     Returns:
       A MindsDB client.
     """
 
-    headers = {
-        "company-id": company_id,
-    }
+    headers = MindsDBHeaders(organization_id=organization_id, user_id=user_id).to_dict()
+
     # If no API key is provided, try connecting without authentication
     if api_key is None or not api_key or not api_key.strip():
         # For MindsDB without authentication, don't pass login/password at all

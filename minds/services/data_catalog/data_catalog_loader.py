@@ -32,9 +32,9 @@ class DataCatalogLoader:
     Service class for loading the data catalog.
     """
 
-    def __init__(self, session: Session, tenant_id: UUID, user_id: UUID):
+    def __init__(self, session: Session, organization_id: UUID, user_id: UUID):
         self.session = session
-        self.tenant_id = tenant_id
+        self.organization_id = organization_id
         self.user_id = user_id
 
     async def load(
@@ -55,12 +55,22 @@ class DataCatalogLoader:
 
         logger.debug(f"Running the data catalog loader flow in {settings.data_catalog.execution_mode} mode")
         if DataCatalogExecutionMode.ASYNC.value == settings.data_catalog.execution_mode:
+            # Debug logging to trace parameter values before sending to Prefect
+            logger.info(
+                f"Calling run_deployment with parameters: "
+                f"mind_datasource_id={mind_datasource.id} (type={type(mind_datasource.id)}), "
+                f"organization_id={self.organization_id} (type={type(self.organization_id)}), "
+                f"user_id={self.user_id} (type={type(self.user_id)}), "
+                f"table_names={table_names}"
+            )
+            # Convert UUIDs to strings for reliable Prefect serialization
+            # Prefect will deserialize them back to UUIDs based on the flow's type hints
             flow_run = await run_deployment(
                 name=f"{settings.data_catalog.job_name}/{settings.data_catalog.job_deployment_name}",
                 parameters={
                     "mind_datasource_id": mind_datasource.id,
-                    "tenant_id": self.tenant_id,
-                    "user_id": self.user_id,
+                    "organization_id": str(self.organization_id),
+                    "user_id": str(self.user_id),
                     "table_names": table_names,
                 },
                 timeout=0,
@@ -82,7 +92,7 @@ class DataCatalogLoader:
         else:
             load_data_catalog(
                 mind_datasource_id=mind_datasource.id,
-                tenant_id=self.tenant_id,
+                organization_id=self.organization_id,
                 user_id=self.user_id,
                 table_names=table_names,
             )

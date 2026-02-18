@@ -15,3 +15,11 @@ job:
     
     - name: LANGFUSE_TRACING_ENVIRONMENT
       value: "gitlab-dev"
+    
+    # ====================================
+    # STATSIG SETTINGS
+    # ====================================
+
+    - name: STATSIG__ENVIRONMENT
+      value: "development"
+          

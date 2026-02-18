@@ -1,5 +1,6 @@
 import sys
 import types
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -94,15 +95,36 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("minds.api.v1.endpoints.chat.chat_completions_request_handler", _fake_chat_completions_handler)
 
-    # Import server after stubs so it binds the fakes
+    # Mock Statsig init/shutdown so no real SDK is created
+    mock_statsig_instance = MagicMock()
+
+    # Import server so we can patch on it directly (handles cached modules)
     import minds.server as server
+
+    monkeypatch.setattr(server, "init_statsig", lambda settings=None: mock_statsig_instance)
+    monkeypatch.setattr(server, "shutdown_statsig", lambda: None)
+
+    # Patch is_langfuse_enabled where it's actually used (bound reference in chat module)
+    import minds.api.v1.endpoints.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "is_langfuse_enabled", lambda context, settings=None: True)
+
+    # Mock usage guard so it doesn't try to hit the real database
+    async def _async_noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(chat_mod, "require_usage_available", _async_noop)
 
     return server.app
 
 
 @pytest.fixture()
 def headers():
-    return {"Authorization": "Bearer 1234567890", "x-user-id": "1", "x-company-id": "2"}
+    return {
+        "Authorization": "Bearer 1234567890",
+        "X-User-Id": "00000000-0000-0000-0000-000000000001",
+        "X-Organization-Id": "00000000-0000-0000-0000-000000000002",
+    }
 
 
 def test_healthz(server_app):
@@ -153,3 +175,48 @@ def test_chat_completions_v1(server_app, headers):
         "system_fingerprint": None,
     }
     assert r.status_code == 200 and r.json() == expected_response
+
+
+class TestStatsigLifecycle:
+    """Test that Statsig is initialized on startup and shut down on shutdown."""
+
+    def test_startup_initializes_statsig(self, monkeypatch):
+        """Verify that Statsig is initialized during app startup."""
+        import minds.server as server
+
+        init_called = {"value": False}
+        mock_statsig = MagicMock()
+
+        def _mock_init(settings=None):
+            init_called["value"] = True
+            return mock_statsig
+
+        # Patch directly on the server module (where the bound reference lives)
+        monkeypatch.setattr(server, "init_statsig", _mock_init)
+        monkeypatch.setattr(server, "shutdown_statsig", lambda: None)
+
+        app = server.create_app()
+
+        with TestClient(app):
+            assert init_called["value"] is True
+
+    def test_shutdown_calls_shutdown_statsig(self, monkeypatch):
+        """Verify that Statsig is shut down during app shutdown."""
+        import minds.server as server
+
+        shutdown_called = {"value": False}
+        mock_statsig = MagicMock()
+
+        def _mock_shutdown():
+            shutdown_called["value"] = True
+
+        # Patch directly on the server module (where the bound reference lives)
+        monkeypatch.setattr(server, "init_statsig", lambda settings=None: mock_statsig)
+        monkeypatch.setattr(server, "shutdown_statsig", _mock_shutdown)
+
+        app = server.create_app()
+
+        with TestClient(app):
+            pass  # startup + shutdown happen
+
+        assert shutdown_called["value"] is True

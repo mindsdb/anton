@@ -2,7 +2,7 @@
 Unit tests for conversations API endpoints.
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -38,7 +38,7 @@ class TestConversationsAPI:
     def mock_request(self):
         """Mock FastAPI request object."""
         request = Mock()
-        request.headers = {"x-user-id": "test-user-123"}
+        request.headers = {"X-User-Id": "test-user-123"}
         return request
 
     @pytest.fixture
@@ -60,7 +60,7 @@ class TestConversationsAPI:
         """Mock ConversationsService instance."""
         service = Mock(spec=ConversationsService)
         service.user_id = "test-user-123"
-        service.tenant_id = "test-tenant-456"
+        service.organization_id = "test-organization-456"
         return service
 
     @pytest.fixture
@@ -96,22 +96,18 @@ class TestConversationsAPI:
 
     def test_get_conversations_service_dependency(self, mock_request, mock_session, mock_mindsdb_client):
         """Test the get_conversations_service dependency function."""
-        with (
-            patch("minds.api.v1.endpoints.conversations.extract_context_from_request") as mock_extract,
-            patch("minds.api.v1.endpoints.conversations.create_mindsdb_client_from_request") as mock_create_client,
-        ):
-            mock_context = Mock()
-            mock_context.user_id = "test-user-123"
-            mock_context.tenant_id = "test-tenant-456"
-            mock_extract.return_value = mock_context
-            mock_create_client.return_value = mock_mindsdb_client
+        mock_context = Mock()
+        mock_context.user_id = "test-user-123"
+        mock_context.organization_id = "test-organization-456"
 
-            service = get_conversations_service(mock_request, mock_session)
+        service = get_conversations_service(
+            context=mock_context, session=mock_session, mindsdb_client=mock_mindsdb_client
+        )
 
-            assert isinstance(service, ConversationsService)
-            assert service.session == mock_session
-            assert service.user_id == "test-user-123"
-            assert service.tenant_id == "test-tenant-456"
+        assert isinstance(service, ConversationsService)
+        assert service.session == mock_session
+        assert service.user_id == "test-user-123"
+        assert service.organization_id == "test-organization-456"
 
     @pytest.mark.asyncio
     async def test_list_conversations_success(self, mock_conversations_service, sample_conversation_response):

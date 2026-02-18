@@ -28,3 +28,4 @@ jobs:
         env:
           MINDS_API_BASE_URL: ${{ vars.MDB_ENV_URL }}
           GATEWAY_INTERNAL_URL: ${{ vars.GATEWAY_INTERNAL_URL }}
+          MINDS_API_KEY: ${{ secrets.MINDS_TEST_USER_API_KEY }}

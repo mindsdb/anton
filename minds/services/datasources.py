@@ -14,15 +14,26 @@ from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
 from minds.common.utilities import safe_parse
+from minds.model.data_catalog.column import Column
+from minds.model.data_catalog.column_statistics import ColumnStatistics
+from minds.model.data_catalog.foreign_key_constraint import ForeignKeyConstraint
+from minds.model.data_catalog.primary_key_constraint import PrimaryKeyConstraint
+from minds.model.data_catalog.table import Table
 from minds.model.datasource import Datasource
 from minds.model.mind_datasource import MindDatasource
 from minds.schemas.datasources import (
+    ColumnResponse,
+    ColumnStatisticsResponse,
+    DataCatalogResponse,
     DatasourceConnectionStatus,
     DatasourceCreateRequest,
     DatasourceDetailedResponse,
     DatasourceResponse,
     DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
+    ForeignKeyConstraintResponse,
+    PrimaryKeyConstraintResponse,
+    TableResponse,
 )
 
 # Set up logging
@@ -53,6 +64,30 @@ class DatasourceConnectionError(DatasourceServiceError):
     pass
 
 
+class DatasourceTableNotFoundError(DatasourceServiceError):
+    """Raised when a table is not found in a datasource."""
+
+    pass
+
+
+class DatasourceTableNotCatalogedError(DatasourceServiceError):
+    """Raised when a table is not cataloged in a datasource."""
+
+    pass
+
+
+class DatasourceTableColumnNotFoundError(DatasourceServiceError):
+    """Raised when a column is not found in a table catalog."""
+
+    pass
+
+
+class DatasourceTableColumnNotCatalogedError(DatasourceServiceError):
+    """Raised when a column is not cataloged in a table."""
+
+    pass
+
+
 class DatasourcesService:
     """
     Service for managing datasource operations.
@@ -64,7 +99,7 @@ class DatasourcesService:
     Follows eager sync pattern - always syncs to MindsDB on create/update/delete.
     """
 
-    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, tenant_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, organization_id: str):
         """
         Initialize the datasources service.
 
@@ -76,8 +111,64 @@ class DatasourcesService:
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
-        self.tenant_id = tenant_id
-        logger.debug(f"DatasourcesService initialized for user {user_id} and tenant {tenant_id}")
+        self.organization_id = organization_id
+        logger.debug(f"DatasourcesService initialized for user {user_id} and organization {organization_id}")
+
+    async def count_datasources(
+        self,
+        is_sample: bool | None = None,
+        since: datetime | None = None,
+    ) -> int:
+        """
+        Count non-deleted datasources for the current organization.
+
+        This is a lightweight alternative to list_datasources() intended for
+        usage tracking (e.g. limits enforcement). It runs a single COUNT query
+        instead of loading full Datasource objects.
+
+        Args:
+            is_sample: When provided, only count datasources matching this sample flag.
+                       Pass False to exclude sample/template datasources from the count.
+            since: When provided, only count datasources created on or after this datetime.
+                   Used for billing-cycle-scoped counts.
+
+        Returns:
+            int: Number of datasources matching the filters.
+        """
+        try:
+            logger.debug(
+                f"Counting datasources for organization {self.organization_id} "
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+            )
+
+            # Always scope to the current organization and exclude soft-deleted records
+            conditions = [
+                Datasource.organization_id == self.organization_id,
+                Datasource.user_id == self.user_id,
+                Datasource.deleted_at.is_(None),
+            ]
+
+            # Optionally narrow to a specific user for per-user limits
+            if is_sample is not None:
+                conditions.append(Datasource.is_sample == is_sample)
+
+            if since is not None:
+                conditions.append(Datasource.created_at >= since)
+
+            stmt = select(func.count(Datasource.id)).where(and_(*conditions))
+            count = self.session.exec(stmt).one()
+
+            logger.debug(
+                f"Counted {count} datasources for organization {self.organization_id} "
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+            )
+            return count
+        except Exception as e:
+            logger.error(
+                f"Error counting datasources for organization {self.organization_id} "
+                f"(user_id={self.user_id}, is_sample={is_sample}): {str(e)}"
+            )
+            raise DatasourceServiceError(f"Failed to count datasources: {str(e)}") from None
 
     async def list_datasources(
         self,
@@ -113,13 +204,13 @@ class DatasourcesService:
         """
         try:
             logger.debug(
-                f"Listing datasources for user {self.user_id} in tenant {self.tenant_id} with filters: "
+                f"Listing datasources for user {self.user_id} in organization {self.organization_id} with filters: "
                 f"name={name}, engine={engine}, include_deleted={include_deleted}, limit={limit}, offset={offset}, "
                 f"sort_by={sort_by}, sort_order={sort_order}, include_total={include_total}"
             )
 
             # Build query conditions
-            conditions = [Datasource.user_id == self.user_id, Datasource.tenant_id == self.tenant_id]
+            conditions = [Datasource.organization_id == self.organization_id]
             if name is not None:
                 conditions.append(Datasource.name.ilike(f"%{name}%"))
             if engine is not None:
@@ -161,13 +252,18 @@ class DatasourcesService:
                     datasource_response = self._datasource_to_response(datasource)
                 datasources_list.append(datasource_response)
 
-            logger.info(f"Retrieved {len(datasources)} datasources for user {self.user_id} and tenant {self.tenant_id}")
+            logger.info(
+                f"Retrieved {len(datasources)} datasources for user {self.user_id} and "
+                f"organization {self.organization_id}"
+            )
 
             if include_total:
                 return datasources_list, total_count
             return datasources_list
         except Exception as e:
-            logger.error(f"Error listing datasources for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error listing datasources for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
             raise DatasourceServiceError(f"Failed to list datasources: {str(e)}") from None
 
     async def get_datasource(
@@ -188,7 +284,9 @@ class DatasourcesService:
         """
         try:
             datasource_name = datasource_name.lower()
-            logger.debug(f"Getting datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(
+                f"Getting datasource {datasource_name} for user {self.user_id} in organization {self.organization_id}"
+            )
 
             datasource = await self._get_datasource(datasource_name)
 
@@ -205,7 +303,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Error getting datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to get datasource: {str(e)}") from None
 
@@ -225,7 +323,8 @@ class DatasourcesService:
         """
         try:
             logger.debug(
-                f"Creating datasource {datasource_data.name} for user {self.user_id} in tenant {self.tenant_id}"
+                f"Creating datasource {datasource_data.name} for user {self.user_id} in "
+                f"organization {self.organization_id}"
             )
 
             # Check if datasource already exists
@@ -240,7 +339,8 @@ class DatasourcesService:
                 description=datasource_data.description,
                 engine=datasource_data.engine,
                 user_id=self.user_id,
-                tenant_id=self.tenant_id,
+                organization_id=self.organization_id,
+                is_sample=datasource_data.is_sample,
             )
 
             # Save to internal database first
@@ -253,7 +353,8 @@ class DatasourcesService:
                 self.session.commit()
                 self.session.refresh(datasource)
                 logger.info(
-                    f"Created datasource {datasource_data.name} for user {self.user_id} in tenant {self.tenant_id}"
+                    f"Created datasource {datasource_data.name} for user {self.user_id} in "
+                    f"organization {self.organization_id}"
                 )
 
             except DatasourceServiceError:
@@ -269,7 +370,7 @@ class DatasourcesService:
             self.session.rollback()
             logger.error(
                 f"Error creating datasource {datasource_data.name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to create datasource: {str(e)}") from None
 
@@ -292,7 +393,9 @@ class DatasourcesService:
         """
         try:
             datasource_name = datasource_name.lower()
-            logger.debug(f"Updating datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(
+                f"Updating datasource {datasource_name} for user {self.user_id} in organization {self.organization_id}"
+            )
 
             # Get existing datasource
             datasource = await self._get_datasource(datasource_name)
@@ -314,7 +417,10 @@ class DatasourcesService:
 
                 self.session.commit()
                 self.session.refresh(datasource)
-                logger.info(f"Updated datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
+                logger.info(
+                    f"Updated datasource {datasource_name} for user {self.user_id} in "
+                    f"organization {self.organization_id}"
+                )
 
             except DatasourceServiceError:
                 self.session.rollback()
@@ -328,7 +434,7 @@ class DatasourcesService:
             self.session.rollback()
             logger.error(
                 f"Error updating datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to update datasource: {str(e)}") from None
 
@@ -347,7 +453,7 @@ class DatasourcesService:
             datasource_name = datasource_name.lower()
             logger.debug(
                 f"Deleting datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id} (cascade={cascade})"
+                f"for user {self.user_id} in organization {self.organization_id} (cascade={cascade})"
             )
 
             # Get existing datasource
@@ -356,8 +462,7 @@ class DatasourcesService:
                 .where(
                     and_(
                         Datasource.name == datasource_name,
-                        Datasource.user_id == self.user_id,
-                        Datasource.tenant_id == self.tenant_id,
+                        Datasource.organization_id == self.organization_id,
                         Datasource.deleted_at.is_(None),
                     )
                 )
@@ -380,14 +485,19 @@ class DatasourcesService:
             if cascade:
                 logger.debug(f"Cascade deletion for datasource {datasource_name} - implement mind deletion")
 
-            await self._delete_mindsdb_database(datasource_name)
-
             datasource.deleted_at = datetime.now(timezone.utc)
 
+            # Soft delete the datasource first because it can be rolled back
             self.session.add(datasource)
+            self.session.flush()
+
+            await self._delete_mindsdb_database(datasource_name)
+
             self.session.commit()
 
-            logger.info(f"Deleted datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(
+                f"Deleted datasource {datasource_name} for user {self.user_id} in organization {self.organization_id}"
+            )
         except DatasourceNotFoundError:
             self.session.rollback()
             raise
@@ -395,7 +505,7 @@ class DatasourcesService:
             self.session.rollback()
             logger.error(
                 f"Error deleting datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to delete datasource: {str(e)}") from None
 
@@ -413,7 +523,7 @@ class DatasourcesService:
             datasource_name = datasource_name.lower()
             logger.debug(
                 f"Testing connection for datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}"
+                f"for user {self.user_id} in organization {self.organization_id}"
             )
 
             # Get datasource to verify it exists
@@ -441,7 +551,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Connection test failed for {datasource_name} "
-                f"for user {self.user_id} and tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} and organization {self.organization_id}: {str(e)}"
             )
             return DatasourceConnectionStatus(success=False, error_message=str(e))
 
@@ -452,7 +562,7 @@ class DatasourcesService:
         datasource_name = datasource_name.lower()
         logger.debug(
             f"Getting sample data for table {table_name} of datasource {datasource_name} "
-            f"for user {self.user_id} in tenant {self.tenant_id}"
+            f"for user {self.user_id} in organization {self.organization_id}"
         )
 
         try:
@@ -476,7 +586,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Error getting sample data for table {table_name} of datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to get sample data: {str(e)}") from None
 
@@ -485,7 +595,7 @@ class DatasourcesService:
         datasource_name = datasource_name.lower()
         logger.debug(
             f"Getting row count for table {table_name} of datasource {datasource_name} "
-            f"for user {self.user_id} in tenant {self.tenant_id}"
+            f"for user {self.user_id} in organization {self.organization_id}"
         )
 
         try:
@@ -504,7 +614,7 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Error getting row count for table {table_name} of datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
 
@@ -523,7 +633,8 @@ class DatasourcesService:
         """
         datasource_name = datasource_name.lower()
         logger.debug(
-            f"Checking existence of datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}"
+            f"Checking existence of datasource {datasource_name} for user {self.user_id} in "
+            f"organization {self.organization_id}"
         )
 
         try:
@@ -531,18 +642,314 @@ class DatasourcesService:
         except Exception as e:
             logger.error(
                 f"Error checking existence of datasource {datasource_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to check datasource existence: {str(e)}") from None
 
         if datasource:
-            logger.debug(f"Datasource {datasource_name} exists for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(
+                f"Datasource {datasource_name} exists for user {self.user_id} in organization {self.organization_id}"
+            )
             return
         else:
             logger.debug(
-                f"Datasource {datasource_name} does not exist for user {self.user_id} in tenant {self.tenant_id}"
+                f"Datasource {datasource_name} does not exist for user {self.user_id} in "
+                f"organization {self.organization_id}"
             )
             raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
+    async def get_datasource_catalog(self, datasource_name: str) -> DataCatalogResponse:
+        """
+        Get the data catalog for a datasource.
+
+        Args:
+            datasource_name: Name of the datasource
+
+        Returns:
+            DataCatalogResponse with aggregated catalog information
+
+        Raises:
+            DatasourceNotFoundError: If the datasource does not exist
+        """
+        try:
+            datasource_name = datasource_name.lower()
+            logger.debug(
+                f"Getting data catalog for datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}"
+            )
+
+            statement = (
+                select(Datasource)
+                .where(
+                    and_(
+                        Datasource.name == datasource_name,
+                        Datasource.user_id == self.user_id,
+                        Datasource.organization_id == self.organization_id,
+                        Datasource.deleted_at.is_(None),
+                    )
+                )
+                .options(
+                    # Tables
+                    selectinload(Datasource.tables),
+                    # Columns + statistics
+                    selectinload(Datasource.tables).selectinload(Table.columns).selectinload(Column.statistics),
+                    # PKs
+                    selectinload(Datasource.tables)
+                    .selectinload(Table.primary_key_constraints)
+                    .selectinload(PrimaryKeyConstraint.column),
+                    # FKs (and their referenced objects)
+                    selectinload(Datasource.tables)
+                    .selectinload(Table.foreign_key_constraints)
+                    .selectinload(ForeignKeyConstraint.column),
+                    selectinload(Datasource.tables)
+                    .selectinload(Table.foreign_key_constraints)
+                    .selectinload(ForeignKeyConstraint.referenced_table),
+                    selectinload(Datasource.tables)
+                    .selectinload(Table.foreign_key_constraints)
+                    .selectinload(ForeignKeyConstraint.referenced_column),
+                    # Avoid loading deleted objects (and optionally restrict tables)
+                    with_loader_criteria(
+                        Table,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                    with_loader_criteria(
+                        Column,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                    with_loader_criteria(
+                        ColumnStatistics,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                    with_loader_criteria(
+                        PrimaryKeyConstraint,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                    with_loader_criteria(
+                        ForeignKeyConstraint,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                )
+            )
+
+            datasource = self.session.exec(statement).first()
+
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
+            return self._datasource_to_catalog_response(datasource)
+
+        except DatasourceNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error getting data catalog for datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise DatasourceServiceError(f"Failed to get data catalog: {str(e)}") from None
+
+    async def get_datasource_table_catalog(self, datasource_name: str, table_name: str) -> TableResponse:
+        """
+        Get the data catalog for a table in a datasource.
+
+        Args:
+            datasource_name: Name of the datasource
+            table_name: Name of the table
+
+        Returns:
+            TableResponse with the data catalog for the table
+
+        Raises:
+            DatasourceNotFoundError: If the datasource does not exist
+            DatasourceTableNotFoundError: If the table does not exist
+        """
+        try:
+            datasource_name = datasource_name.lower()
+            logger.debug(
+                f"Getting data catalog for table {table_name} in datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}"
+            )
+
+            table = await self._get_datasource_table_catalog(datasource_name, table_name)
+
+            if table is None:
+                # If the table is not returned, check if it exists in the datasource
+                if not self._check_table_exists(datasource_name, table_name):
+                    raise DatasourceTableNotFoundError(
+                        f"Table '{table_name}' not found in datasource '{datasource_name}'"
+                    )
+                else:
+                    raise DatasourceTableNotCatalogedError(
+                        f"Table '{table_name}' not cataloged in datasource '{datasource_name}'"
+                    )
+
+            return self._table_to_catalog_response(table)
+
+        except (DatasourceNotFoundError, DatasourceTableNotFoundError, DatasourceTableNotCatalogedError):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error getting data catalog for table {table_name} in datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise DatasourceServiceError(f"Failed to get table catalog: {str(e)}") from None
+
+    async def update_datasource_table_catalog_description(
+        self, datasource_name: str, table_name: str, description: str
+    ) -> TableResponse:
+        """
+        Update the description of a table in the data catalog.
+
+        Args:
+            datasource_name: Name of the datasource
+            table_name: Name of the table
+            description: New description
+
+        Returns:
+            TableResponse with the updated data catalog for the table
+
+        Raises:
+            DatasourceNotFoundError: If the datasource does not exist
+            DatasourceTableCatalogNotFoundError: If the table does not exist
+        """
+        try:
+            datasource_name = datasource_name.lower()
+            logger.debug(
+                f"Updating description for table {table_name} in datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}"
+            )
+
+            table = await self._get_datasource_table_catalog(datasource_name, table_name)
+
+            if not table:
+                # If the table is not returned, check if it exists in the datasource
+                if not self._check_table_exists(datasource_name, table_name):
+                    raise DatasourceTableNotFoundError(
+                        f"Table '{table_name}' not found in datasource '{datasource_name}'"
+                    )
+
+                raise DatasourceTableNotCatalogedError(
+                    f"Table '{table_name}' not cataloged in datasource '{datasource_name}'"
+                )
+
+            table.description = description
+            self.session.add(table)
+            self.session.commit()
+            self.session.refresh(table)
+
+            return self._table_to_catalog_response(table)
+
+        except (DatasourceNotFoundError, DatasourceTableNotFoundError, DatasourceTableNotCatalogedError):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error updating description for table {table_name} in datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise DatasourceServiceError(f"Failed to update table catalog description: {str(e)}") from None
+
+    async def update_datasource_table_catalog_column_description(
+        self, datasource_name: str, table_name: str, column_name: str, description: str
+    ) -> ColumnResponse:
+        """
+        Update the description of a column in the data catalog.
+
+        Args:
+            datasource_name: Name of the datasource
+            table_name: Name of the table
+            column_name: Name of the column
+            description: New description
+        """
+        try:
+            datasource_name = datasource_name.lower()
+            logger.debug(
+                f"Updating description for column {column_name} in table {table_name} in datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}"
+            )
+
+            datasource = await self._get_datasource(datasource_name=datasource_name)
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
+            # Breaking down the logic into multiple queries allows for better error reporting
+            table_statement = select(Table).where(
+                and_(
+                    Table.datasource_id == datasource.id,
+                    Table.name == table_name,
+                    Table.organization_id == self.organization_id,
+                    Table.deleted_at.is_(None),
+                )
+            )
+            table = self.session.exec(table_statement).first()
+            if not table:
+                # If the table is not returned, check if it exists in the datasource
+                if not self._check_table_exists(datasource_name, table_name):
+                    raise DatasourceTableNotFoundError(
+                        f"Table '{table_name}' not found in datasource '{datasource_name}'"
+                    )
+                else:
+                    raise DatasourceTableNotCatalogedError(
+                        f"Table '{table_name}' not cataloged in datasource '{datasource_name}'"
+                    )
+
+            column_statement = (
+                select(Column)
+                .where(
+                    and_(
+                        Column.table_id == table.id,
+                        Column.name == column_name,
+                        Column.organization_id == self.organization_id,
+                        Column.deleted_at.is_(None),
+                    )
+                )
+                .options(
+                    # Statistics
+                    selectinload(Column.statistics),
+                    # Avoid loading deleted objects
+                    with_loader_criteria(
+                        ColumnStatistics,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                )
+            )
+            column = self.session.exec(column_statement).first()
+            if column is None:
+                # If the column is not returned, check if it exists in the table
+                if not self._check_column_exists(datasource_name, table_name, column_name):
+                    raise DatasourceTableColumnNotFoundError(
+                        f"Column '{column_name}' not found in table '{table_name}'"
+                    )
+                else:
+                    raise DatasourceTableColumnNotCatalogedError(
+                        f"Column '{column_name}' not cataloged in table '{table_name}'"
+                    )
+
+            column.description = description
+            self.session.add(column)
+            self.session.commit()
+            self.session.refresh(column)
+
+            return self._column_to_catalog_response(column)
+
+        except (
+            DatasourceNotFoundError,
+            DatasourceTableNotFoundError,
+            DatasourceTableNotCatalogedError,
+            DatasourceTableColumnNotFoundError,
+            DatasourceTableColumnNotCatalogedError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error updating description for column {column_name} in table {table_name} "
+                f"in datasource {datasource_name} for user {self.user_id} in organization {self.organization_id}: {e!s}"
+            )
+            raise DatasourceServiceError(f"Failed to update table catalog column description: {str(e)}") from None
 
     async def _get_datasource(self, datasource_name: str) -> Datasource:
         """
@@ -557,8 +964,7 @@ class DatasourcesService:
         statement = select(Datasource).where(
             and_(
                 Datasource.name == datasource_name,
-                Datasource.user_id == self.user_id,
-                Datasource.tenant_id == self.tenant_id,
+                Datasource.organization_id == self.organization_id,
                 Datasource.deleted_at.is_(None),
             )
         )
@@ -566,6 +972,92 @@ class DatasourcesService:
         datasource = result.first()
 
         return datasource
+
+    async def _get_datasource_table_catalog(self, datasource_name: str, table_name: str) -> Table:
+        """
+        Utility function to get a specific table catalog by name in a datasource.
+
+        Args:
+            datasource_name: Name of the datasource
+            table_name: Name of the table
+        """
+        datasource = await self._get_datasource(datasource_name=datasource_name)
+
+        if not datasource:
+            raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
+        statement = (
+            select(Table)
+            .where(
+                and_(
+                    Table.datasource_id == datasource.id,
+                    Table.name == table_name,
+                    Table.organization_id == self.organization_id,
+                    Table.deleted_at.is_(None),
+                )
+            )
+            .options(
+                # Columns + statistics
+                selectinload(Table.columns).selectinload(Column.statistics),
+                # PKs
+                selectinload(Table.primary_key_constraints),
+                # FKs (and their referenced objects)
+                selectinload(Table.foreign_key_constraints).selectinload(ForeignKeyConstraint.column),
+                selectinload(Table.foreign_key_constraints).selectinload(ForeignKeyConstraint.referenced_table),
+                selectinload(Table.foreign_key_constraints).selectinload(ForeignKeyConstraint.referenced_column),
+                # Avoid loading deleted objects
+                with_loader_criteria(
+                    Column,
+                    lambda cls: cls.deleted_at.is_(None),
+                    include_aliases=True,
+                ),
+                with_loader_criteria(
+                    ColumnStatistics,
+                    lambda cls: cls.deleted_at.is_(None),
+                    include_aliases=True,
+                ),
+                with_loader_criteria(
+                    PrimaryKeyConstraint,
+                    lambda cls: cls.deleted_at.is_(None),
+                    include_aliases=True,
+                ),
+                with_loader_criteria(
+                    ForeignKeyConstraint,
+                    lambda cls: cls.deleted_at.is_(None),
+                    include_aliases=True,
+                ),
+            )
+        )
+        return self.session.exec(statement).first()
+
+    def _check_table_exists(self, datasource_name: str, table_name: str) -> bool:
+        """
+        Check if a table exists in a datasource.
+
+        Args:
+            datasource_name: Name of the datasource
+            table_name: Name of the table
+
+        Returns:
+            True if the table exists, False otherwise
+        """
+        available_tables = self.mindsdb_client.databases.get(datasource_name).tables.list()
+        available_table_names = [table.name for table in available_tables]
+        return table_name in available_table_names
+
+    def _check_column_exists(self, datasource_name: str, table_name: str, column_name: str) -> bool:
+        """
+        Check if a column exists in a table.
+
+        Args:
+            datasource_name: Name of the datasource
+            table_name: Name of the table
+            column_name: Name of the column
+        """
+        # TODO: Is there a more efficient way to get the columns of a table?
+        table = self.mindsdb_client.databases.get(datasource_name).tables.get(table_name)
+        available_columns = table.limit(1).fetch().columns.tolist()
+        return column_name in available_columns
 
     async def _create_mindsdb_database(self, datasource: Datasource, connection_data: dict[str, Any]) -> None:
         """Create database/integration in MindsDB."""
@@ -623,6 +1115,7 @@ class DatasourcesService:
             name=datasource.name,
             description=datasource.description,
             engine=datasource.engine,
+            is_sample=datasource.is_sample,
             created_at=datasource.created_at.isoformat(),
             modified_at=datasource.modified_at.isoformat(),
         )
@@ -643,4 +1136,62 @@ class DatasourcesService:
 
         return DatasourceDetailedResponse(
             **base_response.model_dump(), connection_data=connection_data, connection_status=connection_status
+        )
+
+    def _datasource_to_catalog_response(self, datasource: Datasource) -> DataCatalogResponse:
+        """Convert Datasource model to catalog response object."""
+        return DataCatalogResponse(
+            datasource=self._datasource_to_response(datasource),
+            tables=[self._table_to_catalog_response(table) for table in datasource.tables],
+        )
+
+    def _table_to_catalog_response(self, table: Table) -> TableResponse:
+        """Convert a Table model to a catalog TableResponse."""
+        return TableResponse(
+            name=table.name,
+            schema=table.schema,
+            description=table.description,
+            type=table.type,
+            row_count=table.row_count,
+            columns=[self._column_to_catalog_response(column) for column in table.columns],
+            primary_key_constraints=[
+                PrimaryKeyConstraintResponse(
+                    column_name=pk_constraint.column.name,
+                    ordinal_position=pk_constraint.ordinal_position,
+                    constraint_name=pk_constraint.constraint_name,
+                )
+                for pk_constraint in table.primary_key_constraints
+            ],
+            foreign_key_constraints=[
+                ForeignKeyConstraintResponse(
+                    column_name=fk_constraint.column.name,
+                    referenced_table_name=fk_constraint.referenced_table.name,
+                    referenced_column_name=fk_constraint.referenced_column.name,
+                    constraint_name=fk_constraint.constraint_name,
+                    ordinal_position=fk_constraint.ordinal_position,
+                )
+                for fk_constraint in table.foreign_key_constraints
+            ],
+        )
+
+    def _column_to_catalog_response(self, column: Column) -> ColumnResponse:
+        """Convert a Column model to a catalog ColumnResponse."""
+        return ColumnResponse(
+            name=column.name,
+            data_type=column.data_type,
+            description=column.description,
+            default_value=column.default_value,
+            is_nullable=column.is_nullable,
+            statistics=(
+                ColumnStatisticsResponse(
+                    most_common_values=column.statistics.most_common_values,
+                    most_common_frequencies=column.statistics.most_common_frequencies,
+                    null_percentage=column.statistics.null_percentage,
+                    distinct_values_count=column.statistics.distinct_values_count,
+                    min_value=column.statistics.min_value,
+                    max_value=column.statistics.max_value,
+                )
+                if getattr(column, "statistics", None) is not None
+                else None
+            ),
         )

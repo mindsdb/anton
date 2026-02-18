@@ -77,7 +77,7 @@ class MindsService:
     only used for datasource validation, not for storing minds data.
     """
 
-    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, tenant_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, organization_id: str):
         """
         Initialize the minds service.
 
@@ -88,15 +88,15 @@ class MindsService:
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
-        self.tenant_id = tenant_id
-        logger.debug(f"MindsService initialized for user {user_id} and tenant {tenant_id}")
+        self.organization_id = organization_id
+        logger.debug(f"MindsService initialized for user {user_id} and organization {organization_id}")
 
     async def list_minds(
         self,
         conversations_service: "ConversationsService",
         name: str | None = None,
         provider: str | None = None,
-        is_demo: bool | None = None,
+        is_sample: bool | None = None,
         include_deleted: bool = False,
         limit: int = 50,
         offset: int = 0,
@@ -113,6 +113,7 @@ class MindsService:
             include_deleted (Optional[bool]): Filter by deleted status
             limit (int): Maximum number of minds to return (default: 50)
             offset (int): Number of minds to skip (default: 0)
+            is_sample (bool): Filter by sample status
             with_detailed_data (bool): Include detailed datasource base data
             include_total (bool): If True, return tuple of (minds, total_count)
             sort_by (Optional[str]): Field to sort by (name, created_at, updated_at, provider, model_name)
@@ -123,19 +124,19 @@ class MindsService:
         """
         try:
             logger.debug(
-                f"Listing minds for user {self.user_id} in tenant {self.tenant_id} with filters: "
+                f"Listing minds for user {self.user_id} in organization {self.organization_id} with filters: "
                 f"provider={provider}, include_deleted={include_deleted}, limit={limit}, offset={offset}, "
                 f"sort_by={sort_by}, sort_order={sort_order}, include_total={include_total}"
             )
 
             # Build query conditions
-            conditions = [Mind.user_id == self.user_id, Mind.tenant_id == self.tenant_id]
+            conditions = [Mind.organization_id == self.organization_id]
             if name is not None:
                 conditions.append(Mind.name.ilike(f"%{name}%"))
             if provider is not None:
                 conditions.append(Mind.provider == provider)
-            if is_demo is not None:
-                conditions.append(Mind.parameters["is_demo"].as_boolean() == is_demo)
+            if is_sample is not None:
+                conditions.append(Mind.is_sample == is_sample)
             if not include_deleted:
                 conditions.append(Mind.deleted_at.is_(None))
 
@@ -200,14 +201,16 @@ class MindsService:
 
             logger.info(
                 f"Retrieved {len(minds_list)} minds "
-                f"for user {self.user_id} in tenant {self.tenant_id} (offset={offset}, limit={limit})"
+                f"for user {self.user_id} in organization {self.organization_id} (offset={offset}, limit={limit})"
             )
 
             if include_total:
                 return minds_list, total_count
             return minds_list
         except Exception as e:
-            logger.error(f"Error listing minds for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error listing minds for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to list minds: {str(e)}") from None
 
     async def get_mind(
@@ -229,16 +232,15 @@ class MindsService:
         """
         try:
             mind_name = mind_name.lower()
-            logger.debug(f"Getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(f"Getting mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
 
             statement = (
                 select(Mind)
                 .where(
                     and_(
                         Mind.name == mind_name,
-                        Mind.user_id == self.user_id,
                         Mind.deleted_at.is_(None),
-                        Mind.tenant_id == self.tenant_id,
+                        Mind.organization_id == self.organization_id,
                     )
                 )
                 .options(
@@ -269,12 +271,15 @@ class MindsService:
             mind_response = await self._mind_to_response(
                 mind, with_detailed_data=with_detailed_data, conversations=conversations
             )
-            logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(f"Retrieved mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
             return mind_response
         except MindNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Error getting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error getting mind {mind_name} for user {self.user_id} in "
+                f"organization {self.organization_id}: {str(e)}"
+            )
             raise MindsServiceError(f"Failed to get mind: {str(e)}") from None
 
     async def get_mind_model(self, mind_name: str) -> Mind:
@@ -295,20 +300,25 @@ class MindsService:
         """
         try:
             mind_name = mind_name.lower()
-            logger.debug(f"Getting mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(
+                f"Getting mind model {mind_name} for user {self.user_id} in organization {self.organization_id}"
+            )
 
             mind = await self._get_mind(mind_name)
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
 
-            logger.info(f"Retrieved mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(
+                f"Retrieved mind model {mind_name} for user {self.user_id} in organization {self.organization_id}"
+            )
             return mind
         except MindNotFoundError:
             raise
         except Exception as e:
             logger.error(
-                f"Error getting mind model {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"Error getting mind model {mind_name} for user {self.user_id} in "
+                f"organization {self.organization_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to get mind model: {str(e)}") from None
 
@@ -328,15 +338,16 @@ class MindsService:
             DatasourceNotFoundError: If any specified datasource doesn't exist
         """
         try:
-            logger.debug(f"Creating mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(
+                f"Creating mind {mind_data.name} for user {self.user_id} in organization {self.organization_id}"
+            )
 
             # Check if mind already exists in our database
             existing_mind = self.session.exec(
                 select(Mind).where(
                     and_(
                         Mind.name == mind_data.name,
-                        Mind.user_id == self.user_id,
-                        Mind.tenant_id == self.tenant_id,
+                        Mind.organization_id == self.organization_id,
                         Mind.deleted_at.is_(None),
                     )
                 )
@@ -351,10 +362,11 @@ class MindsService:
 
             new_mind = Mind(
                 name=mind_data.name,
+                is_sample=mind_data.is_sample,
                 provider=mind_data.provider,
-                model_name=mind_data.model_name or "gpt-4o",  # Default model
+                model_name=mind_data.model_name,
                 user_id=self.user_id,
-                tenant_id=self.tenant_id,
+                organization_id=self.organization_id,
                 parameters=mind_data.parameters or {},
                 deleted_at=None,
             )
@@ -367,7 +379,7 @@ class MindsService:
             if mind_data.datasources:
                 await self._add_datasources_to_mind(new_mind, mind_data.datasources, data_catalog_loader)
 
-            logger.info(f"Created mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(f"Created mind {mind_data.name} for user {self.user_id} in organization {self.organization_id}")
 
             return await self._mind_to_response(new_mind, datasource_configs=mind_data.datasources)
         except (MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
@@ -376,7 +388,8 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(
-                f"Error creating mind {mind_data.name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"Error creating mind {mind_data.name} for user {self.user_id} in "
+                f"organization {self.organization_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to create mind: {str(e)}") from None
 
@@ -399,7 +412,7 @@ class MindsService:
         """
         try:
             mind_name = mind_name.lower()
-            logger.debug(f"Updating mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(f"Updating mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)
 
@@ -437,7 +450,7 @@ class MindsService:
             self.session.commit()
             self.session.refresh(mind)
 
-            logger.info(f"Updated mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(f"Updated mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
 
             return await self._mind_to_response(mind, datasource_configs=datasource_configs)
         except (MindNotFoundError, MindAlreadyExistsError, DatasourceNotFoundError, DatasourceTableNotFoundError):
@@ -446,7 +459,8 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(
-                f"Error updating mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"Error updating mind {mind_name} for user {self.user_id} in "
+                f"organization {self.organization_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to update mind: {str(e)}") from None
 
@@ -466,7 +480,7 @@ class MindsService:
         """
         try:
             mind_name = mind_name.lower()
-            logger.debug(f"Deleting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.debug(f"Deleting mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
 
             mind = await self._get_mind_with_datasources(mind_name)
 
@@ -485,7 +499,7 @@ class MindsService:
             self.session.add(mind)
             self.session.commit()
 
-            logger.info(f"Deleted mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(f"Deleted mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
             return True
         except MindNotFoundError:
             self.session.rollback()
@@ -493,7 +507,8 @@ class MindsService:
         except Exception as e:
             self.session.rollback()
             logger.error(
-                f"Error deleting mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"Error deleting mind {mind_name} for user {self.user_id} in "
+                f"organization {self.organization_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to delete mind: {str(e)}") from None
 
@@ -511,31 +526,90 @@ class MindsService:
             None
         """
         mind_name = mind_name.lower()
-        logger.debug(f"Checking existence of mind {mind_name} for user {self.user_id} in tenant {self.tenant_id}")
+        logger.debug(
+            f"Checking existence of mind {mind_name} for user {self.user_id} in organization {self.organization_id}"
+        )
 
         try:
             mind = await self._get_mind(mind_name)
         except Exception as e:
             logger.error(
                 f"Error checking existence of mind {mind_name} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise MindsServiceError(f"Failed to check mind existence: {str(e)}") from None
 
         if mind:
-            logger.info(f"Mind {mind_name} exists for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(f"Mind {mind_name} exists for user {self.user_id} in organization {self.organization_id}")
             return
         else:
-            logger.info(f"Mind {mind_name} does not exist for user {self.user_id} in tenant {self.tenant_id}")
+            logger.info(
+                f"Mind {mind_name} does not exist for user {self.user_id} in organization {self.organization_id}"
+            )
             raise MindNotFoundError(f"Mind '{mind_name}' not found")
+
+    async def count_minds(
+        self,
+        is_sample: bool | None = None,
+        since: datetime | None = None,
+    ) -> int:
+        """
+        Count non-deleted minds for the current organization.
+
+        This is a lightweight alternative to list_minds() intended for usage
+        tracking (e.g. limits enforcement). It runs a single COUNT query
+        instead of loading full Mind objects with relationships.
+
+        Args:
+            is_sample: When provided, only count minds matching this sample flag.
+                       Pass False to exclude sample/template minds from the count.
+            since: When provided, only count minds created on or after this datetime.
+                   Used for billing-cycle-scoped counts.
+
+        Returns:
+            int: Number of minds matching the filters.
+        """
+        try:
+            logger.debug(
+                f"Counting minds for organization {self.organization_id} "
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+            )
+
+            # Always scope to the current organization and exclude soft-deleted records
+            conditions = [
+                Mind.organization_id == self.organization_id,
+                Mind.user_id == self.user_id,
+                Mind.deleted_at.is_(None),
+            ]
+
+            # Optionally narrow to a specific user for per-user limits
+            if is_sample is not None:
+                conditions.append(Mind.is_sample == is_sample)
+
+            if since is not None:
+                conditions.append(Mind.created_at >= since)
+
+            stmt = select(func.count(Mind.id)).where(and_(*conditions))
+            count = self.session.exec(stmt).one()
+
+            logger.debug(
+                f"Counted {count} minds for organization {self.organization_id} "
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+            )
+            return count
+        except Exception as e:
+            logger.error(
+                f"Error counting minds for organization {self.organization_id} "
+                f"(user_id={self.user_id}, is_sample={is_sample}): {str(e)}"
+            )
+            raise MindsServiceError(f"Failed to count minds: {str(e)}") from None
 
     async def _get_mind(self, mind_name: str) -> Mind:
         """Utility function to get a specific mind by name."""
         statement = select(Mind).where(
             and_(
                 Mind.name == mind_name,
-                Mind.user_id == self.user_id,
-                Mind.tenant_id == self.tenant_id,
+                Mind.organization_id == self.organization_id,
                 Mind.deleted_at.is_(None),
             )
         )
@@ -548,9 +622,8 @@ class MindsService:
             .where(
                 and_(
                     Mind.name == mind_name,
-                    Mind.user_id == self.user_id,
                     Mind.deleted_at.is_(None),
-                    Mind.tenant_id == self.tenant_id,
+                    Mind.organization_id == self.organization_id,
                 )
             )
             .options(
@@ -592,19 +665,30 @@ class MindsService:
         # If datasource configs are explicitly provided (e.g. on creation), use those
         # On create and update, the relationships may not be fully populated yet
         if datasource_configs is not None:
+            logger.debug(f"Using explicit datasource configs for mind {mind.name}")
             datasources = datasource_configs
         # Get linked datasources through the many-to-many relationship
         else:
             if with_detailed_data:
+                logger.debug(f"Getting detailed datasource configs for mind {mind.name}")
                 datasources = []
                 for relationship in mind.mind_datasources:
+                    logger.debug(f"Getting detailed datasource config for datasource {relationship.datasource.name}")
                     status = await relationship.status
 
                     # Get connection data from MindsDB database object
-                    connection_data = self.mindsdb_client.databases.get(relationship.datasource.name).params
+                    try:
+                        connection_data = self.mindsdb_client.databases.get(relationship.datasource.name).params
+                    except Exception as e:
+                        logger.error(
+                            f"Error getting connection data for datasource {relationship.datasource.name} "
+                            f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+                        )
+                        raise MindsServiceError(f"Failed to get connection data for datasource: {str(e)}") from None
                     connection_data = (
                         connection_data if isinstance(connection_data, dict) else safe_parse(connection_data)
                     )
+                    logger.debug(f"Adding detailed datasource config for datasource {relationship.datasource.name}")
 
                     datasources.append(
                         DetailedDatasourceConfig(
@@ -638,6 +722,7 @@ class MindsService:
 
         return MindResponse(
             name=mind.name,
+            is_sample=mind.is_sample,
             model_name=mind.model_name,
             provider=mind.provider,
             parameters=mind.parameters or {},
@@ -656,14 +741,14 @@ class MindsService:
             datasource_tables = datasource_config.tables
             try:
                 logger.debug(
-                    f"Validating datasource {datasource_name} for user {self.user_id} in tenant {self.tenant_id}"
+                    f"Validating datasource {datasource_name} for user {self.user_id} in "
+                    f"organization {self.organization_id}"
                 )
                 datasource = self.session.exec(
                     select(Datasource).where(
                         and_(
                             Datasource.name == datasource_name,
-                            Datasource.user_id == self.user_id,
-                            Datasource.tenant_id == self.tenant_id,
+                            Datasource.organization_id == self.organization_id,
                             Datasource.deleted_at.is_(None),
                         )
                     )
@@ -688,7 +773,7 @@ class MindsService:
             except (DatasourceNotFoundError, DatasourceTableNotFoundError) as e:
                 logger.error(
                     f"Error validating datasource {datasource_name} "
-                    f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                    f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
                 )
                 raise
 
@@ -706,7 +791,7 @@ class MindsService:
             try:
                 logger.debug(
                     f"Adding datasource {datasource_config.name} to mind {mind.name} "
-                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                    f"for user {self.user_id} in organization {self.organization_id}"
                 )
                 datasource_name = datasource_config.name
                 table_names = datasource_config.tables
@@ -715,8 +800,7 @@ class MindsService:
                     select(Datasource).where(
                         and_(
                             Datasource.name == datasource_name,
-                            Datasource.user_id == self.user_id,
-                            Datasource.tenant_id == self.tenant_id,
+                            Datasource.organization_id == self.organization_id,
                             Datasource.deleted_at.is_(None),
                         )
                     )
@@ -725,7 +809,7 @@ class MindsService:
                 if not datasource:
                     logger.warning(
                         f"Datasource '{datasource_name}' not found in database "
-                        f"for user {self.user_id} in tenant {self.tenant_id}, skipping"
+                        f"for user {self.user_id} in organization {self.organization_id}, skipping"
                     )
                     continue
 
@@ -735,7 +819,7 @@ class MindsService:
                         and_(
                             MindDatasource.mind_id == mind.id,
                             MindDatasource.datasource_id == datasource.id,
-                            MindDatasource.tenant_id == self.tenant_id,
+                            MindDatasource.organization_id == self.organization_id,
                             MindDatasource.deleted_at.is_(None),
                         )
                     )
@@ -744,13 +828,14 @@ class MindsService:
                 if existing_relationship:
                     logger.debug(
                         f"Datasource {datasource_name} already linked to mind {mind.name} "
-                        f"for user {self.user_id} in tenant {self.tenant_id}"
+                        f"for user {self.user_id} in organization {self.organization_id}"
                     )
                     continue
 
                 # Create new relationship
                 mind_datasource = MindDatasource(
-                    tenant_id=self.tenant_id,
+                    organization_id=self.organization_id,
+                    user_id=self.user_id,
                     mind_id=mind.id,
                     datasource_id=datasource.id,
                 )
@@ -760,28 +845,28 @@ class MindsService:
                 self.session.refresh(mind_datasource)
                 logger.debug(
                     f"Added datasource {datasource_name} to mind {mind.name} "
-                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                    f"for user {self.user_id} in organization {self.organization_id}"
                 )
 
                 logger.debug(
                     f"Loading datasource {datasource_name} to the data catalog "
-                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                    f"for user {self.user_id} in organization {self.organization_id}"
                 )
 
                 logger.debug(
                     f"Loading datasource {datasource_name} to the data catalog "
-                    f"for user {self.user_id} in tenant {self.tenant_id}"
+                    f"for user {self.user_id} in organization {self.organization_id}"
                 )
                 await data_catalog_loader.load(mind_datasource, table_names)
             except PrefectException as e:
                 logger.error(
                     f"Error starting data catalog loader flow for datasource {datasource_name} "
-                    f"to mind {mind.name} for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                    f"to mind {mind.name} for user {self.user_id} in organization {self.organization_id}: {str(e)}"
                 )
             except Exception as e:
                 logger.error(
                     f"Error adding datasource {datasource_name} to mind {mind.name} "
-                    f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                    f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
                 )
 
         # Commit all relationships at once

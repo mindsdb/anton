@@ -1,4 +1,7 @@
+from collections.abc import Awaitable, Callable
+
 from mindsdb_sdk.server import Server
+from pydantic_ai.usage import RunUsage
 from sqlmodel import Session
 
 from minds.agent.database_agent import DatabaseAgent, DatabaseAgentConfig
@@ -26,6 +29,7 @@ class ChatCompletionsHandler:
         stream: bool,
         metadata: ChatCompletionRequestMetadata | None = None,
         instrument: bool = True,
+        on_complete_callback: Callable[[RunUsage], Awaitable[None]] | None = None,
     ):
         """
         Initialize the ChatCompletionsHandler with a list of messages.
@@ -37,6 +41,7 @@ class ChatCompletionsHandler:
                 model (str): The model to use for chat completions.
                 stream (bool): Whether to stream the response.
                 instrument (bool): Whether to instrument the PydanticAIAgent.
+                on_complete_callback: Optional async callback invoked with token usage after the agent run completes.
         """
         self.session = session
         self.context = context
@@ -46,6 +51,8 @@ class ChatCompletionsHandler:
         self.stream = stream
         self.metadata = metadata
         self.instrument = instrument
+        self.on_complete_callback = on_complete_callback
+        self.usage: RunUsage | None = None
 
     async def chat_completions(self, streamer: MessageStreamer) -> str | None:
         """
@@ -61,7 +68,7 @@ class ChatCompletionsHandler:
             session=self.session,
             mindsdb_client=self.mindsdb_client,
             user_id=self.context.user_id,
-            tenant_id=self.context.tenant_id,
+            organization_id=self.context.organization_id,
         )
         mind = await minds_service.get_mind_model(self.model)
 
@@ -88,5 +95,9 @@ class ChatCompletionsHandler:
         )
 
         await database_agent.run_completion(messages=self.messages, streamer=streamer, stream=self.stream)
+
+        self.usage = database_agent.last_run_usage
+        if self.on_complete_callback and self.usage:
+            await self.on_complete_callback(self.usage)
 
         return None

@@ -21,7 +21,7 @@ def client():
     return OpenAIClient(
         api_url=settings.openai.api_url,
         api_key=settings.openai.api_key,
-        chat_completions_model=settings.openai.model_name,
+        chat_completions_model=settings.default_models.openai_model,
         max_tokens=settings.openai.max_tokens,
     )
 
@@ -46,7 +46,7 @@ class TestOpenAIClient:
 
             settings = get_app_settings()
             mock_create.assert_awaited_once_with(
-                model=settings.openai.model_name,
+                model=settings.default_models.openai_model,
                 messages=sample_messages,
                 stream=False,
                 temperature=None,

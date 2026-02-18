@@ -1,5 +1,5 @@
 import importlib
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -47,7 +47,8 @@ def mock_context():
     from minds.requests.context import Context
 
     return Context(
-        user_id=UUID("00000000-0000-0000-0000-000000000001"), tenant_id=UUID("00000000-0000-0000-0000-000000000002")
+        user_id=UUID("00000000-0000-0000-0000-000000000001"),
+        organization_id=UUID("00000000-0000-0000-0000-000000000002"),
     )
 
 
@@ -56,7 +57,7 @@ def mock_conversation_service():
     """Mock ConversationsService."""
     service = Mock()
     service.user_id = "test-user-123"
-    service.tenant_id = "test-tenant-456"
+    service.organization_id = "test-organization-456"
     return service
 
 
@@ -311,7 +312,7 @@ class TestResponsesRequestHandler:
 
         # Create request with stream=None
         responses_request = ResponsesRequest(
-            model="gpt-4",
+            model="gpt-4o",
             input="Test input",
             conversation=None,
             stream=None,
@@ -351,7 +352,7 @@ class TestResponsesRequestHandler:
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
                 messages=[Message(role=Role.user, content="Hello"), Message(role=Role.assistant, content="Hi there!")],
-                model="gpt-4",
+                model="gpt-4o",
                 stream=False,  # Should default to False when None
                 metadata=None,
                 instrument=True,
@@ -756,7 +757,14 @@ class TestResponsesRequestHandler:
             callback = call_args[1]["on_complete_callback"]
             await callback("Assistant response", "SELECT * FROM test")
             mock_conversation_service.update_conversation_message_content.assert_called_once_with(
-                message=mock_message, content="Assistant response", sql_query="SELECT * FROM test"
+                message=mock_message,
+                content="Assistant response",
+                sql_query="SELECT * FROM test",
+                model_name="gpt-3.5-turbo",
+                request_id=ANY,
+                langfuse_trace_id=ANY,
+                input_tokens=ANY,
+                output_tokens=ANY,
             )
 
     @pytest.mark.asyncio

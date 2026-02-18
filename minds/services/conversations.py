@@ -69,15 +69,15 @@ class ConversationsService:
     Service class for conversation management operations.
     """
 
-    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, tenant_id: str):
+    def __init__(self, session: Session, mindsdb_client: Server, user_id: str, organization_id: str):
         """
         Initialize the conversations service.
         """
         self.session = session
         self.mindsdb_client = mindsdb_client
         self.user_id = user_id
-        self.tenant_id = tenant_id
-        logger.debug(f"ConversationsService initialized for user {user_id} and tenant {tenant_id}")
+        self.organization_id = organization_id
+        logger.debug(f"ConversationsService initialized for user {user_id} and organization {organization_id}")
 
     async def list_conversations(
         self,
@@ -108,14 +108,14 @@ class ConversationsService:
             ConversationsServiceError: If there is an error listing conversations.
         """
         logger.debug(
-            f"Listing conversations for user {self.user_id} and tenant {self.tenant_id} with filters: "
+            f"Listing conversations for user {self.user_id} and organization {self.organization_id} with filters: "
             f"topic={topic}, include_deleted={include_deleted}, limit={limit}, offset={offset}, "
             f"include_total={include_total}, sort_by={sort_by}, sort_order={sort_order}"
         )
 
         try:
             # Build query conditions
-            conditions = [Conversation.user_id == self.user_id, Conversation.tenant_id == self.tenant_id]
+            conditions = [Conversation.organization_id == self.organization_id]
             if topic is not None:
                 conditions.append(Conversation.topic.ilike(f"%{topic}%"))
             if not include_deleted:
@@ -162,14 +162,16 @@ class ConversationsService:
 
             logger.info(
                 f"Retrieved {len(conversations_list)} conversations "
-                f"for user {self.user_id} in tenant {self.tenant_id} (offset={offset}, limit={limit})"
+                f"for user {self.user_id} in organization {self.organization_id} (offset={offset}, limit={limit})"
             )
 
             if include_total:
                 return conversations_list, total_count
             return conversations_list
         except Exception as e:
-            logger.error(f"Error listing conversations for user {self.user_id} in tenant {self.tenant_id}: {str(e)}")
+            logger.error(
+                f"Error listing conversations for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
             raise ConversationsServiceError(f"Failed to list conversations: {str(e)}") from None
 
     async def get_conversation(self, conversation_id: UUID) -> ConversationResponse:
@@ -186,7 +188,9 @@ class ConversationsService:
             ConversationNotFoundError: If conversation with the given ID does not exist.
             ConversationsServiceError: If there is an error getting the conversation.
         """
-        logger.debug(f"Getting conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id}")
+        logger.debug(
+            f"Getting conversation {conversation_id} for user {self.user_id} and organization {self.organization_id}"
+        )
 
         try:
             conversation = await self._get_conversation(conversation_id)
@@ -197,7 +201,7 @@ class ConversationsService:
         except Exception as e:
             logger.error(
                 f"Error getting conversation {conversation_id} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to get conversation: {str(e)}") from None
 
@@ -219,7 +223,7 @@ class ConversationsService:
         """
         logger.debug(
             f"Creating conversation {conversation_data.metadata.topic} "
-            f"for user {self.user_id} in tenant {self.tenant_id}"
+            f"for user {self.user_id} in organization {self.organization_id}"
         )
 
         try:
@@ -229,7 +233,7 @@ class ConversationsService:
             new_conversation = Conversation(
                 topic=conversation_data.metadata.topic,
                 user_id=self.user_id,
-                tenant_id=self.tenant_id,
+                organization_id=self.organization_id,
                 mind_id=mind.id,
             )
 
@@ -240,7 +244,8 @@ class ConversationsService:
                 new_messages = []
                 for item in conversation_data.items:
                     new_message = Message(
-                        tenant_id=self.tenant_id,
+                        organization_id=self.organization_id,
+                        user_id=self.user_id,
                         conversation_id=new_conversation.id,
                         role=item.role,
                         content=item.content,
@@ -252,7 +257,7 @@ class ConversationsService:
 
             logger.info(
                 f"Created conversation {conversation_data.metadata.topic} "
-                f"for user {self.user_id} in tenant {self.tenant_id}"
+                f"for user {self.user_id} in organization {self.organization_id}"
             )
 
             return await self.conversation_to_response(new_conversation)
@@ -262,7 +267,7 @@ class ConversationsService:
         except Exception as e:
             logger.error(
                 f"Error creating conversation {conversation_data.metadata.topic} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             self.session.rollback()
             raise ConversationsServiceError(f"Failed to create conversation: {str(e)}") from None
@@ -281,7 +286,9 @@ class ConversationsService:
             ConversationNotFoundError: If conversation with the given ID does not exist.
             ConversationsServiceError: If there is an error deleting the conversation.
         """
-        logger.debug(f"Deleting conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id}")
+        logger.debug(
+            f"Deleting conversation {conversation_id} for user {self.user_id} and organization {self.organization_id}"
+        )
 
         try:
             conversation = await self._get_conversation(conversation_id)
@@ -290,13 +297,15 @@ class ConversationsService:
             self.session.add(conversation)
             self.session.commit()
 
-            logger.info(f"Deleted conversation {conversation_id} for user {self.user_id} and tenant {self.tenant_id}")
+            logger.info(
+                f"Deleted conversation {conversation_id} for user {self.user_id} in organization {self.organization_id}"
+            )
         except ConversationNotFoundError:
             raise
         except Exception as e:
             logger.error(
                 f"Error deleting conversation {conversation_id} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to delete conversation: {str(e)}") from None
 
@@ -311,7 +320,8 @@ class ConversationsService:
             List[MessageResponse]: List of messages.
         """
         logger.debug(
-            f"Getting conversation {conversation_id} with messages for user {self.user_id} and tenant {self.tenant_id}"
+            f"Getting conversation {conversation_id} with messages for user {self.user_id} and "
+            f"organization {self.organization_id}"
         )
 
         try:
@@ -325,7 +335,7 @@ class ConversationsService:
                     and_(
                         Message.conversation_id == conversation_id,
                         Message.deleted_at.is_(None),
-                        Message.tenant_id == self.tenant_id,
+                        Message.organization_id == self.organization_id,
                     )
                 )
                 .order_by(Message.created_at.asc())
@@ -340,7 +350,7 @@ class ConversationsService:
         except Exception as e:
             logger.error(
                 f"Error getting conversation {conversation_id} with messages "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to get conversation with messages: {str(e)}") from None
 
@@ -350,7 +360,7 @@ class ConversationsService:
         """
         logger.debug(
             f"Creating message in conversation {conversation_id} "
-            f"for user {self.user_id} in tenant {self.tenant_id} with role {role} and content {content}"
+            f"for user {self.user_id} in organization {self.organization_id} with role {role} and content {content}"
         )
 
         try:
@@ -359,7 +369,8 @@ class ConversationsService:
                 raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
 
             new_message = Message(
-                tenant_id=self.tenant_id,
+                organization_id=self.organization_id,
+                user_id=self.user_id,
                 conversation_id=conversation_id,
                 role=role,
                 content=content,
@@ -373,7 +384,7 @@ class ConversationsService:
         except Exception as e:
             logger.error(
                 f"Error creating message in conversation {conversation_id} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to create message: {str(e)}") from None
 
@@ -395,7 +406,7 @@ class ConversationsService:
         """
         logger.debug(
             f"Creating message placeholder in conversation {conversation_id} "
-            f"for user {self.user_id} and tenant {self.tenant_id} with role {role}"
+            f"for user {self.user_id} in organization {self.organization_id} with role {role}"
         )
 
         # Check if conversation exists
@@ -405,7 +416,8 @@ class ConversationsService:
 
         try:
             new_message = Message(
-                tenant_id=self.tenant_id,
+                organization_id=self.organization_id,
+                user_id=self.user_id,
                 conversation_id=conversation_id,
                 role=role,
                 content="",  # Placeholder - will be updated later
@@ -415,7 +427,7 @@ class ConversationsService:
 
             logger.info(
                 f"Created message placeholder {new_message.id} in conversation {conversation_id} "
-                f"for user {self.user_id} and tenant {self.tenant_id}"
+                f"for user {self.user_id} in organization {self.organization_id}"
             )
 
             return new_message  # Return the message object so caller can access .id
@@ -424,12 +436,20 @@ class ConversationsService:
         except Exception as e:
             logger.error(
                 f"Error creating message placeholder in conversation {conversation_id} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to create message placeholder: {str(e)}") from None
 
     async def update_conversation_message_content(
-        self, message: Message, content: str, sql_query: str | None = None
+        self,
+        message: Message,
+        content: str,
+        sql_query: str | None = None,
+        model_name: str | None = None,
+        request_id: str | None = None,
+        langfuse_trace_id: str | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> MessageResponse:
         """
         Update the content of an existing message.
@@ -438,6 +458,11 @@ class ConversationsService:
             message: The message object to update.
             content: The new content for the message.
             sql_query: The SQL query for the message.
+            model_name: The model/mind name used for the completion.
+            request_id: The request ID for tracing.
+            langfuse_trace_id: The Langfuse trace ID for cross-referencing.
+            input_tokens: Number of input (prompt) tokens used.
+            output_tokens: Number of output (completion) tokens used.
 
         Returns:
             MessageResponse: Updated message response object.
@@ -445,20 +470,32 @@ class ConversationsService:
         Raises:
             ConversationsServiceError: If there is an error updating the message.
         """
-        logger.info(f"Updating message {message.id} content for user {self.user_id} and tenant {self.tenant_id}")
+        logger.info(
+            f"Updating message {message.id} content for user {self.user_id} in organization {self.organization_id}"
+        )
+
+        def _apply_fields(msg: Message) -> None:
+            """Apply content and usage fields to a message object."""
+            msg.content = content
+            msg.sql_query = sql_query
+            msg.model_name = model_name
+            msg.request_id = request_id
+            msg.langfuse_trace_id = langfuse_trace_id
+            msg.input_tokens = input_tokens
+            msg.output_tokens = output_tokens
 
         try:
             # Ensure the message object is tracked by the session
             # Merge ensures the object is properly attached and tracked for updates
             message = self.session.merge(message)
 
-            # Modify the content and sql_query
-            message.content = content
-            message.sql_query = sql_query
+            _apply_fields(message)
             # Commit will automatically flush any pending changes
             self.session.commit()
 
-            logger.info(f"Updated message {message.id} content for user {self.user_id} and tenant {self.tenant_id}")
+            logger.info(
+                f"Updated message {message.id} content for user {self.user_id} in organization {self.organization_id}"
+            )
 
             return await self._message_to_response(message)
         except PendingRollbackError:
@@ -471,22 +508,26 @@ class ConversationsService:
                 # Message doesn't exist, create it
                 message_from_db = Message(
                     id=message.id,
-                    tenant_id=self.tenant_id,
+                    organization_id=self.organization_id,
+                    user_id=self.user_id,
                     conversation_id=message.conversation_id,
                     role=message.role,
                     content=content,
                     sql_query=sql_query,
+                    model_name=model_name,
+                    request_id=request_id,
+                    langfuse_trace_id=langfuse_trace_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                 )
                 self.session.add(message_from_db)
             else:
-                # Message exists, update it
-                message_from_db.content = content
-                message_from_db.sql_query = sql_query
+                _apply_fields(message_from_db)
             self.session.commit()
 
             logger.info(
                 f"Updated message {message_from_db.id} content "
-                f"for user {self.user_id} in tenant {self.tenant_id} (after rollback recovery)"
+                f"for user {self.user_id} in organization {self.organization_id} (after rollback recovery)"
             )
 
             return await self._message_to_response(message_from_db)
@@ -494,7 +535,7 @@ class ConversationsService:
             self.session.rollback()
             logger.error(
                 f"Error updating message {message.id} content "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to update message content: {str(e)}") from None
 
@@ -520,7 +561,7 @@ class ConversationsService:
         """
         logger.debug(
             f"Getting message result for conversation {conversation_id} and message {message_id} "
-            f"for user {self.user_id} in tenant {self.tenant_id}"
+            f"for user {self.user_id} in organization {self.organization_id}"
         )
 
         try:
@@ -538,7 +579,7 @@ class ConversationsService:
             if message.sql_query is None:
                 raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
 
-            sql_query = message.sql_query
+            sql_query = str(message.sql_query)
 
             # Validate the SQL query to prevent SQL injection.
             parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
@@ -619,7 +660,7 @@ class ConversationsService:
         except Exception as e:
             logger.error(
                 f"Error getting message result for conversation {conversation_id} and message {message_id} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to get message result: {str(e)}") from None
 
@@ -633,7 +674,7 @@ class ConversationsService:
         """
         logger.debug(
             f"Exporting message result for conversation {conversation_id} and message {message_id} "
-            f"for user {self.user_id} in tenant {self.tenant_id}"
+            f"for user {self.user_id} in organization {self.organization_id}"
         )
 
         try:
@@ -651,7 +692,7 @@ class ConversationsService:
             if message.sql_query is None:
                 raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
 
-            sql_query = message.sql_query
+            sql_query = str(message.sql_query)
 
             # Validate the SQL query to prevent SQL injection.
             _ = self._validate_and_parse_sql_query(sql_query)
@@ -673,7 +714,7 @@ class ConversationsService:
         except Exception as e:
             logger.error(
                 f"Error exporting message result for conversation {conversation_id} and message {message_id} "
-                f"for user {self.user_id} in tenant {self.tenant_id}: {str(e)}"
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to export message result: {str(e)}") from None
 
@@ -722,8 +763,7 @@ class ConversationsService:
                 and_(
                     Conversation.id == conversation_id,
                     Conversation.deleted_at.is_(None),
-                    Conversation.user_id == self.user_id,
-                    Conversation.tenant_id == self.tenant_id,
+                    Conversation.organization_id == self.organization_id,
                 )
             )
         )
@@ -741,7 +781,7 @@ class ConversationsService:
                 Message.id == message_id,
                 Message.conversation_id == conversation_id,
                 Message.deleted_at.is_(None),
-                Message.tenant_id == self.tenant_id,
+                Message.organization_id == self.organization_id,
             )
         )
         message = self.session.exec(statement).first()
@@ -781,7 +821,7 @@ class ConversationsService:
         """
         content = MessageContent(
             type=MessageContentType.output_text if message.role == Role.assistant else MessageContentType.input_text,
-            text=message.content,
+            text=str(message.content),
         )
         return MessageResponse(
             id=message.id,

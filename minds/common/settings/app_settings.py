@@ -1,7 +1,13 @@
+from enum import Enum
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DeploymentMode(str, Enum):
+    SELF_HOSTED = "self-hosted"
+    CLOUD = "cloud"
 
 
 class Settings(BaseSettings):
@@ -42,7 +48,33 @@ class OpenAISettings(Settings):
     max_tokens: int = Field(
         default=400000, description="The maximum number of tokens for OpenAI API"
     )  # OPENAI__MAX_TOKENS
-    model_name: str = Field(default="gpt-4o", description="The OpenAI model name")  # OPENAI__MODEL_NAME
+    # TODO: Should the models be extracted programmatically?
+    supported_models: list[str] = Field(
+        default=["gpt-4o", "gpt-4.1", "gpt-5.2"], description="The supported OpenAI models"
+    )  # OPENAI__SUPPORTED_MODELS
+
+    @field_validator("supported_models", mode="before")
+    @classmethod
+    def split_supported_openai_models(cls, v: list[str] | str) -> list[str]:
+        if isinstance(v, str):
+            return [model.strip() for model in v.split(",")]
+        return [model.strip() for model in v]
+
+
+class AnthropicSettings(Settings):
+    api_key: str = Field(default="", description="The Anthropic API key")  # ANTHROPIC__API_KEY
+    # TODO: Should the models be extracted programmatically?
+    supported_models: list[str] = Field(
+        default=["claude-sonnet-4-5", "claude-opus-4-5", "claude-opus-4-6"],
+        description="The supported Anthropic models",
+    )  # ANTHROPIC__SUPPORTED_MODELS
+
+    @field_validator("supported_models", mode="before")
+    @classmethod
+    def split_supported_anthropic_models(cls, v: list[str] | str) -> list[str]:
+        if isinstance(v, str):
+            return [model.strip() for model in v.split(",")]
+        return [model.strip() for model in v]
 
 
 class MindsDBSettings(Settings):
@@ -71,10 +103,14 @@ class DataCatalogSettings(Settings):
 
 
 class DefaultModelsSettings(Settings):
-    mind_model: str = Field(default="gpt-4o", description="The default model for minds")  # DEFAULT_MODELS__MIND_MODEL
-    google_model: str = Field(
-        default="gemini-2.5-pro", description="The default Google model"
-    )  # DEFAULT_MODELS__GOOGLE_MODEL
+    default_provider: str = Field(
+        default="openai", description="The default provider"
+    )  # DEFAULT_MODELS__DEFAULT_PROVIDER
+
+    openai_model: str = Field(default="gpt-4o", description="The default OpenAI model")  # DEFAULT_MODELS__OPENAI_MODEL
+    anthropic_model: str = Field(
+        default="claude-sonnet-4-5", description="The default Anthropic model"
+    )  # DEFAULT_MODELS__ANTHROPIC_MODEL
 
 
 class RedisSettings(Settings):
@@ -91,49 +127,15 @@ class MindsSettings(Settings):
     max_column_width: int = Field(default=300, description="Maximum width of columns")  # MINDS__MAX_COLUMN_WIDTH
     max_sql_retries: int = Field(default=4, description="Maximum number of SQL retries")  # MINDS__MAX_SQL_RETRIES
 
+    enable_model_selection: bool = Field(
+        default=False, description="Whether to enable model selection"
+    )  # MINDS__ENABLE_MODEL_SELECTION
 
-class AuthSettings(Settings):
-    disable: bool = Field(default=False, description="Whether to disable authentication")  # AUTH__DISABLE
 
-
-class LaunchDarklySettings(Settings):
-    sdk_key: str = Field(default="not set", description="The LaunchDarkly SDK key")  # LAUNCHDARKLY__SDK_KEY
-    offline_mode: bool = Field(
-        default=True, description="Whether LaunchDarkly is in offline mode"
-    )  # LAUNCHDARKLY__OFFLINE_MODE
-
-    # Optional Relay Proxy (or custom endpoint) configuration. When set, the SDK
-    # will connect to these URLs instead of LaunchDarkly-hosted endpoints.
-    #
-    # For LaunchDarkly Relay Proxy, these typically all point to the proxy URL.
-    base_uri: str | None = Field(
-        default="", description="Override LaunchDarkly base URI (relay proxy URL)"
-    )  # LAUNCHDARKLY__BASE_URI
-    stream_uri: str | None = Field(
-        default="", description="Override LaunchDarkly stream URI (relay proxy URL)"
-    )  # LAUNCHDARKLY__STREAM_URI
-    events_uri: str | None = Field(
-        default="", description="Override LaunchDarkly events URI (relay proxy URL)"
-    )  # LAUNCHDARKLY__EVENTS_URI
-
-    # HTTP timeouts for SDK -> relay (or SDK -> LaunchDarkly if not using relay).
-    # These map to ldclient.config.HTTPConfig.
-    http_connect_timeout: float = Field(
-        default=20.0, description="HTTP connect timeout (seconds) for LaunchDarkly SDK"
-    )  # LAUNCHDARKLY__HTTP_CONNECT_TIMEOUT
-    http_read_timeout: float = Field(
-        default=30.0, description="HTTP read timeout (seconds) for LaunchDarkly SDK"
-    )  # LAUNCHDARKLY__HTTP_READ_TIMEOUT
-
-    # If your cluster blocks egress from the relay to LaunchDarkly's events service,
-    # you'll see repeated HTTP 503s when the SDK tries to post diagnostics/analytics.
-    # These do not affect flag evaluation; they only affect telemetry.
-    send_events: bool = Field(
-        default=False, description="Whether to send analytics/diagnostic events"
-    )  # LAUNCHDARKLY__SEND_EVENTS
-    diagnostic_opt_out: bool = Field(
-        default=False, description="Disable diagnostic events reporting"
-    )  # LAUNCHDARKLY__DIAGNOSTIC_OPT_OUT
+class MindCastleSettings(Settings):
+    encryption_type: str = Field(
+        default="localencryption", description="The encryption type for MindCastle"
+    )  # MIND_CASTLE__ENCRYPTION_TYPE
 
 
 class FeatureFlagSettings(Settings):
@@ -143,24 +145,39 @@ class FeatureFlagSettings(Settings):
     )  # FEATURE_FLAG__DEFAULT_VALUE
 
 
+class StatsigSettings(Settings):
+    sdk_key: str = Field(default="", description="The Statsig SDK key")  # STATSIG__SDK_KEY
+    environment: str = Field(default="", description="The Statsig environment")  # STATSIG__ENVIRONMENT
+    disable_network: bool = Field(default=True, description="Whether to disable network")  # STATSIG__DISABLE_NETWORK
+    disable_all_logging: bool = Field(
+        default=True, description="Whether to disable all logging"
+    )  # STATSIG__DISABLE_ALL_LOGGING
+
+
 class AppSettings(Settings):
     env: str = Field(default="local", description="The environment (local, dev, prod, etc.)")  # ENV
 
-    log_level: str = Field(default="DEBUG", description="The logging level")  # LOG_LEVEL
+    log_level: str = Field(default="WARNING", description="The logging level")  # LOG_LEVEL
+
+    deployment_mode: DeploymentMode = Field(
+        default=DeploymentMode.SELF_HOSTED, description="The deployment mode"
+    )  # DEPLOYMENT_MODE
 
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)  # DATABASE__*
     openai: OpenAISettings = Field(default_factory=OpenAISettings)  # OPENAI__*
+    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)  # ANTHROPIC__*
     mindsdb: MindsDBSettings = Field(default_factory=MindsDBSettings)  # MINDSDB__*
     data_catalog: DataCatalogSettings = Field(default_factory=DataCatalogSettings)  # DATA_CATALOG__*
     default_models: DefaultModelsSettings = Field(default_factory=DefaultModelsSettings)  # DEFAULT_MODELS__*
     minds: MindsSettings = Field(default_factory=MindsSettings)  # MINDS__*
-    auth: AuthSettings = Field(default_factory=AuthSettings)  # AUTH__*
+    mind_castle: MindCastleSettings = Field(default_factory=MindCastleSettings)  # MIND_CASTLE__*
     redis: RedisSettings = Field(default_factory=RedisSettings)  # REDIS__*
 
-    launchdarkly: LaunchDarklySettings = Field(default_factory=LaunchDarklySettings)  # LAUNCHDARKLY__*
-    feature_flag_disable_langfuse: FeatureFlagSettings = Field(
-        default=FeatureFlagSettings(name="disable-langfuse", default_value=False)
-    )  # FEATURE_FLAG__DISABLE_LANGFUSE
+    statsig: StatsigSettings = Field(default_factory=StatsigSettings)  # STATSIG__*
+
+    feature_flag_enable_langfuse: FeatureFlagSettings = Field(
+        default=FeatureFlagSettings(name="enable-langfuse", default_value=True)
+    )  # FEATURE_FLAG__ENABLE_LANGFUSE
 
 
 @lru_cache

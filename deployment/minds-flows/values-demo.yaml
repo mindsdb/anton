@@ -15,4 +15,12 @@ job:
     
     - name: LANGFUSE_TRACING_ENVIRONMENT
       value: "demo"
+    
+    # ====================================
+    # STATSIG SETTINGS
+    # ====================================
+
+    - name: STATSIG__ENVIRONMENT
+      value: "development"
+          
 

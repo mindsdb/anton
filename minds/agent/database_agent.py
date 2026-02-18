@@ -60,6 +60,7 @@ class DatabaseAgent:
         if not config:
             config = DatabaseAgentConfig()
         self.config = config
+        self.last_run_usage = None
 
         PydanticAIAgent.instrument_all(instrument=self.config.instrument)
 
@@ -221,6 +222,8 @@ class DatabaseAgent:
             async with agent.run_stream(conversation_context, deps=self.deps) as result:
                 async for chunk in result.stream_text(delta=True):
                     await streamer.push(role=Role.assistant, content=chunk)
+                self.last_run_usage = result.usage()
         else:
             result = await agent.run(conversation_context, deps=self.deps)
             await streamer.push(role=Role.assistant, content=result.output)
+            self.last_run_usage = result.usage()

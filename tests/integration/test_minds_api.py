@@ -45,7 +45,7 @@ class TestMindsAPI:
         payload = {
             "name": mind_name,
             "provider": "openai",
-            "model_name": "gpt-4",
+            "model_name": "gpt-4o",
             "parameters": {},
             "datasources": [
                 {

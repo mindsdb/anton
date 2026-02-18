@@ -53,13 +53,13 @@ class TestMindCreateRequest:
         """Test minimal valid creation request."""
         data = {
             "name": "minimal-mind"
-            # Provider has default "openai", others have default factories
+            # Provider/model_name are optional unless explicitly provided
         }
 
         request = MindCreateRequest(**data)
 
         assert request.name == "minimal-mind"
-        assert request.provider == "openai"  # Default value
+        assert request.provider is None
         assert request.model_name is None  # Optional field
         assert request.parameters == {}  # Default factory
         assert request.datasources == []  # Default factory
@@ -72,9 +72,8 @@ class TestMindCreateRequest:
             "datasources": [],  # Empty list
         }
 
-        request = MindCreateRequest(**data)
-
-        assert request.datasources == []
+        with pytest.raises(ValidationError, match="Provider 'google' is not supported"):
+            MindCreateRequest(**data)
 
     def test_create_request_missing_required_field(self):
         """Test creation request missing required fields."""
@@ -84,9 +83,9 @@ class TestMindCreateRequest:
 
         assert "name" in str(exc_info.value)
 
-        # Provider is not required as it has a default value
+        # Provider is optional if omitted
         request = MindCreateRequest(name="test-mind")
-        assert request.provider == "openai"  # Default value
+        assert request.provider is None
 
     def test_create_request_name_constraints(self):
         """Test name field constraints."""
@@ -187,15 +186,9 @@ class TestMindUpdateRequest:
             "datasources": [DatasourceConfig(name="new-datasource", tables=["table1"])],
         }
 
-        request = MindUpdateRequest(**data)
-
-        assert request.name == "fully-updated-mind"
-        assert request.provider == "anthropic"
-        assert request.model_name == "claude-3"
-        assert request.parameters == {"temperature": 0.5}
-        assert len(request.datasources) == 1
-        assert request.datasources[0].name == "new-datasource"
-        assert request.datasources[0].tables == ["table1"]
+        # By default model selection is disabled, so only the default provider/model are allowed.
+        with pytest.raises(ValidationError, match="Model selection is disabled"):
+            MindUpdateRequest(**data)
 
     def test_update_request_lowercase_name_and_datasources(self):
         """Test that name and datasource names are lowercased in update request."""

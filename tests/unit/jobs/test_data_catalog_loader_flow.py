@@ -146,7 +146,7 @@ class TestDataCatalogLoaderFlow:
         """Mock mind datasource."""
         mind_datasource = Mock(spec=MindDatasource)
         mind_datasource.id = UUID("12345678-1234-5678-1234-567812345678")
-        mind_datasource.tenant_id = "test_tenant_456"
+        mind_datasource.organization_id = "test_organization_456"
         mind_datasource.datasource_id = UUID("87654321-4321-8765-4321-876543218765")
         mind_datasource.status = DataCatalogStatus.PENDING
 
@@ -237,11 +237,12 @@ class TestDataCatalogLoaderFlow:
         mock_session.exec.return_value.all.return_value = [existing_table]
 
         result = filter_loaded_tables(
-            mock_session,
-            tables_df,
-            UUID("87654321-4321-8765-4321-876543218765"),
-            UUID("12345678-1234-5678-1234-567812345678"),
-            "test_tenant_456",
+            session=mock_session,
+            tables_df=tables_df,
+            mind_datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+            datasource_id=UUID("12345678-1234-5678-1234-567812345678"),
+            organization_id="test_organization_456",
+            user_id=UUID("00000000-0000-0000-0000-000000000000"),
         )
 
         # Verify result excludes existing table
@@ -343,8 +344,9 @@ class TestDataCatalogLoaderFlow:
 
         table = _convert_row_to_table(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
             datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("00000000-0000-0000-0000-000000000000"),
         )
 
         assert isinstance(table, Table)
@@ -353,8 +355,9 @@ class TestDataCatalogLoaderFlow:
         assert table.description == "Test table"
         assert table.type == "BASE TABLE"
         assert table.row_count == 100
-        assert table.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert table.organization_id == UUID("11111111-1111-1111-1111-111111111111")
         assert table.datasource_id == UUID("87654321-4321-8765-4321-876543218765")
+        assert table.user_id == UUID("00000000-0000-0000-0000-000000000000")
 
     def test_convert_row_to_table_with_nan_row_count(self):
         """Test _convert_row_to_table function with NaN row_count."""
@@ -370,8 +373,9 @@ class TestDataCatalogLoaderFlow:
 
         table = _convert_row_to_table(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
             datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("00000000-0000-0000-0000-000000000000"),
         )
 
         assert table.row_count is None
@@ -395,11 +399,12 @@ class TestDataCatalogLoaderFlow:
         mock_session.add.side_effect = mock_add
 
         result = load_tables(
-            mock_session,
-            tables_df,
-            UUID("12345678-1234-5678-1234-567812345678"),
-            UUID("87654321-4321-8765-4321-876543218765"),
-            UUID("11111111-1111-1111-1111-111111111111"),
+            session=mock_session,
+            tables_df=tables_df,
+            mind_datasource_id=UUID("12345678-1234-5678-1234-567812345678"),
+            datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert len(result) == 2
@@ -431,8 +436,9 @@ class TestDataCatalogLoaderFlow:
 
         column = _convert_row_to_column(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
             table_id=UUID("22222222-2222-2222-2222-222222222222"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert isinstance(column, Column)
@@ -441,7 +447,7 @@ class TestDataCatalogLoaderFlow:
         assert column.description == "Test column"
         assert column.default_value == "default_value"
         assert column.is_nullable is True
-        assert column.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert column.organization_id == UUID("11111111-1111-1111-1111-111111111111")
         assert column.table_id == UUID("22222222-2222-2222-2222-222222222222")
 
     def test_convert_row_to_column_with_null_default(self):
@@ -459,8 +465,9 @@ class TestDataCatalogLoaderFlow:
 
         column = _convert_row_to_column(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
             table_id=UUID("22222222-2222-2222-2222-222222222222"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert column.default_value is None
@@ -489,7 +496,13 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        result = load_columns(mock_session, columns_df, tables, UUID("11111111-1111-1111-1111-111111111111"))
+        result = load_columns(
+            session=mock_session,
+            columns_df=columns_df,
+            tables=tables,
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
+        )
 
         assert len(result) == 2
         mock_session.add_all.assert_called_once()
@@ -568,12 +581,13 @@ class TestDataCatalogLoaderFlow:
 
         stats = _convert_row_to_column_statistics(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
             column_id=UUID("22222222-2222-2222-2222-222222222222"),
         )
 
         assert isinstance(stats, ColumnStatistics)
-        assert stats.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert stats.organization_id == UUID("11111111-1111-1111-1111-111111111111")
         assert stats.column_id == UUID("22222222-2222-2222-2222-222222222222")
         assert stats.most_common_values == ["val1", "val2"]
         assert stats.most_common_frequencies == [0.5, 0.3]
@@ -604,7 +618,11 @@ class TestDataCatalogLoaderFlow:
         )
 
         load_column_statistics(
-            mock_session, column_statistics_df, columns, UUID("11111111-1111-1111-1111-111111111111")
+            session=mock_session,
+            column_statistics_df=column_statistics_df,
+            columns=columns,
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         mock_session.add_all.assert_called_once()
@@ -627,13 +645,14 @@ class TestDataCatalogLoaderFlow:
 
         pk = _convert_row_to_primary_key(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
             table_id=UUID("22222222-2222-2222-2222-222222222222"),
             column_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert isinstance(pk, PrimaryKeyConstraint)
-        assert pk.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert pk.organization_id == UUID("11111111-1111-1111-1111-111111111111")
         assert pk.table_id == UUID("22222222-2222-2222-2222-222222222222")
         assert pk.column_id == UUID("33333333-3333-3333-3333-333333333333")
         assert pk.ordinal_position == 1
@@ -657,7 +676,14 @@ class TestDataCatalogLoaderFlow:
             {"TABLE_NAME": ["table1"], "COLUMN_NAME": ["id"], "ORDINAL_POSITION": [1], "CONSTRAINT_NAME": ["pk_table1"]}
         )
 
-        load_primary_keys(mock_session, primary_keys_df, tables, columns, UUID("77777777-7777-7777-7777-777777777777"))
+        load_primary_keys(
+            session=mock_session,
+            primary_keys_df=primary_keys_df,
+            tables=tables,
+            columns=columns,
+            organization_id=UUID("77777777-7777-7777-7777-777777777777"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
+        )
 
         mock_session.add_all.assert_called_once()
         mock_session.flush.assert_called_once()
@@ -670,7 +696,7 @@ class TestDataCatalogLoaderFlow:
         assert added_pks[0].column_id == column1.id
         assert added_pks[0].ordinal_position == 1
         assert added_pks[0].constraint_name == "pk_table1"
-        assert added_pks[0].tenant_id == UUID("77777777-7777-7777-7777-777777777777")
+        assert added_pks[0].organization_id == UUID("77777777-7777-7777-7777-777777777777")
 
     def test_convert_row_to_foreign_key(self):
         """Test _convert_row_to_foreign_key function."""
@@ -687,7 +713,8 @@ class TestDataCatalogLoaderFlow:
 
         fk = _convert_row_to_foreign_key(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
             table_id=UUID("22222222-2222-2222-2222-222222222222"),
             column_id=UUID("33333333-3333-3333-3333-333333333333"),
             referenced_table_id=UUID("44444444-4444-4444-4444-444444444444"),
@@ -695,7 +722,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         assert isinstance(fk, ForeignKeyConstraint)
-        assert fk.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert fk.organization_id == UUID("11111111-1111-1111-1111-111111111111")
         assert fk.table_id == UUID("22222222-2222-2222-2222-222222222222")
         assert fk.column_id == UUID("33333333-3333-3333-3333-333333333333")
         assert fk.referenced_table_id == UUID("44444444-4444-4444-4444-444444444444")
@@ -734,7 +761,14 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        load_foreign_keys(mock_session, foreign_keys_df, tables, columns, UUID("11111111-1111-1111-1111-111111111111"))
+        load_foreign_keys(
+            session=mock_session,
+            foreign_keys_df=foreign_keys_df,
+            tables=tables,
+            columns=columns,
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
+        )
 
         mock_session.add_all.assert_called_once()
         mock_session.flush.assert_called_once()
@@ -757,11 +791,12 @@ class TestDataCatalogLoaderFlow:
         mock_session.exec.return_value.all.return_value = []
 
         result = filter_loaded_tables(
-            mock_session,
-            empty_df,
-            UUID("87654321-4321-8765-4321-876543218765"),
-            UUID("12345678-1234-5678-1234-567812345678"),
-            "test_tenant_456",
+            session=mock_session,
+            tables_df=empty_df,
+            mind_datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+            datasource_id=UUID("12345678-1234-5678-1234-567812345678"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert len(result) == 0
@@ -772,11 +807,12 @@ class TestDataCatalogLoaderFlow:
         empty_df = pd.DataFrame(columns=["TABLE_NAME", "TABLE_SCHEMA", "TABLE_DESCRIPTION", "TABLE_TYPE", "ROW_COUNT"])
 
         result = load_tables(
-            mock_session,
-            empty_df,
-            UUID("12345678-1234-5678-1234-567812345678"),
-            UUID("87654321-4321-8765-4321-876543218765"),
-            "test_tenant_456",
+            session=mock_session,
+            tables_df=empty_df,
+            mind_datasource_id=UUID("12345678-1234-5678-1234-567812345678"),
+            datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert len(result) == 0
@@ -792,7 +828,13 @@ class TestDataCatalogLoaderFlow:
         )
         tables = []
 
-        result = load_columns(mock_session, empty_df, tables, "test_tenant_456")
+        result = load_columns(
+            session=mock_session,
+            columns_df=empty_df,
+            tables=tables,
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
+        )
 
         assert len(result) == 0
         assert isinstance(result, list)
@@ -814,7 +856,13 @@ class TestDataCatalogLoaderFlow:
         )
         columns = []
 
-        load_column_statistics(mock_session, empty_df, columns, "test_tenant_456")
+        load_column_statistics(
+            session=mock_session,
+            column_statistics_df=empty_df,
+            columns=columns,
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
+        )
 
         # add_all is called with empty list
         mock_session.add_all.assert_called_once_with([])
@@ -825,7 +873,14 @@ class TestDataCatalogLoaderFlow:
         tables = []
         columns = []
 
-        load_primary_keys(mock_session, empty_df, tables, columns, "test_tenant_456")
+        load_primary_keys(
+            session=mock_session,
+            primary_keys_df=empty_df,
+            tables=tables,
+            columns=columns,
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
+        )
 
         # add_all is called with empty list
         mock_session.add_all.assert_called_once_with([])
@@ -845,7 +900,14 @@ class TestDataCatalogLoaderFlow:
         tables = []
         columns = []
 
-        load_foreign_keys(mock_session, empty_df, tables, columns, "test_tenant_456")
+        load_foreign_keys(
+            session=mock_session,
+            foreign_keys_df=empty_df,
+            tables=tables,
+            columns=columns,
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
+        )
 
         # add_all is called with empty list
         mock_session.add_all.assert_called_once_with([])
@@ -866,12 +928,14 @@ class TestDataCatalogLoaderFlow:
 
         stats = _convert_row_to_column_statistics(
             row=row,
-            tenant_id=UUID("11111111-1111-1111-1111-111111111111"),
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
             column_id=UUID("22222222-2222-2222-2222-222222222222"),
+            user_id=UUID("33333333-3333-3333-3333-333333333333"),
         )
 
         assert isinstance(stats, ColumnStatistics)
-        assert stats.tenant_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert stats.organization_id == UUID("11111111-1111-1111-1111-111111111111")
+        assert stats.user_id == UUID("33333333-3333-3333-3333-333333333333")
         assert stats.column_id == UUID("22222222-2222-2222-2222-222222222222")
         assert stats.most_common_values is None
         assert stats.most_common_frequencies is None

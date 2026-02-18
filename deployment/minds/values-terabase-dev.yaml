@@ -1,11 +1,16 @@
 deployment:
+  serviceAccount:
+    enabled: true
+    annotations:
+      # Gives permission to use the mind-castle kms key
+      eks.amazonaws.com/role-arn: arn:aws:iam::168681354662:role/minds-20260204203650912200000002
+      
   ingress:
-  
     annotations:
       nginx.ingress.kubernetes.io/enable-cors: "true"
       
       # Forward auth configuration using your gateway service
-      nginx.ingress.kubernetes.io/auth-url: "http://mindsdb-gateway.terabase-dev.svc.cluster.local:80/cloud/llm/api-key/"
+      nginx.ingress.kubernetes.io/auth-url: "http://auth.terabase-dev.svc.cluster.local:80/api/v1/authenticate/"
     hosts:
       
       - host: minds-terabase.dev.mdb.ai
@@ -36,6 +41,10 @@ deployment:
           - path: /api/v1/responses
             serviceName: minds
             servicePort: 80
+          - path: /api/v1/limits
+            serviceName: minds
+            servicePort: 80
+
       - host: demo2.mdb.ai
         enableMultiPath: true
         paths:
@@ -55,6 +64,9 @@ deployment:
             serviceName: minds
             servicePort: 80
           - path: /api/v1/responses
+            serviceName: minds
+            servicePort: 80
+          - path: /api/v1/limits
             serviceName: minds
             servicePort: 80
 
@@ -80,3 +92,25 @@ deployment:
 
     - name: DATA_CATALOG__JOB_DEPLOYMENT_NAME
       value: "terabase-dev--data-catalog-loader"
+
+    # ====================================
+    # MIND CASTLE SETTINGS
+    # ====================================
+
+    - name: MIND_CASTLE_AWS_KMS_KEY_ARN
+      value: "arn:aws:kms:us-east-1:168681354662:key/679a2faa-925c-4da3-bc27-d4adbdcbcb13"
+
+    # ====================================
+    # MINDS SETTINGS
+    # ====================================
+
+    - name: MINDS__ENABLE_MODEL_SELECTION
+      value: "true"
+    
+    # ====================================
+    # STATSIG SETTINGS
+    # ====================================
+
+    - name: STATSIG__ENVIRONMENT
+      value: "development"
+          

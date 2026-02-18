@@ -5,6 +5,7 @@ Tests the router configuration and endpoint aggregation.
 """
 
 from unittest.mock import Mock, patch
+from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
@@ -27,7 +28,10 @@ class TestAPIV1Router:
     @pytest.fixture
     def headers(self):
         """Create headers for test client."""
-        return {"x-user-id": "12345", "x-company-id": "12345"}
+        return {
+            "X-User-Id": "00000000-0000-0000-0000-000000000001",
+            "X-Organization-Id": "00000000-0000-0000-0000-000000000002",
+        }
 
     @pytest.fixture
     def client(self, app_with_router, headers):
@@ -62,8 +66,8 @@ class TestAPIV1Router:
         mock_connect.return_value = mock_client
 
         # Mock context
-        mock_context.return_value.user_id = "test-user"
-        mock_context.return_value.tenant_id = "test-tenant"
+        mock_context.return_value.user_id = UUID("00000000-0000-0000-0000-000000000001")
+        mock_context.return_value.organization_id = UUID("00000000-0000-0000-0000-000000000002")
 
         response = client.get("/api/v1/minds/")
         assert response.status_code != 404  # Endpoint should exist
@@ -87,8 +91,8 @@ class TestAPIV1Router:
         mock_connect.return_value = mock_client
 
         # Mock context
-        mock_context.return_value.user_id = "test-user"
-        mock_context.return_value.tenant_id = "test-tenant"
+        mock_context.return_value.user_id = UUID("00000000-0000-0000-0000-000000000001")
+        mock_context.return_value.organization_id = UUID("00000000-0000-0000-0000-000000000002")
 
         response = client.get("/api/v1/datasources/")
         assert response.status_code != 404  # Endpoint should exist
@@ -105,8 +109,8 @@ class TestAPIV1Router:
         mock_connect.return_value = mock_client
 
         # Mock context
-        mock_context.return_value.user_id = "test-user"
-        mock_context.return_value.tenant_id = "test-tenant"
+        mock_context.return_value.user_id = UUID("00000000-0000-0000-0000-000000000001")
+        mock_context.return_value.organization_id = UUID("00000000-0000-0000-0000-000000000002")
 
         response = client.get("/api/v1/tree/")
         # Could be 200 (success), 422 (validation), or 500 (dependency error) - just not 404
@@ -162,6 +166,7 @@ class TestAPIV1Router:
                 "/api/v1/datasources",
                 "/api/v1/responses",
                 "/api/v1/tree",
+                "/api/v1/limits",
             ]
             assert any(route.path.startswith(prefix) for prefix in expected_prefixes), (
                 f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"

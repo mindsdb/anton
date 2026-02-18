@@ -8,13 +8,10 @@ providing a clean v1 API interface for conversation management.
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlmodel import Session
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from minds.client.mindsdb import create_mindsdb_client_from_request
+from minds.api.v1.deps import get_conversations_service, get_minds_service
 from minds.common.logger import setup_logging
-from minds.db.pg_session import get_session
-from minds.requests.context import extract_context_from_request
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.schemas.messages import MessageResponse, MessageResultResponse
 from minds.services.conversations import (
@@ -31,28 +28,6 @@ from minds.services.minds import MindNotFoundError, MindsService
 logger = setup_logging()
 
 router = APIRouter()
-
-
-def get_conversations_service(request: Request, session: Session = Depends(get_session)) -> ConversationsService:
-    """
-    Dependency function to create ConversationsService with user context.
-    """
-    context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request, context)
-    return ConversationsService(
-        session=session, mindsdb_client=mindsdb_client, user_id=context.user_id, tenant_id=context.tenant_id
-    )
-
-
-def get_mind_service(request: Request, session: Session = Depends(get_session)) -> MindsService:
-    """
-    Dependency function to create MindsService with user context.
-    """
-    context = extract_context_from_request(request)
-    mindsdb_client = create_mindsdb_client_from_request(request, context)
-    return MindsService(
-        session=session, mindsdb_client=mindsdb_client, user_id=context.user_id, tenant_id=context.tenant_id
-    )
 
 
 @router.get("/")
@@ -84,7 +59,7 @@ async def list_conversations(
     """
     logger.debug(
         f"List conversations requested (v1) "
-        f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
     )
 
     try:
@@ -101,25 +76,25 @@ async def list_conversations(
             conversations, total = result
             logger.info(
                 f"Listed {len(conversations)} conversations (total: {total}) "
-                f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+                f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
             )
             return {"conversations": conversations, "total": total}
         else:
             logger.info(
                 f"Listed conversations "
-                f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+                f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
             )
             return result
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in list_conversations "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in list_conversations "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
@@ -140,32 +115,32 @@ async def get_conversation(
     """
     logger.debug(
         f"Get conversation requested (v1) "
-        f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
     )
 
     try:
         conversation = await conversations_service.get_conversation(conversation_id)
         logger.info(
             f"Retrieved conversation {conversation_id} "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
         )
         return conversation
     except ConversationNotFoundError as e:
         logger.warning(
             f"Conversation not found "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in get_conversation "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in get_conversation "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
@@ -180,7 +155,7 @@ async def get_conversation_messages(
     """
     logger.debug(
         f"Get conversation messages requested (v1) "
-        f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
     )
 
     try:
@@ -192,13 +167,13 @@ async def get_conversation_messages(
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in get_conversation_messages "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in get_conversation_messages "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
@@ -207,7 +182,7 @@ async def get_conversation_messages(
 async def create_conversation(
     conversation_data: ConversationCreateRequest,
     conversations_service: ConversationsService = Depends(get_conversations_service),
-    mind_service: MindsService = Depends(get_mind_service),
+    mind_service: MindsService = Depends(get_minds_service),
 ) -> ConversationResponse:
     """
     Create a new conversation.
@@ -220,7 +195,7 @@ async def create_conversation(
     """
     logger.debug(
         f"Create conversation requested (v1) "
-        f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
     )
 
     try:
@@ -228,19 +203,22 @@ async def create_conversation(
         return conversation
     except MindNotFoundError as e:
         logger.warning(
-            f"Mind not found for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"Mind not found for user {conversations_service.user_id} in "
+            f"organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in create_conversation "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in "
+            f"organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in create_conversation "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in "
+            f"organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
@@ -261,31 +239,31 @@ async def delete_conversation(
     """
     logger.debug(
         f"Delete conversation requested (v1) "
-        f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
     )
     try:
         await conversations_service.delete_conversation(conversation_id)
         logger.info(
             f"Deleted conversation {conversation_id} "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
         )
         # Return nothing for 204 No Content
     except ConversationNotFoundError as e:
         logger.warning(
             f"Conversation not found for deletion "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in delete_conversation "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in delete_conversation "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
@@ -303,7 +281,7 @@ async def get_conversation_message_result(
     """
     logger.debug(
         f"Get conversation message result requested (v1) "
-        f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
     )
 
     try:
@@ -317,49 +295,49 @@ async def get_conversation_message_result(
     except ConversationNotFoundError as e:
         logger.warning(
             f"Conversation not found "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotFoundError as e:
         logger.warning(
             f"Message not found "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotAssistantError as e:
         logger.warning(
             f"Message is not an assistant message "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except MessageNoSQLQueryError as e:
         logger.warning(
             f"Message does not have a SQL query "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except InvalidSQLQueryError as e:
         logger.warning(
             f"Invalid SQL query "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except ValueError as e:
         logger.warning(
             f"Invalid pagination parameters "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in get_conversation_message_result "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in get_conversation_message_result "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
@@ -375,7 +353,7 @@ async def export_conversation_message_result(
     """
     logger.debug(
         f"Export conversation message result requested (v1) "
-        f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}"
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
     )
 
     try:
@@ -384,36 +362,36 @@ async def export_conversation_message_result(
     except ConversationNotFoundError as e:
         logger.warning(
             f"Conversation not found "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotFoundError as e:
         logger.warning(
             f"Message not found "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotAssistantError as e:
         logger.warning(
             f"Message is not an assistant message "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except InvalidSQLQueryError as e:
         logger.warning(
             f"Invalid SQL query "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
             f"Service error in export_conversation_message_result "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
         logger.error(
             f"Unexpected error in export_conversation_message_result "
-            f"for user {conversations_service.user_id} in tenant {conversations_service.tenant_id}: {e}"
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None

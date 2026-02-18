@@ -51,28 +51,28 @@ class TestMindsService:
         return Mock(spec=ConversationsService)
 
     @pytest.fixture
-    def minds_service(self, mock_session, mock_mindsdb_client, user_id=uuid4(), tenant_id=uuid4()):
+    def minds_service(self, mock_session, mock_mindsdb_client, user_id=uuid4(), organization_id=uuid4()):
         """Create MindsService instance with mocked session."""
         # Mock the datasource validation by patching the validation method
         service = MindsService(
             session=mock_session,
             mindsdb_client=mock_mindsdb_client,
             user_id=user_id,
-            tenant_id=tenant_id,
+            organization_id=organization_id,
         )
         service._validate_datasources = AsyncMock()
         service._add_datasources_to_mind = AsyncMock()
         return service
 
     @pytest.fixture
-    def sample_mind(self, user_id=uuid4(), tenant_id=uuid4()):
+    def sample_mind(self, user_id=uuid4(), organization_id=uuid4()):
         """Sample Mind instance for testing."""
         mind = Mind(
             name="test-mind",
             provider="openai",
             model_name="gpt-4o",
             user_id=user_id,
-            tenant_id=tenant_id,
+            organization_id=organization_id,
             parameters={"temperature": 0.7},
             deleted_at=None,
             created_at=datetime.now(timezone.utc),
@@ -111,7 +111,10 @@ class TestMindsService:
     def test_service_initialization(self, mock_session, mock_mindsdb_client):
         """Test MindsService initialization."""
         service = MindsService(
-            session=mock_session, mindsdb_client=mock_mindsdb_client, user_id="user-123", tenant_id="tenant-123"
+            session=mock_session,
+            mindsdb_client=mock_mindsdb_client,
+            user_id="user-123",
+            organization_id="organization-123",
         )
 
         assert service.session == mock_session
@@ -377,3 +380,52 @@ class TestMindsService:
 
         with pytest.raises(MindsServiceError, match="Failed to check mind existence"):
             await minds_service.check_mind_exists("test-mind")
+
+    # -- count_minds tests --
+
+    @pytest.mark.asyncio
+    async def test_count_minds_success(self, minds_service, mock_session):
+        """Test successful mind count."""
+        mock_session.exec.return_value.one.return_value = 5
+
+        result = await minds_service.count_minds()
+
+        assert result == 5
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_minds_with_is_sample_false(self, minds_service, mock_session):
+        """Test count minds excluding sample minds."""
+        mock_session.exec.return_value.one.return_value = 3
+
+        result = await minds_service.count_minds(is_sample=False)
+
+        assert result == 3
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_minds_with_is_sample_true(self, minds_service, mock_session):
+        """Test count minds including only sample minds."""
+        mock_session.exec.return_value.one.return_value = 2
+
+        result = await minds_service.count_minds(is_sample=True)
+
+        assert result == 2
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_minds_returns_zero(self, minds_service, mock_session):
+        """Test count minds when there are none."""
+        mock_session.exec.return_value.one.return_value = 0
+
+        result = await minds_service.count_minds()
+
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_count_minds_database_error(self, minds_service, mock_session):
+        """Test count minds with database error."""
+        mock_session.exec.side_effect = Exception("Database error")
+
+        with pytest.raises(MindsServiceError, match="Failed to count minds"):
+            await minds_service.count_minds()
