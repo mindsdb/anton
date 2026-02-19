@@ -113,3 +113,53 @@ class TestExecutor:
         assert isinstance(event, StatusUpdate)
         assert event.phase == Phase.EXECUTING
         assert "Step 1/1" in event.message
+
+    async def test_publishes_eta_from_initial_estimate(self):
+        """First step uses the provided eta_seconds."""
+        registry = SkillRegistry()
+        registry.register(_make_skill("read_file"))
+        bus = EventBus()
+        queue = bus.subscribe()
+
+        plan = Plan(
+            reasoning="test",
+            steps=[
+                PlanStep(skill_name="read_file", description="reading", parameters={}),
+            ],
+        )
+
+        executor = Executor(registry, bus)
+        await executor.execute_plan(plan, eta_seconds=10.0)
+
+        event = queue.get_nowait()
+        assert isinstance(event, StatusUpdate)
+        assert event.eta_seconds == 10.0
+
+    async def test_multi_step_computes_eta_from_pace(self):
+        """After first step, ETA is computed from observed pace."""
+        registry = SkillRegistry()
+        registry.register(_make_skill("read_file"))
+        registry.register(_make_skill("write_file"))
+        bus = EventBus()
+        queue = bus.subscribe()
+
+        plan = Plan(
+            reasoning="test",
+            steps=[
+                PlanStep(skill_name="read_file", description="read", parameters={}),
+                PlanStep(skill_name="write_file", description="write", parameters={}),
+            ],
+        )
+
+        executor = Executor(registry, bus)
+        await executor.execute_plan(plan)
+
+        # First step: no ETA (no history, no initial estimate)
+        event1 = queue.get_nowait()
+        assert event1.eta_seconds is None
+
+        # Second step: ETA computed from elapsed time
+        event2 = queue.get_nowait()
+        assert isinstance(event2, StatusUpdate)
+        assert event2.eta_seconds is not None
+        assert event2.eta_seconds >= 0

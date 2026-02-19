@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from anton.llm.provider import LLMProvider, LLMResponse
+from anton.llm.provider import LLMProvider, LLMResponse, StreamEvent
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -37,6 +38,23 @@ class LLMClient:
             tools=tools,
             max_tokens=max_tokens,
         )
+
+    async def plan_stream(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[StreamEvent]:
+        async for event in self._planning_provider.stream(
+            model=self._planning_model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        ):
+            yield event
 
     async def code(
         self,

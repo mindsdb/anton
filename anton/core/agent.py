@@ -119,7 +119,7 @@ class Agent:
                 plan = await self._planner.plan(task, memory_context=memory_context)
 
             # Phase 3: Execution
-            execution_result = await self._executor.execute_plan(plan)
+            execution_result = await self._executor.execute_plan(plan, eta_seconds=eta)
 
             # Log each step result to transcript
             if self._memory is not None and session_id is not None:

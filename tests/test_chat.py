@@ -5,7 +5,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.chat import ChatSession
-from anton.llm.provider import LLMResponse, ToolCall, Usage
+from anton.llm.provider import (
+    LLMResponse,
+    StreamComplete,
+    StreamTaskProgress,
+    StreamTextDelta,
+    ToolCall,
+    Usage,
+)
 
 
 def _text_response(text: str) -> LLMResponse:
@@ -173,3 +180,121 @@ class TestChatSession:
         assistant_msg = session.history[1]
         assert len(assistant_msg["content"]) == 1
         assert assistant_msg["content"][0]["type"] == "tool_use"
+
+
+# --- Helpers for streaming tests ---
+
+async def _fake_plan_stream(events):
+    """Return an async generator factory that yields events from a list of event sequences."""
+    call_count = 0
+
+    async def _gen(**kwargs):
+        nonlocal call_count
+        for ev in events[call_count]:
+            yield ev
+        call_count += 1
+
+    return _gen
+
+
+class TestChatSessionStreaming:
+    async def test_turn_stream_yields_text_deltas(self):
+        """Streaming turn yields text deltas and updates history."""
+        mock_llm = AsyncMock()
+
+        async def _stream(**kwargs):
+            yield StreamTextDelta(text="Hello ")
+            yield StreamTextDelta(text="world!")
+            yield StreamComplete(response=_text_response("Hello world!"))
+
+        mock_llm.plan_stream = _stream
+        mock_run = AsyncMock()
+
+        session = ChatSession(mock_llm, mock_run)
+        events = []
+        async for event in session.turn_stream("hi"):
+            events.append(event)
+
+        # Should have 2 text deltas + 1 complete
+        text_deltas = [e for e in events if isinstance(e, StreamTextDelta)]
+        completes = [e for e in events if isinstance(e, StreamComplete)]
+        assert len(text_deltas) == 2
+        assert text_deltas[0].text == "Hello "
+        assert text_deltas[1].text == "world!"
+        assert len(completes) == 1
+
+        # History: user + assistant
+        assert len(session.history) == 2
+        assert session.history[1]["content"] == "Hello world!"
+
+    async def test_turn_stream_handles_tool_calls(self):
+        """Streaming turn handles tool-call loop across two LLM calls."""
+        mock_llm = AsyncMock()
+        call_count = 0
+
+        async def _stream(**kwargs):
+            nonlocal call_count
+            if call_count == 0:
+                # First call: tool use
+                yield StreamTextDelta(text="Let me do that.")
+                yield StreamComplete(
+                    response=_tool_response("Let me do that.", "list files")
+                )
+            else:
+                # Second call: text-only follow-up
+                yield StreamTextDelta(text="Done!")
+                yield StreamComplete(response=_text_response("Done!"))
+            call_count += 1
+
+        mock_llm.plan_stream = _stream
+        mock_run = AsyncMock()
+
+        session = ChatSession(mock_llm, mock_run)
+        events = []
+        async for event in session.turn_stream("list files"):
+            events.append(event)
+
+        mock_run.assert_awaited_once_with("list files")
+
+        # Should have deltas from both calls
+        text_deltas = [e for e in events if isinstance(e, StreamTextDelta)]
+        assert len(text_deltas) == 2
+
+        # History: user, assistant(tool_use), user(tool_result), assistant(text)
+        assert len(session.history) == 4
+
+    async def test_turn_stream_yields_task_progress(self):
+        """Streaming turn with run_task_stream yields StreamTaskProgress events."""
+        mock_llm = AsyncMock()
+        call_count = 0
+
+        async def _stream(**kwargs):
+            nonlocal call_count
+            if call_count == 0:
+                yield StreamComplete(
+                    response=_tool_response("", "build it")
+                )
+            else:
+                yield StreamTextDelta(text="Done!")
+                yield StreamComplete(response=_text_response("Done!"))
+            call_count += 1
+
+        mock_llm.plan_stream = _stream
+
+        async def _fake_run_task_stream(task: str):
+            yield StreamTaskProgress(phase="planning", message="Analyzing task...")
+            yield StreamTaskProgress(phase="executing", message="Step 1/2: read", eta_seconds=5.0)
+            yield StreamTaskProgress(phase="executing", message="Step 2/2: write", eta_seconds=2.0)
+
+        mock_run = AsyncMock()
+        session = ChatSession(mock_llm, mock_run, run_task_stream=_fake_run_task_stream)
+        events = []
+        async for event in session.turn_stream("build it"):
+            events.append(event)
+
+        progress = [e for e in events if isinstance(e, StreamTaskProgress)]
+        assert len(progress) == 3
+        assert progress[0].phase == "planning"
+        assert progress[1].eta_seconds == 5.0
+        # run_task (non-streaming) should NOT have been called
+        mock_run.assert_not_awaited()

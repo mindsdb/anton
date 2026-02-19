@@ -29,15 +29,26 @@ class Executor:
         self._registry = registry
         self._bus = bus
 
-    async def execute_plan(self, plan: Plan) -> ExecutionResult:
+    async def execute_plan(self, plan: Plan, eta_seconds: float | None = None) -> ExecutionResult:
         results: list[StepResult] = []
         total_start = time.monotonic()
+        total_steps = len(plan.steps)
 
         for i, step in enumerate(plan.steps):
+            # Compute ETA: use initial estimate for first step, then observed pace
+            step_eta: float | None = None
+            if i == 0 and eta_seconds is not None:
+                step_eta = eta_seconds
+            elif i > 0:
+                elapsed = time.monotonic() - total_start
+                avg_per_step = elapsed / i
+                step_eta = avg_per_step * (total_steps - i)
+
             await self._bus.publish(
                 StatusUpdate(
                     phase=Phase.EXECUTING,
-                    message=f"Step {i + 1}/{len(plan.steps)}: {step.description}",
+                    message=f"Step {i + 1}/{total_steps}: {step.description}",
+                    eta_seconds=step_eta,
                 )
             )
 
