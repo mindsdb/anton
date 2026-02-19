@@ -360,7 +360,7 @@ services:
   minds-flows:
     build:
       context: .
-    image: minds-flows:latest
+    image: minds:latest
     <<: *autoRestartOnFailure
     command: ["make", "prefect/docker/deploy/full"]
     restart: "no"
@@ -379,7 +379,6 @@ services:
       ENV: local
       LOG_LEVEL: DEBUG
 
-      IMAGE_NAME: minds-flows
       IMAGE_TAG: latest
 
       DATABASE__URI: postgresql://minds:minds@postgres/minds

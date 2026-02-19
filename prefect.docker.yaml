@@ -11,7 +11,7 @@ definitions:
     - "minds"
     - "ENV_PLACEHOLDER"
     - "IMAGE_TAG_PLACEHOLDER"
-  image: &default_image "minds-flows:IMAGE_TAG_PLACEHOLDER"
+  image: &default_image "mindsdb/minds:IMAGE_TAG_PLACEHOLDER"
   work_pools:
     default: &default_work_pool
       name: standard-worker-pool
