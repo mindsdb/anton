@@ -1,5 +1,5 @@
 #!/bin/sh
-# Anton install script — curl -sSf https://raw.githubusercontent.com/jorgestorres/anton/main/install.sh | sh
+# Anton install script — curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh
 # Pure POSIX sh, no sudo, idempotent.
 
 set -e
@@ -13,7 +13,7 @@ RESET='\033[0m'
 ANTON_HOME="$HOME/.anton"
 VENV_DIR="$ANTON_HOME/venv"
 LOCAL_BIN="$HOME/.local/bin"
-REPO_URL="git+https://github.com/jorgestorres/anton.git"
+REPO_URL="git+https://github.com/mindsdb/anton.git"
 
 info()  { printf "%b\n" "$1"; }
 error() { printf "${RED}error:${RESET} %s\n" "$1" >&2; }
@@ -22,7 +22,7 @@ error() { printf "${RED}error:${RESET} %s\n" "$1" >&2; }
 info ""
 info "${CYAN} ▄▀█ █▄ █ ▀█▀ █▀█ █▄ █${RESET}"
 info "${CYAN} █▀█ █ ▀█  █  █▄█ █ ▀█${RESET}"
-info "${CYAN} autonomous coding copilot${RESET}"
+info "${CYAN} autonomous coworker${RESET}"
 info ""
 
 # ── 2. Check for / install uv ──────────────────────────────────────
