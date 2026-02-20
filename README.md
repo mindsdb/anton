@@ -31,12 +31,37 @@ Task → Memory Recall → Planning → Skill Building (if needed) → Execution
 
 The chat interface wraps this pipeline behind a conversational layer. Anton asks clarifying questions, interprets context, and only fires the pipeline when it has enough information.
 
+## Workspace
+
+When you run `anton` in a directory, it checks for an `anton.md` file. If the folder has existing files but no `anton.md`, Anton asks before setting up — it won't touch your stuff without permission.
+
+Once initialized, the workspace looks like:
+
+```
+project/
+├── anton.md              # Project context (read every conversation)
+└── .anton/
+    ├── .env              # Secrets (API keys, tokens — never pass through LLM)
+    ├── context/          # Self-awareness files (project facts, conventions)
+    ├── skills/           # User and auto-generated skills
+    ├── sessions/         # Task transcripts and summaries
+    ├── learnings/        # Extracted insights
+    └── minions/          # One folder per minion (<id>/status.json, artifacts)
+```
+
+**anton.md** — Write anything here. Project context, conventions, preferences. Anton reads it at the start of every conversation.
+
+**Secret vault** — When Anton needs an API key or token, it asks you directly and stores the value in `.anton/.env`. The secret never passes through the LLM — Anton just gets told "the variable is set."
+
+All data lives in `.anton/` in the current working directory. Override with `anton --folder /path`.
+
 ## Architecture
 
 ```
 anton/
 ├── cli.py              # Typer CLI: chat, run, skills, sessions, minions
 ├── chat.py             # Multi-turn conversation with tool-call delegation
+├── workspace.py        # Workspace init, anton.md, secret vault
 ├── core/
 │   ├── agent.py        # Orchestrator: memory → plan → build → execute
 │   ├── planner.py      # LLM-powered task decomposition
@@ -54,7 +79,7 @@ anton/
 ├── context/
 │   └── self_awareness.py  # .anton/context/ files injected into every LLM call
 ├── minion/
-│   └── registry.py     # Minion lifecycle tracking
+│   └── registry.py     # Minion data models and lifecycle
 ├── llm/
 │   ├── client.py       # Planning vs coding model abstraction
 │   ├── prompts.py      # System prompts
@@ -63,34 +88,41 @@ anton/
 └── events/             # Async event bus for status updates
 ```
 
-### Data layout (workspace-relative)
-
-```
-.anton/
-├── .env                # API keys (local to this workspace)
-├── context/            # Self-awareness files (project facts, conventions)
-├── skills/             # User and auto-generated skills
-├── sessions/           # Task transcripts and summaries
-└── learnings/          # Extracted insights
-```
-
-All data lives in `.anton/` in the current working directory. Override with `anton --folder /path`.
-
 ## Minions
 
-Minions are background workers. The idea: Anton handles the conversation, but when a task is long-running, independent, or recurring, it spawns a minion to handle it separately.
+Minions are background workers. Anton handles the conversation, but when a task is long-running, independent, or recurring, it spawns a minion to handle it separately.
 
-### How it works (design)
+### Spawning
 
-**Spawning.** In chat, Anton recognizes work that should run in the background — large batch jobs, monitoring tasks, periodic checks — and spawns a minion. From the CLI: `anton minion "task" --folder /path`. Each minion is a separate `Agent.run()` in its own process and workspace.
+In chat, Anton recognizes work that should run in the background — large batch jobs, monitoring tasks, periodic checks — and spawns a minion. From the CLI:
 
-**Communication.** Minions write their results to `.anton/minions/<id>/` — a session transcript, status file, and output artifacts. The parent Anton reads these to check progress. No sockets, no IPC — just the filesystem. Anton can poll minion status, and when a minion completes, its summary is available for the next conversation turn.
+```bash
+anton minion "check email and flag urgent items" --every 30m
+anton minion "run test suite" --max-runs 1
+anton minion "monitor API health" --every 5m --start 2025-01-15T09:00 --end 2025-01-15T17:00
+```
 
-**Scheduling.** Minions can have a cron expression (`cron_expr` field). A scheduled minion re-runs on its cron schedule until killed. Use case: "check my email every 30 minutes and flag anything important."
+Each minion gets its own directory (`.anton/minions/<id>/`) with a status file, session transcript, and any output artifacts. If scheduling options aren't passed via CLI, the minion can ask conversationally.
 
-**Lifecycle.** Anton decides which minions to kill. When a minion is killed, its cron schedule is also removed — no orphaned jobs. Statuses: `pending → running → completed | failed | killed`.
+### Communication
 
-**Current state.** The data models (`MinionInfo`, `MinionRegistry`) and CLI scaffolding (`anton minion`, `anton minions`) exist. The actual process spawning, filesystem protocol, and chat-level tooling are not yet implemented.
+Minions write their results to `.anton/minions/<id>/` — status.json, transcripts, and artifacts. The parent Anton reads these to check progress. No sockets, no IPC — just the filesystem. When a minion completes, its summary is available for the next conversation turn.
+
+### Scheduling
+
+Minions support flexible scheduling:
+- `--every` — Repeat frequency (`5m`, `1h`, `30s`)
+- `--start` / `--end` — Time window
+- `--max-runs` — Cap on total executions
+- `cron_expr` — Standard cron expressions for advanced scheduling
+
+### Lifecycle
+
+Statuses: `pending → running → completed | failed | killed`
+
+Anton decides which minions to kill. When a minion is killed, its schedule is also removed — no orphaned jobs. Minions track their own run count and respect max_runs limits.
+
+**Current state.** Data models (`MinionInfo`, `MinionRegistry`), CLI scaffolding, directory creation, and status persistence exist. Process spawning and real-time monitoring are not yet implemented.
 
 ## Commands
 
@@ -102,13 +134,14 @@ Minions are background workers. The idea: Anton handles the conversation, but wh
 | `anton skills` | List discovered skills |
 | `anton sessions` | Browse past work |
 | `anton learnings` | What Anton has learned |
-| `anton minion "task"` | Spawn a background worker (scaffold) |
-| `anton minions` | List tracked minions (scaffold) |
+| `anton minion "task"` | Spawn a background worker |
+| `anton minion "task" --every 5m` | Spawn a recurring minion |
+| `anton minions` | List tracked minions |
 
 ## Configuration
 
 ```
-.anton/.env              # Workspace-local API keys
+.anton/.env              # Workspace-local secrets and API keys
 ANTON_ANTHROPIC_API_KEY  # Anthropic API key
 ANTON_PLANNING_MODEL     # Model for planning (default: claude-sonnet-4-6)
 ANTON_CODING_MODEL       # Model for coding (default: claude-opus-4-6)

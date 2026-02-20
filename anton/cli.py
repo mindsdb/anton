@@ -6,14 +6,14 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from anton import __version__
 
 app = typer.Typer(
     name="anton",
-    help="Anton — autonomous coding copilot",
+    help="Anton — a self-evolving autonomous system",
 )
 
 
@@ -32,6 +32,39 @@ def _get_settings(ctx: typer.Context):
     return ctx.obj["settings"]
 
 
+def _ensure_workspace(settings) -> None:
+    """Check workspace state and initialize if needed."""
+    from anton.workspace import Workspace
+
+    ws = Workspace(settings.workspace_path)
+
+    # Apply existing .env variables to process
+    ws.apply_env_to_process()
+
+    if ws.is_initialized():
+        return
+
+    if ws.needs_confirmation():
+        console.print()
+        console.print(
+            "[anton.warning]This folder already contains files that aren't part of Anton.[/]"
+        )
+        console.print(f"[dim]  Folder: {settings.workspace_path}[/]")
+        console.print()
+        if not Confirm.ask(
+            "Initialize Anton workspace here?",
+            default=True,
+            console=console,
+        ):
+            raise typer.Exit(0)
+
+    actions = ws.initialize()
+    for action in actions:
+        console.print(f"[anton.muted]  {action}[/]")
+    if actions:
+        console.print()
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -39,7 +72,7 @@ def main(
         None, "--folder", "-f", help="Workspace folder (defaults to cwd)"
     ),
 ) -> None:
-    """Anton — autonomous coding copilot."""
+    """Anton — a self-evolving autonomous system."""
     from anton.config.settings import AntonSettings
 
     settings = AntonSettings()
@@ -53,6 +86,7 @@ def main(
         from anton.chat import run_chat
 
         render_banner(console)
+        _ensure_workspace(settings)
         _ensure_api_key(settings)
         run_chat(console, settings)
 
@@ -89,6 +123,12 @@ def _ensure_api_key(settings) -> None:
     provider = providers[choice]
 
     console.print()
+
+    # Use the workspace secret vault to store the key securely
+    from anton.workspace import Workspace
+
+    ws = Workspace(settings.workspace_path)
+
     api_key = Prompt.ask(
         f"Enter your {provider.title()} API key",
         console=console,
@@ -99,34 +139,17 @@ def _ensure_api_key(settings) -> None:
         raise typer.Exit(1)
 
     api_key = api_key.strip()
-
-    # Save to workspace .anton/.env for persistence
-    env_dir = Path(settings.workspace_path) / ".anton"
-    env_dir.mkdir(parents=True, exist_ok=True)
-    env_file = env_dir / ".env"
-
-    lines: list[str] = []
     key_name = f"ANTON_{provider.upper()}_API_KEY"
-    replaced = False
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if line.startswith(f"{key_name}="):
-                lines.append(f"{key_name}={api_key}")
-                replaced = True
-            else:
-                lines.append(line)
-    if not replaced:
-        lines.append(f"{key_name}={api_key}")
 
-    env_file.write_text("\n".join(lines) + "\n")
+    # Store via secret vault — never passes through LLM
+    ws.set_secret(key_name, api_key)
 
-    # Apply to current process so this run works
-    os.environ[key_name] = api_key
+    # Apply to current process
     if provider == "anthropic":
         settings.anthropic_api_key = api_key
 
     console.print()
-    console.print(f"[anton.success]Saved to {env_file}[/]")
+    console.print(f"[anton.success]Saved to {ws.env_path}[/]")
     console.print()
 
 
@@ -148,6 +171,7 @@ def run(
 
     settings = _get_settings(ctx)
     render_banner(console)
+    _ensure_workspace(settings)
     asyncio.run(_run_task(task, settings))
 
 
@@ -376,18 +400,123 @@ def minion_cmd(
     folder: str | None = typer.Option(
         None, "--folder", "-f", help="Workspace folder for the minion"
     ),
+    every: str | None = typer.Option(
+        None, "--every", "-e",
+        help="Repeat frequency (e.g. '5m', '1h', '30s')",
+    ),
+    start: str | None = typer.Option(
+        None, "--start",
+        help="When to start (ISO datetime, e.g. '2025-01-15T09:00')",
+    ),
+    end: str | None = typer.Option(
+        None, "--end",
+        help="When to stop (ISO datetime, e.g. '2025-01-15T17:00')",
+    ),
+    max_runs: int | None = typer.Option(
+        None, "--max-runs", "-n",
+        help="Maximum number of repetitions",
+    ),
 ) -> None:
-    """Spawn a minion to work on a task in a given folder."""
-    console.print("[dim]Minion system is not yet implemented.[/]")
-    console.print(f"[dim]  task: {task}[/]")
-    if folder:
-        console.print(f"[dim]  folder: {folder}[/]")
+    """Spawn a minion to work on a task."""
+    from datetime import datetime
+
+    from anton.minion.registry import MinionInfo, MinionRegistry
+
+    minion_id = MinionInfo.make_id()
+    base = Path(folder).resolve() if folder else Path.cwd()
+
+    # Parse scheduling options
+    start_at = None
+    if start:
+        try:
+            start_at = datetime.fromisoformat(start)
+        except ValueError:
+            console.print(f"[anton.error]Invalid --start datetime: {start}[/]")
+            raise typer.Exit(1)
+
+    end_at = None
+    if end:
+        try:
+            end_at = datetime.fromisoformat(end)
+        except ValueError:
+            console.print(f"[anton.error]Invalid --end datetime: {end}[/]")
+            raise typer.Exit(1)
+
+    minion = MinionInfo(
+        id=minion_id,
+        task=task,
+        folder=str(base),
+        every=every,
+        start_at=start_at,
+        end_at=end_at,
+        max_runs=max_runs,
+    )
+
+    # Create the minion's dedicated directory and save status
+    minion.ensure_dir()
+    minion.save_status()
+
+    console.print(f"[anton.cyan]Minion {minion_id}[/] created")
+    console.print(f"[dim]  Task: {task}[/]")
+    console.print(f"[dim]  Directory: {minion.minion_dir}[/]")
+    if every:
+        console.print(f"[dim]  Repeats: every {every}[/]")
+    if start_at:
+        console.print(f"[dim]  Starts: {start_at.isoformat()}[/]")
+    if end_at:
+        console.print(f"[dim]  Ends: {end_at.isoformat()}[/]")
+    if max_runs:
+        console.print(f"[dim]  Max runs: {max_runs}[/]")
+    console.print()
+    console.print("[dim]Minion execution is not yet fully implemented.[/]")
 
 
 @app.command("minions")
 def list_minions() -> None:
     """List tracked minions."""
-    console.print("[dim]No minions tracked.[/]")
+    import json
+
+    # Scan .anton/minions/ for minion directories with status.json
+    minions_dir = Path.cwd() / ".anton" / "minions"
+    if not minions_dir.is_dir():
+        console.print("[dim]No minions tracked.[/]")
+        return
+
+    entries = []
+    for child in sorted(minions_dir.iterdir()):
+        status_file = child / "status.json"
+        if status_file.is_file():
+            try:
+                data = json.loads(status_file.read_text())
+                entries.append(data)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    if not entries:
+        console.print("[dim]No minions tracked.[/]")
+        return
+
+    table = Table(title="Minions")
+    table.add_column("ID", style="anton.cyan")
+    table.add_column("Task")
+    table.add_column("Status")
+    table.add_column("Runs")
+    table.add_column("Schedule")
+
+    for e in entries:
+        schedule = e.get("every") or e.get("cron_expr") or "—"
+        runs = str(e.get("run_count", 0))
+        if e.get("max_runs"):
+            runs += f"/{e['max_runs']}"
+        table.add_row(
+            e.get("id", "?"),
+            (e.get("task", "")[:40] + "...") if len(e.get("task", "")) > 40 else e.get("task", ""),
+            e.get("status", "?"),
+            runs,
+            schedule,
+        )
+
+    console.print(table)
 
 
 @app.command("version")

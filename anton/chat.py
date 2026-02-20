@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.llm.client import LLMClient
+    from anton.workspace import Workspace
 
 EXECUTE_TASK_TOOL = {
     "name": "execute_task",
@@ -74,6 +75,29 @@ UPDATE_CONTEXT_TOOL = {
     },
 }
 
+REQUEST_SECRET_TOOL = {
+    "name": "request_secret",
+    "description": (
+        "Request a secret value (API key, token, password) from the user. "
+        "The value is stored directly in .anton/.env and NEVER passed through the LLM. "
+        "After calling this, you will be told the variable has been set — use it by name."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "variable_name": {
+                "type": "string",
+                "description": "Environment variable name to store (e.g. 'GITHUB_TOKEN', 'DATABASE_PASSWORD')",
+            },
+            "prompt_text": {
+                "type": "string",
+                "description": "What to ask the user (e.g. 'Please enter your GitHub personal access token')",
+            },
+        },
+        "required": ["variable_name", "prompt_text"],
+    },
+}
+
 
 class _ProgressChannel(Channel):
     """Channel that captures agent events into an asyncio.Queue instead of rendering."""
@@ -102,12 +126,16 @@ class ChatSession:
         run_task_stream=None,
         self_awareness: SelfAwarenessContext | None = None,
         runtime_context: str = "",
+        workspace: Workspace | None = None,
+        console: Console | None = None,
     ) -> None:
         self._llm = llm_client
         self._run_task = run_task
         self._run_task_stream = run_task_stream
         self._self_awareness = self_awareness
         self._runtime_context = runtime_context
+        self._workspace = workspace
+        self._console = console
         self._history: list[dict] = []
 
     @property
@@ -120,12 +148,19 @@ class ChatSession:
             sa_section = self._self_awareness.build_prompt_section()
             if sa_section:
                 prompt += sa_section
+        # Inject anton.md project context
+        if self._workspace is not None:
+            md_context = self._workspace.build_anton_md_context()
+            if md_context:
+                prompt += md_context
         return prompt
 
     def _build_tools(self) -> list[dict]:
         tools = [EXECUTE_TASK_TOOL]
         if self._self_awareness is not None:
             tools.append(UPDATE_CONTEXT_TOOL)
+        if self._workspace is not None:
+            tools.append(REQUEST_SECRET_TOOL)
         return tools
 
     def _handle_update_context(self, tc_input: dict) -> str:
@@ -148,6 +183,37 @@ class ChatSession:
         actions = self._self_awareness.apply_updates(updates)
         return "Context updated: " + "; ".join(actions)
 
+    def _handle_request_secret(self, tc_input: dict) -> str:
+        """Handle a request_secret tool call.
+
+        Asks the user directly for the secret value, stores it in .env,
+        and returns a confirmation — NEVER returns the actual secret value.
+        """
+        if self._workspace is None or self._console is None:
+            return "Secret storage not available."
+
+        var_name = tc_input.get("variable_name", "")
+        prompt_text = tc_input.get("prompt_text", f"Enter value for {var_name}")
+
+        if not var_name:
+            return "No variable_name provided."
+
+        # Check if already set
+        if self._workspace.has_secret(var_name):
+            return f"Variable {var_name} is already set in .anton/.env."
+
+        # Ask user directly — this bypasses the LLM entirely
+        self._console.print()
+        value = self._console.input(f"[bold]{prompt_text}:[/] ")
+        value = value.strip()
+
+        if not value:
+            return f"No value provided for {var_name}. Variable not set."
+
+        # Store securely — value never touches the LLM
+        self._workspace.set_secret(var_name, value)
+        return f"Variable {var_name} has been set in .anton/.env. You can now use it."
+
     async def turn(self, user_input: str) -> str:
         self._history.append({"role": "user", "content": user_input})
 
@@ -160,7 +226,7 @@ class ChatSession:
             tools=tools,
         )
 
-        # Handle tool calls (execute_task, update_context)
+        # Handle tool calls (execute_task, update_context, request_secret)
         while response.tool_calls:
             # Build assistant message with content blocks
             assistant_content: list[dict] = []
@@ -187,6 +253,8 @@ class ChatSession:
                         result_text = f"Task failed: {exc}"
                 elif tc.name == "update_context":
                     result_text = self._handle_update_context(tc.input)
+                elif tc.name == "request_secret":
+                    result_text = self._handle_request_secret(tc.input)
                 else:
                     result_text = f"Unknown tool: {tc.name}"
 
@@ -269,6 +337,8 @@ class ChatSession:
                         result_text = f"Task failed: {exc}"
                 elif tc.name == "update_context":
                     result_text = self._handle_update_context(tc.input)
+                elif tc.name == "request_secret":
+                    result_text = self._handle_request_secret(tc.input)
                 else:
                     result_text = f"Unknown tool: {tc.name}"
 
@@ -313,6 +383,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
     from anton.core.agent import Agent
     from anton.llm.client import LLMClient
     from anton.skill.registry import SkillRegistry
+    from anton.workspace import Workspace
 
     # Use a mutable container so closures always see the current client
     state: dict = {"llm_client": LLMClient.from_settings(settings)}
@@ -338,6 +409,10 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
 
     # Self-awareness context
     self_awareness = SelfAwarenessContext(Path(settings.context_dir))
+
+    # Workspace for anton.md and secret vault
+    workspace = Workspace(settings.workspace_path)
+    workspace.apply_env_to_process()
 
     async def _do_run_task(task: str) -> None:
         agent = Agent(
@@ -426,6 +501,8 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
         run_task_stream=_do_run_task_stream,
         self_awareness=self_awareness,
         runtime_context=runtime_context,
+        workspace=workspace,
+        console=console,
     )
 
     console.print("[anton.muted]Chat with Anton. Type 'exit' to quit.[/]")
@@ -493,6 +570,8 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                     run_task_stream=_do_run_task_stream,
                     self_awareness=self_awareness,
                     runtime_context=runtime_context,
+                    workspace=workspace,
+                    console=console,
                 )
             except KeyboardInterrupt:
                 display.abort()
