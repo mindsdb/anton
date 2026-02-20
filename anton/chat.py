@@ -632,7 +632,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
     try:
         while True:
             try:
-                user_input = prompt_session.prompt(ANSI("\033[1myou>\033[0m "))
+                user_input = await prompt_session.prompt_async(ANSI("\033[1myou>\033[0m "))
             except EOFError:
                 break
 
