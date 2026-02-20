@@ -131,6 +131,11 @@ class Agent:
                 )
                 plan = await self._planner.plan(task, memory_context=memory_context)
 
+            # Make LLM available to skills via get_llm()
+            from anton.skill.context import set_skill_llm
+
+            set_skill_llm(self._llm.coding_provider, self._llm.coding_model)
+
             # Phase 3: Execution
             execution_result = await self._executor.execute_plan(plan, eta_seconds=eta)
 

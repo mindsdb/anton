@@ -56,6 +56,16 @@ class LLMClient:
         ):
             yield event
 
+    @property
+    def coding_provider(self) -> LLMProvider:
+        """The LLM provider used for coding/skill execution."""
+        return self._coding_provider
+
+    @property
+    def coding_model(self) -> str:
+        """The model name used for coding/skill execution."""
+        return self._coding_model
+
     async def code(
         self,
         *,
