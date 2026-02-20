@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -80,26 +77,6 @@ UPDATE_CONTEXT_TOOL = {
     },
 }
 
-RUN_CODE_TOOL = {
-    "name": "run_code",
-    "description": (
-        "Run a Python code snippet and return the output. Use this for calculations, "
-        "counting, parsing, data processing, or any task that benefits from precise "
-        "computation rather than guessing. The code runs in a subprocess with access "
-        "to the Python standard library. Use print() to produce output."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "code": {
-                "type": "string",
-                "description": "Python code to execute. Use print() to output results.",
-            },
-        },
-        "required": ["code"],
-    },
-}
-
 REQUEST_SECRET_TOOL = {
     "name": "request_secret",
     "description": (
@@ -127,15 +104,16 @@ REQUEST_SECRET_TOOL = {
 SCRATCHPAD_TOOL = {
     "name": "scratchpad",
     "description": (
-        "Manage persistent Python scratchpads for stateful, iterative "
-        "computation. Unlike run_code (one-shot), scratchpads maintain state across "
-        "cells — variables, imports, and data persist. Use for data exploration, "
-        "multi-step analysis, and building up results incrementally.\n\n"
+        "Run Python code in a persistent scratchpad. Use this whenever you need to "
+        "count characters, do math, parse data, transform text, or any task that "
+        "benefits from precise computation rather than guessing. Variables, imports, "
+        "and data persist across cells — like a notebook you drive programmatically.\n\n"
         "Actions:\n"
         "- exec: Run code in the scratchpad (creates it if needed)\n"
         "- view: See all cells and their outputs\n"
         "- reset: Restart the process, clearing all state\n"
         "- remove: Kill the scratchpad\n\n"
+        "Use print() to produce output. The Python standard library is available.\n"
         "run_skill(name, **kwargs) is available in code to call Anton skills."
     ),
     "input_schema": {
@@ -152,7 +130,6 @@ SCRATCHPAD_TOOL = {
     },
 }
 
-_RUN_CODE_TIMEOUT = 30
 
 class _ProgressChannel(Channel):
     """Channel that captures agent events into an asyncio.Queue instead of rendering."""
@@ -213,7 +190,7 @@ class ChatSession:
         return prompt
 
     def _build_tools(self) -> list[dict]:
-        tools = [EXECUTE_TASK_TOOL, RUN_CODE_TOOL, SCRATCHPAD_TOOL]
+        tools = [EXECUTE_TASK_TOOL, SCRATCHPAD_TOOL]
         if self._self_awareness is not None:
             tools.append(UPDATE_CONTEXT_TOOL)
         if self._workspace is not None:
@@ -270,60 +247,6 @@ class ChatSession:
         # Store securely — value never touches the LLM
         self._workspace.set_secret(var_name, value)
         return f"Variable {var_name} has been set in .anton/.env. You can now use it."
-
-    async def _handle_run_code(self, tc_input: dict) -> str:
-        """Execute a Python code snippet in a subprocess and return the output."""
-        code = tc_input.get("code", "")
-        if not code or not code.strip():
-            return "No code provided."
-
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".py", delete=False
-            ) as tmp:
-                tmp.write(code)
-                tmp_path = tmp.name
-
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, tmp_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=_RUN_CODE_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                return f"Code execution timed out after {_RUN_CODE_TIMEOUT} seconds."
-
-            parts: list[str] = []
-            if stdout:
-                parts.append(stdout.decode(errors="replace"))
-            if stderr:
-                parts.append(f"[stderr]\n{stderr.decode(errors='replace')}")
-
-            output = "\n".join(parts).strip()
-            if not output:
-                return "Code executed successfully (no output)."
-
-            max_len = 10_000
-            if len(output) > max_len:
-                output = output[:max_len] + f"\n\n... (truncated, {len(output)} chars total)"
-
-            return output
-
-        except Exception as exc:
-            return f"Error running code: {exc}"
-        finally:
-            if tmp_path is not None:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     async def _handle_scratchpad(self, tc_input: dict) -> str:
         """Dispatch a scratchpad tool call by action."""
@@ -414,8 +337,6 @@ class ChatSession:
                         result_text = f"Task completed: {task_desc}"
                     except Exception as exc:
                         result_text = f"Task failed: {exc}"
-                elif tc.name == "run_code":
-                    result_text = await self._handle_run_code(tc.input)
                 elif tc.name == "update_context":
                     result_text = self._handle_update_context(tc.input)
                 elif tc.name == "request_secret":
@@ -502,8 +423,6 @@ class ChatSession:
                         result_text = f"Task completed: {task_desc}"
                     except Exception as exc:
                         result_text = f"Task failed: {exc}"
-                elif tc.name == "run_code":
-                    result_text = await self._handle_run_code(tc.input)
                 elif tc.name == "update_context":
                     result_text = self._handle_update_context(tc.input)
                 elif tc.name == "request_secret":
