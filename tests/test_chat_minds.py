@@ -610,6 +610,100 @@ class TestMindsConnect:
 
         await session.close()
 
+    async def test_connect_uses_table_list_from_get_mind_when_catalog_fails(self, tmp_path):
+        """When catalog 404s but get_mind has tables, use those."""
+        mock_llm = AsyncMock()
+        mock_llm.plan = AsyncMock(return_value=_text_response("This mind has order and car data."))
+        mock_run = AsyncMock()
+
+        workspace = MagicMock()
+        workspace.base = tmp_path
+        workspace.build_anton_md_context.return_value = ""
+
+        session = ChatSession(
+            mock_llm, mock_run,
+            workspace=workspace,
+            minds_api_key="test-key",
+        )
+        console = MagicMock()
+
+        import httpx
+        catalog_error = httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=MagicMock(status_code=404),
+        )
+
+        # get_mind returns datasource dict with tables (like the real API)
+        with patch.object(
+            session._minds, "get_mind", new_callable=AsyncMock,
+            return_value={
+                "name": "test",
+                "datasources": [
+                    {"name": "demo_db", "tables": ["orders", "used_car_price", "customers"]},
+                ],
+            },
+        ), patch.object(
+            session._minds, "catalog", new_callable=AsyncMock,
+            side_effect=catalog_error,
+        ):
+            await session._handle_minds_connect("test", console)
+
+        # Verify file was written — LLM got the table list
+        md_file = tmp_path / ".anton" / "minds" / "test.md"
+        assert md_file.exists()
+        content = md_file.read_text()
+        assert "order" in content.lower()
+
+        # The LLM prompt should have received the table names
+        plan_call = mock_llm.plan.call_args
+        prompt_msg = plan_call.kwargs["messages"][0]["content"]
+        assert "orders" in prompt_msg
+        assert "used_car_price" in prompt_msg
+
+        await session.close()
+
+    async def test_connect_falls_back_to_ask_when_no_tables_in_metadata(self, tmp_path):
+        """When catalog 404s AND get_mind has no tables, ask the mind directly."""
+        mock_llm = AsyncMock()
+        mock_llm.plan = AsyncMock(return_value=_text_response("This mind has order tracking data."))
+        mock_run = AsyncMock()
+
+        workspace = MagicMock()
+        workspace.base = tmp_path
+        workspace.build_anton_md_context.return_value = ""
+
+        session = ChatSession(
+            mock_llm, mock_run,
+            workspace=workspace,
+            minds_api_key="test-key",
+        )
+        console = MagicMock()
+
+        import httpx
+        catalog_error = httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=MagicMock(status_code=404),
+        )
+
+        # Datasource is a plain string (no tables metadata)
+        with patch.object(
+            session._minds, "get_mind", new_callable=AsyncMock,
+            return_value={"name": "test", "datasources": ["demo_db"]},
+        ), patch.object(
+            session._minds, "catalog", new_callable=AsyncMock,
+            side_effect=catalog_error,
+        ), patch.object(
+            session._minds, "ask", new_callable=AsyncMock,
+            return_value="I have access to: orders (id, customer_id, total)",
+        ) as mock_ask:
+            await session._handle_minds_connect("test", console)
+
+        # Verify it fell back to asking the mind
+        mock_ask.assert_awaited_once()
+
+        md_file = tmp_path / ".anton" / "minds" / "test.md"
+        assert md_file.exists()
+
+        await session.close()
+
     async def test_connect_rejects_invalid_name(self, tmp_path):
         """Invalid mind names are rejected."""
         mock_llm = AsyncMock()

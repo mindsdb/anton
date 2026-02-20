@@ -551,15 +551,43 @@ class ChatSession:
         if not datasources:
             console.print("[anton.warning]Mind has no datasources.[/]")
 
-        # 2. Fetch catalog for each datasource
+        # 2. Build catalog — try API first, fall back to get_mind metadata, then ask
         catalog_parts: list[str] = []
+        catalog_ok = False
         for ds in datasources:
             ds_name = ds if isinstance(ds, str) else ds.get("name", str(ds))
+            # 2a. Try the catalog API endpoint
             try:
                 cat = await self._minds.catalog(ds_name, mind=mind_name)
                 catalog_parts.append(f"# Datasource: {ds_name}\n{cat}")
-            except Exception as exc:
-                catalog_parts.append(f"# Datasource: {ds_name}\n(error fetching catalog: {exc})")
+                catalog_ok = True
+                continue
+            except Exception:
+                pass
+
+            # 2b. Fallback: extract table list from get_mind response
+            tables = ds.get("tables", []) if isinstance(ds, dict) else []
+            if tables:
+                table_listing = "\n".join(f"  - {t}" for t in tables)
+                catalog_parts.append(
+                    f"# Datasource: {ds_name}\nAvailable tables:\n{table_listing}"
+                )
+                catalog_ok = True
+            else:
+                catalog_parts.append(f"# Datasource: {ds_name}\n(catalog unavailable)")
+
+        # 2c. Last resort: if nothing worked, ask the mind itself
+        if not catalog_ok:
+            console.print("[anton.muted]Catalog unavailable — asking the mind directly...[/]")
+            try:
+                introspect = await self._minds.ask(
+                    "List every table you have access to and their columns. "
+                    "Be specific — include table names, column names, and data types.",
+                    mind_name,
+                )
+                catalog_parts = [f"# Self-reported schema (from asking the mind)\n{introspect}"]
+            except Exception:
+                pass  # keep whatever we had
 
         combined_catalog = "\n\n".join(catalog_parts) if catalog_parts else "(no catalog available)"
         ds_names = ", ".join(
