@@ -13,7 +13,7 @@
 
 ## How it works
 
-Anton is your coworker that's excellent at many things — research, data work, more data work ;), lead gen, and yes, coding too.
+Anton is your coworker that's excellent at many things — research, data work, more data work ;), being your thinking partner, and yes, coding solutions to problems so you dont have to.
 
 ```
 anton run "cross-reference our postgres customers table with the revenue spreadsheet and flag mismatches"
