@@ -624,10 +624,15 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
 
     display = StreamDisplay(console)
 
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import ANSI
+
+    prompt_session: PromptSession[str] = PromptSession(mouse_support=True)
+
     try:
         while True:
             try:
-                user_input = console.input("[bold]you>[/] ")
+                user_input = prompt_session.prompt(ANSI("\033[1myou>\033[0m "))
             except EOFError:
                 break
 
