@@ -17,6 +17,7 @@ Anton is not a code assistant. It's a coworker with a computer. You tell it what
 
 ```bash
 curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh
+source ~/.zshrc  # or restart your terminal
 anton
 ```
 
@@ -36,21 +37,25 @@ That's the point: you describe a problem in plain language, and Anton assembles 
 
 ## How it works
 
-Anton has a four-phase execution pipeline:
+Anton operates in two modes depending on what you need:
+
+**Chat + Scratchpad** — For most tasks, Anton works directly in conversation. It thinks through the problem, writes and runs Python in a persistent scratchpad (variables, imports, and data survive across steps), installs packages as needed, and iterates until it has your answer. This is how the BLS example above works — no pipeline, just Anton reasoning and computing live.
+
+**Autonomous pipeline** — For larger tasks that need structured execution, Anton switches to a four-phase pipeline:
 
 ```
 Task → Memory Recall → Planning → Skill Building (if needed) → Execution
 ```
 
-1. **Memory recall** — Loads past session summaries, relevant learnings, skill-local notes, and project context from `.anton/`. Every task starts with what Anton already knows.
+1. **Memory recall** — Loads past session summaries, relevant learnings, and project context from `.anton/`. Every task starts with what Anton already knows.
 
-2. **Planning** — An LLM breaks the task into atomic steps, mapping each to a known skill. If a step needs something that doesn't exist, it's flagged for building.
+2. **Planning** — Breaks the task into atomic steps, mapping each to a known skill. If a step needs something that doesn't exist, it's flagged for building.
 
-3. **Skill building** — For unknown steps, Anton generates Python skill modules on the fly, validates them, and registers them. These persist in `.anton/skills/` so they're available next time.
+3. **Skill building** — Generates Python skill modules on the fly, validates them, and registers them. These persist in `.anton/skills/` so they're available next time.
 
 4. **Execution** — Steps run in dependency order. Results, durations, and errors are logged. After completion, Anton extracts reusable learnings and records them.
 
-The chat interface wraps this pipeline behind a conversational layer. Anton asks clarifying questions, interprets context, and only fires the pipeline when it has enough information.
+**Explainable by default** — You can always ask Anton to explain what it did. Ask it to dump its scratchpad and you get a full notebook-style breakdown: every cell of code it ran, the outputs, and errors — so you can follow its reasoning step by step.
 
 ## Workspace
 
