@@ -410,10 +410,14 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
             raise
 
     # Build runtime context so the LLM knows what it's running on
+    skill_names = [s.name for s in registry.list_all()]
     runtime_context = (
         f"- Provider: {settings.planning_provider}\n"
         f"- Planning model: {settings.planning_model}\n"
-        f"- Coding model: {settings.coding_model}"
+        f"- Coding model: {settings.coding_model}\n"
+        f"- Workspace: {settings.workspace_path}\n"
+        f"- Available skills: {', '.join(skill_names) if skill_names else 'none discovered'}\n"
+        f"- Memory: {'enabled' if settings.memory_enabled else 'disabled'}"
     )
 
     session = ChatSession(
