@@ -51,7 +51,7 @@ class MindsClient:
         if conversation_id:
             payload["conversation_id"] = conversation_id
 
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60, follow_redirects=True) as client:
             resp = await client.post(
                 "/api/v1/responses",
                 headers=self._headers(),
@@ -99,7 +99,7 @@ class MindsClient:
         if offset:
             params["offset"] = offset
 
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60, follow_redirects=True) as client:
             resp = await client.get(url, headers=self._headers(), params=params)
             resp.raise_for_status()
             data = resp.json()
@@ -127,7 +127,7 @@ class MindsClient:
             f"/items/{self._last_message_id}/export"
         )
 
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60, follow_redirects=True) as client:
             resp = await client.get(url, headers=self._headers())
             resp.raise_for_status()
             return resp.text
@@ -140,7 +140,7 @@ class MindsClient:
         """
         import httpx
 
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60, follow_redirects=True) as client:
             resp = await client.get(
                 f"/api/v1/datasources/{datasource}/catalog",
                 headers=self._headers(),
