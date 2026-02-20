@@ -22,7 +22,7 @@ _ENV_FILES = _build_env_files()
 
 
 class AntonSettings(BaseSettings):
-    model_config = {"env_prefix": "ANTON_", "env_file": _ENV_FILES, "env_file_encoding": "utf-8"}
+    model_config = {"env_prefix": "ANTON_", "env_file": _ENV_FILES, "env_file_encoding": "utf-8", "extra": "ignore"}
 
     planning_provider: str = "anthropic"
     planning_model: str = "claude-sonnet-4-6"
