@@ -309,6 +309,7 @@ class Scratchpad:
     _skill_dirs: list[Path] = field(default_factory=list, repr=False)
     _coding_provider: str = field(default="anthropic", repr=False)
     _coding_model: str = field(default="", repr=False)
+    _coding_api_key: str = field(default="", repr=False)
     _venv_dir: str | None = field(default=None, repr=False)
     _venv_python: str | None = field(default=None, repr=False)
 
@@ -368,6 +369,15 @@ class Scratchpad:
             env["ANTHROPIC_API_KEY"] = env["ANTON_ANTHROPIC_API_KEY"]
         if "OPENAI_API_KEY" not in env and "ANTON_OPENAI_API_KEY" in env:
             env["OPENAI_API_KEY"] = env["ANTON_OPENAI_API_KEY"]
+        # If settings provided an explicit API key (e.g. from ~/.anton/.env or
+        # Pydantic settings), inject it so the subprocess SDK can authenticate.
+        if self._coding_api_key:
+            sdk_key = {
+                "anthropic": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY",
+            }.get(self._coding_provider, "")
+            if sdk_key and sdk_key not in env:
+                env[sdk_key] = self._coding_api_key
         # Ensure the anton package is importable in the subprocess (needed for
         # get_llm and skill loading). The boot script runs from a temp file, so
         # the project root isn't on sys.path by default.
@@ -581,11 +591,13 @@ class ScratchpadManager:
         skill_dirs: list[Path] | None = None,
         coding_provider: str = "anthropic",
         coding_model: str = "",
+        coding_api_key: str = "",
     ) -> None:
         self._pads: dict[str, Scratchpad] = {}
         self._skill_dirs: list[Path] = skill_dirs or []
         self._coding_provider: str = coding_provider
         self._coding_model: str = coding_model
+        self._coding_api_key: str = coding_api_key
         self._available_packages: list[str] = self.probe_packages()
 
     @staticmethod
@@ -603,6 +615,7 @@ class ScratchpadManager:
                 _skill_dirs=self._skill_dirs,
                 _coding_provider=self._coding_provider,
                 _coding_model=self._coding_model,
+                _coding_api_key=self._coding_api_key,
             )
             await pad.start()
             self._pads[name] = pad

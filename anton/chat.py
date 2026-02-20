@@ -181,6 +181,7 @@ class ChatSession:
         console: Console | None = None,
         skill_dirs: list[Path] | None = None,
         coding_provider: str = "anthropic",
+        coding_api_key: str = "",
     ) -> None:
         self._llm = llm_client
         self._run_task = run_task
@@ -194,6 +195,7 @@ class ChatSession:
             skill_dirs=skill_dirs,
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
+            coding_api_key=coding_api_key,
         )
 
     @property
@@ -549,6 +551,10 @@ def _rebuild_session(
         f"- Coding model: {settings.coding_model}\n"
         f"- Workspace: {settings.workspace_path}\n"
     )
+    api_key = (
+        settings.anthropic_api_key if settings.coding_provider == "anthropic"
+        else settings.openai_api_key
+    ) or ""
     return ChatSession(
         state["llm_client"],
         do_run_task,
@@ -559,6 +565,7 @@ def _rebuild_session(
         console=console,
         skill_dirs=skill_dirs,
         coding_provider=settings.coding_provider,
+        coding_api_key=api_key,
     )
 
 
@@ -797,6 +804,10 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
 
     skill_dirs = [builtin, user_dir]
 
+    coding_api_key = (
+        settings.anthropic_api_key if settings.coding_provider == "anthropic"
+        else settings.openai_api_key
+    ) or ""
     session = ChatSession(
         state["llm_client"],
         _do_run_task,
@@ -807,6 +818,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
         console=console,
         skill_dirs=skill_dirs,
         coding_provider=settings.coding_provider,
+        coding_api_key=coding_api_key,
     )
 
     console.print("[anton.muted]Chat with Anton. Type '/help' for commands or 'exit' to quit.[/]")

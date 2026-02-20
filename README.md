@@ -22,6 +22,14 @@ anton
 
 That drops you into a conversation. Talk to Anton like a person.
 
+Try this:
+
+> Information about inflation in the US is found on this website, https://www.bls.gov/news.release/cpi.nr0.htm — plot me the CPI items stacked per month.
+
+What happens next is the interesting part. Anton doesn't have a "fetch BLS data" skill or a "plot CPI" template. It figures it out live: fetches the page with `httpx`, parses the HTML table with BeautifulSoup, installs any missing packages into the scratchpad on the fly, builds a pandas DataFrame, and generates a stacked bar chart with matplotlib — all in one conversation, with no setup. If it hits a missing library, it `install`s it mid-flow and keeps going. You get a chart on your screen and can ask follow-up questions about the data because the state is still in memory.
+
+That's the point: you describe a problem in plain language, and Anton assembles the toolchain, writes the code, and delivers the result — the same way a coworker would if you walked over to their desk and asked.
+
 ## How it works
 
 Anton has a four-phase execution pipeline:
