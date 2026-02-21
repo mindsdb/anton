@@ -40,7 +40,6 @@ BUBBLE_PHRASES = [
     "let's go",
     "ask me",
     "ready",
-    "hmm...",
     "hi boss",
     "what's the plan?",
     "I'm here",
@@ -104,47 +103,42 @@ def _render_robot_static(console: Console, bubble: str = "\u2661\u2661\u2661\u26
 
 
 def _animate_banner(console: Console) -> None:
-    """Run the typing animation on the robot's speech bubble."""
+    """Run a quick typing animation: hearts → one random phrase → hearts."""
     rng = random.Random()
-    phrases = list(BUBBLE_PHRASES)
-    # Always start with hearts, pick 2-3 random others, end with hearts
-    middle = [p for p in phrases if p != "\u2661\u2661\u2661\u2661"]
-    rng.shuffle(middle)
-    sequence = ["\u2661\u2661\u2661\u2661"] + middle[:3] + ["\u2661\u2661\u2661\u2661"]
+    middle = [p for p in BUBBLE_PHRASES if p != "\u2661\u2661\u2661\u2661"]
+    phrase = rng.choice(middle)
 
-    type_speed = 0.06   # seconds per character
-    pause_after = 0.4   # pause after full phrase
-    clear_speed = 0.02  # speed of clearing
+    type_speed = 0.05
+    pause_after = 0.35
+    clear_speed = 0.02
 
     with Live(
-        _build_robot_text(_MOUTH_SMILE, ""),
+        _build_robot_text(_MOUTH_SMILE, "\u2661\u2661\u2661\u2661"),
         console=console,
         refresh_per_second=30,
         transient=True,
     ) as live:
-        for i, phrase in enumerate(sequence):
-            # Type in the phrase character by character
-            for j in range(1, len(phrase) + 1):
-                mouth = _MOUTH_TALK[j % 2]
-                live.update(_build_robot_text(mouth, phrase[:j]))
-                time.sleep(type_speed)
+        time.sleep(0.3)
 
-            # Show full phrase with smile
-            live.update(_build_robot_text(_MOUTH_SMILE, phrase))
-            time.sleep(pause_after)
+        # Type the phrase
+        for j in range(1, len(phrase) + 1):
+            mouth = _MOUTH_TALK[j % 2]
+            live.update(_build_robot_text(mouth, phrase[:j]))
+            time.sleep(type_speed)
 
-            # Clear (except for the last phrase — keep it)
-            if i < len(sequence) - 1:
-                for j in range(len(phrase), 0, -1):
-                    live.update(_build_robot_text(_MOUTH_SMILE, phrase[:j - 1]))
-                    time.sleep(clear_speed)
-                time.sleep(0.1)
+        # Hold with smile
+        live.update(_build_robot_text(_MOUTH_SMILE, phrase))
+        time.sleep(pause_after)
 
-        # Final frame with smile and hearts
+        # Clear back
+        for j in range(len(phrase), 0, -1):
+            live.update(_build_robot_text(_MOUTH_SMILE, phrase[:j - 1]))
+            time.sleep(clear_speed)
+
+        # Back to hearts
         live.update(_build_robot_text(_MOUTH_SMILE, "\u2661\u2661\u2661\u2661"))
-        time.sleep(0.2)
+        time.sleep(0.15)
 
-    # Print the static final robot so it stays on screen
     _render_robot_static(console, "\u2661\u2661\u2661\u2661")
 
 
