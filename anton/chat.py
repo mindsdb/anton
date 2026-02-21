@@ -1227,7 +1227,11 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
     toolbar_text = ""
 
     def _bottom_toolbar():
-        return HTML(f"\n<style fg='#555570'>{toolbar_text}</style>") if toolbar_text else ""
+        if not toolbar_text:
+            return ""
+        width = os.get_terminal_size().columns
+        padded = toolbar_text.rjust(width)
+        return HTML(f"\n<style fg='#555570'>{padded}</style>")
 
     pt_style = PTStyle.from_dict({
         "bottom-toolbar": "noreverse nounderline bg:default",
