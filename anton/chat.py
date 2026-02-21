@@ -1224,13 +1224,13 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
     from prompt_toolkit.formatted_text import ANSI, HTML
     from prompt_toolkit.styles import Style as PTStyle
 
-    toolbar_text = ""
+    toolbar = {"text": ""}
 
     def _bottom_toolbar():
-        if not toolbar_text:
+        if not toolbar["text"]:
             return ""
         width = os.get_terminal_size().columns
-        padded = toolbar_text.rjust(width)
+        padded = toolbar["text"].rjust(width)
         return HTML(f"\n<style fg='#555570'>{padded}</style>")
 
     pt_style = PTStyle.from_dict({
@@ -1316,12 +1316,11 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                         total_input += event.response.usage.input_tokens
                         total_output += event.response.usage.output_tokens
 
-                nonlocal toolbar_text
                 elapsed = time.monotonic() - t0
                 parts = [f"{elapsed:.1f}s", f"{total_input} in / {total_output} out"]
                 if ttft is not None:
                     parts.append(f"TTFT {int(ttft * 1000)}ms")
-                toolbar_text = "  ".join(parts)
+                toolbar["text"] = "  ".join(parts)
                 display.finish()
             except anthropic.AuthenticationError:
                 display.abort()
