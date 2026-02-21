@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
+
+import pytest
 
 from anton.skill.base import SkillInfo, SkillResult
 from anton.skill.registry import SkillRegistry
@@ -66,6 +69,34 @@ class TestSkillRegistryDiscover:
         reg = SkillRegistry()
         reg.discover("/nonexistent/path")
         assert reg.list_all() == []
+
+    def test_discover_skips_invalid_skill_files(self, tmp_path: Path):
+        good_dir = tmp_path / "good_skill"
+        good_dir.mkdir(parents=True)
+        (good_dir / "skill.py").write_text(
+            textwrap.dedent(
+                """
+                from anton.skill.base import SkillResult, skill
+
+
+                @skill("good_skill", "A valid skill")
+                async def good_skill() -> SkillResult:
+                    return SkillResult(output="ok", metadata={})
+                """
+            ).strip()
+            + "\n"
+        )
+
+        bad_dir = tmp_path / "bad_skill"
+        bad_dir.mkdir(parents=True)
+        (bad_dir / "skill.py").write_text('x = "unterminated\n')
+
+        reg = SkillRegistry()
+        with pytest.warns(RuntimeWarning, match="Skipping invalid skill module"):
+            reg.discover(tmp_path)
+
+        names = [s.name for s in reg.list_all()]
+        assert names == ["good_skill"]
 
 
 class TestSkillRegistryCatalog:
