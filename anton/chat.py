@@ -1218,20 +1218,25 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
 
     from anton.chat_ui import StreamDisplay
 
-    display = StreamDisplay(console)
+    display = StreamDisplay(console, toolbar=toolbar)
 
     from prompt_toolkit import PromptSession
     from prompt_toolkit.formatted_text import ANSI, HTML
     from prompt_toolkit.styles import Style as PTStyle
 
-    toolbar = {"text": ""}
+    toolbar = {"stats": "", "status": ""}
 
     def _bottom_toolbar():
-        if not toolbar["text"]:
+        stats = toolbar["stats"]
+        status = toolbar["status"]
+        if not stats and not status:
             return ""
         width = os.get_terminal_size().columns
-        padded = toolbar["text"].rjust(width)
-        return HTML(f"\n<style fg='#555570'>{padded}</style>")
+        gap = width - len(status) - len(stats)
+        if gap < 1:
+            gap = 1
+        line = status + " " * gap + stats
+        return HTML(f"\n<style fg='#555570'>{line}</style>")
 
     pt_style = PTStyle.from_dict({
         "bottom-toolbar": "noreverse nounderline bg:default",
@@ -1246,7 +1251,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
     try:
         while True:
             try:
-                user_input = await prompt_session.prompt_async(ANSI("\033[1myou>\033[0m "))
+                user_input = await prompt_session.prompt_async(ANSI("\033[1;38;2;0;255;159myou>\033[0m "))
             except EOFError:
                 break
 
@@ -1320,7 +1325,8 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                 parts = [f"{elapsed:.1f}s", f"{total_input} in / {total_output} out"]
                 if ttft is not None:
                     parts.append(f"TTFT {int(ttft * 1000)}ms")
-                toolbar["text"] = "  ".join(parts)
+                toolbar["stats"] = "  ".join(parts)
+                toolbar["status"] = ""
                 display.finish()
             except anthropic.AuthenticationError:
                 display.abort()

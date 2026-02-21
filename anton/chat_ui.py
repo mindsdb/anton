@@ -57,14 +57,20 @@ PHASE_LABELS = {
 class StreamDisplay:
     """Manages a Rich Live display for streaming LLM responses."""
 
-    def __init__(self, console: Console) -> None:
+    def __init__(self, console: Console, toolbar: dict | None = None) -> None:
         self._console = console
         self._live: object | None = None
         self._buffer = ""
         self._started = False
+        self._toolbar = toolbar
+
+    def _set_status(self, text: str) -> None:
+        if self._toolbar is not None:
+            self._toolbar["status"] = text
 
     def start(self) -> None:
         msg = random.choice(THINKING_MESSAGES)  # noqa: S311
+        self._set_status(msg)
         spinner = Spinner("dots", text=Text(f" {msg}", style="anton.muted"))
         self._live = Live(
             spinner,
@@ -97,6 +103,7 @@ class StreamDisplay:
         if self._live is None:
             return
         msg = random.choice(TOOL_MESSAGES)  # noqa: S311
+        self._set_status(msg)
         spinner = Spinner("dots", text=Text(f" {msg}", style="anton.muted"))
         self._live.update(spinner)
 
@@ -106,9 +113,11 @@ class StreamDisplay:
             return
         label = PHASE_LABELS.get(phase, phase)
         eta_str = f"  ~{int(eta)}s" if eta else ""
+        status = f"{label}  {message}{eta_str}"
+        self._set_status(status)
         spinner = Spinner(
             "dots",
-            text=Text(f" {label}  {message}{eta_str}", style="anton.muted"),
+            text=Text(f" {status}", style="anton.muted"),
         )
         self._live.update(spinner)
 

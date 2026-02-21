@@ -16,7 +16,8 @@ class TestMessageLists:
 class TestStreamDisplay:
     def _make_display(self):
         console = MagicMock()
-        return StreamDisplay(console), console
+        toolbar = {"stats": "", "status": ""}
+        return StreamDisplay(console, toolbar=toolbar), console
 
     @patch("anton.chat_ui.Live")
     def test_start_creates_live(self, MockLive):
