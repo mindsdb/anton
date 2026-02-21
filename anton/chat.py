@@ -151,6 +151,10 @@ SCRATCHPAD_TOOL = {
                 "items": {"type": "string"},
                 "description": "Package names to install (install only).",
             },
+            "label": {
+                "type": "string",
+                "description": "Brief label describing what this step does (shown to user as progress).",
+            },
         },
         "required": ["action", "name"],
     },
@@ -670,6 +674,19 @@ class ChatSession:
         """Clean up scratchpads and other resources."""
         await self._scratchpads.close_all()
 
+    @staticmethod
+    def _tool_description(tc) -> str:
+        """Extract a brief description from a tool call for display."""
+        if tc.name == "scratchpad":
+            return tc.input.get("label", "")
+        if tc.name == "minds":
+            q = tc.input.get("question", "")
+            return q[:80] if q else ""
+        if tc.name == "execute_task":
+            t = tc.input.get("task", "")
+            return t[:80] if t else ""
+        return ""
+
     async def turn(self, user_input: str) -> str:
         self._history.append({"role": "user", "content": user_input})
 
@@ -784,6 +801,11 @@ class ChatSession:
             # Process each tool call
             tool_results: list[dict] = []
             for tc in llm_response.tool_calls:
+                # Yield description for display before executing
+                desc = self._tool_description(tc)
+                if desc:
+                    yield StreamToolUseStart(id=tc.id, name=tc.name, description=desc)
+
                 if tc.name == "execute_task":
                     task_desc = tc.input.get("task", "")
                     try:
@@ -1323,7 +1345,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                     elif isinstance(event, StreamToolResult):
                         display.show_tool_result(event.content)
                     elif isinstance(event, StreamToolUseStart):
-                        display.show_tool_execution(event.name)
+                        display.show_tool_execution(event.name, event.description)
                     elif isinstance(event, StreamTaskProgress):
                         display.update_progress(
                             event.phase, event.message, event.eta_seconds

@@ -132,16 +132,32 @@ class StreamDisplay:
         self._started = True
         self._live.update(self._render())
 
-    def show_tool_execution(self, name: str) -> None:
+    def show_tool_execution(self, name: str, description: str = "") -> None:
         if self._live is None:
             return
-        # Mark current active step as done
-        for step in self._steps:
-            if not step.done:
-                step.done = True
-        # Add new step from tool labels
-        label = _TOOL_LABELS.get(name, name)
-        self._steps.append(_Step(label=label))
+        base_label = _TOOL_LABELS.get(name, name)
+
+        if description:
+            # Truncate description to 20 words
+            words = description.split()
+            if len(words) > 20:
+                description = " ".join(words[:20]) + "..."
+            full_label = f"{base_label} — {description}"
+            # Update the current active step's label (set by the earlier no-desc event)
+            for step in self._steps:
+                if not step.done:
+                    step.label = full_label
+                    self._live.update(self._render())
+                    return
+            # No active step to update — add new one
+            self._steps.append(_Step(label=full_label))
+        else:
+            # No description — mark previous active step done, add new
+            for step in self._steps:
+                if not step.done:
+                    step.done = True
+            self._steps.append(_Step(label=base_label))
+
         self._live.update(self._render())
 
     def update_progress(self, phase: str, message: str, eta: float | None = None) -> None:

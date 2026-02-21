@@ -103,6 +103,40 @@ class TestStreamDisplay:
         assert display._steps[1].label == "unknown_tool"
 
     @patch("anton.chat_ui.Live")
+    def test_show_tool_execution_with_description(self, MockLive):
+        display, console = self._make_display()
+        display.start()
+
+        # First call without description adds the step
+        display.show_tool_execution("scratchpad")
+        assert len(display._steps) == 2
+        assert display._steps[1].label == "Running scratchpad"
+
+        # Second call WITH description updates the active step's label
+        display.show_tool_execution("scratchpad", "installing pandas")
+        assert len(display._steps) == 2  # no new step added
+        assert display._steps[1].label == "Running scratchpad — installing pandas"
+
+    @patch("anton.chat_ui.Live")
+    def test_show_tool_execution_collapse_repeated(self, MockLive):
+        display, console = self._make_display()
+        display.start()
+
+        # First scratchpad call
+        display.show_tool_execution("scratchpad")
+        display.show_tool_execution("scratchpad", "installing pandas")
+
+        # Second scratchpad call — marks previous done, adds new
+        display.show_tool_execution("scratchpad")
+        display.show_tool_execution("scratchpad", "fetching data")
+
+        assert len(display._steps) == 3  # thinking + 2 scratchpad steps
+        assert display._steps[1].done  # first scratchpad marked done
+        assert display._steps[1].label == "Running scratchpad — installing pandas"
+        assert not display._steps[2].done  # second scratchpad active
+        assert display._steps[2].label == "Running scratchpad — fetching data"
+
+    @patch("anton.chat_ui.Live")
     def test_finish_stops_live_and_prints(self, MockLive):
         display, console = self._make_display()
         display.start()
