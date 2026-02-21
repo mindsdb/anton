@@ -130,6 +130,50 @@ class TestBuildFailure:
         assert mock_llm.code.await_count == 3
         assert registry.get("count_lines") is None
 
+    async def test_failed_build_does_not_publish_broken_skill_file(
+        self, tmp_path: Path, spec: SkillSpec, bus: EventBus
+    ):
+        mock_llm = AsyncMock()
+        bad_response = _make_response("```python\ndef broken(\n```")
+        mock_llm.code = AsyncMock(return_value=bad_response)
+        registry = SkillRegistry()
+
+        builder = SkillBuilder(
+            llm_client=mock_llm,
+            registry=registry,
+            user_skills_dir=tmp_path,
+            bus=bus,
+        )
+        result = await builder.build(spec)
+
+        assert result is None
+        assert (tmp_path / "count_lines" / "skill.py").exists() is False
+
+    async def test_failed_build_preserves_existing_skill_file(
+        self, tmp_path: Path, spec: SkillSpec, bus: EventBus
+    ):
+        skill_dir = tmp_path / "count_lines"
+        skill_dir.mkdir(parents=True)
+        existing_path = skill_dir / "skill.py"
+        existing_content = "# existing skill\n"
+        existing_path.write_text(existing_content, encoding="utf-8")
+
+        mock_llm = AsyncMock()
+        bad_response = _make_response("```python\ndef broken(\n```")
+        mock_llm.code = AsyncMock(return_value=bad_response)
+        registry = SkillRegistry()
+
+        builder = SkillBuilder(
+            llm_client=mock_llm,
+            registry=registry,
+            user_skills_dir=tmp_path,
+            bus=bus,
+        )
+        result = await builder.build(spec)
+
+        assert result is None
+        assert existing_path.read_text(encoding="utf-8") == existing_content
+
 
 class TestExtractCode:
     def test_python_fences(self):

@@ -70,9 +70,12 @@ class SkillBuilder:
             )
 
             code = _extract_code(response.content)
-            skill_path.write_text(code, encoding="utf-8")
+            # Validate each generation in an attempt file and only publish to
+            # skill.py on success. This avoids leaving a broken skill artifact.
+            attempt_path = skill_dir / f".{spec.name}.attempt.py"
+            attempt_path.write_text(code, encoding="utf-8")
 
-            result = await self._tester.test_skill(skill_path, spec)
+            result = await self._tester.test_skill(attempt_path, spec)
 
             if result.passed:
                 await self._bus.publish(
@@ -81,16 +84,22 @@ class SkillBuilder:
                         message=f"Skill '{spec.name}' built successfully",
                     )
                 )
+                attempt_path.replace(skill_path)
+
                 # Load and register
                 skills = load_skill_module(skill_path)
                 for skill in skills:
                     if skill.name == spec.name:
                         self._registry.register(skill)
+                        attempt_path.unlink(missing_ok=True)
                         return skill
                 # Fallback: register first skill found
                 if skills:
                     self._registry.register(skills[0])
+                    attempt_path.unlink(missing_ok=True)
                     return skills[0]
+
+            attempt_path.unlink(missing_ok=True)
 
             # Failed — append error context for retry
             messages.append({"role": "assistant", "content": response.content})
