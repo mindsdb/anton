@@ -1316,6 +1316,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                         total_input += event.response.usage.input_tokens
                         total_output += event.response.usage.output_tokens
 
+                nonlocal toolbar_text
                 elapsed = time.monotonic() - t0
                 parts = [f"{elapsed:.1f}s", f"{total_input} in / {total_output} out"]
                 if ttft is not None:
