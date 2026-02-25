@@ -10,7 +10,7 @@ deployment:
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
     command: ["python", "-m", "uvicorn", "minds.server:create_app"]
-    args: ["--factory", "--workers", " 24", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
+    args: ["--factory", "--workers", " 12", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
 
 
   # livenessProbes are used to determine when to restart a container
