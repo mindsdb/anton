@@ -62,7 +62,7 @@ jobs:
       MIND_CASTLE__ENCRYPTION_TYPE: awskms
       MIND_CASTLE_AWS_USE_ENV_AUTH: true
       MIND_CASTLE_AWS_REGION: us-east-1
-      MIND_CASTLE_AWS_KMS_KEY_ARN: "arn:aws:kms:us-east-1:168681354662:key/679a2faa-925c-4da3-bc27-d4adbdcbcb13"
+      MIND_CASTLE_AWS_KMS_KEY_ARN: "arn:aws:kms:us-east-1:065786718370:key/db492506-a7d9-4b3b-b160-c0859e131898"
 
     steps:
       - uses: actions/checkout@v4
