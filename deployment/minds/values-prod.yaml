@@ -69,7 +69,7 @@ deployment:
     # ====================================
 
     - name: MIND_CASTLE_AWS_KMS_KEY_ARN
-      value: "arn:aws:kms:us-east-1:065786718370:key/db492506-a7d9-4b3b-b160-c0859e131898"
+      value: "arn:aws:kms:us-east-1:065786718370:key/1787cc0e-18e5-4c7d-af9f-6f9f01b06f17"
     
     # ====================================
     # STATSIG SETTINGS
