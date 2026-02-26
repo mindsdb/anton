@@ -68,4 +68,5 @@ class Anton:
         """
         Chat with Anton.
         """
-        return await self._chat_session.turn_stream(user_input)
+        async for event in self._chat_session.turn_stream(user_input):
+            yield event
