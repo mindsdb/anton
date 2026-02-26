@@ -79,6 +79,8 @@ class ChatSession:
         console: Console | None = None,
         coding_provider: str = "anthropic",
         coding_api_key: str = "",
+        history: list[dict] = [],
+        scratchpad_manager: ScratchpadManager | None = None,
     ) -> None:
         self._llm = llm_client
         self._self_awareness = self_awareness
@@ -87,10 +89,10 @@ class ChatSession:
         self._runtime_context = runtime_context
         self._workspace = workspace
         self._console = console
-        self._history: list[dict] = []
+        self._history: list[dict] = history
         self._pending_memory_confirmations: list = []
         self._turn_count = 0
-        self._scratchpads = ScratchpadManager(
+        self._scratchpads = scratchpad_manager or ScratchpadManager(
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
             coding_api_key=coding_api_key,
