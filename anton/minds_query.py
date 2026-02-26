@@ -110,13 +110,40 @@ class MindsQueryClient:
             }
         """
         with self._client() as client:
-            # Fetch mind-level details (system_prompt, prompt_template)
+            # Fetch mind-level details (system_prompt, prompt_template, datasources)
             mind_details = self._get_mind_details(client)
             params = mind_details.get("parameters") or {}
             system_prompt = params.get("system_prompt", "")
             prompt_template = params.get("prompt_template", "")
 
-            datasources = self._list_datasources(client)
+            # Only include datasources actually attached to this mind.
+            # The mind details response has a "datasources" list with the
+            # attached names — use it as a filter so the LLM doesn't try
+            # to query datasources the mind can't reach.
+            mind_ds_list = mind_details.get("datasources") or []
+            mind_ds_names: set[str] = set()
+            for entry in mind_ds_list:
+                if isinstance(entry, dict):
+                    n = entry.get("name")
+                elif isinstance(entry, str):
+                    n = entry
+                else:
+                    continue
+                if n:
+                    mind_ds_names.add(n)
+
+            all_datasources = self._list_datasources(client)
+
+            # If the mind has an explicit datasource list, filter to only those.
+            # Otherwise fall back to all (for minds without explicit attachments).
+            if mind_ds_names:
+                datasources = [
+                    ds for ds in all_datasources
+                    if isinstance(ds, dict) and ds.get("name") in mind_ds_names
+                ]
+            else:
+                datasources = all_datasources
+
             out: list[dict[str, Any]] = []
             for ds in datasources:
                 if not isinstance(ds, dict):
@@ -320,7 +347,7 @@ class MindsQueryClient:
         """
         nq = native_query.strip().rstrip(";")
         nq_escaped = nq.replace("'", "''")
-        wrapped = f"SELECT * FROM {datasource_name}('{nq_escaped}');"
+        wrapped = f"SELECT * FROM {datasource_name}('{nq_escaped}')"
         return self._run_query_df(
             wrapped,
             conversation_id=conversation_id,
