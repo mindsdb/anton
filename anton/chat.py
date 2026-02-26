@@ -1174,6 +1174,12 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                     continue
                 elif cmd == "/connect":
                     await _handle_connect(console, workspace)
+                    # Reset running scratchpads so they pick up the new
+                    # MINDS_CONNECTION env var and inject minds_client.
+                    for pad_name in session._scratchpads.list_pads():
+                        pad = session._scratchpads._pads.get(pad_name)
+                        if pad is not None:
+                            await pad.reset()
                     continue
                 elif cmd == "/disconnect":
                     await _handle_disconnect(console, workspace)

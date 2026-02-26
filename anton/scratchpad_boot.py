@@ -191,8 +191,11 @@ if _minds_connection_raw:
                 progress_fn=progress,
             )
             namespace["minds_client"] = _minds_client_instance
-    except Exception:
-        pass  # Mind not available — not fatal
+    except Exception as _minds_exc:
+        import traceback as _tb
+        sys.stderr.write(f"[scratchpad] minds_client init failed: {_minds_exc}\n")
+        sys.stderr.write(_tb.format_exc() + "\n")
+        sys.stderr.flush()
 
 # Read-execute loop
 _real_stdout = sys.stdout
