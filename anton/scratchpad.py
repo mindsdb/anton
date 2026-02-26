@@ -63,6 +63,10 @@ class Scratchpad:
     _venv_dir: str | None = field(default=None, repr=False)
     _venv_python: str | None = field(default=None, repr=False)
     _installed_packages: set[str] = field(default_factory=set, repr=False)
+    _venvs_base: Path = field(
+        default_factory=lambda: Path("~/.anton/scratchpad-venvs").expanduser(),
+        repr=False,
+    )
 
     _MAX_VENV_RETRIES = 3
 
@@ -73,11 +77,22 @@ class Scratchpad:
         If we're running inside a parent venv, we also drop a .pth file so the
         parent venv's site-packages are visible in the child.
 
-        If the venv is broken (stale symlinks, missing Python binary), it is
-        deleted and recreated from scratch. Gives up after _MAX_VENV_RETRIES.
+        If a persistent venv already exists on disk it is recycled when healthy.
+        If the venv is broken (stale symlinks, missing Python binary, version
+        mismatch), it is deleted and recreated from scratch. Gives up after
+        _MAX_VENV_RETRIES.
         """
         if self._venv_dir is not None and self._verify_venv_python():
             return
+
+        # Try to recycle a persistent venv from a previous session.
+        venv_path = self._venvs_base / self.name
+        if venv_path.is_dir() and self._try_recycle_venv(venv_path):
+            return
+
+        # Recycling failed or no prior venv — nuke leftovers and create fresh.
+        if venv_path.is_dir():
+            self._nuke_venv()
 
         last_error: Exception | None = None
         for attempt in range(1, self._MAX_VENV_RETRIES + 1):
@@ -85,6 +100,7 @@ class Scratchpad:
                 self._create_venv()
                 if self._verify_venv_python():
                     self._setup_parent_site_packages()
+                    self._save_python_version()
                     return
                 # Python binary exists but doesn't run — nuke and retry
                 raise RuntimeError(f"venv Python binary at {self._venv_python} is not functional")
@@ -123,15 +139,14 @@ class Scratchpad:
         macOS (doesn't break when Homebrew upgrades Python), and doesn't depend
         on the ``venv`` stdlib module being functional.  Falls back to
         ``venv.create()`` when ``uv`` isn't found.
+
+        The venv is persisted at ``{_venvs_base}/{name}`` on all platforms so
+        installed packages survive across sessions.
         """
         import subprocess as _sp
 
-        if sys.platform == "win32":
-            base = Path("~/.anton/scratchpad-venvs").expanduser()
-            self._venv_dir = str(base / self.name)
-            os.makedirs(self._venv_dir, exist_ok=True)
-        else:
-            self._venv_dir = tempfile.mkdtemp(prefix="anton_venv_")
+        self._venv_dir = str(self._venvs_base / self.name)
+        os.makedirs(self._venv_dir, exist_ok=True)
 
         uv = self._find_uv()
         if uv:
@@ -197,6 +212,82 @@ class Scratchpad:
                 with open(pth_path, "w") as f:
                     for sp in parent_site:
                         f.write(sp + "\n")
+
+    def _try_recycle_venv(self, venv_path: Path) -> bool:
+        """Validate and reuse a persistent venv from a previous session.
+
+        Sets internal paths, verifies the Python binary is functional, checks
+        the Python version matches, loads saved requirements, and refreshes
+        parent-site-packages links.  Returns False on any failure (caller
+        should nuke the directory and create a fresh venv).
+        """
+        try:
+            self._venv_dir = str(venv_path)
+            if sys.platform == "win32":
+                self._venv_python = os.path.join(self._venv_dir, "Scripts", "python.exe")
+            else:
+                self._venv_python = os.path.join(self._venv_dir, "bin", "python")
+
+            if not self._verify_venv_python():
+                return False
+            if not self._check_python_version():
+                return False
+            self._load_requirements()
+            self._setup_parent_site_packages()
+            return True
+        except Exception:
+            return False
+
+    def _save_requirements(self) -> None:
+        """Write installed package names to requirements.txt (best-effort)."""
+        if not self._venv_dir or not self._installed_packages:
+            return
+        try:
+            req_path = os.path.join(self._venv_dir, "requirements.txt")
+            with open(req_path, "w") as f:
+                for pkg in sorted(self._installed_packages):
+                    f.write(pkg + "\n")
+        except OSError:
+            pass
+
+    def _load_requirements(self) -> None:
+        """Read requirements.txt into _installed_packages."""
+        if not self._venv_dir:
+            return
+        req_path = os.path.join(self._venv_dir, "requirements.txt")
+        try:
+            with open(req_path) as f:
+                for line in f:
+                    pkg = line.strip()
+                    if pkg:
+                        self._installed_packages.add(pkg)
+        except FileNotFoundError:
+            pass
+
+    def _save_python_version(self) -> None:
+        """Write the current Python major.minor to .python_version."""
+        if not self._venv_dir:
+            return
+        try:
+            ver_path = os.path.join(self._venv_dir, ".python_version")
+            with open(ver_path, "w") as f:
+                f.write(f"{sys.version_info.major}.{sys.version_info.minor}\n")
+        except OSError:
+            pass
+
+    def _check_python_version(self) -> bool:
+        """Return True if .python_version matches the current Python."""
+        if not self._venv_dir:
+            return False
+        ver_path = os.path.join(self._venv_dir, ".python_version")
+        try:
+            with open(ver_path) as f:
+                saved = f.read().strip()
+            expected = f"{sys.version_info.major}.{sys.version_info.minor}"
+            return saved == expected
+        except FileNotFoundError:
+            # No version file — treat as mismatch so it gets recreated with one.
+            return False
 
     async def start(self) -> None:
         """Write the boot script to a temp file and launch the subprocess."""
@@ -541,15 +632,14 @@ class Scratchpad:
         await self.start()
 
     async def close(self) -> None:
-        """Kill the process and clean up the boot script temp file and venv."""
+        """Kill the process and clean up the boot script temp file.
+
+        The venv is preserved on disk so installed packages survive across
+        sessions. A ``requirements.txt`` is saved to record what was installed.
+        """
         await self._stop_process()
         if self._venv_dir is not None:
-            # On Windows, keep the fixed venv so firewall rules persist
-            if sys.platform != "win32":
-                try:
-                    shutil.rmtree(self._venv_dir)
-                except OSError:
-                    pass
+            self._save_requirements()
             self._venv_dir = None
             self._venv_python = None
 
@@ -597,11 +687,16 @@ class ScratchpadManager:
         coding_provider: str = "anthropic",
         coding_model: str = "",
         coding_api_key: str = "",
+        workspace_path: Path | None = None,
     ) -> None:
         self._pads: dict[str, Scratchpad] = {}
         self._coding_provider: str = coding_provider
         self._coding_model: str = coding_model
         self._coding_api_key: str = coding_api_key
+        if workspace_path is not None:
+            self._venvs_base = workspace_path / ".anton" / "scratchpad-venvs"
+        else:
+            self._venvs_base = Path("~/.anton/scratchpad-venvs").expanduser()
         self._available_packages: list[str] = self.probe_packages()
 
     @staticmethod
@@ -619,17 +714,19 @@ class ScratchpadManager:
                 _coding_provider=self._coding_provider,
                 _coding_model=self._coding_model,
                 _coding_api_key=self._coding_api_key,
+                _venvs_base=self._venvs_base,
             )
             await pad.start()
             self._pads[name] = pad
         return self._pads[name]
 
     async def remove(self, name: str) -> str:
-        """Kill and delete a scratchpad."""
+        """Kill and fully delete a scratchpad (including its persistent venv)."""
         pad = self._pads.pop(name, None)
         if pad is None:
             return f"No scratchpad named '{name}'."
-        await pad.close()
+        await pad._stop_process()
+        pad._nuke_venv()
         return f"Scratchpad '{name}' removed."
 
     def list_pads(self) -> list[str]:

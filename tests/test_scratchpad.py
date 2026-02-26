@@ -472,16 +472,21 @@ class TestScratchpadVenv:
         finally:
             await pad.close()
 
-    async def test_venv_cleaned_on_close(self):
-        """Venv directory should be removed when the scratchpad is closed."""
+    async def test_venv_persisted_on_close(self):
+        """Venv directory should be preserved when the scratchpad is closed."""
         pad = Scratchpad(name="venv-close")
         await pad.start()
         venv_dir = pad._venv_dir
         assert os.path.isdir(venv_dir)
         await pad.close()
-        assert not os.path.exists(venv_dir)
+        # Venv directory persists on disk
+        assert os.path.isdir(venv_dir)
+        # But internal pointers are cleared
         assert pad._venv_dir is None
         assert pad._venv_python is None
+        # Cleanup
+        import shutil
+        shutil.rmtree(venv_dir, ignore_errors=True)
 
     async def test_venv_persists_across_reset(self):
         """Venv should survive a reset (only the process restarts)."""
@@ -518,6 +523,127 @@ class TestScratchpadVenv:
             await pad.close()
 
 
+class TestVenvPersistence:
+    """Tests for persistent venv recycling across sessions."""
+
+    async def test_venv_recycled_on_restart(self, tmp_path):
+        """Close + reopen same name → packages remembered."""
+        import shutil
+        venvs_base = tmp_path / "venvs"
+        pad = Scratchpad(name="recycle", _venvs_base=venvs_base)
+        await pad.start()
+        await pad.install_packages(["cowsay"])
+        venv_dir = pad._venv_dir
+        await pad.close()
+
+        # Venv persists on disk with requirements.txt
+        assert os.path.isdir(venv_dir)
+        req_path = os.path.join(venv_dir, "requirements.txt")
+        assert os.path.isfile(req_path)
+        with open(req_path) as f:
+            assert "cowsay" in f.read()
+
+        # Reopen — should recycle the existing venv
+        pad2 = Scratchpad(name="recycle", _venvs_base=venvs_base)
+        await pad2.start()
+        try:
+            assert "cowsay" in pad2._installed_packages
+            cell = await pad2.execute("import cowsay; print('ok')")
+            assert cell.error is None
+            assert cell.stdout.strip() == "ok"
+        finally:
+            await pad2.close()
+            shutil.rmtree(venvs_base, ignore_errors=True)
+
+    async def test_venv_nuked_on_version_mismatch(self, tmp_path, monkeypatch):
+        """Wrong .python_version → recreates venv."""
+        import shutil
+        venvs_base = tmp_path / "venvs"
+        pad = Scratchpad(name="ver-mismatch", _venvs_base=venvs_base)
+        await pad.start()
+        venv_dir = pad._venv_dir
+        await pad.close()
+
+        # Tamper with the .python_version file
+        ver_path = os.path.join(venv_dir, ".python_version")
+        with open(ver_path, "w") as f:
+            f.write("2.7\n")
+
+        # Reopen — should detect mismatch, nuke, and recreate
+        pad2 = Scratchpad(name="ver-mismatch", _venvs_base=venvs_base)
+        await pad2.start()
+        try:
+            assert pad2._venv_dir is not None
+            # The new venv should have the correct version
+            with open(os.path.join(pad2._venv_dir, ".python_version")) as f:
+                saved = f.read().strip()
+            import sys as _sys
+            assert saved == f"{_sys.version_info.major}.{_sys.version_info.minor}"
+        finally:
+            await pad2.close()
+            shutil.rmtree(venvs_base, ignore_errors=True)
+
+    async def test_venv_nuked_on_corruption(self, tmp_path):
+        """Delete Python binary → recreates venv."""
+        import shutil
+        venvs_base = tmp_path / "venvs"
+        pad = Scratchpad(name="corrupt", _venvs_base=venvs_base)
+        await pad.start()
+        venv_dir = pad._venv_dir
+        python_path = pad._venv_python
+        await pad.close()
+
+        # Delete the Python binary to simulate corruption
+        os.remove(python_path)
+
+        # Reopen — should detect corruption, nuke, and recreate
+        pad2 = Scratchpad(name="corrupt", _venvs_base=venvs_base)
+        await pad2.start()
+        try:
+            assert pad2._venv_dir is not None
+            assert pad2._venv_python is not None
+            assert os.path.isfile(pad2._venv_python)
+            cell = await pad2.execute("print('alive')")
+            assert cell.error is None
+            assert cell.stdout.strip() == "alive"
+        finally:
+            await pad2.close()
+            shutil.rmtree(venvs_base, ignore_errors=True)
+
+    async def test_remove_deletes_persistent_venv(self, tmp_path):
+        """ScratchpadManager.remove() fully deletes the persistent venv dir."""
+        import shutil
+        venvs_base = tmp_path / "venvs"
+        mgr = ScratchpadManager(workspace_path=tmp_path)
+        # Override base to use our tmp dir
+        mgr._venvs_base = venvs_base
+        try:
+            pad = await mgr.get_or_create("deleteme")
+            venv_dir = pad._venv_dir
+            assert os.path.isdir(venv_dir)
+            await mgr.remove("deleteme")
+            assert not os.path.exists(venv_dir)
+        finally:
+            await mgr.close_all()
+            shutil.rmtree(venvs_base, ignore_errors=True)
+
+    async def test_requirements_saved_on_close(self, tmp_path):
+        """requirements.txt is written when pad has installed packages."""
+        import shutil
+        venvs_base = tmp_path / "venvs"
+        pad = Scratchpad(name="req-save", _venvs_base=venvs_base)
+        await pad.start()
+        await pad.install_packages(["cowsay"])
+        await pad.close()
+
+        req_path = os.path.join(str(venvs_base / "req-save"), "requirements.txt")
+        assert os.path.isfile(req_path)
+        with open(req_path) as f:
+            contents = f.read()
+        assert "cowsay" in contents
+        shutil.rmtree(venvs_base, ignore_errors=True)
+
+
 class TestScratchpadInstall:
     async def test_install_packages_success(self):
         """install_packages should install a package into the venv."""
@@ -525,7 +651,7 @@ class TestScratchpadInstall:
         await pad.start()
         try:
             result = await pad.install_packages(["cowsay"])
-            assert "cowsay" in result.lower() or "already satisfied" in result.lower()
+            assert "cowsay" in result.lower() or "already satisfied" in result.lower() or "already installed" in result.lower()
             # Verify the package is importable
             cell = await pad.execute("import cowsay; print('ok')")
             assert cell.error is None

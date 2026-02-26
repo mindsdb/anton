@@ -303,7 +303,7 @@ class StreamDisplay:
             parts.append(spinner)
 
         # Working footer — visible while streaming
-        footer = Text(f"\n\u23f5\u23f5 Ctrl+C to cancel \u2014 {self._footer_msg}", style="#ff69b4")
+        footer = Text(f"\n\u23f5\u23f5 Esc to stop \u2014 {self._footer_msg}", style="#ff69b4")
         parts.append(footer)
 
         self._live.update(Group(*parts) if len(parts) > 1 else parts[0])

@@ -313,7 +313,7 @@ class TestScratchpadInstallViaChat:
             ]
             assert len(tool_result_msgs) == 1
             result_content = tool_result_msgs[0]["content"][0]["content"]
-            assert "cowsay" in result_content.lower() or "satisfied" in result_content.lower()
+            assert "cowsay" in result_content.lower() or "satisfied" in result_content.lower() or "already installed" in result_content.lower()
         finally:
             await session.close()
 

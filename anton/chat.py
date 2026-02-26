@@ -82,6 +82,7 @@ class ChatSession:
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
             coding_api_key=coding_api_key,
+            workspace_path=workspace.base if workspace else None,
         )
 
     @property
@@ -906,6 +907,45 @@ def _print_slash_help(console: Console) -> None:
     console.print()
 
 
+class _EscapeWatcher:
+    """Detect Escape keypress during streaming via cbreak terminal mode."""
+
+    def __init__(self) -> None:
+        self.cancelled = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self._old_settings: list | None = None
+
+    async def __aenter__(self) -> _EscapeWatcher:
+        if sys.platform != "win32" and sys.stdin.isatty():
+            self._task = asyncio.create_task(self._watch())
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _watch(self) -> None:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        self._old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            loop = asyncio.get_running_loop()
+            while True:
+                ch = await loop.run_in_executor(None, lambda: os.read(fd, 1))
+                if ch == b"\x1b":
+                    self.cancelled.set()
+                    return
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
+
+
 def run_chat(console: Console, settings: AntonSettings) -> None:
     """Launch the interactive chat REPL."""
     asyncio.run(_chat_loop(console, settings))
@@ -1077,26 +1117,29 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
             total_output = 0
 
             try:
-                async for event in session.turn_stream(message_content):
-                    if isinstance(event, StreamTextDelta):
-                        if ttft is None:
-                            ttft = time.monotonic() - t0
-                        display.append_text(event.text)
-                    elif isinstance(event, StreamToolResult):
-                        display.show_tool_result(event.content)
-                    elif isinstance(event, StreamToolUseStart):
-                        display.on_tool_use_start(event.id, event.name)
-                    elif isinstance(event, StreamToolUseDelta):
-                        display.on_tool_use_delta(event.id, event.json_delta)
-                    elif isinstance(event, StreamToolUseEnd):
-                        display.on_tool_use_end(event.id)
-                    elif isinstance(event, StreamTaskProgress):
-                        display.update_progress(
-                            event.phase, event.message, event.eta_seconds
-                        )
-                    elif isinstance(event, StreamComplete):
-                        total_input += event.response.usage.input_tokens
-                        total_output += event.response.usage.output_tokens
+                async with _EscapeWatcher() as esc:
+                    async for event in session.turn_stream(message_content):
+                        if esc.cancelled.is_set():
+                            raise KeyboardInterrupt
+                        if isinstance(event, StreamTextDelta):
+                            if ttft is None:
+                                ttft = time.monotonic() - t0
+                            display.append_text(event.text)
+                        elif isinstance(event, StreamToolResult):
+                            display.show_tool_result(event.content)
+                        elif isinstance(event, StreamToolUseStart):
+                            display.on_tool_use_start(event.id, event.name)
+                        elif isinstance(event, StreamToolUseDelta):
+                            display.on_tool_use_delta(event.id, event.json_delta)
+                        elif isinstance(event, StreamToolUseEnd):
+                            display.on_tool_use_end(event.id)
+                        elif isinstance(event, StreamTaskProgress):
+                            display.update_progress(
+                                event.phase, event.message, event.eta_seconds
+                            )
+                        elif isinstance(event, StreamComplete):
+                            total_input += event.response.usage.input_tokens
+                            total_output += event.response.usage.output_tokens
 
                 elapsed = time.monotonic() - t0
                 parts = [f"{elapsed:.1f}s", f"{total_input} in / {total_output} out"]
