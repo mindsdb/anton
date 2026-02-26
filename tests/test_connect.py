@@ -152,3 +152,43 @@ class TestHandleConnect:
         console.print.assert_any_call(
             "[anton.error]No Minds found on this server.[/]"
         )
+
+    @pytest.mark.asyncio
+    async def test_url_without_protocol_gets_https(self, console, workspace):
+        from anton.chat import _handle_connect
+
+        minds_response = [
+            {
+                "name": "test_mind",
+                "model_name": "gpt-4",
+                "provider": "openai",
+                "datasources": ["ds1"],
+            },
+        ]
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = minds_response
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_client), \
+             patch("rich.prompt.Prompt") as mock_prompt_cls:
+            mock_prompt_cls.ask = MagicMock(
+                side_effect=["terbase.dev.mdb.ai", "test-key", "1", "1"]
+            )
+            await _handle_connect(console, workspace)
+
+        conn_raw = workspace.get_secret("MINDS_CONNECTION")
+        assert conn_raw is not None
+        conn = json.loads(conn_raw)
+        assert conn["url"] == "https://terbase.dev.mdb.ai"
+
+        # Verify the GET was called with the https:// prefixed URL
+        mock_client.get.assert_called_once_with(
+            "https://terbase.dev.mdb.ai/api/v1/minds",
+            headers={"Authorization": "Bearer test-key"},
+        )

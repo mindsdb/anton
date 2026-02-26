@@ -559,6 +559,10 @@ async def _handle_connect(
         console=console,
     ).strip().rstrip("/")
 
+    # Auto-prepend https:// if no protocol given
+    if url and not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
     # 2. API key
     api_key = Prompt.ask(
         "API key",
