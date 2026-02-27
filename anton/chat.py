@@ -839,16 +839,20 @@ async def _handle_setup(
     console.print("  What do you want to configure?")
     console.print("    [bold]1[/]  Models — provider, API key, planning & coding models")
     console.print("    [bold]2[/]  Memory — memory mode and episodic memory")
+    console.print("    [bold]q[/]  Back")
     console.print()
 
     top_choice = Prompt.ask(
         "Select",
-        choices=["1", "2"],
-        default="1",
+        choices=["1", "2", "q"],
+        default="q",
         console=console,
     )
 
-    if top_choice == "1":
+    if top_choice == "q":
+        console.print()
+        return session
+    elif top_choice == "1":
         return await _handle_setup_models(
             console, settings, workspace, state,
             self_awareness, cortex, session, episodic=episodic,
