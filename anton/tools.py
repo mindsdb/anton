@@ -417,5 +417,11 @@ async def dispatch_tool(session: ChatSession, tool_name: str, tc_input: dict) ->
         return await handle_scratchpad(session, tc_input)
     elif tool_name == "recall":
         return await handle_recall(session, tc_input)
+
+    # If it is not one of the above, it could be a custom tool
+    # The custom tools are passed to the session as a list of dicts
+    tool_def = next((t for t in session.custom_tools if t["name"] == tool_name), None)
+    if tool_def:
+        return await tool_def["handler"](**tc_input)
     else:
         return f"Unknown tool: {tool_name}"

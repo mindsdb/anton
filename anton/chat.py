@@ -81,6 +81,7 @@ class ChatSession:
         coding_api_key: str = "",
         history: list[dict] = [],
         scratchpad_manager: ScratchpadManager | None = None,
+        custom_tools: list[dict] = [],
     ) -> None:
         self._llm = llm_client
         self._self_awareness = self_awareness
@@ -98,10 +99,15 @@ class ChatSession:
             coding_api_key=coding_api_key,
             workspace_path=workspace.base if workspace else None,
         )
+        self._custom_tools = custom_tools
 
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    @property
+    def custom_tools(self) -> list[dict]:
+        return self._custom_tools
 
     def repair_history(self) -> None:
         """Fix dangling tool_use blocks left by mid-stream cancellation.
@@ -205,6 +211,15 @@ class ChatSession:
             tools.append(_MT)
         if self._episodic is not None and self._episodic.enabled:
             tools.append(RECALL_TOOL)
+
+        # Add custom tools to the list
+        # Do not include the handler function in the tool definition
+        tools.extend([{
+            "name": tool["name"],
+            "description": tool["description"],
+            "input_schema": tool["input_schema"],
+        } for tool in self._custom_tools])
+
         return tools
 
     async def close(self) -> None:

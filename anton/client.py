@@ -22,6 +22,7 @@ class Anton:
         runtime_context: str = "",
         history: list[dict] = [],
         scratchpad_manager: ScratchpadManager | None = None,
+        custom_tools: list[dict] = [],
     ):
         """
         Initialize the Anton client.
@@ -31,6 +32,7 @@ class Anton:
             runtime_context: The runtime context to use for the chat session. Defaults to an empty string.
             history: The history of the chat session. Defaults to an empty list.
             scratchpad_manager: The scratchpad manager to use for the chat session. Defaults to a new ScratchpadManager.
+            custom_tools: The custom tools to use for the chat session. Defaults to an empty list.
         """
         # Initialize settings
         settings = AntonSettings()
@@ -56,6 +58,7 @@ class Anton:
             console=console,
             history=history,
             scratchpad_manager=scratchpad_manager,
+            custom_tools=custom_tools,
         )
 
     async def chat(self, user_input: str | list[dict]) -> str:
