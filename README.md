@@ -16,7 +16,7 @@ Anton is an advanced AI coworker. You tell it what you need done and it figures 
 
 **macOS / Linux:**
 ```bash
-curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && anton
 ```
 
 **Windows** (PowerShell):
@@ -24,7 +24,7 @@ curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh
 irm https://raw.githubusercontent.com/mindsdb/anton/main/install.ps1 | iex
 ```
 
-Open a new terminal, and run it by simply typing the command:
+Run it by simply typing the command:
 ```
 anton
 ```

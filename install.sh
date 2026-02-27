@@ -1,5 +1,6 @@
 #!/bin/sh
-# Anton install script — curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh
+# Anton install script
+# curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && anton
 # Pure POSIX sh, no sudo, idempotent.
 # Pass --force to skip confirmation prompts.
 
@@ -192,11 +193,6 @@ rm -rf "$HEALTH_DIR" 2>/dev/null
 # ── 8. Success message ──────────────────────────────────────────────
 info ""
 info "${GREEN}  ✓ anton installed successfully!${RESET}"
-info ""
-info "  Open a new terminal, then:"
-info ""
-info "    anton                                          ${CYAN}# Dashboard${RESET}"
-info "    anton run \"analyze last month's sales data\"    ${CYAN}# Give Anton a task${RESET}"
 info ""
 info "  Upgrade:    uv tool upgrade anton"
 info "  Uninstall:  uv tool uninstall anton"

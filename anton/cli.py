@@ -126,7 +126,7 @@ def _ensure_dependencies(console: Console) -> None:
         if sys.platform == "win32":
             console.print("[anton.muted]Or reinstall anton: irm https://raw.githubusercontent.com/mindsdb/anton/main/install.ps1 | iex[/]")
         else:
-            console.print("[anton.muted]Or reinstall anton: curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh[/]")
+            console.print('[anton.muted]Or reinstall anton: curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh && export PATH="$HOME/.local/bin:$PATH"[/]')
         console.print()
         raise typer.Exit(1)
 
