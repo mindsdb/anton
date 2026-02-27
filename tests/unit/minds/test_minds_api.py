@@ -8,7 +8,7 @@ Tests the FastAPI endpoints for minds management including:
 - Input validation
 """
 
-from unittest.mock import ANY, AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -19,6 +19,7 @@ from minds.api.v1.endpoints.minds import (
     delete_mind,
     get_mind,
     get_minds_service,
+    get_supported_models,
     list_minds,
     update_mind,
 )
@@ -448,6 +449,53 @@ class TestMindsAPI:
                 sort_order="desc",
             )
         assert exc_info.value.status_code == 500
+
+
+class TestGetSupportedModels:
+    """Test suite for get_supported_models endpoint."""
+
+    @pytest.mark.asyncio
+    @patch("minds.api.v1.endpoints.minds.get_app_settings")
+    @patch("minds.api.v1.endpoints.minds.get_supported_models_by_provider")
+    async def test_returns_expected_shape(self, mock_get_models, mock_get_settings):
+        mock_get_models.return_value = (
+            True,
+            "openai",
+            "gpt-4o",
+            {"openai": ["gpt-4o"], "anthropic": ["claude-sonnet-4-5"]},
+        )
+        mock_settings = Mock()
+        mock_get_settings.return_value = mock_settings
+
+        mock_context = Mock()
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.organization_id = "test-org"
+
+        result = await get_supported_models(context=mock_context, minds_service=mock_service)
+
+        assert result["model_selection_enabled"] is True
+        assert result["default_provider"] == "openai"
+        assert result["default_model"] == "gpt-4o"
+        assert result["providers"] == {"openai": ["gpt-4o"], "anthropic": ["claude-sonnet-4-5"]}
+        mock_get_models.assert_called_once_with(context=mock_context, settings=mock_settings)
+
+    @pytest.mark.asyncio
+    @patch("minds.api.v1.endpoints.minds.get_app_settings")
+    @patch("minds.api.v1.endpoints.minds.get_supported_models_by_provider")
+    async def test_returns_disabled_with_single_provider(self, mock_get_models, mock_get_settings):
+        mock_get_models.return_value = (False, "openai", "gpt-4o", {"openai": ["gpt-4o"]})
+        mock_get_settings.return_value = Mock()
+
+        mock_context = Mock()
+        mock_service = Mock(spec=MindsService)
+        mock_service.user_id = "test-user"
+        mock_service.organization_id = "test-org"
+
+        result = await get_supported_models(context=mock_context, minds_service=mock_service)
+
+        assert result["model_selection_enabled"] is False
+        assert result["providers"] == {"openai": ["gpt-4o"]}
 
 
 class TestMindsAPIErrorHandling:

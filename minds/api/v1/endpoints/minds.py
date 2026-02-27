@@ -9,10 +9,18 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from minds.api.v1.deps import get_conversations_service, get_data_catalog_loader, get_limits_service, get_minds_service
+from minds.api.v1.deps import (
+    get_context,
+    get_conversations_service,
+    get_data_catalog_loader,
+    get_limits_service,
+    get_minds_service,
+)
 from minds.common.guards import ResourceType, require_usage_available
 from minds.common.llm_provider import get_supported_models_by_provider
 from minds.common.logger import setup_logging
+from minds.common.settings.app_settings import get_app_settings
+from minds.requests.context import Context
 from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
 from minds.services.conversations import ConversationsService
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
@@ -27,6 +35,7 @@ router = APIRouter()
 
 @router.get("/supported-models")
 async def get_supported_models(
+    context: Context = Depends(get_context),
     minds_service: MindsService = Depends(get_minds_service),
 ) -> dict[str, bool | str | str | dict[str, list[str]]]:
     """
@@ -36,11 +45,12 @@ async def get_supported_models(
         f"Get supported models requested for user {minds_service.user_id} in "
         f"organization {minds_service.organization_id}"
     )
-    is_model_selection_enabled, default_provider, default_model, providers_and_models = (
-        get_supported_models_by_provider()
+    model_selection_enabled, default_provider, default_model, providers_and_models = get_supported_models_by_provider(
+        context=context,
+        settings=get_app_settings(),
     )
     return {
-        "is_model_selection_enabled": is_model_selection_enabled,
+        "model_selection_enabled": model_selection_enabled,
         "default_provider": default_provider,
         "default_model": default_model,
         "providers": providers_and_models,

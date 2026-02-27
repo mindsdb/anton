@@ -179,6 +179,10 @@ class AppSettings(Settings):
         default=FeatureFlagSettings(name="enable-langfuse", default_value=True)
     )  # FEATURE_FLAG__ENABLE_LANGFUSE
 
+    feature_flag_enable_model_selection: FeatureFlagSettings = Field(
+        default=FeatureFlagSettings(name="enable-model-selection", default_value=True)
+    )  # FEATURE_FLAG__ENABLE_MODEL_SELECTION
+
 
 @lru_cache
 def get_app_settings() -> AppSettings:

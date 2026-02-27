@@ -1,6 +1,8 @@
 from enum import Enum
 
-from minds.common.settings.app_settings import get_app_settings
+from minds.common.settings.app_settings import AppSettings, get_app_settings
+from minds.common.statsig.feature_flags.model_selection_enabled import is_model_selection_enabled
+from minds.requests.context import Context
 
 settings = get_app_settings()
 
@@ -30,7 +32,9 @@ class LLMProvider(Enum):
             ) from None
 
 
-def get_supported_models_by_provider() -> tuple[bool, str, str, dict[str, list[str]]]:
+def get_supported_models_by_provider(
+    context: Context, settings: AppSettings | None = None
+) -> tuple[bool, str, str, dict[str, list[str]]]:
     """
     Get the supported models by provider.
     If model selection is disabled, return only the default provider and model.
@@ -40,11 +44,14 @@ def get_supported_models_by_provider() -> tuple[bool, str, str, dict[str, list[s
         tuple[bool, str, str, dict[str, list[str]]]: A tuple with a boolean flag indicating if model selection is
         enabled, the default provider, the default model, and a dictionary of supported providers and models
     """
+    settings = settings or get_app_settings()
+
     # If model selection is disabled, return only the default provider and model
-    is_model_selection_enabled = bool(settings.minds.enable_model_selection)
+    model_selection_enabled = is_model_selection_enabled(context=context, settings=settings)
+
     default_provider = settings.default_models.default_provider
     default_model = getattr(settings.default_models, f"{default_provider}_model")
-    if not is_model_selection_enabled:
+    if not model_selection_enabled:
         providers_and_models = {
             default_provider: [default_model],
         }
@@ -55,27 +62,40 @@ def get_supported_models_by_provider() -> tuple[bool, str, str, dict[str, list[s
             provider_str = provider.value
             providers_and_models[provider_str] = getattr(settings, provider_str).supported_models
 
-    return is_model_selection_enabled, default_provider, default_model, providers_and_models
+    return model_selection_enabled, default_provider, default_model, providers_and_models
 
 
 def validate_provider_and_model_name(
     provider: str | None,
     model_name: str | None,
+    context: Context | None = None,
+    settings: AppSettings | None = None,
 ) -> None:
     """Validate provider and model name.
-    If model selection is disabled, only the default provider and model can be used.
-    If model selection is enabled, validate the provider and model against the supported models for the provider.
+
+    When called without *context* (e.g. from a Pydantic schema validator),
+    only basic provider normalization is performed.  Full model-selection
+    checks require a request context and are enforced at the endpoint /
+    service layer.
     """
     if provider is None and model_name is None:
         return
 
-    is_model_selection_enabled, default_provider, default_model, providers_and_models = (
-        get_supported_models_by_provider()
+    # Without context we can only validate that the provider string is recognised.
+    if context is None:
+        if provider:
+            LLMProvider.normalize(provider)
+        return
+
+    settings = settings or get_app_settings()
+
+    model_selection_enabled, default_provider, default_model, providers_and_models = get_supported_models_by_provider(
+        context=context, settings=settings
     )
 
     if provider:
         provider = LLMProvider.normalize(provider).value
-        if not is_model_selection_enabled:
+        if not model_selection_enabled:
             if provider != default_provider:
                 raise ValueError(
                     f"Model selection is disabled. Only the default provider '{default_provider}' can be used."
@@ -88,7 +108,7 @@ def validate_provider_and_model_name(
                 )
 
     if model_name:
-        if not is_model_selection_enabled:
+        if not model_selection_enabled:
             if model_name != default_model:
                 raise ValueError(f"Model selection is disabled. Only the default model '{default_model}' can be used.")
         else:

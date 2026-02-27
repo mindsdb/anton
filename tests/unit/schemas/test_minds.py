@@ -177,7 +177,12 @@ class TestMindUpdateRequest:
         assert request.datasources is None  # Not updated
 
     def test_update_request_full_update(self):
-        """Test full update with all fields."""
+        """Test full update with all fields.
+
+        Schema-level validation only checks provider normalization (no context
+        available), so any valid LLMProvider is accepted here.  Model-selection
+        rules are enforced at the endpoint/service layer where context exists.
+        """
         data = {
             "name": "fully-updated-mind",
             "provider": "anthropic",
@@ -186,9 +191,13 @@ class TestMindUpdateRequest:
             "datasources": [DatasourceConfig(name="new-datasource", tables=["table1"])],
         }
 
-        # By default model selection is disabled, so only the default provider/model are allowed.
-        with pytest.raises(ValidationError, match="Model selection is disabled"):
-            MindUpdateRequest(**data)
+        request = MindUpdateRequest(**data)
+
+        assert request.name == "fully-updated-mind"
+        assert request.provider == "anthropic"
+        assert request.model_name == "claude-3"
+        assert request.parameters == {"temperature": 0.5}
+        assert len(request.datasources) == 1
 
     def test_update_request_lowercase_name_and_datasources(self):
         """Test that name and datasource names are lowercased in update request."""
