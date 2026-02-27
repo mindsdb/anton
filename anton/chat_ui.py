@@ -27,7 +27,7 @@ class _ToolActivity:
 
 _TOOL_LABELS: dict[str, str] = {
     "scratchpad": "Scratchpad",
-    "update_context": "Context",
+    "memorize": "Memory",
 }
 
 _MAX_DESC = 60
@@ -44,9 +44,9 @@ def _tool_display_text(name: str, input_json: str) -> str:
     desc = ""
     if name == "scratchpad":
         desc = data.get("one_line_description") or data.get("action", "")
-    elif name == "update_context":
-        updates = data.get("updates", [])
-        desc = f"{len(updates)} file(s)"
+    elif name == "memorize":
+        entries = data.get("entries", [])
+        desc = f"{len(entries)} entry/entries"
     if desc:
         if len(desc) > _MAX_DESC:
             desc = desc[:_MAX_DESC - 1] + "\u2026"

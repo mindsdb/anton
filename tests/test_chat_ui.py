@@ -165,13 +165,13 @@ class TestActivityTracking:
         display.on_tool_use_delta("tool_1", '{"action": "exec", "name": "pad"}')
         display.on_tool_use_end("tool_1")
 
-        display.on_tool_use_start("tool_2", "update_context")
-        display.on_tool_use_delta("tool_2", '{"updates": [{"file": "x.md", "content": "hi"}]}')
+        display.on_tool_use_start("tool_2", "memorize")
+        display.on_tool_use_delta("tool_2", '{"entries": [{"text": "test", "kind": "lesson", "scope": "project"}]}')
         display.on_tool_use_end("tool_2")
 
         assert len(display._activities) == 2
         assert display._activities[0].description == "Scratchpad(exec)"
-        assert display._activities[1].description == "Context(1 file(s))"
+        assert display._activities[1].description == "Memory(1 entry/entries)"
 
     def test_malformed_json_fallback(self):
         # Bad JSON should not crash, falls back to just the label

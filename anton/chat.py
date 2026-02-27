@@ -33,8 +33,8 @@ from anton.llm.provider import (
 )
 from anton.scratchpad import ScratchpadManager
 from anton.tools import (
+    MEMORIZE_TOOL,
     SCRATCHPAD_TOOL,
-    UPDATE_CONTEXT_TOOL,
     dispatch_tool,
     format_cell_result,
     prepare_scratchpad_exec,
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.llm.client import LLMClient
+    from anton.memory.cortex import Cortex
     from anton.workspace import Workspace
 
 
@@ -69,6 +70,7 @@ class ChatSession:
         llm_client: LLMClient,
         *,
         self_awareness: SelfAwarenessContext | None = None,
+        cortex: Cortex | None = None,
         runtime_context: str = "",
         workspace: Workspace | None = None,
         console: Console | None = None,
@@ -77,10 +79,13 @@ class ChatSession:
     ) -> None:
         self._llm = llm_client
         self._self_awareness = self_awareness
+        self._cortex = cortex
         self._runtime_context = runtime_context
         self._workspace = workspace
         self._console = console
         self._history: list[dict] = []
+        self._pending_memory_confirmations: list = []
+        self._turn_count = 0
         self._scratchpads = ScratchpadManager(
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
@@ -132,11 +137,17 @@ class ChatSession:
         prompt = CHAT_SYSTEM_PROMPT.format(
             runtime_context=self._runtime_context,
         )
-        if self._self_awareness is not None:
+        # Inject memory context (replaces old self_awareness)
+        if self._cortex is not None:
+            memory_section = self._cortex.build_memory_context()
+            if memory_section:
+                prompt += memory_section
+        elif self._self_awareness is not None:
+            # Fallback for legacy usage (tests, etc.)
             sa_section = self._self_awareness.build_prompt_section()
             if sa_section:
                 prompt += sa_section
-        # Inject anton.md project context
+        # Inject anton.md project context (user-written takes priority)
         if self._workspace is not None:
             md_context = self._workspace.build_anton_md_context()
             if md_context:
@@ -173,9 +184,19 @@ class ChatSession:
                 extra = f"\n\nInstalled packages: {len(pkg_list)} total (standard library plus dependencies)."
             scratchpad_tool["description"] = SCRATCHPAD_TOOL["description"] + extra
 
+        # Inject scratchpad wisdom from memory (procedural priming)
+        if self._cortex is not None:
+            wisdom = self._cortex.get_scratchpad_context()
+            if wisdom:
+                scratchpad_tool["description"] += f"\n\nLessons from past sessions:\n{wisdom}"
+
         tools = [scratchpad_tool]
-        if self._self_awareness is not None:
-            tools.append(UPDATE_CONTEXT_TOOL)
+        if self._cortex is not None:
+            tools.append(MEMORIZE_TOOL)
+        elif self._self_awareness is not None:
+            # Legacy fallback
+            from anton.tools import MEMORIZE_TOOL as _MT
+            tools.append(_MT)
         return tools
 
     async def close(self) -> None:
@@ -371,6 +392,16 @@ class ChatSession:
         async for event in self._stream_and_handle_tools():
             yield event
 
+        # Identity extraction (Default Mode Network — every 5 turns)
+        self._turn_count += 1
+        if (
+            self._turn_count % 5 == 0
+            and self._cortex is not None
+            and self._cortex.mode != "off"
+            and isinstance(user_input, str)
+        ):
+            asyncio.create_task(self._cortex.maybe_update_identity(user_input))
+
     async def _stream_and_handle_tools(self) -> AsyncIterator[StreamEvent]:
         """Stream one LLM call, handle tool loops, yield all events."""
         system = self._build_system_prompt()
@@ -544,6 +575,38 @@ class ChatSession:
         reply = llm_response.content or ""
         self._history.append({"role": "assistant", "content": reply})
 
+        # Consolidation: replay scratchpad sessions to extract lessons
+        if self._cortex is not None and self._cortex.mode != "off":
+            self._maybe_consolidate_scratchpads()
+
+    def _maybe_consolidate_scratchpads(self) -> None:
+        """Check if any scratchpad sessions warrant consolidation and fire it off."""
+        from anton.memory.consolidator import Consolidator
+
+        consolidator = Consolidator()
+        for pad in self._scratchpads._pads.values():
+            cells = list(pad.cells)
+            if consolidator.should_replay(cells):
+                asyncio.create_task(self._consolidate(cells))
+
+    async def _consolidate(self, cells: list) -> None:
+        """Run offline consolidation on a completed scratchpad session."""
+        from anton.memory.consolidator import Consolidator
+
+        consolidator = Consolidator()
+        engrams = await consolidator.replay_and_extract(cells, self._llm)
+        if not engrams or self._cortex is None:
+            return
+
+        auto_encode = [e for e in engrams if not self._cortex.encoding_gate(e)]
+        needs_confirm = [e for e in engrams if self._cortex.encoding_gate(e)]
+
+        if auto_encode:
+            await self._cortex.encode(auto_encode)
+
+        if needs_confirm:
+            self._pending_memory_confirmations.extend(needs_confirm)
+
 
 def _apply_error_tracking(
     result_text: str,
@@ -582,6 +645,7 @@ def _rebuild_session(
     settings: AntonSettings,
     state: dict,
     self_awareness,
+    cortex,
     workspace,
     console: Console,
 ) -> ChatSession:
@@ -589,11 +653,18 @@ def _rebuild_session(
     from anton.llm.client import LLMClient
 
     state["llm_client"] = LLMClient.from_settings(settings)
+
+    # Update cortex with new LLM client and memory mode
+    if cortex is not None:
+        cortex._llm = state["llm_client"]
+        cortex.mode = settings.memory_mode
+
     runtime_context = (
         f"- Provider: {settings.planning_provider}\n"
         f"- Planning model: {settings.planning_model}\n"
         f"- Coding model: {settings.coding_model}\n"
         f"- Workspace: {settings.workspace_path}\n"
+        f"- Memory mode: {settings.memory_mode}"
     )
     api_key = (
         settings.anthropic_api_key if settings.coding_provider == "anthropic"
@@ -602,6 +673,7 @@ def _rebuild_session(
     return ChatSession(
         state["llm_client"],
         self_awareness=self_awareness,
+        cortex=cortex,
         runtime_context=runtime_context,
         workspace=workspace,
         console=console,
@@ -616,6 +688,7 @@ async def _handle_setup(
     workspace: Workspace,
     state: dict,
     self_awareness,
+    cortex,
     session: ChatSession,
 ) -> ChatSession:
     """Interactive setup wizard — reconfigure provider, model, and API key."""
@@ -691,16 +764,39 @@ async def _handle_setup(
         console=console,
     )
 
+    # --- Memory Mode ---
+    console.print()
+    console.print("[anton.cyan]Memory modes:[/]")
+    console.print(r"  [bold]1[/]  Autopilot — Anton decides what to remember       [dim]\[high NE][/]")
+    console.print(r"  [bold]2[/]  Co-pilot — save obvious, confirm ambiguous        [dim]\[recommended][/]")
+    console.print(r"  [bold]3[/]  Manual — always confirm before saving             [dim]\[low NE][/]")
+    console.print(r"  [bold]4[/]  Off — never save memory (still reads existing)    [dim]\[suppressed][/]")
+    console.print()
+
+    mode_map = {"1": "autopilot", "2": "copilot", "3": "manual", "4": "off"}
+    current_mode_num = {"autopilot": "1", "copilot": "2", "manual": "3", "off": "4"}.get(
+        settings.memory_mode, "2"
+    )
+    mode_choice = Prompt.ask(
+        "Memory mode",
+        choices=["1", "2", "3", "4"],
+        default=current_mode_num,
+        console=console,
+    )
+    memory_mode = mode_map[mode_choice]
+
     # --- Persist ---
     settings.planning_provider = provider
     settings.coding_provider = provider
     settings.planning_model = planning_model
     settings.coding_model = coding_model
+    settings.memory_mode = memory_mode
 
     workspace.set_secret("ANTON_PLANNING_PROVIDER", provider)
     workspace.set_secret("ANTON_CODING_PROVIDER", provider)
     workspace.set_secret("ANTON_PLANNING_MODEL", planning_model)
     workspace.set_secret("ANTON_CODING_MODEL", coding_model)
+    workspace.set_secret("ANTON_MEMORY_MODE", memory_mode)
 
     if api_key:
         setattr(settings, key_attr, api_key)
@@ -723,6 +819,7 @@ async def _handle_setup(
         settings=settings,
         state=state,
         self_awareness=self_awareness,
+        cortex=cortex,
         workspace=workspace,
         console=console,
     )
@@ -991,17 +1088,42 @@ def run_chat(console: Console, settings: AntonSettings) -> None:
 async def _chat_loop(console: Console, settings: AntonSettings) -> None:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.llm.client import LLMClient
+    from anton.memory.cortex import Cortex
     from anton.workspace import Workspace
 
     # Use a mutable container so closures always see the current client
     state: dict = {"llm_client": LLMClient.from_settings(settings)}
 
-    # Self-awareness context
+    # Self-awareness context (legacy, kept for backward compatibility)
     self_awareness = SelfAwarenessContext(Path(settings.context_dir))
 
     # Workspace for anton.md and secret vault
     workspace = Workspace(settings.workspace_path)
     workspace.apply_env_to_process()
+
+    # --- Memory system (brain-inspired architecture) ---
+    global_memory_dir = Path.home() / ".anton" / "memory"
+    project_memory_dir = settings.workspace_path / ".anton" / "memory"
+
+    cortex = Cortex(
+        global_dir=global_memory_dir,
+        project_dir=project_memory_dir,
+        mode=settings.memory_mode,
+        llm_client=state["llm_client"],
+    )
+
+    # Reconsolidation: migrate legacy memory formats on first run
+    from anton.memory.reconsolidator import needs_reconsolidation, reconsolidate
+
+    project_anton_dir = settings.workspace_path / ".anton"
+    if needs_reconsolidation(project_anton_dir):
+        actions = reconsolidate(project_anton_dir)
+        if actions:
+            console.print(f"[anton.muted]  Memory migration: {actions[0]}[/]")
+
+    # Background compaction if needed
+    if cortex.needs_compaction():
+        asyncio.create_task(cortex.compact_all())
 
     # Clean up old clipboard uploads
     uploads_dir = Path(settings.workspace_path) / ".anton" / "uploads"
@@ -1013,7 +1135,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
         f"- Planning model: {settings.planning_model}\n"
         f"- Coding model: {settings.coding_model}\n"
         f"- Workspace: {settings.workspace_path}\n"
-        f"- Memory: {'enabled' if settings.memory_enabled else 'disabled'}"
+        f"- Memory mode: {settings.memory_mode}"
     )
 
     coding_api_key = (
@@ -1023,6 +1145,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
     session = ChatSession(
         state["llm_client"],
         self_awareness=self_awareness,
+        cortex=cortex,
         runtime_context=runtime_context,
         workspace=workspace,
         console=console,
@@ -1067,6 +1190,35 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
 
     try:
         while True:
+            # Memory confirmation UX — show pending lessons before prompt
+            if session._pending_memory_confirmations:
+                pending = session._pending_memory_confirmations
+                console.print("[anton.muted]Lessons learned from this session:[/]")
+                for i, engram in enumerate(pending, 1):
+                    console.print(f"  [bold]{i}.[/] [{engram.kind}] {engram.text}")
+                console.print()
+                confirm = console.input("[bold]Save to memory? (y/n/pick numbers):[/] ").strip().lower()
+                if confirm in ("y", "yes"):
+                    if cortex is not None:
+                        await cortex.encode(pending)
+                    console.print("[anton.muted]Saved.[/]")
+                elif confirm in ("n", "no"):
+                    console.print("[anton.muted]Discarded.[/]")
+                else:
+                    # Parse number selections like "1 3" or "1,3"
+                    try:
+                        nums = [int(x.strip()) for x in confirm.replace(",", " ").split() if x.strip().isdigit()]
+                        selected = [pending[n - 1] for n in nums if 1 <= n <= len(pending)]
+                        if selected and cortex is not None:
+                            await cortex.encode(selected)
+                            console.print(f"[anton.muted]Saved {len(selected)} entries.[/]")
+                        else:
+                            console.print("[anton.muted]Discarded.[/]")
+                    except (ValueError, IndexError):
+                        console.print("[anton.muted]Discarded.[/]")
+                session._pending_memory_confirmations = []
+                console.print()
+
             try:
                 user_input = await prompt_session.prompt_async(ANSI("\033[1;38;2;0;255;159myou>\033[0m "))
             except EOFError:
@@ -1104,7 +1256,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                 if cmd == "/setup":
                     session = await _handle_setup(
                         console, settings, workspace, state,
-                        self_awareness, session,
+                        self_awareness, cortex, session,
                     )
                     continue
                 elif cmd == "/help":
@@ -1194,6 +1346,7 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
                     settings=settings,
                     state=state,
                     self_awareness=self_awareness,
+                    cortex=cortex,
                     workspace=workspace,
                     console=console,
                 )

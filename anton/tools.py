@@ -65,34 +65,49 @@ def build_tool_schemas(available: list[str]) -> list[dict]:
 # Tool definitions + handlers (moved from chat.py)
 # ---------------------------------------------------------------------------
 
-UPDATE_CONTEXT_TOOL = {
-    "name": "update_context",
+MEMORIZE_TOOL = {
+    "name": "memorize",
     "description": (
-        "Update self-awareness context files when you learn something important "
-        "about the project or workspace. Use this to persist knowledge for future sessions."
+        "Encode a rule or lesson into long-term memory for future sessions. "
+        "Use this when you learn something important, discover a useful pattern, "
+        "or the user asks you to remember something.\n\n"
+        "Entry kinds:\n"
+        "- always: Something to always do ('Use httpx instead of requests')\n"
+        "- never: Something to never do ('Never use time.sleep() in scratchpad')\n"
+        "- when: Conditional rule ('If paginated API → use async + progress()')\n"
+        "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
+        "- profile: Fact about the user ('Name: Jorge', 'Prefers dark mode')"
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "updates": {
+            "entries": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "file": {
+                        "text": {
                             "type": "string",
-                            "description": "Filename like 'project-overview.md'",
+                            "description": "The memory to encode",
                         },
-                        "content": {
-                            "type": ["string", "null"],
-                            "description": "New content, or null to delete the file",
+                        "kind": {
+                            "type": "string",
+                            "enum": ["always", "never", "when", "lesson", "profile"],
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["global", "project"],
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "Topic slug for lessons (e.g. 'api-coingecko')",
                         },
                     },
-                    "required": ["file", "content"],
+                    "required": ["text", "kind", "scope"],
                 },
             },
         },
-        "required": ["updates"],
+        "required": ["entries"],
     },
 }
 
@@ -168,25 +183,63 @@ SCRATCHPAD_TOOL = {
 # Tool handlers
 # ---------------------------------------------------------------------------
 
-def handle_update_context(session: ChatSession, tc_input: dict) -> str:
-    """Process an update_context tool call and return a result string."""
-    if session._self_awareness is None:
-        return "Context updates not available."
+async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
+    """Process a memorize tool call and return a result string."""
+    if session._cortex is None:
+        return "Memory system not available."
 
-    from anton.context.self_awareness import ContextUpdate
+    if session._cortex.mode == "off":
+        return "Memory encoding is disabled. Change memory mode via /setup to enable."
 
-    raw_updates = tc_input.get("updates", [])
-    updates = [
-        ContextUpdate(file=u["file"], content=u.get("content"))
-        for u in raw_updates
-        if isinstance(u, dict) and "file" in u
-    ]
+    from anton.memory.hippocampus import Engram
 
-    if not updates:
-        return "No valid updates provided."
+    raw_entries = tc_input.get("entries", [])
+    if not raw_entries:
+        return "No entries provided."
 
-    actions = session._self_awareness.apply_updates(updates)
-    return "Context updated: " + "; ".join(actions)
+    engrams: list[Engram] = []
+    for entry in raw_entries:
+        if not isinstance(entry, dict) or "text" not in entry:
+            continue
+
+        kind = entry.get("kind", "lesson")
+        if kind not in ("always", "never", "when", "lesson", "profile"):
+            kind = "lesson"
+
+        scope = entry.get("scope", "project")
+        if scope not in ("global", "project"):
+            scope = "project"
+
+        # User-sourced memories (via explicit tool call) get high confidence
+        engrams.append(Engram(
+            text=entry["text"],
+            kind=kind,
+            scope=scope,
+            confidence="high",
+            topic=entry.get("topic", ""),
+            source="user",
+        ))
+
+    if not engrams:
+        return "No valid entries provided."
+
+    # Check encoding gate for each engram
+    auto_encode = [e for e in engrams if not session._cortex.encoding_gate(e)]
+    needs_confirm = [e for e in engrams if session._cortex.encoding_gate(e)]
+
+    actions: list[str] = []
+    if auto_encode:
+        results = await session._cortex.encode(auto_encode)
+        actions.extend(results)
+
+    if needs_confirm:
+        # Queue for confirmation (handled in chat loop)
+        if not hasattr(session, "_pending_memory_confirmations"):
+            session._pending_memory_confirmations = []
+        session._pending_memory_confirmations.extend(needs_confirm)
+        actions.append(f"{len(needs_confirm)} memory entries pending user confirmation.")
+
+    return "Memory updated: " + "; ".join(actions) if actions else "No changes made."
 
 
 async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
@@ -307,8 +360,8 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
 
 async def dispatch_tool(session: ChatSession, tool_name: str, tc_input: dict) -> str:
     """Dispatch a tool call by name. Returns result text."""
-    if tool_name == "update_context":
-        return handle_update_context(session, tc_input)
+    if tool_name == "memorize":
+        return await handle_memorize(session, tc_input)
     elif tool_name == "scratchpad":
         return await handle_scratchpad(session, tc_input)
     else:
