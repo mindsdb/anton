@@ -35,9 +35,9 @@ These three parts work in a very simple way:
   │    2. Monitor scratchpad progress                  │
   │    3. Detect stuck/failure → pivot strategy        │
   │    4. On success → record to experience store      │
-  └────────────┬───────────────────────────────────────┘
-               │ spawns & monitors
-               ▼
+  └────────────┬────────────────────↑──────────────────┘
+               │ spawns & monitors  │
+               ▼                    │
   ┌──────────────────────────────────────────────────────┐
   │              SCRATCHPADS (working memory)            │
   │                                                      │
@@ -46,15 +46,8 @@ These three parts work in a very simple way:
   │  - A chain-of-thought trace (code + observations)    │
   │  - Has a goal, constraints, and a budget             │
   │  - Can request sub-scratchpads (decomposition)       │
+  │  - Can invoke the hypocampus in a loop               │
   │                                                      │
-  │  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
-  │  │ Scratch1 │  │ Scratch2 │  │ Scratch3 │            │
-  │  │ "parse   │  │ "query   │  │ "format  │            │
-  │  │  input"  │  │  API"    │  │  output" │            │
-  │  └────┬─────┘  └────┬─────┘  └────┬─────┘            │
-  │       │              │              │                │
-  │       ▼              ▼              ▼                │
-  │   [result]       [result]       [result]             │
   └────────────────────┬─────────────────────────────────┘
                        │ on success
                        ▼
