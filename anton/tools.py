@@ -2,63 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
-
-
-@dataclass
-class ToolDef:
-    name: str
-    description: str
-    input_schema: dict
-    handler: Callable  # async (session, tc_input) -> str
-    stream_handler: Callable | None = None  # async generator version
-
-
-_registry: dict[str, ToolDef] = {}
-
-
-def tool(name: str, *, description: str, input_schema: dict):
-    """Decorator to register a tool with its handler."""
-    def decorator(fn):
-        _registry[name] = ToolDef(
-            name=name,
-            description=description,
-            input_schema=input_schema,
-            handler=fn,
-        )
-        return fn
-    return decorator
-
-
-def tool_stream(name: str):
-    """Decorator to register a streaming handler for an existing tool."""
-    def decorator(fn):
-        if name in _registry:
-            _registry[name].stream_handler = fn
-        return fn
-    return decorator
-
-
-def get_tool(name: str) -> ToolDef | None:
-    return _registry.get(name)
-
-
-def all_tools() -> list[ToolDef]:
-    return list(_registry.values())
-
-
-def build_tool_schemas(available: list[str]) -> list[dict]:
-    """Build API-ready tool schema dicts for the given tool names."""
-    return [
-        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
-        for t in _registry.values()
-        if t.name in available
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -417,5 +364,11 @@ async def dispatch_tool(session: ChatSession, tool_name: str, tc_input: dict) ->
         return await handle_scratchpad(session, tc_input)
     elif tool_name == "recall":
         return await handle_recall(session, tc_input)
+
+    # If it is not one of the above, it could be a custom tool
+    # The custom tools are passed to the session as a list of dicts
+    tool_def = next((t for t in session.custom_tools if t["name"] == tool_name), None)
+    if tool_def:
+        return await tool_def["handler"](**tc_input)
     else:
         return f"Unknown tool: {tool_name}"
