@@ -3,14 +3,24 @@ import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field
 
-_KEEP_RECENT = 5  # Number of recent cells to keep during compaction
 
+# Boot script
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
-# Delimiters
+# Cell settings
+_CELL_TIMEOUT_DEFAULT = 120        # Default total timeout when no estimate given
+_CELL_INACTIVITY_TIMEOUT = 30      # Max silence between output lines before killing
+_CELL_INACTIVITY_AFTER_PROGRESS = 60  # Grace window after a progress() call
+_KEEP_RECENT = 5  # Number of recent cells to keep during compaction
+
+# Installation settings
+_INSTALL_TIMEOUT = 120
+
+# Delimiters and markers
 _CELL_DELIM = "__ANTON_CELL_END__"
 _RESULT_START = "__ANTON_RESULT__"
 _RESULT_END = "__ANTON_RESULT_END__"
+_PROGRESS_MARKER = "__ANTON_PROGRESS__"
 
 
 @dataclass
@@ -29,7 +39,7 @@ class ScratchpadRuntime(ABC):
     name: str
     cells: list[Cell] = field(default_factory=list)
 
-    _boot_path: str | None = field(default=None, repr=False)
+    _boot_path: str = field(default=str(_BOOT_SCRIPT_PATH), repr=False)
     _coding_provider: str = field(default="anthropic", repr=False)
     _coding_model: str = field(default="", repr=False)
     _coding_api_key: str = field(default="", repr=False)
@@ -253,3 +263,18 @@ class ScratchpadRuntime(ABC):
         )
         self.cells = [summary_cell] + recent
         return True
+
+    @staticmethod
+    def _compute_timeouts(estimated_seconds: int) -> tuple[float, float]:
+        """
+        Compute (total_timeout, inactivity_timeout) from estimated execution time.
+
+        - If estimate is 0: use defaults (120s total, 30s inactivity).
+        - Otherwise: total = max(estimate * 2, estimate + 30) with no cap.
+        Inactivity = max(estimate * 0.5, 30) — no hard cap, scales with estimate.
+        """
+        if estimated_seconds <= 0:
+            return float(_CELL_TIMEOUT_DEFAULT), float(_CELL_INACTIVITY_TIMEOUT)
+        total = max(estimated_seconds * 2, estimated_seconds + 30)
+        inactivity = max(estimated_seconds * 0.5, 30)
+        return float(total), float(inactivity)
