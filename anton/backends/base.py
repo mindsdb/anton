@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -39,11 +38,13 @@ class ScratchpadRuntime(ABC):
     name: str
     cells: list[Cell] = field(default_factory=list)
 
-    _boot_path: str = field(default=str(_BOOT_SCRIPT_PATH), repr=False)
+    _installed_packages: set[str] = field(default_factory=set, repr=False)
+
     _coding_provider: str = field(default="anthropic", repr=False)
     _coding_model: str = field(default="", repr=False)
     _coding_api_key: str = field(default="", repr=False)
-    _installed_packages: set[str] = field(default_factory=set, repr=False)
+
+    _workspace_path: Path = field(default_factory=lambda: Path("~/.anton").expanduser(), repr=False)
 
     @abstractmethod
     async def start(self) -> None:
