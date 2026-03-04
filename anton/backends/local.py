@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ import venv
 from .base import (
     Cell,
     ScratchpadRuntime,
+    _BOOT_SCRIPT_PATH,
     _CELL_DELIM,
     _CELL_TIMEOUT_DEFAULT,
     _CELL_INACTIVITY_TIMEOUT,
@@ -25,17 +26,18 @@ from .base import (
 class LocalScratchpadRuntime(ScratchpadRuntime):
     # Runtime settings
     # The runtime will be launched in a subprocess.
-    _proc: asyncio.subprocess.Process | None = field(default=None, repr=False)
+    _boot_path: str = str(_BOOT_SCRIPT_PATH)
+    _proc: asyncio.subprocess.Process | None = None
 
     # Virtual environment settings
     # Code will be execueted in isolated virtual environments.
-    _venvs_base: Path = field(
-        default_factory=lambda: Path("~/.anton/scratchpad-venvs").expanduser(),
-        repr=False,
-    )
-    _venv_dir: str | None = field(default=None, repr=False)
-    _venv_python: str | None = field(default=None, repr=False)
+    _venvs_base: Path | None = None
+    _venv_dir: str | None = None
+    _venv_python: str | None = None
     _MAX_VENV_RETRIES = 3
+
+    def __post_init__(self) -> None:
+        self._venvs_base = self._workspace_path / "scratchpad-venvs"
 
     async def start(self) -> None:
         """Write the boot script to a temp file and launch the subprocess."""
@@ -585,15 +587,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             self._nuke_venv()
         await self.start()
 
-    async def close(self) -> None:
+    async def close(self, cleanup: bool = True) -> None:
         """Kill the process and clean up the boot script temp file.
 
-        The venv is preserved on disk so installed packages survive across
+        If cleanup is True, the venv is deleted and recreated from scratch.
+        Otherwise, the venv is preserved on disk so installed packages survive across
         sessions. A ``requirements.txt`` is saved to record what was installed.
         """
         await self._stop_process()
         if self._venv_dir is not None:
-            self._save_requirements()
+            if cleanup:
+                self._nuke_venv()
+            else:
+                self._save_requirements()
             self._venv_dir = None
             self._venv_python = None
 
