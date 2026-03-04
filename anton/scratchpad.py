@@ -416,6 +416,7 @@ class Scratchpad:
         description: str = "",
         estimated_time: str = "",
         estimated_seconds: int = 0,
+        cancel_event: asyncio.Event | None = None,
     ):
         """Async generator that sends code and yields progress strings and a final Cell.
 
@@ -445,19 +446,30 @@ class Scratchpad:
             async for item in self._read_result(
                 total_timeout=total_timeout,
                 inactivity_timeout=inactivity_timeout,
+                cancel_event=cancel_event,
             ):
                 if isinstance(item, str):
                     yield item  # progress message
                 else:
                     result_data = item
-        except asyncio.TimeoutError as exc:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             self._kill_tree()
-            await self._proc.wait()
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            error_msg = (
+                f"{exc}. Process killed — state lost. Use reset to restart.\n\n"
+                "If a database query was running, it may still be executing server-side.\n"
+                "To check and cancel: run SHOW PROCESSLIST (MySQL) or\n"
+                "SELECT * FROM information_schema.processlist WHERE status='running' and cancel with KILL <id>.\n"
+                "For Snowflake: use SHOW RUNNING QUERIES and SELECT SYSTEM$CANCEL_ALL_QUERIES(<session_id>)."
+            )
             cell = Cell(
                 code=code,
                 stdout="",
                 stderr="",
-                error=f"{exc}. Process killed — state lost. Use reset to restart.",
+                error=error_msg,
                 description=description,
                 estimated_time=estimated_time,
             )
@@ -489,6 +501,7 @@ class Scratchpad:
         *,
         total_timeout: float = _CELL_TIMEOUT_DEFAULT,
         inactivity_timeout: float = _CELL_INACTIVITY_TIMEOUT,
+        cancel_event: asyncio.Event | None = None,
     ):
         """Async generator that reads lines from stdout until result delimiters.
 
@@ -497,6 +510,7 @@ class Scratchpad:
             dict — the final JSON result (always the last item)
 
         Raises asyncio.TimeoutError with a descriptive message.
+        Raises asyncio.CancelledError if cancel_event is set.
 
         After a progress() call is received, the inactivity window is extended
         to _CELL_INACTIVITY_AFTER_PROGRESS (60s) so that long-running work
@@ -510,6 +524,8 @@ class Scratchpad:
         current_inactivity = inactivity_timeout
 
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError("Cancelled by user")
             elapsed = _time.monotonic() - start
             remaining_total = total_timeout - elapsed
             if remaining_total <= 0:
@@ -720,8 +736,8 @@ class Scratchpad:
         if self._proc is not None and self._proc.returncode is None:
             try:
                 self._kill_tree()
-                await self._proc.wait()
-            except ProcessLookupError:
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except (ProcessLookupError, asyncio.TimeoutError):
                 pass
         # Close transport pipes to prevent "Event loop is closed" noise
         # from __del__ during Python shutdown.

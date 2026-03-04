@@ -96,6 +96,7 @@ class ChatSession:
         self._turn_count = sum(1 for m in self._history if m.get("role") == "user") if initial_history else 0
         self._history_store = history_store
         self._session_id = session_id
+        self._cancel_event = asyncio.Event()
         self._scratchpads = ScratchpadManager(
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
@@ -574,6 +575,7 @@ class ChatSession:
                                 description=description,
                                 estimated_time=estimated_time,
                                 estimated_seconds=estimated_seconds,
+                                cancel_event=self._cancel_event,
                             ):
                                 if isinstance(item, str):
                                     yield StreamTaskProgress(
@@ -1900,11 +1902,13 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
             ttft: float | None = None
             total_input = 0
             total_output = 0
+            session._cancel_event.clear()
 
             try:
                 async with _EscapeWatcher(on_cancel=display.show_cancelling) as esc:
                     async for event in session.turn_stream(message_content):
                         if esc.cancelled.is_set():
+                            session._cancel_event.set()
                             raise KeyboardInterrupt
                         if isinstance(event, StreamTextDelta):
                             if ttft is None:
