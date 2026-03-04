@@ -31,7 +31,7 @@ from anton.llm.provider import (
     StreamToolUseEnd,
     StreamToolUseStart,
 )
-from anton.scratchpad import ScratchpadManager
+from anton.scratchpad_manager import ScratchpadManager
 from anton.tools import (
     MEMORIZE_TOOL,
     RECALL_TOOL,
@@ -77,6 +77,7 @@ class ChatSession:
         runtime_context: str = "",
         workspace: Workspace | None = None,
         console: Console | None = None,
+        backend: str = "local",
         coding_provider: str = "anthropic",
         coding_api_key: str = "",
     ) -> None:
@@ -91,6 +92,7 @@ class ChatSession:
         self._pending_memory_confirmations: list = []
         self._turn_count = 0
         self._scratchpads = ScratchpadManager(
+            backend=backend,
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
             coding_api_key=coding_api_key,
