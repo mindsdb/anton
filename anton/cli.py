@@ -241,11 +241,12 @@ def _ensure_api_key(settings) -> None:
     console.print("[anton.warning]No API key configured.[/]")
     console.print()
 
-    providers = {"1": "anthropic", "2": "openai", "3": "openai-compatible"}
+    providers = {"1": "minds", "2": "anthropic", "3": "openai", "4": "openai-compatible"}
     console.print("[anton.cyan]Available providers:[/]")
-    console.print(r"  [bold]1[/]  Anthropic (Claude)                    [dim]\[recommended][/]")
-    console.print(r"  [bold]2[/]  OpenAI (GPT / o-series)               [dim]\[experimental][/]")
-    console.print(r"  [bold]3[/]  OpenAI-compatible (custom endpoint)   [dim]\[experimental][/]")
+    console.print(r"  [bold]1[/]  Minds (MindsDB)                       [dim]\[recommended][/]")
+    console.print(r"  [bold]2[/]  Anthropic (Claude)                    [dim]\[bring your own key][/]")
+    console.print(r"  [bold]3[/]  OpenAI (GPT / o-series)               [dim]\[experimental][/]")
+    console.print(r"  [bold]4[/]  OpenAI-compatible (custom endpoint)   [dim]\[experimental][/]")
     console.print()
 
     choice = Prompt.ask(
@@ -276,6 +277,43 @@ def _ensure_api_key(settings) -> None:
         settings.openai_base_url = base_url
         ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
         console.print()
+
+    # Minds provider — uses OpenAI-compatible under the hood with _reason_ / _code_ models
+    if provider == "minds":
+        minds_url = Prompt.ask(
+            "Minds URL",
+            default="https://mdb.ai",
+            console=console,
+        ).strip()
+
+        api_key = Prompt.ask("Enter your Minds API key", console=console)
+        if not api_key.strip():
+            console.print("[anton.error]No API key provided. Exiting.[/]")
+            raise typer.Exit(1)
+        api_key = api_key.strip()
+
+        base_url = f"{minds_url.rstrip('/')}/api/v1"
+
+        settings.openai_api_key = api_key
+        settings.openai_base_url = base_url
+        settings.planning_provider = "openai-compatible"
+        settings.coding_provider = "openai-compatible"
+        settings.planning_model = "_reason_"
+        settings.coding_model = "_code_"
+
+        ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
+        ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
+        ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
+        ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
+        ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
+        ws.set_secret("ANTON_CODING_MODEL", "_code_")
+
+        console.print()
+        console.print(f"[anton.success]Saved to {ws.env_path}[/]")
+        console.print(f"[anton.muted]  endpoint: {base_url}[/]")
+        console.print(f"[anton.muted]  planning: _reason_  |  coding: _code_[/]")
+        console.print()
+        return
 
     api_key = Prompt.ask(
         f"Enter your API key",
