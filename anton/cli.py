@@ -237,34 +237,50 @@ def _ensure_api_key(settings) -> None:
     if _has_api_key(settings):
         return
 
-    console.print()
-    console.print("[anton.warning]No API key configured.[/]")
-    console.print()
+    from rich.prompt import Prompt
 
-    # Go straight to Minds setup with defaults
     from anton.workspace import Workspace
 
     ws = Workspace(Path.home())
 
-    minds_url = "https://mdb.ai"
-    base_url = f"{minds_url}/api/v1"
+    console.print()
+    console.print("[anton.cyan]Minds configuration[/]")
+    console.print()
 
-    settings.openai_api_key = "minds"
+    api_key = Prompt.ask("Minds API key", console=console)
+    if not api_key.strip():
+        console.print("[anton.error]No API key provided. Exiting.[/]")
+        raise typer.Exit(1)
+    api_key = api_key.strip()
+
+    minds_url = Prompt.ask(
+        "Minds URL",
+        default="https://mdb.ai",
+        console=console,
+    ).strip()
+
+    base_url = f"{minds_url.rstrip('/')}/api/v1"
+
+    settings.openai_api_key = api_key
     settings.openai_base_url = base_url
     settings.planning_provider = "openai-compatible"
     settings.coding_provider = "openai-compatible"
     settings.planning_model = "_reason_"
     settings.coding_model = "_code_"
+    settings.minds_api_key = api_key
+    settings.minds_url = minds_url
 
-    ws.set_secret("ANTON_OPENAI_API_KEY", "minds")
+    ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
     ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
     ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
     ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
     ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
     ws.set_secret("ANTON_CODING_MODEL", "_code_")
+    ws.set_secret("ANTON_MINDS_API_KEY", api_key)
+    ws.set_secret("ANTON_MINDS_URL", minds_url)
 
+    console.print()
     console.print(f"[anton.success]Saved to {ws.env_path}[/]")
-    console.print(f"[anton.muted]  endpoint: {base_url}[/]")
     console.print()
 
 
