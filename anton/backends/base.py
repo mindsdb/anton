@@ -1,5 +1,9 @@
 from abc import ABC, abstractmethod
+import importlib
+import inspect
 from pathlib import Path
+import pkgutil
+from typing import Type
 from dataclasses import dataclass, field
 
 
@@ -279,3 +283,85 @@ class ScratchpadRuntime(ABC):
         total = max(estimated_seconds * 2, estimated_seconds + 30)
         inactivity = max(estimated_seconds * 0.5, 30)
         return float(total), float(inactivity)
+
+
+class ScratchpadRuntimeFactory:
+    def __init__(self) -> None:
+        self._registry: dict[str, Type[ScratchpadRuntime]] = {}
+
+    def discover(self) -> dict[str, Type[ScratchpadRuntime]]:
+        """
+        Discover all available scratchpad runtimes.
+
+        Returns a mapping: backend_name -> runtime class
+        where backend_name defaults to the module name (e.g. "local").
+        """
+        backends_dir = Path(__file__).resolve().parent
+        package_name = __name__.rsplit(".", 1)[0]  # "anton.backends"
+
+        registry: dict[str, Type[ScratchpadRuntime]] = {}
+
+        for modinfo in pkgutil.iter_modules([str(backends_dir)]):
+            modname = modinfo.name
+
+            # Skip non-implementations
+            if modname.startswith("_") or modname in {"__init__", "base"}:
+                continue
+
+            module = importlib.import_module(f"{package_name}.{modname}")
+
+            candidates: list[Type[ScratchpadRuntime]] = []
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if obj is ScratchpadRuntime:
+                    continue
+                if not issubclass(obj, ScratchpadRuntime):
+                    continue
+                # Only classes defined in this module (not imported)
+                if obj.__module__ != module.__name__:
+                    continue
+                # Skip abstract subclasses
+                if inspect.isabstract(obj):
+                    continue
+                candidates.append(obj)
+
+            if not candidates:
+                continue
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"Backend module '{module.__name__}' has multiple ScratchpadRuntime implementations: "
+                    f"{[c.__name__ for c in candidates]}. Keep one, or add a disambiguation mechanism."
+                )
+
+            registry[modname] = candidates[0]
+
+        self._registry = registry
+        return registry
+
+    def create(
+        self,
+        backend: str = "local",
+        coding_provider: str = "anthropic",
+        coding_model: str = "",
+        coding_api_key: str = "",
+        workspace_path: Path = Path("~/.anton").expanduser(),
+        **kwargs,
+    ) -> ScratchpadRuntime:
+        """
+        Create a new scratchpad runtime.
+
+        - backend: "local" (module name) or "anton.backends.local:LocalScratchpadRuntime"
+        - name: pass via kwargs (recommended). If omitted, defaults to backend string.
+        """
+        self.discover()
+
+        if backend not in self._registry:
+            raise ValueError(f"Unknown backend '{backend}'. Available: {sorted(self._registry)}")
+        runtime_cls = self._registry[backend]
+
+        return runtime_cls(
+            _coding_provider=coding_provider,
+            _coding_model=coding_model,
+            _coding_api_key=coding_api_key,
+            _workspace_path=workspace_path,
+            **kwargs,
+        )
