@@ -249,14 +249,14 @@ def _ensure_api_key(settings) -> None:
     minds_url = "https://mdb.ai"
     base_url = f"{minds_url}/api/v1"
 
-    settings.openai_api_key = ""
+    settings.openai_api_key = "minds"
     settings.openai_base_url = base_url
     settings.planning_provider = "openai-compatible"
     settings.coding_provider = "openai-compatible"
     settings.planning_model = "_reason_"
     settings.coding_model = "_code_"
 
-    ws.set_secret("ANTON_OPENAI_API_KEY", "")
+    ws.set_secret("ANTON_OPENAI_API_KEY", "minds")
     ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
     ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
     ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
