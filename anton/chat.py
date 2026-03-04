@@ -524,7 +524,7 @@ class ChatSession:
                             result_text = prep
                         else:
                             pad, code, description, estimated_time, estimated_seconds = prep
-                            from anton.scratchpad import Cell
+                            from anton.backends.base import Cell
                             cell = None
                             async for item in pad.execute_streaming(
                                 code,

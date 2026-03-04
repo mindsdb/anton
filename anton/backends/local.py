@@ -26,7 +26,7 @@ from .base import (
 class LocalScratchpadRuntime(ScratchpadRuntime):
     # Runtime settings
     # The runtime will be launched in a subprocess.
-    _boot_path: str = str(_BOOT_SCRIPT_PATH)
+    _boot_path: Path = _BOOT_SCRIPT_PATH
     _proc: asyncio.subprocess.Process | None = None
 
     # Virtual environment settings

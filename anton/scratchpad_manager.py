@@ -33,7 +33,8 @@ class ScratchpadManager:
     async def get_or_create(self, name: str) -> ScratchpadRuntime:
         """Return existing pad or create + start a new one."""
         if name not in self._pads:
-            pad = ScratchpadRuntimeFactory.create(
+            pad = ScratchpadRuntimeFactory().create(
+                name=name,
                 backend=self._backend,
                 coding_provider=self._coding_provider,
                 coding_model=self._coding_model,

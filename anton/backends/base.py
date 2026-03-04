@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 
 # Boot script
-_BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
+_BOOT_SCRIPT_PATH = Path(__file__).parent.parent / "scratchpad_boot.py"
 
 # Cell settings
 _CELL_TIMEOUT_DEFAULT = 120        # Default total timeout when no estimate given
@@ -40,15 +40,16 @@ class Cell:
 @dataclass
 class ScratchpadRuntime(ABC):
     name: str
-    cells: list[Cell] = field(default_factory=list)
-
-    _installed_packages: set[str] = field(default_factory=set, repr=False)
 
     _coding_provider: str = field(default="anthropic", repr=False)
     _coding_model: str = field(default="", repr=False)
     _coding_api_key: str = field(default="", repr=False)
 
     _workspace_path: Path = field(default_factory=lambda: Path("~/.anton").expanduser(), repr=False)
+
+    cells: list[Cell] = field(default_factory=list)
+
+    _installed_packages: set[str] = field(default_factory=set, repr=False)
 
     @abstractmethod
     async def start(self) -> None:
@@ -339,6 +340,7 @@ class ScratchpadRuntimeFactory:
 
     def create(
         self,
+        name: str,
         backend: str = "local",
         coding_provider: str = "anthropic",
         coding_model: str = "",
@@ -349,8 +351,13 @@ class ScratchpadRuntimeFactory:
         """
         Create a new scratchpad runtime.
 
-        - backend: "local" (module name) or "anton.backends.local:LocalScratchpadRuntime"
-        - name: pass via kwargs (recommended). If omitted, defaults to backend string.
+        - name: the name of the scratchpad runtime.
+        - backend: the backend to use.
+        - coding_provider: the coding provider to use.
+        - coding_model: the coding model to use.
+        - coding_api_key: the coding API key to use.
+        - workspace_path: the workspace path to use.
+        - kwargs: additional keyword arguments to pass to the scratchpad runtime constructor.
         """
         self.discover()
 
@@ -359,6 +366,7 @@ class ScratchpadRuntimeFactory:
         runtime_cls = self._registry[backend]
 
         return runtime_cls(
+            name=name,
             _coding_provider=coding_provider,
             _coding_model=coding_model,
             _coding_api_key=coding_api_key,
