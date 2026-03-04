@@ -69,11 +69,11 @@ class ScratchpadRuntime(ABC):
         pass
 
     @abstractmethod
-    async def close(self) -> None:
+    async def close(self, cleanup: bool = True) -> None:
         """
         Close the runtime.
 
-        This method should kill the runtime and clean up any resources.
+        This method should kill the runtime, and if cleanup is True, clean up any resources.
         """
 
     @abstractmethod
