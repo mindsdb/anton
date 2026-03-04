@@ -31,7 +31,7 @@ from anton.llm.provider import (
     StreamToolUseEnd,
     StreamToolUseStart,
 )
-from anton.scratchpad import ScratchpadManager
+from anton.scratchpad_manager import ScratchpadManager
 from anton.tools import (
     MEMORIZE_TOOL,
     RECALL_TOOL,
@@ -78,6 +78,7 @@ class ChatSession:
         runtime_context: str = "",
         workspace: Workspace | None = None,
         console: Console | None = None,
+        backend: str = "local",
         coding_provider: str = "anthropic",
         coding_api_key: str = "",
         initial_history: list[dict] | None = None,
@@ -97,6 +98,7 @@ class ChatSession:
         self._history_store = history_store
         self._session_id = session_id
         self._scratchpads = ScratchpadManager(
+            backend=backend,
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
             coding_api_key=coding_api_key,
@@ -567,7 +569,7 @@ class ChatSession:
                             result_text = prep
                         else:
                             pad, code, description, estimated_time, estimated_seconds = prep
-                            from anton.scratchpad import Cell
+                            from anton.backends.base import Cell
                             cell = None
                             async for item in pad.execute_streaming(
                                 code,
