@@ -167,24 +167,15 @@ def _ensure_workspace(settings) -> None:
     local_ws = Workspace(local_path)
     global_ws = Workspace(global_path)
 
-    # 1. Local .anton exists → use it
-    if local_ws.is_initialized():
-        # Local env wins, then global fills in anything missing (API keys, etc.)
-        local_ws.apply_env_to_process()
-        if local_path != global_path and global_ws.is_initialized():
-            global_ws.apply_env_to_process()
-        return
+    # Always ensure local .anton exists so project memory has a home
+    if not local_ws.is_initialized():
+        local_ws.initialize()
+        console.print(f"[anton.muted]  workspace is {local_path}/.anton[/]")
 
-    # 2. Global ~/.anton exists and we're not already pointing at $HOME → use it
-    if local_path != global_path and global_ws.is_initialized():
-        settings.resolve_workspace(str(global_path))
-        global_ws.apply_env_to_process()
-        return
-
-    # 3. Neither exists → create local workspace automatically
-    local_ws.initialize()
+    # Local env wins, then global fills in anything missing (API keys, etc.)
     local_ws.apply_env_to_process()
-    console.print(f"[anton.muted]  workspace is {local_path}/.anton[/]")
+    if local_path != global_path and global_ws.is_initialized():
+        global_ws.apply_env_to_process()
 
 
 @app.callback(invoke_without_command=True)

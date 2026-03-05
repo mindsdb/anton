@@ -78,8 +78,9 @@ class Workspace:
         """Create the workspace structure. Returns list of actions taken."""
         actions: list[str] = []
 
-        # Create .anton/ directory
+        # Create .anton/ directory and memory subdirectory
         self._anton_dir.mkdir(parents=True, exist_ok=True)
+        (self._anton_dir / "memory").mkdir(exist_ok=True)
         actions.append(f"Created {self._anton_dir}")
 
         # Create anton.md if it doesn't exist
