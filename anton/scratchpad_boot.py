@@ -245,6 +245,7 @@ if _minds_datasource and _minds_api_key and _minds_url:
             req.add_header("Authorization", f"Bearer {_minds_api_key}")
             req.add_header("Content-Type", "application/json")
             req.add_header("Accept", "application/json")
+            req.add_header("User-Agent", "anton/1.0")
 
             ctx = None
             if not _minds_ssl_verify:

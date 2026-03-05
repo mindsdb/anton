@@ -1222,6 +1222,7 @@ def _minds_list_datasources(base_url: str, api_key: str, verify: bool = True) ->
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "anton/1.0")
 
     ctx = None
     if not verify:
