@@ -18,7 +18,7 @@ if _scratchpad_model:
         import asyncio as _llm_asyncio
 
         _scratchpad_provider_name = os.environ.get("ANTON_SCRATCHPAD_PROVIDER", "anthropic")
-        if _scratchpad_provider_name == "openai":
+        if _scratchpad_provider_name in ("openai", "openai-compatible"):
             from anton.llm.openai import OpenAIProvider as _ProviderClass
         else:
             from anton.llm.anthropic import AnthropicProvider as _ProviderClass
