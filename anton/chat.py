@@ -1260,9 +1260,24 @@ async def _handle_setup_minds(
 
     console.print()
 
-    # Use key and URL from settings (already configured in _ensure_api_key)
+    # Ask for Minds API key and URL if not already configured
     api_key = settings.minds_api_key or ""
     minds_url = _normalize_minds_url(settings.minds_url)
+
+    if not api_key:
+        api_key = Prompt.ask("Minds API key", console=console)
+        if not api_key.strip():
+            console.print("[anton.error]No API key provided. Aborted.[/]")
+            console.print()
+            return session
+        api_key = api_key.strip()
+
+    minds_url_input = Prompt.ask(
+        "Minds URL",
+        default=minds_url or "https://mdb.ai",
+        console=console,
+    ).strip()
+    minds_url = _normalize_minds_url(minds_url_input)
 
     # --- Test connection ---
     ssl_verify = settings.minds_ssl_verify

@@ -233,7 +233,7 @@ def _has_api_key(settings) -> bool:
 
 
 def _ensure_api_key(settings) -> None:
-    """Prompt the user to configure a provider and API key if none is set."""
+    """Prompt the user to configure Anthropic as the default provider."""
     if _has_api_key(settings):
         return
 
@@ -244,40 +244,26 @@ def _ensure_api_key(settings) -> None:
     ws = Workspace(Path.home())
 
     console.print()
-    console.print("[anton.cyan]Minds configuration[/]")
+    console.print("[anton.cyan]Anthropic configuration[/]")
     console.print()
 
-    api_key = Prompt.ask("Minds API key", console=console)
+    api_key = Prompt.ask("Anthropic API key", console=console)
     if not api_key.strip():
         console.print("[anton.error]No API key provided. Exiting.[/]")
         raise typer.Exit(1)
     api_key = api_key.strip()
 
-    minds_url = Prompt.ask(
-        "Minds URL",
-        default="https://mdb.ai",
-        console=console,
-    ).strip()
+    settings.anthropic_api_key = api_key
+    settings.planning_provider = "anthropic"
+    settings.coding_provider = "anthropic"
+    settings.planning_model = "claude-sonnet-4-6"
+    settings.coding_model = "claude-haiku-4-5-20251001"
 
-    base_url = f"{minds_url.rstrip('/')}/api/v1"
-
-    settings.openai_api_key = api_key
-    settings.openai_base_url = base_url
-    settings.planning_provider = "openai-compatible"
-    settings.coding_provider = "openai-compatible"
-    settings.planning_model = "_reason_"
-    settings.coding_model = "_code_"
-    settings.minds_api_key = api_key
-    settings.minds_url = minds_url
-
-    ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
-    ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
-    ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
-    ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
-    ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
-    ws.set_secret("ANTON_CODING_MODEL", "_code_")
-    ws.set_secret("ANTON_MINDS_API_KEY", api_key)
-    ws.set_secret("ANTON_MINDS_URL", minds_url)
+    ws.set_secret("ANTON_ANTHROPIC_API_KEY", api_key)
+    ws.set_secret("ANTON_PLANNING_PROVIDER", "anthropic")
+    ws.set_secret("ANTON_CODING_PROVIDER", "anthropic")
+    ws.set_secret("ANTON_PLANNING_MODEL", "claude-sonnet-4-6")
+    ws.set_secret("ANTON_CODING_MODEL", "claude-haiku-4-5-20251001")
 
     # Reload env vars into the process so the scratchpad subprocess inherits them
     ws.apply_env_to_process()
