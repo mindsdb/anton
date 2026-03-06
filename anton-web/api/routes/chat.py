@@ -22,6 +22,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
     manager = _get_manager()
 
     session = None
+    sid = None
 
     try:
         while True:
@@ -48,6 +49,11 @@ async def chat_websocket(websocket: WebSocket) -> None:
                 else:
                     await websocket.send_json({"type": "error", "message": "Session not found"})
 
+            elif msg_type == "cancel":
+                cancel_sid = data.get("session_id", sid if session else "")
+                if cancel_sid:
+                    manager.cancel_session(cancel_sid)
+
             elif msg_type == "message":
                 if session is None:
                     sid, session = await manager.create_session()
@@ -67,7 +73,8 @@ async def chat_websocket(websocket: WebSocket) -> None:
                         await websocket.send_json(msg)
 
     except WebSocketDisconnect:
-        pass
+        if session is not None and sid:
+            manager.cancel_session(sid)
     except Exception as e:
         traceback.print_exc()
         try:

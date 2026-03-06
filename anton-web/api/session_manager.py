@@ -54,39 +54,37 @@ class SessionManager:
         episodes_dir = self._workspace_path / ".anton" / "episodes"
         self._history_store = HistoryStore(episodes_dir)
 
-        # Scratchpad subprocesses inherit CWD for file output
         os.chdir(self._workspace_path)
+
+    def _runtime_context(self) -> str:
+        from anton.chat import _build_runtime_context
+
+        ctx = _build_runtime_context(self._settings)
+        ctx += "\n- Interface: web"
+        return ctx
+
+    def _coding_api_key(self) -> str:
+        s = self._settings
+        if s.coding_provider == "anthropic":
+            return s.anthropic_api_key or ""
+        return s.openai_api_key or ""
 
     async def create_session(self):
         from anton.chat import ChatSession
         from anton.memory.episodes import EpisodicMemory
 
-        s = self._settings
         episodes_dir = self._workspace_path / ".anton" / "episodes"
-        episodic = EpisodicMemory(episodes_dir, enabled=s.episodic_memory)
+        episodic = EpisodicMemory(episodes_dir, enabled=self._settings.episodic_memory)
         session_id = episodic.start_session()
-
-        coding_api_key = (
-            s.anthropic_api_key if s.coding_provider == "anthropic" else s.openai_api_key
-        ) or ""
-
-        runtime_context = (
-            f"- Provider: {s.planning_provider}\n"
-            f"- Planning model: {s.planning_model}\n"
-            f"- Coding model: {s.coding_model}\n"
-            f"- Workspace: {self._workspace_path}\n"
-            f"- Memory mode: {s.memory_mode}\n"
-            f"- Interface: web"
-        )
 
         session = ChatSession(
             self._llm_client,
             cortex=self._cortex,
             episodic=episodic,
-            runtime_context=runtime_context,
+            runtime_context=self._runtime_context(),
             workspace=self._workspace,
-            coding_provider=s.coding_provider,
-            coding_api_key=coding_api_key,
+            coding_provider=self._settings.coding_provider,
+            coding_api_key=self._coding_api_key(),
             history_store=self._history_store,
             session_id=session_id,
         )
@@ -105,32 +103,18 @@ class SessionManager:
         if history is None:
             return None
 
-        s = self._settings
         episodes_dir = self._workspace_path / ".anton" / "episodes"
-        episodic = EpisodicMemory(episodes_dir, enabled=s.episodic_memory)
+        episodic = EpisodicMemory(episodes_dir, enabled=self._settings.episodic_memory)
         episodic.resume_session(session_id)
-
-        coding_api_key = (
-            s.anthropic_api_key if s.coding_provider == "anthropic" else s.openai_api_key
-        ) or ""
-
-        runtime_context = (
-            f"- Provider: {s.planning_provider}\n"
-            f"- Planning model: {s.planning_model}\n"
-            f"- Coding model: {s.coding_model}\n"
-            f"- Workspace: {self._workspace_path}\n"
-            f"- Memory mode: {s.memory_mode}\n"
-            f"- Interface: web"
-        )
 
         session = ChatSession(
             self._llm_client,
             cortex=self._cortex,
             episodic=episodic,
-            runtime_context=runtime_context,
+            runtime_context=self._runtime_context(),
             workspace=self._workspace,
-            coding_provider=s.coding_provider,
-            coding_api_key=coding_api_key,
+            coding_provider=self._settings.coding_provider,
+            coding_api_key=self._coding_api_key(),
             history_store=self._history_store,
             session_id=session_id,
             initial_history=history,
@@ -141,6 +125,14 @@ class SessionManager:
 
     def list_sessions(self) -> list[dict]:
         return self._history_store.list_sessions()
+
+    def cancel_session(self, session_id: str) -> bool:
+        """Signal a running session to cancel its current turn."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        session._cancel_event.set()
+        return True
 
     async def shutdown(self) -> None:
         self._sessions.clear()
