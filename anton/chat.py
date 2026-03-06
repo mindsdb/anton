@@ -96,6 +96,7 @@ class ChatSession:
         self._turn_count = sum(1 for m in self._history if m.get("role") == "user") if initial_history else 0
         self._history_store = history_store
         self._session_id = session_id
+        self._cancel_event = asyncio.Event()
         self._scratchpads = ScratchpadManager(
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
@@ -574,6 +575,7 @@ class ChatSession:
                                 description=description,
                                 estimated_time=estimated_time,
                                 estimated_seconds=estimated_seconds,
+                                cancel_event=self._cancel_event,
                             ):
                                 if isinstance(item, str):
                                     yield StreamTaskProgress(
@@ -728,6 +730,33 @@ def _apply_error_tracking(
     return result_text
 
 
+def _build_runtime_context(settings: AntonSettings) -> str:
+    """Build runtime context string including Minds datasource info if configured."""
+    ctx = (
+        f"- Provider: {settings.planning_provider}\n"
+        f"- Planning model: {settings.planning_model}\n"
+        f"- Coding model: {settings.coding_model}\n"
+        f"- Workspace: {settings.workspace_path}\n"
+        f"- Memory mode: {settings.memory_mode}"
+    )
+    _ds = getattr(settings, "minds_datasource", None)
+    _ds_key = getattr(settings, "minds_api_key", None)
+    if _ds and _ds_key:
+        engine = getattr(settings, "minds_datasource_engine", None) or "unknown"
+        ctx += (
+            f"\n\n**CONNECTED DATASOURCE (Minds):**\n"
+            f"- Datasource: {_ds}\n"
+            f"- Engine: {engine}\n"
+            f"- To query data, use the scratchpad with the built-in `query_minds_data()` function.\n"
+            f"  It is pre-loaded in the scratchpad namespace — DO NOT import it. Just call it directly.\n"
+            f'  Example: result = query_minds_data("SELECT * FROM users LIMIT 5")\n'
+            f"  Returns dict with 'type', 'data' (list of rows), 'column_names', 'error_message'.\n"
+            f'  Optional: query_minds_data("SELECT ...", datasource="other_ds")\n'
+            f"- Write SQL appropriate for the {engine} engine."
+        )
+    return ctx
+
+
 def _rebuild_session(
     *,
     settings: AntonSettings,
@@ -750,13 +779,7 @@ def _rebuild_session(
         cortex._llm = state["llm_client"]
         cortex.mode = settings.memory_mode
 
-    runtime_context = (
-        f"- Provider: {settings.planning_provider}\n"
-        f"- Planning model: {settings.planning_model}\n"
-        f"- Coding model: {settings.coding_model}\n"
-        f"- Workspace: {settings.workspace_path}\n"
-        f"- Memory mode: {settings.memory_mode}"
-    )
+    runtime_context = _build_runtime_context(settings)
     api_key = (
         settings.anthropic_api_key if settings.coding_provider == "anthropic"
         else settings.openai_api_key
@@ -959,14 +982,14 @@ async def _handle_setup(
     history_store: HistoryStore | None = None,
     session_id: str | None = None,
 ) -> ChatSession:
-    """Interactive setup wizard with sub-menu: Models or Memory."""
+    """Interactive setup wizard with sub-menu: Models, Memory, or Minds."""
     from rich.prompt import Prompt
 
     console.print()
     console.print("[anton.cyan]/setup[/]")
     console.print()
     console.print("  What do you want to configure?")
-    console.print("    [bold]1[/]  Models — provider, API key, planning & coding models")
+    console.print("    [bold]1[/]  Datasource — connect to datasource via Minds")
     console.print("    [bold]2[/]  Memory — memory mode and episodic memory")
     console.print("    [bold]q[/]  Back")
     console.print()
@@ -982,10 +1005,9 @@ async def _handle_setup(
         console.print()
         return session
     elif top_choice == "1":
-        return await _handle_setup_models(
+        return await _handle_setup_minds(
             console, settings, workspace, state,
             self_awareness, cortex, session, episodic=episodic,
-            history_store=history_store, session_id=session_id,
         )
     else:
         _handle_setup_memory(console, settings, workspace, cortex, episodic=episodic)
@@ -1183,6 +1205,176 @@ def _handle_setup_memory(
     console.print()
 
 
+def _normalize_minds_url(url: str) -> str:
+    """Add https:// if no scheme present, strip trailing slash."""
+    url = url.strip()
+    if url and not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+    return url.rstrip("/")
+
+
+def _minds_list_datasources(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
+    """Fetch datasource list from a Minds server using stdlib urllib."""
+    import json as _json
+    import ssl
+    import urllib.request
+
+    url = f"{base_url}/api/v1/datasources/"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "anton/1.0")
+
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+        data = _json.loads(resp.read().decode())
+
+    # Response may be a list or a dict with a "datasources" key
+    if isinstance(data, list):
+        return data
+    return data.get("datasources", data if isinstance(data, list) else [])
+
+
+async def _handle_setup_minds(
+    console: Console,
+    settings: AntonSettings,
+    workspace: Workspace,
+    state: dict,
+    self_awareness,
+    cortex,
+    session: ChatSession,
+    episodic: EpisodicMemory | None = None,
+) -> ChatSession:
+    """Setup sub-menu: connect to a Minds datasource."""
+    import ssl
+    import urllib.error
+
+    from rich.prompt import Prompt
+
+    from anton.workspace import Workspace as _Workspace
+
+    global_ws = _Workspace(Path.home())
+
+    console.print()
+
+    # Ask for Minds API key and URL if not already configured
+    api_key = getattr(settings, "minds_api_key", None) or ""
+    minds_url = _normalize_minds_url(getattr(settings, "minds_url", "https://mdb.ai"))
+
+    if not api_key:
+        api_key = Prompt.ask("Minds API key", console=console)
+        if not api_key.strip():
+            console.print("[anton.error]No API key provided. Aborted.[/]")
+            console.print()
+            return session
+        api_key = api_key.strip()
+
+    minds_url_input = Prompt.ask(
+        "Minds URL",
+        default=minds_url or "https://mdb.ai",
+        console=console,
+    ).strip()
+    minds_url = _normalize_minds_url(minds_url_input)
+
+    # --- Test connection ---
+    ssl_verify = getattr(settings, "minds_ssl_verify", True)
+    console.print()
+    console.print(f"[anton.muted]Connecting to {minds_url}...[/]")
+
+    datasources = None
+    try:
+        datasources = _minds_list_datasources(minds_url, api_key, verify=ssl_verify)
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        is_ssl = isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError)
+        # On some platforms, invalid certs surface as HTTP errors instead of SSL errors.
+        is_https_error = not is_ssl and minds_url.startswith("https://") and ssl_verify
+        if is_ssl or is_https_error:
+            if is_ssl:
+                console.print("[anton.warning]This server uses a self-signed or untrusted certificate.[/]")
+            else:
+                console.print(f"[anton.warning]Connection failed ({e}). This may be a certificate issue.[/]")
+            trust = Prompt.ask(
+                "Retry without SSL verification? (y/n)",
+                choices=["y", "n"],
+                default="y",
+                console=console,
+            )
+            if trust == "y":
+                ssl_verify = False
+                try:
+                    datasources = _minds_list_datasources(minds_url, api_key, verify=False)
+                except Exception as retry_err:
+                    console.print(f"[anton.error]Connection failed: {retry_err}[/]")
+                    console.print()
+                    return session
+            else:
+                console.print("[anton.muted]Aborted.[/]")
+                console.print()
+                return session
+        else:
+            console.print(f"[anton.error]Connection failed: {e}[/]")
+            console.print()
+            return session
+    except Exception as e:
+        console.print(f"[anton.error]Connection failed: {e}[/]")
+        console.print()
+        return session
+
+    if not datasources:
+        console.print("[anton.warning]No datasources found on this server.[/]")
+        console.print()
+        return session
+
+    # --- Display datasources ---
+    console.print()
+    console.print("[anton.cyan]Available datasources:[/]")
+    for i, ds in enumerate(datasources, 1):
+        name = ds.get("name", "?")
+        engine = ds.get("engine", "unknown")
+        console.print(f"    [bold]{i}[/]  {name} [dim]({engine})[/]")
+    console.print()
+
+    choices = [str(i) for i in range(1, len(datasources) + 1)]
+    pick = Prompt.ask(
+        "Select datasource",
+        choices=choices,
+        console=console,
+    )
+    selected = datasources[int(pick) - 1]
+    ds_name = selected.get("name", "")
+    ds_engine = selected.get("engine", "unknown")
+
+    # --- Persist to global ~/.anton/.env ---
+    global_ws.set_secret("ANTON_MINDS_API_KEY", api_key)
+    global_ws.set_secret("ANTON_MINDS_URL", minds_url)
+    global_ws.set_secret("ANTON_MINDS_DATASOURCE", ds_name)
+    global_ws.set_secret("ANTON_MINDS_DATASOURCE_ENGINE", ds_engine)
+    global_ws.set_secret("ANTON_MINDS_SSL_VERIFY", "true" if ssl_verify else "false")
+
+    # Reload env vars into the process so the scratchpad subprocess inherits them
+    global_ws.apply_env_to_process()
+
+    settings.minds_api_key = api_key
+    settings.minds_url = minds_url
+    settings.minds_datasource = ds_name
+    settings.minds_datasource_engine = ds_engine
+    settings.minds_ssl_verify = ssl_verify
+
+    console.print()
+    console.print(f"[anton.success]Connected to datasource: {ds_name} ({ds_engine})[/]")
+    console.print()
+
+    return _rebuild_session(
+        settings=settings, state=state, self_awareness=self_awareness,
+        cortex=cortex, workspace=workspace, console=console, episodic=episodic,
+    )
+
+
 def _format_file_message(text: str, paths: list[Path], console: Console) -> str:
     """Rewrite user input to include file contents for detected paths."""
     parts: list[str] = []
@@ -1333,7 +1525,7 @@ def _print_slash_help(console: Console) -> None:
     """Print available slash commands."""
     console.print()
     console.print("[anton.cyan]Available commands:[/]")
-    console.print("  [bold]/setup[/]       — Configure models or memory settings")
+    console.print("  [bold]/setup[/]       — Configure datasources and memory settings")
     console.print("  [bold]/memory[/]      — Show memory status dashboard")
     console.print("  [bold]/paste[/]       — Attach clipboard image to your message")
     console.print("  [bold]/resume[/]      — Resume a previous chat session")
@@ -1508,13 +1700,7 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
     cleanup_old_uploads(uploads_dir)
 
     # Build runtime context so the LLM knows what it's running on
-    runtime_context = (
-        f"- Provider: {settings.planning_provider}\n"
-        f"- Planning model: {settings.planning_model}\n"
-        f"- Coding model: {settings.coding_model}\n"
-        f"- Workspace: {settings.workspace_path}\n"
-        f"- Memory mode: {settings.memory_mode}"
-    )
+    runtime_context = _build_runtime_context(settings)
 
     coding_api_key = (
         settings.anthropic_api_key if settings.coding_provider == "anthropic"
@@ -1543,6 +1729,7 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
         )
         if resumed_id:
             current_session_id = resumed_id
+
 
     console.print("[anton.muted] Chat with Anton. Type '/help' for commands or 'exit' to quit.[/]")
     console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
@@ -1709,11 +1896,13 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
             ttft: float | None = None
             total_input = 0
             total_output = 0
+            session._cancel_event.clear()
 
             try:
                 async with _EscapeWatcher(on_cancel=display.show_cancelling) as esc:
                     async for event in session.turn_stream(message_content):
                         if esc.cancelled.is_set():
+                            session._cancel_event.set()
                             raise KeyboardInterrupt
                         if isinstance(event, StreamTextDelta):
                             if ttft is None:

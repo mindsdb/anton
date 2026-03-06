@@ -48,6 +48,13 @@ class AntonSettings(BaseSettings):
 
     disable_autoupdates: bool = False
 
+    # Minds datasource integration
+    minds_api_key: str | None = None
+    minds_url: str = "https://mdb.ai"
+    minds_datasource: str | None = None
+    minds_datasource_engine: str | None = None
+    minds_ssl_verify: bool = True
+
     _workspace: Path = PrivateAttr(default=None)
 
     @property

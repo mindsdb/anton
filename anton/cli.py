@@ -233,93 +233,40 @@ def _has_api_key(settings) -> bool:
 
 
 def _ensure_api_key(settings) -> None:
-    """Prompt the user to configure a provider and API key if none is set."""
+    """Prompt the user to configure Anthropic as the default provider."""
     if _has_api_key(settings):
         return
 
-    console.print()
-    console.print("[anton.warning]No API key configured.[/]")
-    console.print()
+    from rich.prompt import Prompt
 
-    providers = {"1": "anthropic", "2": "openai", "3": "openai-compatible"}
-    console.print("[anton.cyan]Available providers:[/]")
-    console.print(r"  [bold]1[/]  Anthropic (Claude)                    [dim]\[recommended][/]")
-    console.print(r"  [bold]2[/]  OpenAI (GPT / o-series)               [dim]\[experimental][/]")
-    console.print(r"  [bold]3[/]  OpenAI-compatible (custom endpoint)   [dim]\[experimental][/]")
-    console.print()
-
-    choice = Prompt.ask(
-        "Select provider",
-        choices=list(providers.keys()),
-        default="1",
-        console=console,
-    )
-    provider = providers[choice]
-
-    console.print()
-
-    # Always store API keys and model settings in global ~/.anton/.env
     from anton.workspace import Workspace
 
     ws = Workspace(Path.home())
 
-    # For OpenAI-compatible, ask for the base URL first
-    if provider == "openai-compatible":
-        base_url = Prompt.ask(
-            "Enter the API base URL (e.g. http://localhost:11434/v1)",
-            console=console,
-        )
-        if not base_url.strip():
-            console.print("[anton.error]No base URL provided. Exiting.[/]")
-            raise typer.Exit(1)
-        base_url = base_url.strip()
-        settings.openai_base_url = base_url
-        ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
-        console.print()
+    console.print()
+    console.print("[anton.cyan]Anthropic configuration[/]")
+    console.print()
 
-    api_key = Prompt.ask(
-        f"Enter your API key",
-        console=console,
-    )
-
+    api_key = Prompt.ask("Anthropic API key", console=console)
     if not api_key.strip():
         console.print("[anton.error]No API key provided. Exiting.[/]")
         raise typer.Exit(1)
-
     api_key = api_key.strip()
-    key_name = "ANTON_OPENAI_API_KEY" if provider in ("openai", "openai-compatible") else "ANTON_ANTHROPIC_API_KEY"
 
-    # Store via secret vault — never passes through LLM
-    ws.set_secret(key_name, api_key)
+    settings.anthropic_api_key = api_key
+    settings.planning_provider = "anthropic"
+    settings.coding_provider = "anthropic"
+    settings.planning_model = "claude-sonnet-4-6"
+    settings.coding_model = "claude-haiku-4-5-20251001"
 
-    # Apply to current process and set provider config
-    if provider == "anthropic":
-        settings.anthropic_api_key = api_key
-    elif provider == "openai":
-        settings.openai_api_key = api_key
-        settings.planning_provider = "openai"
-        settings.coding_provider = "openai"
-        settings.planning_model = "gpt-5-mini"
-        settings.coding_model = "gpt-5-nano"
-        ws.set_secret("ANTON_PLANNING_PROVIDER", "openai")
-        ws.set_secret("ANTON_CODING_PROVIDER", "openai")
-        ws.set_secret("ANTON_PLANNING_MODEL", "gpt-5-mini")
-        ws.set_secret("ANTON_CODING_MODEL", "gpt-5-nano")
-    elif provider == "openai-compatible":
-        settings.openai_api_key = api_key
-        settings.planning_provider = "openai-compatible"
-        settings.coding_provider = "openai-compatible"
+    ws.set_secret("ANTON_ANTHROPIC_API_KEY", api_key)
+    ws.set_secret("ANTON_PLANNING_PROVIDER", "anthropic")
+    ws.set_secret("ANTON_CODING_PROVIDER", "anthropic")
+    ws.set_secret("ANTON_PLANNING_MODEL", "claude-sonnet-4-6")
+    ws.set_secret("ANTON_CODING_MODEL", "claude-haiku-4-5-20251001")
 
-        console.print()
-        planning_model = Prompt.ask("Planning model", console=console)
-        coding_model = Prompt.ask("Coding model", console=console)
-
-        settings.planning_model = planning_model
-        settings.coding_model = coding_model
-        ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
-        ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
-        ws.set_secret("ANTON_PLANNING_MODEL", planning_model)
-        ws.set_secret("ANTON_CODING_MODEL", coding_model)
+    # Reload env vars into the process so the scratchpad subprocess inherits them
+    ws.apply_env_to_process()
 
     console.print()
     console.print(f"[anton.success]Saved to {ws.env_path}[/]")
