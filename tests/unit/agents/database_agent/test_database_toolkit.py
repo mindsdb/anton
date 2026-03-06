@@ -18,8 +18,8 @@ from uuid import UUID
 import pandas as pd
 import pytest
 
-from minds.agent.database_toolkit import DatabaseToolkit
-from minds.agent.exceptions import QueryGenerationError
+from minds.agents.database_agent.database_toolkit import DatabaseToolkit
+from minds.agents.exceptions import QueryGenerationError
 from minds.model.data_catalog import DataCatalog
 from minds.model.database_agent import QueryGenerationResult, QueryGenerationResultRetry, QueryPlanResult
 from minds.model.datasource import Datasource
@@ -264,7 +264,7 @@ class TestDatabaseToolkit:
 
     def test_sanitize_and_validate_sql_mindsdb_invalid_syntax(self, database_toolkit):
         """Test SQL sanitization with invalid syntax."""
-        with patch("minds.agent.database_toolkit.parse_sql") as mock_parse:
+        with patch("minds.agents.database_agent.database_toolkit.parse_sql") as mock_parse:
             mock_parse.side_effect = Exception("Syntax error")
 
             with pytest.raises(QueryGenerationError, match="Unparseable SQL"):
@@ -272,7 +272,7 @@ class TestDatabaseToolkit:
 
     def test_sanitize_and_validate_sql_mindsdb_non_select_statement(self, database_toolkit):
         """Test SQL sanitization with non-SELECT statement."""
-        with patch("minds.agent.database_toolkit.parse_sql") as mock_parse:
+        with patch("minds.agents.database_agent.database_toolkit.parse_sql") as mock_parse:
             # Create a mock AST that is not a Select statement
             mock_ast = Mock()
             mock_ast.__class__ = type("ShowStatement", (), {})  # Not a Select class
@@ -341,8 +341,8 @@ class TestDatabaseToolkit:
         )
 
         with (
-            patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.database_toolkit.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
         ):
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
@@ -365,8 +365,8 @@ class TestDatabaseToolkit:
         catalogs = [mock_data_catalog]
 
         with (
-            patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.database_toolkit.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
         ):
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
@@ -388,9 +388,9 @@ class TestDatabaseToolkit:
         expected_corrected_sql = "SELECT * FROM users"
 
         with (
-            patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
-            patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.database_toolkit.data_catalog_cache") as mock_cache,
+            patch("minds.agents.database_agent.database_toolkit.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
             patch.object(database_toolkit, "_plan_selection", new=AsyncMock(return_value=None)),
         ):
             mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
@@ -414,7 +414,7 @@ class TestDatabaseToolkit:
         failed_query = "SELECT * FROM non_existent_table"
         error_message = "Table not found"
 
-        with patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache:
+        with patch("minds.agents.database_agent.database_toolkit.data_catalog_cache") as mock_cache:
             mock_cache.load = AsyncMock(return_value=[])
 
             with pytest.raises(Exception, match="No database context available for retry"):
@@ -428,8 +428,8 @@ class TestDatabaseToolkit:
         error_message = "Table not found"
 
         with (
-            patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
-            patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.database_toolkit.data_catalog_cache") as mock_cache,
+            patch("minds.agents.database_agent.database_toolkit.get_llm_config") as mock_get_llm,
         ):
             mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
             mock_get_llm.side_effect = Exception("LLM config error")
@@ -444,10 +444,10 @@ class TestDatabaseToolkit:
         expected_sql = "SELECT * FROM users"
 
         with (
-            patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
-            patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
-            patch("minds.agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
+            patch("minds.agents.database_agent.database_toolkit.data_catalog_cache") as mock_cache,
+            patch("minds.agents.database_agent.database_toolkit.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
             patch.object(database_toolkit, "_plan_selection", new=AsyncMock(return_value=None)),
         ):
             mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
@@ -470,7 +470,7 @@ class TestDatabaseToolkit:
         """Test SQL generation with no data catalogs."""
         conversation_context = "Show me all users"
 
-        with patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache:
+        with patch("minds.agents.database_agent.database_toolkit.data_catalog_cache") as mock_cache:
             mock_cache.load = AsyncMock(return_value=[])
 
             with pytest.raises(QueryGenerationError, match="No database context available"):
@@ -483,10 +483,10 @@ class TestDatabaseToolkit:
         error_message = "Failed to generate SQL"
 
         with (
-            patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
-            patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
-            patch("minds.agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
+            patch("minds.agents.database_agent.database_toolkit.data_catalog_cache") as mock_cache,
+            patch("minds.agents.database_agent.database_toolkit.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
             patch.object(database_toolkit, "_plan_selection", new=AsyncMock(return_value=None)),
         ):
             mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
@@ -613,11 +613,11 @@ class TestDatabaseToolkit:
         expected_sql = "SELECT * FROM users"
 
         with (
-            patch("minds.agent.database_toolkit.data_catalog_cache") as mock_cache,
+            patch("minds.agents.database_agent.database_toolkit.data_catalog_cache") as mock_cache,
             patch.object(database_toolkit, "_plan_selection", new=AsyncMock()) as mock_plan,
-            patch("minds.agent.database_toolkit.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
-            patch("minds.agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
+            patch("minds.agents.database_agent.database_toolkit.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.database_toolkit.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.database_toolkit.get_prompt_template_for_engines") as mock_get_template,
         ):
             mock_cache.load = AsyncMock(return_value=[mock_data_catalog])
             # Planning returns error

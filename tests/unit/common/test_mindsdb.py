@@ -175,6 +175,7 @@ def dummy_ast(monkeypatch):
         Case=_Case,
     )
     monkeypatch.setattr(mindsdb_module, "ast", ast_stub, raising=True)
+    monkeypatch.setattr(mindsdb_module, "Identifier", ast_stub.Identifier, raising=True)
     return ast_stub
 
 
@@ -200,19 +201,85 @@ def test_extract_database_engines_from_query_uses_is_table_identifier_detection(
 
     mindsdb_client = types.SimpleNamespace(databases=types.SimpleNamespace(get=get_database))
 
-    database_engines = []
+    database_engines = mindsdb_module.extract_database_engines_from_select(query, mindsdb_client)
+    assert set(database_engines) == {"postgres", "mssql"}
 
-    def find_databases(node, is_table, **_kwargs):
-        if is_table and isinstance(node, dummy_ast.Identifier):
-            database = node.parts[0]
-            database_engine = mindsdb_client.databases.get(database).engine
-            if database_engine not in database_engines:
-                database_engines.append(database_engine)
 
-    mindsdb_module.query_traversal(query, find_databases)
+def test_extract_database_engines_from_select_excludes_cte_names(dummy_ast):
+    """
+    Ensure CTE names are not treated as databases while still traversing into the CTE query.
+    """
+    cte_query = dummy_ast.Select(from_table=dummy_ast.Identifier(["db1", "table1"]), targets=[])
+    cte = types.SimpleNamespace(name=dummy_ast.Identifier(["cte1"]), query=cte_query)
+    query = dummy_ast.Select(
+        from_table=dummy_ast.Join(
+            left=dummy_ast.Identifier(["cte1"]),
+            right=dummy_ast.Identifier(["db2", "table2"]),
+            condition=None,
+        ),
+        targets=[],
+        cte=[cte],
+    )
+
+    engines_by_db = {"db1": "postgres", "db2": "mssql"}
+
+    def resolve_engine(db_name: str) -> str:
+        assert db_name != "cte1"
+        return engines_by_db[db_name]
+
+    mindsdb_client = types.SimpleNamespace(
+        databases=types.SimpleNamespace(get=lambda db_name: types.SimpleNamespace(engine=resolve_engine(db_name)))
+    )
+    database_engines = mindsdb_module.extract_database_engines_from_select(
+        query, mindsdb_client, require_qualified_table=False, exclude_cte_names=True
+    )
 
     assert set(database_engines) == {"postgres", "mssql"}
-    assert database_engines.count("mssql") == 1
+
+
+def test_extract_databases_from_select_collects_unique_db_names(dummy_ast):
+    query = dummy_ast.Select(
+        from_table=dummy_ast.Join(
+            left=dummy_ast.Identifier(["db1", "table1"]),
+            right=dummy_ast.Identifier(["db2", "table2"]),
+            condition=None,
+        ),
+        targets=[],
+    )
+
+    databases = mindsdb_module.extract_databases_from_select(query)
+    assert set(databases) == {"db1", "db2"}
+    assert len(databases) == 2
+
+
+def test_extract_databases_from_select_ignores_unqualified_tables_by_default(dummy_ast):
+    query = dummy_ast.Select(from_table=dummy_ast.Identifier(["table_only"]), targets=[])
+    assert mindsdb_module.extract_databases_from_select(query) == []
+
+
+def test_extract_databases_from_select_allows_unqualified_tables_when_configured(dummy_ast):
+    query = dummy_ast.Select(from_table=dummy_ast.Identifier(["db1"]), targets=[])
+    assert mindsdb_module.extract_databases_from_select(query, require_qualified_table=False) == ["db1"]
+
+
+def test_extract_databases_from_select_excludes_cte_names(dummy_ast):
+    cte_query = dummy_ast.Select(from_table=dummy_ast.Identifier(["db1", "table1"]), targets=[])
+    cte = types.SimpleNamespace(name=dummy_ast.Identifier(["cte1"]), query=cte_query)
+    query = dummy_ast.Select(
+        from_table=dummy_ast.Join(
+            left=dummy_ast.Identifier(["cte1"]),
+            right=dummy_ast.Identifier(["db2", "table2"]),
+            condition=None,
+        ),
+        targets=[],
+        cte=[cte],
+    )
+
+    databases = mindsdb_module.extract_databases_from_select(
+        query, exclude_cte_names=True, require_qualified_table=False
+    )
+    assert set(databases) == {"db1", "db2"}
+    assert len(databases) == 2
 
 
 def test_query_traversal_set_operation_replaces_left_and_right_and_sets_parent_query(dummy_ast):

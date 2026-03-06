@@ -72,11 +72,24 @@ class DeleteDatasourceRequest(BaseModel):
     cascade: bool = Field(default=False, description="Remove from all minds that use it")
 
 
-class DatasourceTableSampleResponse(BaseModel):
-    """Response model for datasource table sample data."""
+class DatasourceQueryRequest(BaseModel):
+    """Request model for executing a native query against a datasource."""
 
-    data: list[list[Any]] = Field(..., description="Sample data as array of arrays")
-    column_names: list[str] = Field(..., description="Column names for the data")
+    query: str = Field(..., description="SQL query to execute against the datasource")
+    native_query: bool = Field(
+        default=True, description="Send raw SQL directly to the database, bypassing MindsDB parsing"
+    )
+
+
+class DatasourceQueryResponse(BaseModel):
+    """Response model for native query results."""
+
+    data: list[list[Any]] | None = Field(default=None, description="Query result rows")
+    column_names: list[str] | None = Field(default=None, description="Column names for the data")
+
+
+class DatasourceTableSampleResponse(DatasourceQueryResponse):
+    """Response model for table sample data."""
 
 
 class ColumnStatisticsResponse(BaseModel):

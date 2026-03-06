@@ -183,7 +183,6 @@ async def format_messages_for_streaming_chat_completions_api(
 async def format_messages_for_streaming_responses_api(
     message_generator: AsyncGenerator[StreamMessage, Any],
     model: str,
-    on_complete_callback: Callable[[str], Awaitable[None]],
     message_id: UUID,
     **kwargs,
 ) -> AsyncGenerator[str, None]:
@@ -215,20 +214,15 @@ async def format_messages_for_streaming_responses_api(
 
     # Emit each incoming message immediately.
     assistant_content = ""
-    sql_query = None
     async for msg in message_generator:
         # Properly serialize BaseModel content
         content = msg.content
         if isinstance(content, BaseModel):
             content = content.model_dump()
 
-        # Emit thoughts (system messages) separately as an in-progress chunks
-        if msg.role == Role.system:
-            # Extract the SQL query from the system message if it exists
-            sql_query = extract_sql_query_from_thoughts(content)
-            if sql_query:
-                content = sql_query
-
+        # Emit thoughts separately as in-progress chunks
+        # All messages except assistant messages are considered thoughts
+        if msg.role != Role.assistant:
             chunk = StreamingResponseSchema(
                 type=StreamingResponseEvent.in_progress.value,
                 sequence_number=0,
@@ -239,7 +233,7 @@ async def format_messages_for_streaming_responses_api(
                         ResponseOutput(
                             id=str(message_id),
                             status=ResponseStatus.in_progress.value,
-                            role=Role.system.value,
+                            role=msg.role.value,
                             content=[ResponseOutputContent(text=content)],
                         )
                     ],
@@ -247,7 +241,7 @@ async def format_messages_for_streaming_responses_api(
             )
 
         # Emit assistant messages as delta chunks
-        if msg.role == Role.assistant:
+        else:
             chunk = StreamingResponseSchema(
                 type=StreamingResponseEvent.output_text_delta.value,
                 sequence_number=async_index,
@@ -283,9 +277,6 @@ async def format_messages_for_streaming_responses_api(
         ),
     )
     yield f"event: {completed_chunk.type.value}\ndata: {completed_chunk.model_dump_json()}\n\n"
-
-    if on_complete_callback:
-        await on_complete_callback(assistant_content, sql_query)
 
 
 async def process_streaming_producer(
@@ -402,7 +393,6 @@ async def format_messages_for_non_streaming_chat_completions_api(
 async def format_messages_for_non_streaming_responses_api(
     messages: list[StreamMessage],
     model: str,
-    on_complete_callback: Callable[[str], Awaitable[None]],
     message_id: UUID,
     **kwargs,
 ) -> JSONResponse:
@@ -412,24 +402,15 @@ async def format_messages_for_non_streaming_responses_api(
     Args:
         messages (list[StreamMessage]): A list of StreamMessage objects.
         model (str): The model name to include in the response.
-        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after the
-                messages are processed.
         message_id: UUID, The ID of the message to include in the response.
 
     Returns:
         JSONResponse: A Response object built from the messages.
     """
     output = []
-    sql_query = None
     for _, search_message in enumerate(messages):
-        # Skip system messages (thoughts) in the final response,
-        # but extract the SQL query.
-        if search_message.role == Role.system:
-            sql_query = extract_sql_query_from_thoughts(search_message.content)
-            if sql_query:
-                content = sql_query
-
-        if search_message.role != Role.system:
+        # Skip thoughts in the final response,
+        if search_message.role == Role.assistant:
             # Properly serialize BaseModel content
             content = search_message.content
             if isinstance(content, BaseModel):
@@ -448,9 +429,6 @@ async def format_messages_for_non_streaming_responses_api(
         output=output,
         status=ResponseStatus.completed.value,
     )
-
-    if on_complete_callback and response.output and response.output[0].content:
-        await on_complete_callback(response.output[0].content[0].text, sql_query)
 
     return JSONResponse(response.model_dump())
 

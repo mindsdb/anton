@@ -1,4 +1,6 @@
+from mindsdb_sdk.server import Server
 from mindsdb_sql_parser import ast
+from mindsdb_sql_parser.ast import Identifier, Select
 
 
 # This function has been extracted directly from MindsDB.
@@ -245,3 +247,75 @@ def query_traversal(node, callback, is_table=False, is_target=False, parent_quer
 
     # keep original node
     return None
+
+
+def extract_databases_from_select(
+    parsed_sql_query: Select,
+    *,
+    exclude_cte_names: bool = True,
+    require_qualified_table: bool = True,
+) -> list[str]:
+    """
+    Extract unique database names referenced by table identifiers in a parsed SELECT query.
+
+    Notes:
+    - We rely on `query_traversal(..., is_table=True)` semantics to identify table references.
+    - CTE names are optionally excluded because they can appear in FROM/JOIN positions but
+      are not real databases/integrations.
+    """
+    databases: list[str] = []
+    seen: set[str] = set()
+
+    cte_names: set[str] = set()
+    if exclude_cte_names:
+        for cte in getattr(parsed_sql_query, "cte", None) or []:
+            name = getattr(cte, "name", None)
+            parts = getattr(name, "parts", None)
+            if parts:
+                cte_names.add(parts[0])
+
+    def _collect_databases(node, is_table, **_kwargs):
+        if not is_table or not isinstance(node, Identifier):
+            return None
+
+        parts = getattr(node, "parts", None)
+        if not parts:
+            return None
+
+        if require_qualified_table and len(parts) < 2:
+            return None
+
+        database = parts[0]
+        if exclude_cte_names and database in cte_names:
+            return None
+
+        if database not in seen:
+            seen.add(database)
+            databases.append(database)
+        return None
+
+    query_traversal(parsed_sql_query, _collect_databases)
+    return databases
+
+
+def extract_database_engines_from_select(
+    parsed_sql_query: Select,
+    mindsdb_client: Server,
+    *,
+    exclude_cte_names: bool = True,
+    require_qualified_table: bool = True,
+) -> set[str]:
+    """
+    Extract unique database engine names referenced by table identifiers in a parsed SELECT query.
+
+    Notes:
+    - We rely on `query_traversal(..., is_table=True)` semantics to identify table references.
+    - CTE names are optionally excluded because they can appear in FROM/JOIN positions but
+      are not real databases/integrations.
+    """
+    databases = extract_databases_from_select(
+        parsed_sql_query,
+        exclude_cte_names=exclude_cte_names,
+        require_qualified_table=require_qualified_table,
+    )
+    return set(mindsdb_client.databases.get(database).engine for database in databases)

@@ -1,12 +1,10 @@
 from langfuse import observe
 from mindsdb_sdk.server import Server
-from pydantic_ai.usage import RunUsage
 from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.handlers.chat_completions_handler import ChatCompletionsHandler
-from minds.model.chat_completion import ChatCompletion
+from minds.handlers.openai_request_handler import OpenAIRequestHandler
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import Context
 from minds.requests.langfuse_tracing import get_langfuse_trace_id, setup_langfuse_observation
@@ -61,24 +59,7 @@ async def chat_completions_request_handler(
     metadata = chat_completions_request.metadata
     logger.debug(f"🔄[{request_id}] Metadata: {metadata}")
 
-    async def save_chat_completion(usage: RunUsage):
-        """Save a ChatCompletion record with token usage to the database."""
-        chat_completion = ChatCompletion(
-            organization_id=context.organization_id,
-            user_id=context.user_id,
-            model_name=model,
-            request_id=request_id,
-            langfuse_trace_id=get_langfuse_trace_id(),
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-        )
-        session.add(chat_completion)
-        session.commit()
-        logger.debug(
-            f"🔄[{request_id}] Saved ChatCompletion usage: {usage.input_tokens} in / {usage.output_tokens} out"
-        )
-
-    chat_completions_handler = ChatCompletionsHandler(
+    chat_completions_handler = await OpenAIRequestHandler.create(
         session=session,
         context=context,
         mindsdb_client=mindsdb_client,
@@ -87,7 +68,8 @@ async def chat_completions_request_handler(
         stream=stream,
         metadata=metadata,
         instrument=instrument,
-        on_complete_callback=save_chat_completion,
+        request_id=request_id,
+        langfuse_trace_id=get_langfuse_trace_id(),
     )
 
     if stream:

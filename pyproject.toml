@@ -1,6 +1,6 @@
 [project]
 name = "minds"
-version = "1.5.0"
+version = "1.6.0"
 requires-python = ">=3.10,<4.0"
 dependencies = [
     "fastapi==0.128.0",
@@ -61,7 +61,9 @@ ignore = ["B008"]  # Allow Depends() calls in FastAPI function signatures
 [tool.ruff.lint.per-file-ignores]
 "alembic/versions/*.py" = ["E501"]
 "tests/e2e/evals/*.py" = ["E501"]
-"minds/agent/prompt_templates.py" = ["E501"]
+"minds/agents/database_agent/prompt_templates.py" = ["E501"]
+"minds/agents/helpers/chart_generation_instructions.py" = ["E501"]
+"minds/agents/candidate_sql_agent/**/instruction*.py" = ["E501"]
 [tool.ruff.lint.pycodestyle]
 ignore-overlong-task-comments = true
 

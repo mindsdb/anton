@@ -15,7 +15,14 @@ from uuid import uuid4
 import pytest
 from sqlmodel import Session
 
+from minds.model.data_catalog.column import Column
+from minds.model.data_catalog.column_statistics import ColumnStatistics
+from minds.model.data_catalog.foreign_key_constraint import ForeignKeyConstraint
+from minds.model.data_catalog.primary_key_constraint import PrimaryKeyConstraint
+from minds.model.data_catalog.table import Table
 from minds.model.mind import Mind
+from minds.model.mind_datasource import MindDatasource
+from minds.model.mind_datasource_table import MindDatasourceTable
 from minds.schemas.minds import DatasourceConfig, MindCreateRequest, MindUpdateRequest
 from minds.services.conversations import ConversationsService
 from minds.services.minds import (
@@ -429,3 +436,54 @@ class TestMindsService:
 
         with pytest.raises(MindsServiceError, match="Failed to count minds"):
             await minds_service.count_minds()
+
+    @pytest.mark.asyncio
+    async def test_get_mind_with_datasources_eager_loaded_builds_expected_query(self, minds_service, mock_session):
+        mock_mind = Mind(
+            name="test-mind",
+            provider="openai",
+            model_name="gpt-4o",
+            user_id=minds_service.user_id,
+            organization_id=minds_service.organization_id,
+            parameters={},
+            deleted_at=None,
+            created_at=datetime.now(timezone.utc),
+            modified_at=datetime.now(timezone.utc),
+        )
+        mock_mind.mind_datasources = []
+
+        mock_session.exec.return_value.first.return_value = mock_mind
+
+        result = await minds_service._get_mind_with_datasources_eager_loaded("test-mind")
+
+        assert result is mock_mind
+        mock_session.exec.assert_called_once()
+
+        statement = mock_session.exec.call_args[0][0]
+        assert hasattr(statement, "compile")
+
+        where_sql = " ".join(str(c) for c in getattr(statement, "_where_criteria", ()))
+        assert "minds.name" in where_sql
+        assert "minds.user_id" in where_sql
+        assert "minds.organization_id" in where_sql
+        assert "minds.deleted_at" in where_sql
+        assert "IS NULL" in where_sql
+
+        options = list(getattr(statement, "_with_options", ()))
+        assert any(hasattr(opt, "path") and "Mind.mind_datasources" in str(opt.path) for opt in options)
+
+        loader_criteria_entities = [
+            opt.entity.class_.__name__
+            for opt in options
+            if hasattr(opt, "entity") and getattr(opt, "entity", None) is not None
+        ]
+        expected_loader_criteria_entities = {
+            MindDatasource.__name__,
+            MindDatasourceTable.__name__,
+            Table.__name__,
+            Column.__name__,
+            ColumnStatistics.__name__,
+            PrimaryKeyConstraint.__name__,
+            ForeignKeyConstraint.__name__,
+        }
+        assert expected_loader_criteria_entities.issubset(set(loader_criteria_entities))

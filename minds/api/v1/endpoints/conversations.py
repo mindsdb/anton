@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from minds.api.v1.deps import get_conversations_service, get_minds_service
 from minds.common.logger import setup_logging
+from minds.schemas.charts import ChartRequest, ChartResponse
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.schemas.messages import MessageResponse, MessageResultResponse
 from minds.services.conversations import (
@@ -159,7 +160,10 @@ async def get_conversation_messages(
     )
 
     try:
-        messages = await conversations_service.get_conversation_messages(conversation_id)
+        messages = await conversations_service.get_conversation_messages(
+            conversation_id,
+            with_sql_query=True,
+        )
         return {
             "object": "list",
             "data": messages,
@@ -392,6 +396,90 @@ async def export_conversation_message_result(
     except Exception as e:
         logger.error(
             f"Unexpected error in export_conversation_message_result "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.post("/{conversation_id}/items/{message_id}/chart", response_model=ChartResponse)
+async def get_chart_for_message(
+    conversation_id: UUID,
+    message_id: UUID,
+    req: ChartRequest,
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> ChartResponse:
+    """
+    Generate a Chart.js configuration from a message's SQL query results.
+
+    This endpoint takes a chart intent specification and compiles it into
+    a complete Chart.js configuration using the SQL query results from the
+    specified message.
+
+    Args:
+        conversation_id: ID of the conversation.
+        message_id: ID of the message with the SQL query.
+        req: Chart request containing the intent specification.
+
+    Returns:
+        ChartResponse: Complete Chart.js configuration with metadata and warnings.
+    """
+    logger.debug(
+        f"Get chart for message requested "
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
+    )
+
+    try:
+        result = await conversations_service.get_conversation_message_chart(
+            conversation_id,
+            message_id,
+            req.intent,
+        )
+        return result
+    except ConversationNotFoundError as e:
+        logger.warning(
+            f"Conversation not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotFoundError as e:
+        logger.warning(
+            f"Message not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotAssistantError as e:
+        logger.warning(
+            f"Message is not an assistant message "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except MessageNoSQLQueryError as e:
+        logger.warning(
+            f"Message does not have a SQL query "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except InvalidSQLQueryError as e:
+        logger.warning(
+            f"Invalid SQL query "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ValueError as e:
+        logger.warning(
+            f"Invalid chart intent "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ConversationsServiceError as e:
+        logger.error(
+            f"Service error in get_chart_for_message "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e)) from None
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in get_chart_for_message "
             f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None

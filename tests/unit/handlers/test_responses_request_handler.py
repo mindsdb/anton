@@ -1,5 +1,5 @@
 import importlib
-from unittest.mock import ANY, AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -142,12 +142,13 @@ class TestResponsesRequestHandler:
         message_id = uuid4()
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+            mock_handler_instance.responses = AsyncMock()
             mock_process_streaming.return_value = mock_streaming_response
 
             # Mock conversation service methods
@@ -177,8 +178,8 @@ class TestResponsesRequestHandler:
             # Verify messages were retrieved
             mock_conversation_service.get_conversation_messages.assert_called_once_with(sample_conversation_response.id)
 
-            # Verify ChatCompletionsHandler was created with correct parameters
-            mock_handler_class.assert_called_once_with(
+            # Verify OpenAIRequestHandler was created with correct parameters
+            mock_handler_class.create.assert_awaited_once_with(
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -203,10 +204,8 @@ class TestResponsesRequestHandler:
             # Verify the producer function works
             producer_func = call_args[1]["producer"]
             mock_streamer = Mock()
-            # Make chat_completions async
-            mock_handler_instance.chat_completions = AsyncMock()
             await producer_func(mock_streamer)
-            mock_handler_instance.chat_completions.assert_called_once_with(streamer=mock_streamer)
+            mock_handler_instance.responses.assert_awaited_once_with(streamer=mock_streamer, message=mock_message)
 
             # Verify return value
             assert result == mock_streaming_response
@@ -228,14 +227,15 @@ class TestResponsesRequestHandler:
         message_id = uuid4()
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+            mock_handler_instance.responses = AsyncMock()
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
@@ -261,8 +261,8 @@ class TestResponsesRequestHandler:
             # Verify messages were retrieved
             mock_conversation_service.get_conversation_messages.assert_called_once_with(sample_conversation_response.id)
 
-            # Verify ChatCompletionsHandler was created with correct parameters
-            mock_handler_class.assert_called_once_with(
+            # Verify OpenAIRequestHandler was created with correct parameters
+            mock_handler_class.create.assert_awaited_once_with(
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -287,10 +287,8 @@ class TestResponsesRequestHandler:
             # Verify the producer function works
             producer_func = call_args[1]["producer"]
             mock_streamer = Mock()
-            # Make chat_completions async
-            mock_handler_instance.chat_completions = AsyncMock()
             await producer_func(mock_streamer)
-            mock_handler_instance.chat_completions.assert_called_once_with(streamer=mock_streamer)
+            mock_handler_instance.responses.assert_awaited_once_with(streamer=mock_streamer, message=mock_message)
 
             # Verify return value
             assert result == mock_json_response
@@ -319,14 +317,14 @@ class TestResponsesRequestHandler:
         )
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
@@ -346,8 +344,8 @@ class TestResponsesRequestHandler:
                 conversation_service=mock_conversation_service,
             )
 
-            # Verify ChatCompletionsHandler was created with stream=False (default)
-            mock_handler_class.assert_called_once_with(
+            # Verify OpenAIRequestHandler was created with stream=False (default)
+            mock_handler_class.create.assert_awaited_once_with(
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -388,14 +386,14 @@ class TestResponsesRequestHandler:
         )
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
@@ -464,14 +462,14 @@ class TestResponsesRequestHandler:
         )
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
@@ -531,14 +529,14 @@ class TestResponsesRequestHandler:
         )
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
@@ -594,15 +592,16 @@ class TestResponsesRequestHandler:
         message_id = uuid4()
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
+            patch.object(handler_mod, "get_langfuse_trace_id", return_value=None),
             patch.object(handler_mod, "logger") as mock_logger,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
@@ -660,14 +659,14 @@ class TestResponsesRequestHandler:
         )
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods
@@ -688,7 +687,7 @@ class TestResponsesRequestHandler:
             )
 
             # Verify parameters were extracted and passed correctly
-            mock_handler_class.assert_called_once_with(
+            mock_handler_class.create.assert_awaited_once_with(
                 session=mock_session,
                 context=mock_context,
                 mindsdb_client=mock_mindsdb_client,
@@ -703,69 +702,6 @@ class TestResponsesRequestHandler:
             call_args = mock_process_non_streaming.call_args
             assert call_args[1]["model"] == "custom-model-v1"
             assert call_args[1]["message_id"] == message_id
-
-    @pytest.mark.asyncio
-    async def test_responses_request_handler_saves_assistant_response(
-        self,
-        handler_mod,
-        mock_session,
-        mock_mindsdb_client,
-        sample_responses_request,
-        mock_context,
-        mock_conversation_service,
-        sample_conversation_response,
-        sample_message_responses,
-    ):
-        """Test that assistant response is saved via callback."""
-        mock_json_response = Mock(spec=JSONResponse)
-        message_id = uuid4()
-
-        with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
-            patch.object(
-                handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
-            ) as mock_process_non_streaming,
-        ):
-            # Setup mocks
-            mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
-            mock_process_non_streaming.return_value = mock_json_response
-
-            # Mock conversation service methods
-            mock_conversation_service.create_conversation = AsyncMock(return_value=sample_conversation_response)
-            mock_conversation_service.get_conversation_messages = AsyncMock(return_value=sample_message_responses)
-            mock_message = Mock()
-            mock_message.id = message_id
-            mock_conversation_service.create_conversation_message_placeholder = AsyncMock(return_value=mock_message)
-            mock_conversation_service.update_conversation_message_content = AsyncMock()
-
-            # Call the handler
-            await handler_mod.responses_request_handler(
-                session=mock_session,
-                context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                responses_request=sample_responses_request,
-                conversation_service=mock_conversation_service,
-            )
-
-            # Verify process_non_streaming_producer was called with callback
-            mock_process_non_streaming.assert_called_once()
-            call_args = mock_process_non_streaming.call_args
-            assert "on_complete_callback" in call_args[1]
-
-            # Verify the callback function saves the response
-            callback = call_args[1]["on_complete_callback"]
-            await callback("Assistant response", "SELECT * FROM test")
-            mock_conversation_service.update_conversation_message_content.assert_called_once_with(
-                message=mock_message,
-                content="Assistant response",
-                sql_query="SELECT * FROM test",
-                model_name="gpt-3.5-turbo",
-                request_id=ANY,
-                langfuse_trace_id=ANY,
-                input_tokens=ANY,
-                output_tokens=ANY,
-            )
 
     @pytest.mark.asyncio
     async def test_responses_request_handler_no_input(
@@ -790,14 +726,14 @@ class TestResponsesRequestHandler:
         )
 
         with (
-            patch.object(handler_mod, "ChatCompletionsHandler") as mock_handler_class,
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
-            mock_handler_class.return_value = mock_handler_instance
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
             # Mock conversation service methods

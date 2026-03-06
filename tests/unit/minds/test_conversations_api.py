@@ -306,7 +306,10 @@ class TestConversationsAPI:
         assert "data" in result
         assert result["object"] == "list"
         assert len(result["data"]) == 1
-        mock_conversations_service.get_conversation_messages.assert_called_once_with(conversation_id)
+        mock_conversations_service.get_conversation_messages.assert_called_once_with(
+            conversation_id,
+            with_sql_query=True,
+        )
 
     @pytest.mark.asyncio
     async def test_get_conversation_messages_service_error(self, mock_conversations_service):

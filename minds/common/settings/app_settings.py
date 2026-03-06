@@ -132,6 +132,15 @@ class MindsSettings(Settings):
     )  # MINDS__ENABLE_MODEL_SELECTION
 
 
+class ChartCompilerSettings(Settings):
+    max_rows_to_process: int = Field(
+        default=1000, description="Maximum number of rows to process for chart generation"
+    )  # CHART_COMPILER__MAX_ROWS_TO_PROCESS
+    max_series: int = Field(
+        default=12, description="Maximum number of series to render in a chart"
+    )  # CHART_COMPILER__MAX_SERIES
+
+
 class MindCastleSettings(Settings):
     encryption_type: str = Field(
         default="localencryption", description="The encryption type for MindCastle"
@@ -154,6 +163,12 @@ class StatsigSettings(Settings):
     )  # STATSIG__DISABLE_ALL_LOGGING
 
 
+class AgentsSettings(Settings):
+    default_agent: str = Field(
+        default="candidate_sql_agent", description="The default agent to use"
+    )  # AGENTS__DEFAULT_AGENT
+
+
 class AppSettings(Settings):
     env: str = Field(default="local", description="The environment (local, dev, prod, etc.)")  # ENV
 
@@ -172,6 +187,8 @@ class AppSettings(Settings):
     minds: MindsSettings = Field(default_factory=MindsSettings)  # MINDS__*
     mind_castle: MindCastleSettings = Field(default_factory=MindCastleSettings)  # MIND_CASTLE__*
     redis: RedisSettings = Field(default_factory=RedisSettings)  # REDIS__*
+    agents: AgentsSettings = Field(default_factory=AgentsSettings)  # AGENTS__*
+    chart_compiler: ChartCompilerSettings = Field(default_factory=ChartCompilerSettings)  # CHART_COMPILER__*
 
     statsig: StatsigSettings = Field(default_factory=StatsigSettings)  # STATSIG__*
 

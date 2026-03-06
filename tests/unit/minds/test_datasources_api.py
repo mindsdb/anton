@@ -19,6 +19,7 @@ from minds.api.v1.endpoints.datasources import (
     get_datasource_table_sample,
     get_datasources_service,
     list_datasources,
+    query_datasource,
     update_column_description,
     update_datasource,
     update_table_description,
@@ -28,6 +29,8 @@ from minds.schemas.datasources import (
     DataCatalogResponse,
     DatasourceConnectionStatus,
     DatasourceCreateRequest,
+    DatasourceQueryRequest,
+    DatasourceQueryResponse,
     DatasourceResponse,
     DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
@@ -45,6 +48,7 @@ from minds.services.datasources import (
     DatasourceTableColumnNotFoundError,
     DatasourceTableNotCatalogedError,
     DatasourceTableNotFoundError,
+    InvalidDatasourceQueryError,
 )
 from minds.services.limits import LimitsService
 
@@ -913,6 +917,73 @@ class TestDatasourcesAPI:
             await get_datasource_table_row_count(
                 datasource_name="test_postgres", table_name="test_table", datasources_service=mock_datasources_service
             )
+
+        assert exc_info.value.status_code == 500
+        assert "Internal server error" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_query_datasource_success(self, mock_datasources_service):
+        """Test successful datasource query execution."""
+        mock_datasources_service.query = AsyncMock(
+            return_value=DatasourceQueryResponse(data=[[1, "a"]], column_names=["id", "val"])
+        )
+
+        req = DatasourceQueryRequest(query="SELECT 1 AS id, 'a' AS val", native_query=True)
+        result = await query_datasource(
+            datasource_name="test_postgres",
+            request=req,
+            datasources_service=mock_datasources_service,
+        )
+
+        assert isinstance(result, DatasourceQueryResponse)
+        assert result.data == [[1, "a"]]
+        assert result.column_names == ["id", "val"]
+        mock_datasources_service.query.assert_called_once_with("test_postgres", req.query, req.native_query)
+
+    @pytest.mark.asyncio
+    async def test_query_datasource_not_found(self, mock_datasources_service):
+        """Test datasource query when datasource is not found."""
+        mock_datasources_service.query = AsyncMock(side_effect=DatasourceNotFoundError("Datasource not found"))
+        req = DatasourceQueryRequest(query="SELECT 1", native_query=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await query_datasource("missing", req, datasources_service=mock_datasources_service)
+
+        assert exc_info.value.status_code == 404
+        assert "Datasource not found" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_query_datasource_invalid_query(self, mock_datasources_service):
+        """Test datasource query when the query is invalid."""
+        mock_datasources_service.query = AsyncMock(side_effect=InvalidDatasourceQueryError("Invalid query"))
+        req = DatasourceQueryRequest(query="DROP TABLE x", native_query=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await query_datasource("test_postgres", req, datasources_service=mock_datasources_service)
+
+        assert exc_info.value.status_code == 400
+        assert "Invalid query" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_query_datasource_service_error(self, mock_datasources_service):
+        """Test datasource query when service raises a DatasourceServiceError."""
+        mock_datasources_service.query = AsyncMock(side_effect=DatasourceServiceError("Service error"))
+        req = DatasourceQueryRequest(query="SELECT 1", native_query=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await query_datasource("test_postgres", req, datasources_service=mock_datasources_service)
+
+        assert exc_info.value.status_code == 400
+        assert "Service error" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_query_datasource_unexpected_error(self, mock_datasources_service):
+        """Test datasource query when an unexpected exception occurs."""
+        mock_datasources_service.query = AsyncMock(side_effect=Exception("boom"))
+        req = DatasourceQueryRequest(query="SELECT 1", native_query=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await query_datasource("test_postgres", req, datasources_service=mock_datasources_service)
 
         assert exc_info.value.status_code == 500
         assert "Internal server error" in str(exc_info.value.detail)

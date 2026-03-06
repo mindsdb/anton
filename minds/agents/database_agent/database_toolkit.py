@@ -7,13 +7,13 @@ from mindsdb_sql_parser import parse_sql
 from mindsdb_sql_parser.ast import Select
 from pydantic_ai import Agent as PydanticAIAgent
 
-from minds.agent.exceptions import QueryGenerationError
-from minds.agent.llm import get_llm_config
-from minds.agent.prompt_templates import (
+from minds.agents.database_agent.prompt_templates import (
     PLANNING_PROMPT_TEMPLATE,
     RETRY_PROMPT_TEMPLATE,
     get_prompt_template_for_engines,
 )
+from minds.agents.exceptions import QueryGenerationError
+from minds.agents.llm import get_llm_config
 from minds.cache import data_catalog_cache
 from minds.common.logger import setup_logging
 from minds.common.settings.app_settings import get_app_settings
@@ -83,7 +83,7 @@ class DatabaseToolkit:
                 )
                 await streamer.push(
                     role=Role.system,
-                    content={"type": "sql_query", "query": sanitized_query},
+                    content=sanitized_query,
                 )
 
                 return execution_result

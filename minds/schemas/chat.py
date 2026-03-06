@@ -12,6 +12,14 @@ class Role(str, Enum):
     assistant = "assistant"
     function = "function"
 
+    # Roles for thought rendering
+    thought_planning = "thought.planning"
+    thought_execution = "thought.execution"
+    thought_execution_step = "thought.execution.step"
+    thought_execution_step_start = "thought.execution.step.start"
+    thought_execution_step_sql = "thought.execution.step.sql"
+    thought_execution_step_end = "thought.execution.step.end"
+
 
 class Message(BaseModel):
     role: Role

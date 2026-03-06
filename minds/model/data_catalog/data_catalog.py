@@ -36,24 +36,52 @@ class DataCatalog(SQLModel, table=False):
         lines.append("")
         return lines
 
-    def _format_table(self, table: "Table") -> list[str]:
+    def _format_table(self, table: "Table", include_datasource_name: bool = True) -> list[str]:
         """Format a single table's complete information."""
         lines = []
 
         # Table header.
-        qualified_table_name = f"{self.mind_datasource.datasource.name}.{table.name}"
+        qualified_table_name = table.name
+        if include_datasource_name:
+            qualified_table_name = f"{self.mind_datasource.datasource.name}.{qualified_table_name}"
         table_header = f"Table: {qualified_table_name}"
         if table.description:
             table_header += f" - {table.description}"
         lines.append(table_header)
 
-        lines.extend(self._format_table_constraints(table))
+        lines.extend(self._format_table_constraints(table, include_datasource_name))
 
         lines.append("  Columns:")
         for column in table.columns:
             lines.extend(self._format_column(column))
 
         lines.append("")  # Blank line between tables.
+        return lines
+
+    def _format_table_without_stats(self, table: "Table", include_datasource_name: bool = True) -> list[str]:
+        """Format a single table's information without statistics (compact version)."""
+        lines = []
+
+        qualified_table_name = table.name
+        if include_datasource_name:
+            qualified_table_name = f"{self.mind_datasource.datasource.name}.{qualified_table_name}"
+        table_header = f"Table: {qualified_table_name}"
+        if table.description:
+            table_header += f" - {table.description}"
+        lines.append(table_header)
+
+        lines.extend(self._format_table_constraints(table, include_datasource_name))
+
+        lines.append("  Columns:")
+        for column in table.columns:
+            column_info = f"    - {column.name} ({column.data_type})"
+            if not column.is_nullable:
+                column_info += " NOT NULL"
+            if column.description:
+                column_info += f" - {column.description}"
+            lines.append(column_info)
+
+        lines.append("")
         return lines
 
     def _format_column(self, column: "Column") -> list[str]:
@@ -108,7 +136,7 @@ class DataCatalog(SQLModel, table=False):
 
         return lines
 
-    def _format_table_constraints(self, table: "Table") -> list[str]:
+    def _format_table_constraints(self, table: "Table", include_datasource_name: bool = True) -> list[str]:
         """Format primary keys and foreign keys for a table."""
         lines = []
 
@@ -138,13 +166,15 @@ class DataCatalog(SQLModel, table=False):
 
                 fk_column_name = fk.column.name
                 ref_column_name = fk.referenced_column.name
-                qualified_fk_table = f"{self.mind_datasource.datasource.name}.{fk.referenced_table.name}"
+                qualified_fk_table = fk.referenced_table.name
+                if include_datasource_name:
+                    qualified_fk_table = f"{self.mind_datasource.datasource.name}.{qualified_fk_table}"
                 fk_info = f"    - {fk_column_name} → {qualified_fk_table}({ref_column_name})"
                 lines.append(fk_info)
 
         return lines
 
-    def _format_relationships(self, table: "Table") -> list[str]:
+    def _format_relationships(self, table: "Table", include_datasource_name: bool = True) -> list[str]:
         """Format the relationships section for each table."""
         lines = []
 
@@ -164,17 +194,32 @@ class DataCatalog(SQLModel, table=False):
             related_tables.append(fk.referenced_table.name)
 
         if related_tables:
-            qualified_table_name = f"{self.mind_datasource.datasource.name}.{table.name}"
+            qualified_table_name = table.name
+            if include_datasource_name:
+                qualified_table_name = f"{self.mind_datasource.datasource.name}.{qualified_table_name}"
             lines.append(f"{qualified_table_name} is related to: {', '.join(related_tables)}")
 
         return lines
 
-    def to_context_str(self) -> str:
+    def to_context_str(
+        self,
+        max_tokens: int | None = None,
+        include_statistics: bool = True,
+        table_names: list[str] | None = None,
+        include_datasource_name: bool = True,
+    ) -> str:
         """
         Convert the MindsDB data catalog to a formatted string for LLM context.
 
         The format is optimized for LLMs to understand MindsDB integration structure.
         for SQL query generation against the underlying data source.
+
+        Args:
+            max_tokens: Maximum number of tokens to include (approximate, uses char count / 4).
+                       If None, no limit is applied.
+            include_statistics: Whether to include column statistics. Set to False to reduce size.
+            table_names: Optional list of specific table names to include. If None, includes all tables.
+            include_datasource_name: Whether to include the data source as part of the tables names.
 
         Returns:
             A formatted string representation of the MindsDB data catalog.
@@ -184,17 +229,66 @@ class DataCatalog(SQLModel, table=False):
 
         lines.extend(self._format_header())
 
-        for mind_datasource_table in self.mind_datasource.mind_datasource_tables:
+        # Filter tables if table_names is provided
+        tables_to_include = self.mind_datasource.mind_datasource_tables
+        if table_names:
+            tables_to_include = [mdt for mdt in tables_to_include if mdt.table.name in table_names]
+
+        for mind_datasource_table in tables_to_include:
             table = mind_datasource_table.table
-            lines.extend(self._format_table(table))
-            # TODO: Is this necessary? We are already adding the foreign keys to the table section.
-            relationship_lines.extend(self._format_relationships(table))
+
+            if include_statistics:
+                lines.extend(self._format_table(table, include_datasource_name))
+            else:
+                lines.extend(self._format_table_without_stats(table, include_datasource_name))
+
+            relationship_lines.extend(self._format_relationships(table, include_datasource_name))
 
         if relationship_lines:
             lines.append("Relationships:")
             lines.extend([f"  - {line}" for line in relationship_lines])
             lines.append("")
 
+        result = "\n".join(lines)
+
+        if max_tokens:
+            max_chars = max_tokens * 4
+            if len(result) > max_chars:
+                # Instead of hard truncation, provide a warning
+                result = (
+                    result[:max_chars] + "\n\n[... catalog truncated due to size limits. "
+                    "Consider using catalog pruning to focus on specific tables ...]"
+                )
+
+        return result
+
+    def _get_table_summary(self, table: "Table", include_datasource_name: bool = True) -> str:
+        """Get a one-line summary of a table for compact overview."""
+        qualified_name = table.name
+        if include_datasource_name:
+            qualified_name = f"{self.mind_datasource.datasource.name}.{qualified_name}"
+        col_count = len(table.columns)
+        summary = f"{qualified_name} ({col_count} columns)"
+        if table.description:
+            summary += f" - {table.description}"
+        return summary
+
+    def get_table_list_summary(self, include_datasource_name: bool = True) -> str:
+        """Get a compact list of all tables with basic info for initial context."""
+        lines = []
+
+        if include_datasource_name:
+            lines.append(f"Data Source: {self.mind_datasource.datasource.name}")
+        lines.append(f"Total Tables: {len(self.mind_datasource.mind_datasource_tables)}")
+        lines.append("")
+        lines.append("Available Tables:")
+
+        for mind_datasource_table in self.mind_datasource.mind_datasource_tables:
+            table = mind_datasource_table.table
+            lines.append(f"  - {self._get_table_summary(table, include_datasource_name)}")
+
+        lines.append("")
+        lines.append("Note: Use catalog pruning to focus on specific tables for detailed schema information.")
         return "\n".join(lines)
 
 

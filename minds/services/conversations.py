@@ -10,16 +10,18 @@ from uuid import UUID
 
 from mindsdb_sdk.server import Server
 from mindsdb_sql_parser import parse_sql
-from mindsdb_sql_parser.ast import Identifier, Select
+from mindsdb_sql_parser.ast import Select
 from mindsdb_sql_parser.exceptions import ParsingException
 from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
-from minds.common.mindsdb import query_traversal
+from minds.common.mindsdb import extract_database_engines_from_select
+from minds.common.utilities import format_numeric_columns
 from minds.model.conversation import Conversation
 from minds.model.message import Message
+from minds.schemas.charts import ChartResponse, PieIntent, ScatterIntent, XYIntent
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse, MessageResultResponse
@@ -309,12 +311,17 @@ class ConversationsService:
             )
             raise ConversationsServiceError(f"Failed to delete conversation: {str(e)}") from None
 
-    async def get_conversation_messages(self, conversation_id: UUID) -> list[MessageResponse]:
+    async def get_conversation_messages(
+        self,
+        conversation_id: UUID,
+        with_sql_query: bool = False,
+    ) -> list[MessageResponse]:
         """
         Get the messages of a conversation by ID.
 
         Args:
             conversation_id: ID of the conversation to get the messages from.
+            with_sql_query: Whether to include the SQL query in the response.
 
         Returns:
             List[MessageResponse]: List of messages.
@@ -343,7 +350,7 @@ class ConversationsService:
             messages = self.session.exec(statement).all()
             messages_list = []
             for message in messages:
-                messages_list.append(await self._message_to_response(message))
+                messages_list.append(await self._message_to_response(message, with_sql_query=with_sql_query))
             return messages_list
         except ConversationNotFoundError:
             raise
@@ -588,6 +595,12 @@ class ConversationsService:
             count_sql_query = f"SELECT COUNT(*) FROM ({sql_query}) AS total_rows"
             count_result = self.mindsdb_client.query(count_sql_query).fetch()
             total_rows = count_result.values[0][0]
+            try:
+                if isinstance(total_rows, str):
+                    total_rows = total_rows.replace(",", "").strip()
+                total_rows = int(total_rows)
+            except (TypeError, ValueError):
+                total_rows = None
 
             # Then we need to get the data from the result with pagination
             # We need to check if the SQL query has a ORDER BY clause,
@@ -609,16 +622,11 @@ class ConversationsService:
             # This is because the MSSQL integration for MindsDB does not support LIMIT and OFFSET.
             # This should be fixed in MindsDB itself and removed from here.
             # Get the database engine of the query
-            database_engines = []
-
-            def find_databases(node, is_table, **kwargs):
-                if is_table and isinstance(node, Identifier):
-                    database = node.parts[0]
-                    database_engine = self.mindsdb_client.databases.get(database).engine
-                    if database_engine not in database_engines:
-                        database_engines.append(database_engine)
-
-            query_traversal(parsed_sql_query, find_databases)
+            database_engines = extract_database_engines_from_select(
+                parsed_sql_query,
+                mindsdb_client=self.mindsdb_client,
+                exclude_cte_names=True,
+            )
             # database_engine = self.mindsdb_client.databases.get(parsed_sql_query.from_table.parts[0]).engine
             # If is is MSSQL, execute the original query without LIMIT and OFFSET
             # Execute pagination in memory.
@@ -637,16 +645,22 @@ class ConversationsService:
                 )
                 result = self.mindsdb_client.query(paginated_sql_query).fetch()
 
+            # Format numeric columns to prevent scientific notation
+            # TODO: This is a costly operation, can it be improved?
+            result = format_numeric_columns(result)
+
             # Convert DataFrame to structured response
             column_names = result.columns.tolist()
             data = result.values.tolist()
+            if total_rows is None:
+                total_rows = len(data)
 
             return (
                 MessageResultResponse(
                     data=data,
                     column_names=column_names,
                 ),
-                total_rows,
+                int(total_rows),
                 is_pagination_consistent,
             )
         except (
@@ -699,6 +713,10 @@ class ConversationsService:
 
             result = self.mindsdb_client.query(sql_query).fetch()
 
+            # Format numeric columns to prevent scientific notation
+            # TODO: This is a costly operation, can it be improved?
+            result = format_numeric_columns(result)
+
             # Convert DataFrame to structured response
             column_names = result.columns.tolist()
             data = result.to_dict(orient="records")
@@ -718,6 +736,100 @@ class ConversationsService:
             )
             raise ConversationsServiceError(f"Failed to export message result: {str(e)}") from None
 
+    async def get_conversation_message_chart(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+        intent: XYIntent | PieIntent | ScatterIntent,
+    ) -> ChartResponse:
+        """
+        Generate a Chart.js configuration from a message's SQL query results.
+
+        This method fetches the SQL query associated with a message, executes it,
+        and compiles the results into a Chart.js configuration based on the provided intent.
+
+        Args:
+            conversation_id: ID of the conversation.
+            message_id: ID of the message with the SQL query.
+            intent: Chart intent specification (XYIntent, PieIntent, or ScatterIntent).
+
+        Returns:
+            ChartResponse: Complete Chart.js configuration with metadata and warnings.
+
+        Raises:
+            ConversationNotFoundError: If conversation is not found.
+            MessageNotFoundError: If message is not found.
+            MessageNotAssistantError: If message is not from the assistant.
+            MessageNoSQLQueryError: If message has no SQL query.
+            InvalidSQLQueryError: If SQL query is invalid.
+            ValueError: If intent references invalid columns.
+        """
+        # Import here to avoid circular imports
+        from minds.schemas.charts import ChartResponse
+        from minds.services.chart_compiler import MAX_ROWS_TO_PROCESS, compile_chartjs
+
+        logger.debug(
+            f"Getting chart for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in organization {self.organization_id}"
+        )
+
+        try:
+            # Validate conversation and message
+            conversation = await self._get_conversation(conversation_id)
+            if not conversation:
+                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+
+            message = await self._get_message(conversation_id, message_id)
+            if not message:
+                raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
+
+            if message.role != Role.assistant:
+                raise MessageNotAssistantError(f"Message with ID '{message_id}' is not an assistant message")
+
+            if message.sql_query is None:
+                raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
+
+            sql_query = str(message.sql_query)
+            parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
+            database_engines = extract_database_engines_from_select(
+                parsed_sql_query,
+                mindsdb_client=self.mindsdb_client,
+                exclude_cte_names=True,
+            )
+
+            if "mssql" in database_engines:
+                # For MSSQL, LIMIT isn't supported, so we use TOP instead.
+                limited_sql_query = f"SELECT TOP {MAX_ROWS_TO_PROCESS} * FROM ({sql_query}) AS chart_data"
+            else:
+                limited_sql_query = f"SELECT * FROM ({sql_query}) AS chart_data LIMIT {MAX_ROWS_TO_PROCESS}"
+
+            result = self.mindsdb_client.query(limited_sql_query).fetch()
+
+            # Compile the Chart.js configuration
+            config, warnings, meta = compile_chartjs(result, intent)
+
+            return ChartResponse(
+                config=config,
+                meta=meta,
+                warnings=warnings,
+            )
+
+        except (
+            ConversationNotFoundError,
+            MessageNotFoundError,
+            MessageNotAssistantError,
+            MessageNoSQLQueryError,
+            InvalidSQLQueryError,
+            ValueError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error getting chart for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to generate chart: {str(e)}") from None
+
     def _validate_and_parse_sql_query(self, sql_query: str) -> Select:
         """
         Validate and parse the SQL query to ensure it is valid and a SELECT query.
@@ -731,6 +843,9 @@ class ConversationsService:
         Returns:
             Select: The parsed SQL query.
         """
+        if not sql_query or not sql_query.strip():
+            raise InvalidSQLQueryError("Invalid SQL query: Empty input")
+
         try:
             parsed_sql_query = parse_sql(sql_query)
         except ParsingException as e:
@@ -809,12 +924,13 @@ class ConversationsService:
             modified_at=conversation.modified_at.isoformat(),
         )
 
-    async def _message_to_response(self, message: Message) -> MessageResponse:
+    async def _message_to_response(self, message: Message, with_sql_query: bool = False) -> MessageResponse:
         """
         Convert Message database model to MessageResponse object.
 
         Args:
             message: Message database model.
+            with_sql_query: Whether to include the SQL query in the response.
 
         Returns:
             MessageResponse: Message response object.
@@ -823,10 +939,15 @@ class ConversationsService:
             type=MessageContentType.output_text if message.role == Role.assistant else MessageContentType.input_text,
             text=str(message.content),
         )
-        return MessageResponse(
+        message_response = MessageResponse(
             id=message.id,
             role=message.role,
             content=content,
             created_at=message.created_at.isoformat(),
             modified_at=message.modified_at.isoformat(),
         )
+
+        if with_sql_query:
+            message_response.sql_query = str(message.sql_query)
+
+        return message_response

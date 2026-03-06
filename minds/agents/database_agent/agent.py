@@ -1,14 +1,16 @@
 import textwrap
-from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
 
+from mindsdb_sdk.server import Server
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai import RunContext
 
-from minds.agent.database_toolkit import DatabaseToolkit
-from minds.agent.llm import get_llm_config
-from minds.agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
+from minds.agents.base import AgentRunContext, BaseAgent, BaseAgentConfig
+from minds.agents.base_response import AgentResponse
+from minds.agents.database_agent.database_toolkit import DatabaseToolkit
+from minds.agents.database_agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
+from minds.agents.llm import get_llm_config
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
 from minds.requests.stream import MessageStreamer
@@ -26,15 +28,13 @@ class DatabaseDeps:
     streamer: MessageStreamer | None = None
 
 
-@dataclass
-class DatabaseAgentConfig:
+class DatabaseAgentConfig(BaseAgentConfig):
     """Config for the database agent."""
 
     enable_charting: bool = False
-    instrument: bool = True
 
 
-class DatabaseAgent:
+class DatabaseAgent(BaseAgent):
     """Experimental agent implementation using Pydantic instead of Langchain.
 
     This class is intended to replace LangchainAgent but maintains the same interface
@@ -44,8 +44,8 @@ class DatabaseAgent:
     def __init__(
         self,
         mind: Mind,
-        database_toolkit: DatabaseToolkit,
-        config: DatabaseAgentConfig | None = None,
+        mindsdb_client: Server,
+        config: DatabaseAgentConfig | None = DatabaseAgentConfig(),
     ):
         """Initialize the PydanticAgent.
 
@@ -54,17 +54,29 @@ class DatabaseAgent:
             database_toolkit: DatabaseToolkit instance for executing database operations.
             config: Config for the database agent.
         """
+        super().__init__(mind=mind, mindsdb_client=mindsdb_client, config=config)
 
-        self.mind = mind
+        database_toolkit = DatabaseToolkit(mind=mind, mindsdb_client=mindsdb_client)
         self.deps = DatabaseDeps(toolkit=database_toolkit)
-        if not config:
-            config = DatabaseAgentConfig()
-        self.config = config
-        self.last_run_usage = None
 
         PydanticAIAgent.instrument_all(instrument=self.config.instrument)
 
         self._pydantic_agent = self._setup_agent()
+
+    @classmethod
+    def build_config(cls, run_context: AgentRunContext) -> DatabaseAgentConfig:
+        """Build the config for the database agent.
+
+        Args:
+            run_context: The run context for the agent.
+
+        Returns:
+            The config for the database agent.
+        """
+        return DatabaseAgentConfig(
+            instrument=run_context.instrument,
+            enable_charting=run_context.metadata.enable_charting if run_context.metadata else False,
+        )
 
     def _setup_agent(self) -> PydanticAIAgent:
         """Set up and configure the Pydantic AI agent with database tools.
@@ -80,6 +92,7 @@ class DatabaseAgent:
             model=llm_model,
             system_prompt=system_prompt,
             deps_type=DatabaseDeps,
+            output_type=AgentResponse,
         )
 
         @agent.tool
@@ -172,34 +185,7 @@ class DatabaseAgent:
 
         return conversation_context
 
-    async def get_completion(self, messages: list[Message], stream: bool = False) -> AsyncGenerator[str, None]:
-        """Get completion from the Pydantic-based agent.
-
-        Args:
-            messages: List of message dictionaries.
-            stream: Whether to stream the response.
-
-        Returns:
-            ChatCompletionCustom object for non-streaming or a generator for streaming.
-        """
-        # Use the preconfigured agent with tools
-        agent = self._pydantic_agent
-
-        # Build conversation context string from all messages
-        conversation_context = self._build_conversation_context(messages)
-
-        # Store the complete conversation context for the tool context
-        self.deps.conversation_context = conversation_context
-
-        if stream:
-            async with agent.run_stream(conversation_context, deps=self.deps) as result:
-                async for chunk in result.stream_text(delta=True):
-                    yield chunk
-        else:
-            result = await agent.run(conversation_context, deps=self.deps)
-            yield result.output
-
-    async def run_completion(self, messages: list[Message], streamer: MessageStreamer, stream: bool = False):
+    async def run(self, messages: list[Message], streamer: MessageStreamer, stream: bool = False) -> AgentResponse:
         """Run completion and push results to the streamer.
         The streamer will also be added to the dependencies to allow tools to push messages (thoughts).
 
@@ -218,12 +204,40 @@ class DatabaseAgent:
         self.deps.conversation_context = conversation_context
         self.deps.streamer = streamer
 
+        result = None
         if stream:
-            async with agent.run_stream(conversation_context, deps=self.deps) as result:
-                async for chunk in result.stream_text(delta=True):
-                    await streamer.push(role=Role.assistant, content=chunk)
-                self.last_run_usage = result.usage()
+            async with agent.run_stream(conversation_context, deps=self.deps) as stream:
+                # stream_output() returns the complete answer generated so far,
+                # To return the delta, we need to remove the previous answer chunk from the current answer chunk.
+                previous_answer_chunk = ""
+                async for chunk in stream.stream_output():
+                    result = chunk
+                    answer_chunk = chunk.answer
+                    delta_answer_chunk = answer_chunk.removeprefix(previous_answer_chunk)
+                    if delta_answer_chunk:
+                        await streamer.push(role=Role.assistant, content=delta_answer_chunk)
+                    previous_answer_chunk = answer_chunk
+
+                self.last_run_usage = stream.usage()
+
         else:
             result = await agent.run(conversation_context, deps=self.deps)
             await streamer.push(role=Role.assistant, content=result.output)
             self.last_run_usage = result.usage()
+
+        return result
+
+    async def get_last_run_usage(self) -> tuple[int, int] | None:
+        """Get the last run usage for the database agent.
+
+        Returns:
+            The last run usage for the database agent.
+        """
+        input_tokens = self.last_run_usage.input_tokens if self.last_run_usage else None
+        output_tokens = self.last_run_usage.output_tokens if self.last_run_usage else None
+        logger.debug(f"Last run usage: {input_tokens} in / {output_tokens} out")
+
+        if input_tokens is None or output_tokens is None:
+            return None
+
+        return (input_tokens, output_tokens)

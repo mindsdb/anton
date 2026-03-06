@@ -8,11 +8,17 @@ for datasource management operations.
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+import sqlglot
 from mindsdb_sdk.server import Server
+from mindsdb_sql_parser import ParsingException, parse_sql
+from mindsdb_sql_parser.ast import Select
 from sqlalchemy.orm import selectinload, with_loader_criteria
+from sqlglot import exp
+from sqlglot.errors import ParseError
 from sqlmodel import Session, and_, func, select
 
 from minds.common.logger import setup_logging
+from minds.common.mindsdb import extract_databases_from_select
 from minds.common.utilities import safe_parse
 from minds.model.data_catalog.column import Column
 from minds.model.data_catalog.column_statistics import ColumnStatistics
@@ -28,6 +34,7 @@ from minds.schemas.datasources import (
     DatasourceConnectionStatus,
     DatasourceCreateRequest,
     DatasourceDetailedResponse,
+    DatasourceQueryResponse,
     DatasourceResponse,
     DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
@@ -84,6 +91,12 @@ class DatasourceTableColumnNotFoundError(DatasourceServiceError):
 
 class DatasourceTableColumnNotCatalogedError(DatasourceServiceError):
     """Raised when a column is not cataloged in a table."""
+
+    pass
+
+
+class InvalidDatasourceQueryError(DatasourceServiceError):
+    """Raised when a datasource query is invalid."""
 
     pass
 
@@ -617,6 +630,174 @@ class DatasourcesService:
                 f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to get row count: {str(e)}") from None
+
+    async def query(self, datasource_name: str, query: str, native_query: bool = True) -> DatasourceQueryResponse:
+        """Execute a query against a datasource via MindsDB."""
+        datasource_name = datasource_name.lower()
+        logger.debug(
+            f"Executing native query on datasource {datasource_name} "
+            f"for user {self.user_id} in organization {self.organization_id}"
+        )
+
+        try:
+            datasource = await self._get_datasource(datasource_name)
+            if not datasource:
+                raise DatasourceNotFoundError(f"Datasource '{datasource_name}' not found")
+
+            if native_query:
+                # TODO: Ensure that all engines are supported by sqlglot
+                # TODO: Ensure that engines are properly mapped to sqlglot dialects
+                self._validate_native_query(query, datasource.engine)
+
+                # TODO: This should be run be executed via the SDK
+                # A function is not available via the SDK at the moment
+                response = self.mindsdb_client.api.session.post(
+                    self.mindsdb_client.api.url + "/api/sql/query",
+                    json={"query": query, "context": {"db": datasource_name, "native_query": native_query}},
+                )
+                response.raise_for_status()
+                response_json = response.json()
+
+                # Type can be either 'table', 'ok', or 'error'
+                # Since mutations are not allowed, it is sage to assume that 'ok' is not possible
+                if response_json.get("type") == "error":
+                    raise DatasourceServiceError(
+                        f"Failed to execute query: {response_json.get('error_message')}"
+                    ) from None
+
+                return DatasourceQueryResponse(
+                    data=response_json.get("data"),
+                    column_names=response_json.get("column_names"),
+                )
+
+            else:
+                self._validate_mindsdb_query(query, datasource_name)
+
+                database = self.mindsdb_client.databases.get(datasource_name)
+                response_df = database.query(query).fetch()
+
+                return DatasourceQueryResponse(
+                    data=response_df.values.tolist(),
+                    column_names=response_df.columns.tolist(),
+                )
+        except (DatasourceNotFoundError, InvalidDatasourceQueryError) as ue:
+            logger.error(
+                f"Error executing native query on datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(ue)}"
+            )
+            raise
+        except Exception as e:
+            logger.error(
+                f"Unexpected error executing native query on datasource {datasource_name} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise DatasourceServiceError(f"Failed to execute query: {str(e)}") from None
+
+    def _validate_native_query(self, query: str, dialect: str):
+        """
+        Ensure the query is:
+        - Exactly one statement
+        - A read-only query (SELECT / WITH / set operations)
+        - Contains no DML/DDL/transaction/command nodes anywhere
+        - No SELECT INTO
+        - No locking reads (FOR UPDATE / LOCK ...)
+
+        DISCLAIMER: This is a best-effort validation. It is not guaranteed to catch all invalid queries.
+
+        Args:
+            query: The query to validate.
+            dialect: The dialect of the query.
+
+        Raises:
+            InvalidDatasourceQueryError: If the query is not valid.
+        """
+
+        try:
+            statements = sqlglot.parse(query, read=dialect)
+        except ParseError:
+            raise InvalidDatasourceQueryError(f"Invalid query: {query}") from None
+
+        # 1) Exactly one statement
+        if len(statements) != 1:
+            raise InvalidDatasourceQueryError(f"Query must contain exactly one statement: {query}") from None
+
+        statement = statements[0]
+
+        # 2) Root must be a query expression
+        if not isinstance(statement, exp.Select | exp.With | exp.Union | exp.Intersect | exp.Except):
+            raise InvalidDatasourceQueryError(
+                f"Query must be a read-only query (SELECT/WITH/set-ops): {query}"
+            ) from None
+
+        # 3) Forbid writes / DDL / transactions / commands anywhere in tree
+        FORBIDDEN_NODES = (
+            # DML
+            exp.Insert,
+            exp.Update,
+            exp.Delete,
+            exp.Merge,
+            exp.Replace,
+            # DDL
+            exp.Create,
+            exp.Drop,
+            exp.Alter,
+            exp.TruncateTable,
+            exp.Comment,
+            # Transactions
+            exp.Commit,
+            exp.Rollback,
+            exp.Transaction,
+            # Generic command bucket (VACUUM, ANALYZE, etc.)
+            exp.Command,
+            # Utility (not a query)
+            exp.Use,
+            exp.Set,
+            exp.Show,
+            exp.Describe,
+        )
+
+        for node_type in FORBIDDEN_NODES:
+            if statement.find(node_type):
+                raise InvalidDatasourceQueryError(
+                    f"Query must be read-only (found forbidden operation): {query}"
+                ) from None
+
+        # 4) Prevent SELECT INTO (table creation via SELECT)
+        if statement.find(exp.Into):
+            raise InvalidDatasourceQueryError(f"Query must not contain SELECT INTO: {query}") from None
+
+        # 5) Prevent locking reads (FOR UPDATE / FOR SHARE / LOCK ...)
+        LOCKING_NODES = (exp.Lock,)
+
+        for node_type in LOCKING_NODES:
+            if statement.find(node_type):
+                raise InvalidDatasourceQueryError(f"Query must not take locks (e.g., FOR UPDATE): {query}") from None
+
+    def _validate_mindsdb_query(self, query: str, datasource_name: str) -> None:
+        """
+        Validate a query to ensure it is a single, read-only MindsDB SELECT statement.
+
+        Args:
+            query: The query to validate.
+            datasource_name: Name of the datasource.
+        """
+        try:
+            parsed_query = parse_sql(query)
+        except ParsingException as e:
+            raise InvalidDatasourceQueryError(f"Invalid query: {e}") from e
+
+        # The parser does not allow for multiple statements
+        # TODO: Validate this assumption
+
+        if not isinstance(parsed_query, Select):
+            raise InvalidDatasourceQueryError(f"Query is not a SELECT statement: {parsed_query}") from None
+
+        # Ensure that the query is referencing the correct datasource
+        databases = extract_databases_from_select(parsed_query)
+        if len(databases) != 1 or databases[0] != datasource_name:
+            raise InvalidDatasourceQueryError(
+                f"Query is not referencing the correct datasource: {parsed_query}"
+            ) from None
 
     async def check_datasource_exists(self, datasource_name: str) -> None:
         """

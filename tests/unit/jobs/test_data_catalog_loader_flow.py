@@ -1,4 +1,3 @@
-import sys
 from unittest.mock import Mock, patch
 from uuid import UUID
 
@@ -6,55 +5,7 @@ import pandas as pd
 import pytest
 from sqlmodel import Session
 
-# Store original modules to restore later
-original_prefect = sys.modules.get("prefect")
-original_prefect_flow = sys.modules.get("prefect.flow")
-original_prefect_task = sys.modules.get("prefect.task")
-original_prefect_cache_policies = sys.modules.get("prefect.cache_policies")
-original_prefect_blocks_system = sys.modules.get("prefect.blocks.system")
-original_prefect_exceptions = sys.modules.get("prefect.exceptions")
-
-# Mock Prefect modules to prevent Prefect initialization during import
-prefect_mock = Mock()
-prefect_mock.cache_policies = Mock()
-prefect_mock.cache_policies.NO_CACHE = Mock()
-
-# Mock prefect.blocks.system
-prefect_blocks_system_mock = Mock()
-prefect_blocks_system_mock.Secret = Mock()
-
-# Mock prefect.exceptions
-prefect_exceptions_mock = Mock()
-prefect_exceptions_mock.PrefectException = Exception
-
-
-# Create pass-through decorators that don't modify the functions
-def mock_task(func=None, **kwargs):
-    """Mock task decorator that passes through the function unchanged."""
-    if func is None:
-        return lambda f: f
-    return func
-
-
-def mock_flow(func=None, **kwargs):
-    """Mock flow decorator that passes through the function unchanged."""
-    if func is None:
-        return lambda f: f
-    return func
-
-
-prefect_mock.flow = mock_flow
-prefect_mock.task = mock_task
-
-sys.modules["prefect"] = prefect_mock
-sys.modules["prefect.flow"] = prefect_mock.flow
-sys.modules["prefect.task"] = prefect_mock.task
-sys.modules["prefect.cache_policies"] = prefect_mock.cache_policies
-sys.modules["prefect.blocks.system"] = prefect_blocks_system_mock
-sys.modules["prefect.exceptions"] = prefect_exceptions_mock
-
-# Import after mocking Prefect modules
-from minds.jobs.data_catalog_loader_flow import (  # noqa: E402
+from minds.jobs.data_catalog_loader_flow import (
     _convert_row_to_column,
     _convert_row_to_column_statistics,
     _convert_row_to_foreign_key,
@@ -76,46 +27,27 @@ from minds.jobs.data_catalog_loader_flow import (  # noqa: E402
     load_tables,
     normalize_distinct_count,
 )
-from minds.model.data_catalog import (  # noqa: E402
+from minds.model.data_catalog import (
     Column,
     ColumnStatistics,
     ForeignKeyConstraint,
     PrimaryKeyConstraint,
     Table,
 )
-from minds.model.datasource import Datasource  # noqa: E402
-from minds.model.mind_datasource import DataCatalogStatus, MindDatasource  # noqa: E402
+from minds.model.datasource import Datasource
+from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 
-# Restore original modules
-if original_prefect is not None:
-    sys.modules["prefect"] = original_prefect
-else:
-    sys.modules.pop("prefect", None)
 
-if original_prefect_flow is not None:
-    sys.modules["prefect.flow"] = original_prefect_flow
-else:
-    sys.modules.pop("prefect.flow", None)
+def _call_task(task_or_fn, *args, **kwargs):
+    """
+    Call a function whether it's a Prefect `Task` or a plain function.
 
-if original_prefect_task is not None:
-    sys.modules["prefect.task"] = original_prefect_task
-else:
-    sys.modules.pop("prefect.task", None)
+    In CI, if `@task` is active, calling the task object can trigger Prefect orchestration
+    (and an API server). Calling `.fn(...)` executes the underlying function directly.
+    """
 
-if original_prefect_cache_policies is not None:
-    sys.modules["prefect.cache_policies"] = original_prefect_cache_policies
-else:
-    sys.modules.pop("prefect.cache_policies", None)
-
-if original_prefect_blocks_system is not None:
-    sys.modules["prefect.blocks.system"] = original_prefect_blocks_system
-else:
-    sys.modules.pop("prefect.blocks.system", None)
-
-if original_prefect_exceptions is not None:
-    sys.modules["prefect.exceptions"] = original_prefect_exceptions
-else:
-    sys.modules.pop("prefect.exceptions", None)
+    fn = getattr(task_or_fn, "fn", None)
+    return fn(*args, **kwargs) if callable(fn) else task_or_fn(*args, **kwargs)
 
 
 class TestDataCatalogLoaderFlow:
@@ -191,7 +123,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
-            result = get_tables(mock_mindsdb_client, "test_datasource", None)
+            result = _call_task(get_tables, mock_mindsdb_client, "test_datasource", None)
 
             expected_query = """
     SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
@@ -215,7 +147,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
-            result = get_tables(mock_mindsdb_client, "test_datasource", ["table1", "table2"])
+            result = _call_task(get_tables, mock_mindsdb_client, "test_datasource", ["table1", "table2"])
 
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args[0][1]
@@ -236,7 +168,8 @@ class TestDataCatalogLoaderFlow:
         existing_table.name = "table2"
         mock_session.exec.return_value.all.return_value = [existing_table]
 
-        result = filter_loaded_tables(
+        result = _call_task(
+            filter_loaded_tables,
             session=mock_session,
             tables_df=tables_df,
             mind_datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
@@ -265,7 +198,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
-            result = get_columns(mock_mindsdb_client, "test_datasource", ["table1"])
+            result = _call_task(get_columns, mock_mindsdb_client, "test_datasource", ["table1"])
 
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args[0][1]
@@ -288,7 +221,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
-            result = get_column_statistics(mock_mindsdb_client, "test_datasource", None)
+            result = _call_task(get_column_statistics, mock_mindsdb_client, "test_datasource", None)
 
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args[0][1]
@@ -302,7 +235,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
-            result = get_primary_keys(mock_mindsdb_client, "test_datasource", None)
+            result = _call_task(get_primary_keys, mock_mindsdb_client, "test_datasource", None)
 
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args[0][1]
@@ -323,7 +256,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
-            result = get_foreign_keys(mock_mindsdb_client, "test_datasource", None)
+            result = _call_task(get_foreign_keys, mock_mindsdb_client, "test_datasource", None)
 
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args[0][1]
@@ -398,7 +331,8 @@ class TestDataCatalogLoaderFlow:
 
         mock_session.add.side_effect = mock_add
 
-        result = load_tables(
+        result = _call_task(
+            load_tables,
             session=mock_session,
             tables_df=tables_df,
             mind_datasource_id=UUID("12345678-1234-5678-1234-567812345678"),
@@ -496,7 +430,8 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        result = load_columns(
+        result = _call_task(
+            load_columns,
             session=mock_session,
             columns_df=columns_df,
             tables=tables,
@@ -617,7 +552,8 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        load_column_statistics(
+        _call_task(
+            load_column_statistics,
             session=mock_session,
             column_statistics_df=column_statistics_df,
             columns=columns,
@@ -676,7 +612,8 @@ class TestDataCatalogLoaderFlow:
             {"TABLE_NAME": ["table1"], "COLUMN_NAME": ["id"], "ORDINAL_POSITION": [1], "CONSTRAINT_NAME": ["pk_table1"]}
         )
 
-        load_primary_keys(
+        _call_task(
+            load_primary_keys,
             session=mock_session,
             primary_keys_df=primary_keys_df,
             tables=tables,
@@ -761,7 +698,8 @@ class TestDataCatalogLoaderFlow:
             }
         )
 
-        load_foreign_keys(
+        _call_task(
+            load_foreign_keys,
             session=mock_session,
             foreign_keys_df=foreign_keys_df,
             tables=tables,
@@ -790,7 +728,8 @@ class TestDataCatalogLoaderFlow:
         # Mock session.exec to return empty list
         mock_session.exec.return_value.all.return_value = []
 
-        result = filter_loaded_tables(
+        result = _call_task(
+            filter_loaded_tables,
             session=mock_session,
             tables_df=empty_df,
             mind_datasource_id=UUID("87654321-4321-8765-4321-876543218765"),
@@ -806,7 +745,8 @@ class TestDataCatalogLoaderFlow:
         """Test load_tables with empty DataFrame."""
         empty_df = pd.DataFrame(columns=["TABLE_NAME", "TABLE_SCHEMA", "TABLE_DESCRIPTION", "TABLE_TYPE", "ROW_COUNT"])
 
-        result = load_tables(
+        result = _call_task(
+            load_tables,
             session=mock_session,
             tables_df=empty_df,
             mind_datasource_id=UUID("12345678-1234-5678-1234-567812345678"),
@@ -828,7 +768,8 @@ class TestDataCatalogLoaderFlow:
         )
         tables = []
 
-        result = load_columns(
+        result = _call_task(
+            load_columns,
             session=mock_session,
             columns_df=empty_df,
             tables=tables,
@@ -856,7 +797,8 @@ class TestDataCatalogLoaderFlow:
         )
         columns = []
 
-        load_column_statistics(
+        _call_task(
+            load_column_statistics,
             session=mock_session,
             column_statistics_df=empty_df,
             columns=columns,
@@ -873,7 +815,8 @@ class TestDataCatalogLoaderFlow:
         tables = []
         columns = []
 
-        load_primary_keys(
+        _call_task(
+            load_primary_keys,
             session=mock_session,
             primary_keys_df=empty_df,
             tables=tables,
@@ -900,7 +843,8 @@ class TestDataCatalogLoaderFlow:
         tables = []
         columns = []
 
-        load_foreign_keys(
+        _call_task(
+            load_foreign_keys,
             session=mock_session,
             foreign_keys_df=empty_df,
             tables=tables,

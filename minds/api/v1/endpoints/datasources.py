@@ -18,6 +18,8 @@ from minds.schemas.datasources import (
     DatasourceConnectionStatus,
     DatasourceCreateRequest,
     DatasourceDetailedResponse,
+    DatasourceQueryRequest,
+    DatasourceQueryResponse,
     DatasourceResponse,
     DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
@@ -34,6 +36,7 @@ from minds.services.datasources import (
     DatasourceTableColumnNotFoundError,
     DatasourceTableNotCatalogedError,
     DatasourceTableNotFoundError,
+    InvalidDatasourceQueryError,
 )
 from minds.services.limits import LimitsService
 
@@ -502,6 +505,27 @@ async def get_datasource_table_row_count(
             f"Unexpected error in get_datasource_table_row_count "
             f"for user {datasources_service.user_id} in organization {datasources_service.organization_id}: {str(e)}"
         )
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.post("/{datasource_name}/query", status_code=200)
+async def query_datasource(
+    datasource_name: str,
+    request: DatasourceQueryRequest,
+    datasources_service: DatasourcesService = Depends(get_datasources_service),
+) -> DatasourceQueryResponse:
+    """Execute a query against a datasource."""
+    try:
+        query_response = await datasources_service.query(datasource_name, request.query, request.native_query)
+
+        return query_response
+    except DatasourceNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except InvalidDatasourceQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except DatasourceServiceError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 

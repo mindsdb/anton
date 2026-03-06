@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from minds.agent.database_agent import DatabaseAgent, DatabaseAgentConfig, DatabaseDeps
-from minds.agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
+from minds.agents.database_agent.agent import DatabaseAgent, DatabaseAgentConfig, DatabaseDeps
+from minds.agents.database_agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
 from minds.model.mind import Mind
 from minds.schemas.chat import Message, Role
 
@@ -64,78 +64,86 @@ class TestDatabaseAgent:
         return mind
 
     @pytest.fixture
-    def mock_database_toolkit(self):
-        """Create a mock DatabaseToolkit instance for testing."""
+    def mock_mindsdb_client(self):
+        """Create a mock MindsDB Server instance for testing."""
         return Mock()
 
     @pytest.fixture
-    def database_agent(self, mock_mind, mock_database_toolkit):
+    def database_agent(self, mock_mind, mock_mindsdb_client):
         """Create a DatabaseAgent instance for testing."""
         with (
-            patch("minds.agent.database_agent.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_agent.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
+            patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
         ):
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
+            mock_toolkit_class.return_value = Mock()
             mock_agent = Mock()
             mock_agent_class.return_value = mock_agent
-            return DatabaseAgent(mind=mock_mind, database_toolkit=mock_database_toolkit)
+            return DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
-    def test_database_agent_initialization(self, mock_mind, mock_database_toolkit):
+    def test_database_agent_initialization(self, mock_mind, mock_mindsdb_client):
         """Test DatabaseAgent initialization."""
         with (
-            patch("minds.agent.database_agent.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_agent.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
+            patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
         ):
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
+            mock_toolkit = Mock()
+            mock_toolkit_class.return_value = mock_toolkit
             mock_agent = Mock()
             mock_agent_class.return_value = mock_agent
 
-            agent = DatabaseAgent(mind=mock_mind, database_toolkit=mock_database_toolkit)
+            agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
             assert agent.mind == mock_mind
-            assert agent.deps.toolkit == mock_database_toolkit
+            assert agent.deps.toolkit == mock_toolkit
             assert agent.deps.conversation_context is None
             assert agent._pydantic_agent is not None
             mock_get_llm.assert_called_once_with(mock_mind.provider, mock_mind.model_name)
 
-    def test_database_agent_initialization_with_llm_config_error(self, mock_mind, mock_database_toolkit):
+    def test_database_agent_initialization_with_llm_config_error(self, mock_mind, mock_mindsdb_client):
         """Test DatabaseAgent initialization when LLM config fails."""
-        with patch("minds.agent.database_agent.get_llm_config") as mock_get_llm:
+        with patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm:
             mock_get_llm.side_effect = ValueError("Unsupported provider")
 
             with pytest.raises(ValueError, match="Unsupported provider"):
-                DatabaseAgent(mind=mock_mind, database_toolkit=mock_database_toolkit)
+                DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
-    def test_database_agent_initialization_respects_instrument_config(self, mock_mind, mock_database_toolkit):
+    def test_database_agent_initialization_respects_instrument_config(self, mock_mind, mock_mindsdb_client):
         """Test that initialization wires instrument flag to PydanticAIAgent."""
         config = DatabaseAgentConfig(instrument=False)
         with (
-            patch("minds.agent.database_agent.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_agent.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.agent.get_llm_config", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
+            patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
         ):
-            mock_get_llm.return_value = Mock()
+            mock_toolkit_class.return_value = Mock()
             mock_agent_class.return_value = Mock()
 
-            DatabaseAgent(mind=mock_mind, database_toolkit=mock_database_toolkit, config=config)
+            DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client, config=config)
 
             mock_agent_class.instrument_all.assert_called_once_with(instrument=False)
 
-    def test_get_system_prompt_includes_system_prompt_charting_and_time(self, mock_mind, mock_database_toolkit):
+    def test_get_system_prompt_includes_system_prompt_charting_and_time(self, mock_mind, mock_mindsdb_client):
         """Test system prompt composition with charting and custom prompt."""
         mock_mind.parameters = {"system_prompt": "Follow strict SQL style."}
         fixed_now = datetime(2026, 2, 16, 10, 55, 0)
 
         with (
-            patch("minds.agent.database_agent.get_llm_config", return_value=Mock()),
-            patch("minds.agent.database_agent.PydanticAIAgent", return_value=Mock()),
-            patch("minds.agent.database_agent.datetime") as mock_datetime,
+            patch("minds.agents.database_agent.agent.get_llm_config", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
+            patch("minds.agents.database_agent.agent.PydanticAIAgent", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.datetime") as mock_datetime,
         ):
+            mock_toolkit_class.return_value = Mock()
             mock_datetime.now.return_value = fixed_now
             agent = DatabaseAgent(
                 mind=mock_mind,
-                database_toolkit=mock_database_toolkit,
+                mindsdb_client=mock_mindsdb_client,
                 config=DatabaseAgentConfig(enable_charting=True),
             )
 
@@ -145,17 +153,19 @@ class TestDatabaseAgent:
             assert "Current date: 2026-02-16" in prompt
             assert "Current time: 10:55:00" in prompt
 
-    def test_get_system_prompt_uses_prompt_template_fallback(self, mock_mind, mock_database_toolkit):
+    def test_get_system_prompt_uses_prompt_template_fallback(self, mock_mind, mock_mindsdb_client):
         """Uses prompt_template when system_prompt is not set."""
         mock_mind.parameters = {"prompt_template": "Use concise answers."}
         fixed_now = datetime(2026, 2, 16, 10, 55, 0)
         with (
-            patch("minds.agent.database_agent.get_llm_config", return_value=Mock()),
-            patch("minds.agent.database_agent.PydanticAIAgent", return_value=Mock()),
-            patch("minds.agent.database_agent.datetime") as mock_datetime,
+            patch("minds.agents.database_agent.agent.get_llm_config", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
+            patch("minds.agents.database_agent.agent.PydanticAIAgent", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.datetime") as mock_datetime,
         ):
+            mock_toolkit_class.return_value = Mock()
             mock_datetime.now.return_value = fixed_now
-            agent = DatabaseAgent(mind=mock_mind, database_toolkit=mock_database_toolkit)
+            agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
             prompt = agent._get_system_prompt()
             assert "Use concise answers." in prompt
 
@@ -242,153 +252,20 @@ class TestDatabaseAgent:
         expected = "Test message"
         assert context == expected
 
-    @pytest.mark.asyncio
-    async def test_get_completion_non_streaming(self, database_agent):
-        """Test get_completion in non-streaming mode."""
-        messages = [Message(role=Role.user, content="Hello")]
-        expected_response = "Hello! How can I help you?"
-
-        # Mock the agent's run method
-        mock_result = Mock()
-        mock_result.output = expected_response
-        database_agent._pydantic_agent.run = AsyncMock(return_value=mock_result)
-
-        # Mock the toolkit's generate_and_execute_sql method
-        database_agent.deps.toolkit.generate_and_execute_sql = AsyncMock(return_value="SQL result")
-
-        result = []
-        async for chunk in database_agent.get_completion(messages, stream=False):
-            result.append(chunk)
-
-        assert len(result) == 1
-        assert result[0] == expected_response
-
-        # Verify conversation context was set
-        assert database_agent.deps.conversation_context == "Hello"
-
-    @pytest.mark.asyncio
-    async def test_get_completion_streaming(self, database_agent):
-        """Test get_completion in streaming mode."""
-        messages = [Message(role=Role.user, content="Hello")]
-        expected_chunks = ["Hello", "! ", "How", " can", " I", " help", " you?"]
-
-        # Mock the agent's run_stream method as an async context manager
-        mock_stream_result = Mock()
-
-        async def mock_stream_text(delta=True):
-            for chunk in expected_chunks:
-                yield chunk
-
-        mock_stream_result.stream_text = mock_stream_text
-
-        class MockAsyncContextManager:
-            async def __aenter__(self):
-                return mock_stream_result
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        database_agent._pydantic_agent.run_stream = Mock(return_value=MockAsyncContextManager())
-
-        # Mock the toolkit's generate_and_execute_sql method
-        database_agent.deps.toolkit.generate_and_execute_sql = AsyncMock(return_value="SQL result")
-
-        result = []
-        async for chunk in database_agent.get_completion(messages, stream=True):
-            result.append(chunk)
-
-        assert result == expected_chunks
-
-        # Verify conversation context was set
-        assert database_agent.deps.conversation_context == "Hello"
-
-    @pytest.mark.asyncio
-    async def test_get_completion_with_multiple_messages(self, database_agent):
-        """Test get_completion with multiple messages."""
-        messages = [
-            Message(role=Role.user, content="Hello"),
-            Message(role=Role.assistant, content="Hi there!"),
-            Message(role=Role.user, content="How are you?"),
-        ]
-        expected_response = "I'm doing well, thank you!"
-
-        # Mock the agent's run method
-        mock_result = Mock()
-        mock_result.output = expected_response
-        database_agent._pydantic_agent.run = AsyncMock(return_value=mock_result)
-
-        # Mock the toolkit's generate_and_execute_sql method
-        database_agent.deps.toolkit.generate_and_execute_sql = AsyncMock(return_value="SQL result")
-
-        result = []
-        async for chunk in database_agent.get_completion(messages, stream=False):
-            result.append(chunk)
-
-        assert len(result) == 1
-        assert result[0] == expected_response
-
-        # Verify conversation context was built correctly
-        expected_context = (
-            "This is a conversation history. Please respond to the most recent user message "
-            "while considering the full context:\n\n"
-            "User: Hello\n\nAssistant: Hi there!\n\nUser: How are you?"
-            "IMPORTANT: Use the prior conversation only for context and intent. "
-            "Do not copy or reuse previous answers, even if the same or similar questions appear, "
-            "as the underlying data, schema, or results may have changed."
-        )
-        assert database_agent.deps.conversation_context == expected_context
-
-    @pytest.mark.asyncio
-    async def test_get_completion_agent_run_error(self, database_agent):
-        """Test get_completion when agent.run raises an exception."""
-        messages = [Message(role=Role.user, content="Hello")]
-
-        # Mock the agent's run method to raise an exception
-        database_agent._pydantic_agent.run = AsyncMock(side_effect=Exception("Agent error"))
-
-        # Mock the toolkit's generate_and_execute_sql method
-        database_agent.deps.toolkit.generate_and_execute_sql = AsyncMock(return_value="SQL result")
-
-        with pytest.raises(Exception, match="Agent error"):
-            result = []
-            async for chunk in database_agent.get_completion(messages, stream=False):
-                result.append(chunk)
-
-    @pytest.mark.asyncio
-    async def test_get_completion_streaming_error(self, database_agent):
-        """Test get_completion when streaming raises an exception."""
-        messages = [Message(role=Role.user, content="Hello")]
-
-        # Mock the agent's run_stream method to raise an exception in the context manager
-        class MockAsyncContextManager:
-            async def __aenter__(self):
-                raise Exception("Streaming error")
-
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        database_agent._pydantic_agent.run_stream = Mock(return_value=MockAsyncContextManager())
-
-        # Mock the toolkit's generate_and_execute_sql method
-        database_agent.deps.toolkit.generate_and_execute_sql = AsyncMock(return_value="SQL result")
-
-        with pytest.raises(Exception, match="Streaming error"):
-            result = []
-            async for chunk in database_agent.get_completion(messages, stream=True):
-                result.append(chunk)
-
-    def test_setup_agent_creates_tool(self, mock_mind, mock_database_toolkit):
+    def test_setup_agent_creates_tool(self, mock_mind, mock_mindsdb_client):
         """Test that _setup_agent creates the generate_and_execute_sql tool."""
         with (
-            patch("minds.agent.database_agent.get_llm_config") as mock_get_llm,
-            patch("minds.agent.database_agent.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm,
+            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
+            patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
         ):
             mock_llm = Mock()
             mock_get_llm.return_value = mock_llm
+            mock_toolkit_class.return_value = Mock()
             mock_agent = Mock()
             mock_agent_class.return_value = mock_agent
 
-            agent = DatabaseAgent(mind=mock_mind, database_toolkit=mock_database_toolkit)
+            agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
             # Verify the agent was created
             assert agent._pydantic_agent is not None
@@ -459,8 +336,8 @@ class TestDatabaseAgent:
         assert "Please respond to the most recent user message" in context
 
     @pytest.mark.asyncio
-    async def test_run_completion_non_streaming_pushes_result(self, database_agent):
-        """Test run_completion in non-streaming mode pushes agent output to streamer."""
+    async def test_run_non_streaming_pushes_result(self, database_agent):
+        """Test run() in non-streaming mode pushes agent output to streamer."""
         messages = [Message(role=Role.user, content="Query")]
 
         # Mock agent.run to return a result with output
@@ -474,7 +351,7 @@ class TestDatabaseAgent:
         mock_streamer = Mock()
         mock_streamer.push = AsyncMock()
 
-        await database_agent.run_completion(messages=messages, streamer=mock_streamer, stream=False)
+        await database_agent.run(messages=messages, streamer=mock_streamer, stream=False)
 
         # Ensure the agent's conversation was set and streamer.push was called with the output
         assert database_agent.deps.conversation_context == "Query"
@@ -482,20 +359,20 @@ class TestDatabaseAgent:
         assert database_agent.last_run_usage == usage
 
     @pytest.mark.asyncio
-    async def test_run_completion_streaming_pushes_chunks(self, database_agent):
-        """Test run_completion in streaming mode pushes chunks to streamer as they arrive."""
+    async def test_run_streaming_pushes_deltas(self, database_agent):
+        """Test run() in streaming mode pushes only deltas to streamer."""
         messages = [Message(role=Role.user, content="Stream me")]
 
-        # Prepare streaming chunks
-        chunks = ["a", "b", "c"]
+        # stream_output yields objects with `answer` containing the full output so far.
+        chunks = [Mock(answer="a"), Mock(answer="ab"), Mock(answer="abc")]
 
         mock_stream_result = Mock()
 
-        async def mock_stream_text(delta=True):
+        async def mock_stream_output():
             for c in chunks:
                 yield c
 
-        mock_stream_result.stream_text = mock_stream_text
+        mock_stream_result.stream_output = mock_stream_output
         usage = 3
         mock_stream_result.usage.return_value = usage
 
@@ -511,10 +388,13 @@ class TestDatabaseAgent:
         mock_streamer = Mock()
         mock_streamer.push = AsyncMock()
 
-        await database_agent.run_completion(messages=messages, streamer=mock_streamer, stream=True)
+        await database_agent.run(messages=messages, streamer=mock_streamer, stream=True)
 
-        # Ensure push was called for each chunk
-        assert mock_streamer.push.await_count == len(chunks)
+        # Ensure push was called for each delta: "a", "b", "c"
+        assert mock_streamer.push.await_count == 3
+        assert mock_streamer.push.call_args_list[0][1]["content"] == "a"
+        assert mock_streamer.push.call_args_list[1][1]["content"] == "b"
+        assert mock_streamer.push.call_args_list[2][1]["content"] == "c"
         # Verify conversation context set
         assert database_agent.deps.conversation_context == "Stream me"
         assert database_agent.last_run_usage == usage

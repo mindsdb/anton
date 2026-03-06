@@ -42,7 +42,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Minds API",
         description="FastAPI-based service providing OpenAI-compatible chat completions with MindsDB integration",
-        version="1.5.0",
+        version="1.6.0",
         lifespan=lifespan,
     )
 

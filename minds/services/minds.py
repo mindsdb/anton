@@ -18,9 +18,15 @@ from minds.client.prefect import PrefectClient
 from minds.common.logger import setup_logging
 from minds.common.utilities import safe_parse
 from minds.model.conversation import Conversation
+from minds.model.data_catalog.column import Column
+from minds.model.data_catalog.column_statistics import ColumnStatistics
+from minds.model.data_catalog.foreign_key_constraint import ForeignKeyConstraint
+from minds.model.data_catalog.primary_key_constraint import PrimaryKeyConstraint
+from minds.model.data_catalog.table import Table
 from minds.model.datasource import Datasource
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
+from minds.model.mind_datasource_table import MindDatasourceTable
 from minds.schemas.conversations import ConversationResponse
 from minds.schemas.minds import (
     DatasourceConfig,
@@ -304,7 +310,7 @@ class MindsService:
                 f"Getting mind model {mind_name} for user {self.user_id} in organization {self.organization_id}"
             )
 
-            mind = await self._get_mind(mind_name)
+            mind = await self._get_mind_with_datasources_eager_loaded(mind_name)
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
@@ -414,7 +420,7 @@ class MindsService:
             mind_name = mind_name.lower()
             logger.debug(f"Updating mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
 
-            mind = await self._get_mind_with_datasources(mind_name)
+            mind = await self._get_mind_with_conversations_and_datasources(mind_name)
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
@@ -482,7 +488,7 @@ class MindsService:
             mind_name = mind_name.lower()
             logger.debug(f"Deleting mind {mind_name} for user {self.user_id} in organization {self.organization_id}")
 
-            mind = await self._get_mind_with_datasources(mind_name)
+            mind = await self._get_mind_with_conversations_and_datasources(mind_name)
 
             if not mind:
                 raise MindNotFoundError(f"Mind '{mind_name}' not found")
@@ -615,8 +621,8 @@ class MindsService:
         )
         return self.session.exec(statement).first()
 
-    async def _get_mind_with_datasources(self, mind_name: str) -> Mind:
-        """Utility function to get a specific mind by name with datasources eagerly loaded."""
+    async def _get_mind_with_conversations_and_datasources(self, mind_name: str) -> Mind:
+        """Utility function to get a specific mind by name with conversations and datasources eagerly loaded."""
         statement = (
             select(Mind)
             .where(
@@ -639,6 +645,49 @@ class MindsService:
                     lambda cls: cls.deleted_at.is_(None),
                     include_aliases=True,
                 ),
+            )
+        )
+        return self.session.exec(statement).first()
+
+    async def _get_mind_with_datasources_eager_loaded(self, mind_name: str) -> Mind:
+        """Utility function to get a specific mind by name with datasources and related tables eagerly loaded."""
+        statement = (
+            select(Mind)
+            .where(
+                and_(
+                    Mind.name == mind_name,
+                    Mind.user_id == self.user_id,
+                    Mind.organization_id == self.organization_id,
+                    Mind.deleted_at.is_(None),
+                )
+            )
+            .options(
+                # Datasources and their junction records
+                selectinload(Mind.mind_datasources).options(
+                    selectinload(MindDatasource.datasource),
+                    selectinload(MindDatasource.mind_datasource_tables)
+                    .selectinload(MindDatasourceTable.table)
+                    .options(
+                        # Columns + statistics
+                        selectinload(Table.columns).selectinload(Column.statistics),
+                        # PKs (and their columns)
+                        selectinload(Table.primary_key_constraints).selectinload(PrimaryKeyConstraint.column),
+                        # FKs (and their referenced edges)
+                        selectinload(Table.foreign_key_constraints).selectinload(ForeignKeyConstraint.column),
+                        selectinload(Table.foreign_key_constraints).selectinload(ForeignKeyConstraint.referenced_table),
+                        selectinload(Table.foreign_key_constraints).selectinload(
+                            ForeignKeyConstraint.referenced_column
+                        ),
+                    ),
+                ),
+                # Apply soft-delete filtering across eagerly-loaded entities.
+                with_loader_criteria(MindDatasource, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+                with_loader_criteria(MindDatasourceTable, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+                with_loader_criteria(Table, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+                with_loader_criteria(Column, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+                with_loader_criteria(ColumnStatistics, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+                with_loader_criteria(PrimaryKeyConstraint, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+                with_loader_criteria(ForeignKeyConstraint, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
             )
         )
         return self.session.exec(statement).first()

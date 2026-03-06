@@ -17,6 +17,7 @@ from minds.schemas.datasources import (
     ColumnResponse,
     DataCatalogResponse,
     DatasourceCreateRequest,
+    DatasourceQueryResponse,
     DatasourceResponse,
     DatasourceTableSampleResponse,
     DatasourceUpdateRequest,
@@ -31,6 +32,7 @@ from minds.services.datasources import (
     DatasourceTableColumnNotFoundError,
     DatasourceTableNotCatalogedError,
     DatasourceTableNotFoundError,
+    InvalidDatasourceQueryError,
 )
 
 
@@ -837,3 +839,148 @@ class TestDatasourcesService:
 
         with pytest.raises(DatasourceServiceError, match="Failed to count datasources"):
             await service.count_datasources()
+
+    def test_validate_native_query_allows_simple_select(self, service):
+        service._validate_native_query("SELECT 1", "postgres")
+
+    def test_validate_native_query_rejects_multiple_statements(self, service):
+        with pytest.raises(InvalidDatasourceQueryError, match="exactly one statement"):
+            service._validate_native_query("SELECT 1; SELECT 2", "postgres")
+
+    def test_validate_native_query_rejects_select_into(self, service):
+        with pytest.raises(InvalidDatasourceQueryError, match="SELECT INTO"):
+            service._validate_native_query("SELECT 1 INTO new_table", "postgres")
+
+    def test_validate_native_query_rejects_locking_reads(self, service):
+        with pytest.raises(InvalidDatasourceQueryError, match="must not take locks"):
+            service._validate_native_query("SELECT * FROM t FOR UPDATE", "postgres")
+
+    def test_validate_native_query_rejects_invalid_sql(self, service):
+        with pytest.raises(InvalidDatasourceQueryError, match="Invalid query"):
+            service._validate_native_query("SELEC FROM", "postgres")
+
+    def test_validate_mindsdb_query_accepts_single_db_reference(self, service, monkeypatch):
+        import minds.services.datasources as svc_module
+
+        class _FakeSelect:
+            pass
+
+        monkeypatch.setattr(svc_module, "Select", _FakeSelect, raising=True)
+        monkeypatch.setattr(svc_module, "parse_sql", lambda _q: _FakeSelect(), raising=True)
+        monkeypatch.setattr(
+            svc_module,
+            "extract_databases_from_select",
+            lambda _parsed: ["test_postgres"],
+            raising=True,
+        )
+
+        service._validate_mindsdb_query("SELECT * FROM test_postgres.t", "test_postgres")
+
+    def test_validate_mindsdb_query_rejects_parse_error(self, service, monkeypatch):
+        import minds.services.datasources as svc_module
+
+        def _raise(_q):
+            raise svc_module.ParsingException("bad")
+
+        monkeypatch.setattr(svc_module, "parse_sql", _raise, raising=True)
+
+        with pytest.raises(InvalidDatasourceQueryError, match="Invalid query"):
+            service._validate_mindsdb_query("bad sql", "test_postgres")
+
+    def test_validate_mindsdb_query_rejects_non_select(self, service, monkeypatch):
+        import minds.services.datasources as svc_module
+
+        class _NotSelect:
+            def __repr__(self):  # pragma: no cover
+                return "NOT_SELECT"
+
+        monkeypatch.setattr(svc_module, "parse_sql", lambda _q: _NotSelect(), raising=True)
+
+        with pytest.raises(InvalidDatasourceQueryError, match="not a SELECT statement"):
+            service._validate_mindsdb_query("CREATE TABLE x", "test_postgres")
+
+    def test_validate_mindsdb_query_rejects_wrong_datasource(self, service, monkeypatch):
+        import minds.services.datasources as svc_module
+
+        class _FakeSelect:
+            pass
+
+        monkeypatch.setattr(svc_module, "Select", _FakeSelect, raising=True)
+        monkeypatch.setattr(svc_module, "parse_sql", lambda _q: _FakeSelect(), raising=True)
+        monkeypatch.setattr(svc_module, "extract_databases_from_select", lambda _p: ["other"], raising=True)
+
+        with pytest.raises(InvalidDatasourceQueryError, match="not referencing the correct datasource"):
+            service._validate_mindsdb_query("SELECT * FROM other.t", "test_postgres")
+
+    @pytest.mark.asyncio
+    async def test_query_native_success(self, service, mock_mindsdb_client):
+        datasource = Mock()
+        datasource.engine = "postgres"
+        service._get_datasource = AsyncMock(return_value=datasource)
+
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json.return_value = {"type": "table", "data": [[1]], "column_names": ["one"]}
+
+        mock_mindsdb_client.api = Mock()
+        mock_mindsdb_client.api.url = "http://mindsdb"
+        mock_mindsdb_client.api.session = Mock()
+        mock_mindsdb_client.api.session.post.return_value = mock_response
+
+        result = await service.query("TEST_POSTGRES", "SELECT 1", native_query=True)
+
+        assert isinstance(result, DatasourceQueryResponse)
+        assert result.data == [[1]]
+        assert result.column_names == ["one"]
+        service._get_datasource.assert_awaited_once_with("test_postgres")
+        mock_mindsdb_client.api.session.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_query_native_response_error_raises(self, service, mock_mindsdb_client):
+        datasource = Mock()
+        datasource.engine = "postgres"
+        service._get_datasource = AsyncMock(return_value=datasource)
+
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json.return_value = {"type": "error", "error_message": "nope"}
+
+        mock_mindsdb_client.api = Mock()
+        mock_mindsdb_client.api.url = "http://mindsdb"
+        mock_mindsdb_client.api.session = Mock()
+        mock_mindsdb_client.api.session.post.return_value = mock_response
+
+        with pytest.raises(DatasourceServiceError, match="Failed to execute query: nope"):
+            await service.query("test_postgres", "SELECT 1", native_query=True)
+
+    @pytest.mark.asyncio
+    async def test_query_non_native_success(self, service, mock_mindsdb_client):
+        service._get_datasource = AsyncMock(return_value=Mock())
+        service._validate_mindsdb_query = Mock()
+
+        df = pd.DataFrame({"id": [1, 2], "val": ["a", "b"]})
+
+        mock_fetch = Mock(return_value=df)
+        mock_query = Mock()
+        mock_query.fetch = mock_fetch
+        mock_database = Mock()
+        mock_database.query.return_value = mock_query
+
+        mock_mindsdb_client.databases.get.return_value = mock_database
+
+        result = await service.query("test_postgres", "SELECT * FROM test_postgres.t", native_query=False)
+
+        assert isinstance(result, DatasourceQueryResponse)
+        assert result.data == [[1, "a"], [2, "b"]]
+        assert result.column_names == ["id", "val"]
+        service._validate_mindsdb_query.assert_called_once()
+        mock_mindsdb_client.databases.get.assert_called_once_with("test_postgres")
+        mock_database.query.assert_called_once()
+        mock_query.fetch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_query_datasource_not_found(self, service):
+        service._get_datasource = AsyncMock(return_value=None)
+
+        with pytest.raises(DatasourceNotFoundError, match="Datasource 'missing' not found"):
+            await service.query("missing", "SELECT 1", native_query=True)
