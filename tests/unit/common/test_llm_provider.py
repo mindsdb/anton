@@ -44,6 +44,12 @@ def _make_settings(enable_model_selection: bool = False, **overrides) -> AppSett
     return AppSettings(**defaults)
 
 
+def _get_default_provider_and_model(settings: AppSettings) -> tuple[str, str]:
+    default_provider = settings.default_models.default_provider
+    default_model = getattr(settings.default_models, f"{default_provider}_model")
+    return default_provider, default_model
+
+
 class TestLLMProvider:
     """Test cases for the LLMProvider enum."""
 
@@ -104,28 +110,30 @@ class TestGetSupportedModelsByProvider:
     def test_disabled_returns_only_default(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
+        expected_default_provider, expected_default_model = _get_default_provider_and_model(settings)
 
         is_enabled, default_provider, default_model, providers = get_supported_models_by_provider(
             context=ctx, settings=settings
         )
 
         assert is_enabled is False
-        assert default_provider == "openai"
-        assert default_model == "gpt-4o"
-        assert providers == {"openai": ["gpt-4o"]}
+        assert default_provider == expected_default_provider
+        assert default_model == expected_default_model
+        assert providers == {expected_default_provider: [expected_default_model]}
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=True)
     def test_enabled_returns_all_providers(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
+        expected_default_provider, expected_default_model = _get_default_provider_and_model(settings)
 
         is_enabled, default_provider, default_model, providers = get_supported_models_by_provider(
             context=ctx, settings=settings
         )
 
         assert is_enabled is True
-        assert default_provider == "openai"
-        assert default_model == "gpt-4o"
+        assert default_provider == expected_default_provider
+        assert default_model == expected_default_model
         assert set(providers.keys()) == {p.value for p in LLMProvider}
         assert settings.openai.supported_models == providers["openai"]
         assert settings.anthropic.supported_models == providers["anthropic"]
@@ -197,31 +205,44 @@ class TestValidateProviderAndModelName:
     def test_disabled_default_provider_accepted(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
+        default_provider, _ = _get_default_provider_and_model(settings)
 
-        validate_provider_and_model_name(provider="openai", model_name=None, context=ctx, settings=settings)
+        validate_provider_and_model_name(provider=default_provider, model_name=None, context=ctx, settings=settings)
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=False)
     def test_disabled_non_default_provider_rejected(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
+        default_provider, _ = _get_default_provider_and_model(settings)
+        non_default_provider = next(p.value for p in LLMProvider if p.value != default_provider)
 
         with pytest.raises(ValueError, match="Model selection is disabled"):
-            validate_provider_and_model_name(provider="anthropic", model_name=None, context=ctx, settings=settings)
+            validate_provider_and_model_name(
+                provider=non_default_provider, model_name=None, context=ctx, settings=settings
+            )
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=False)
     def test_disabled_default_model_accepted(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
+        _, default_model = _get_default_provider_and_model(settings)
 
-        validate_provider_and_model_name(provider=None, model_name="gpt-4o", context=ctx, settings=settings)
+        validate_provider_and_model_name(provider=None, model_name=default_model, context=ctx, settings=settings)
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=False)
     def test_disabled_non_default_model_rejected(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
+        _, default_model = _get_default_provider_and_model(settings)
+        non_default_model = f"{default_model}-not"
 
         with pytest.raises(ValueError, match="Model selection is disabled"):
-            validate_provider_and_model_name(provider=None, model_name="gpt-5.2", context=ctx, settings=settings)
+            validate_provider_and_model_name(
+                provider=None,
+                model_name=non_default_model,
+                context=ctx,
+                settings=settings,
+            )
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=True)
     def test_enabled_valid_provider_accepted(self, mock_flag):
@@ -243,7 +264,12 @@ class TestValidateProviderAndModelName:
         ctx = _make_context()
         settings = _make_settings()
 
-        validate_provider_and_model_name(provider="openai", model_name="gpt-4o", context=ctx, settings=settings)
+        validate_provider_and_model_name(
+            provider="openai",
+            model_name=settings.default_models.openai_model,
+            context=ctx,
+            settings=settings,
+        )
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=True)
     def test_enabled_invalid_model_for_provider_rejected(self, mock_flag):
@@ -259,8 +285,9 @@ class TestValidateProviderAndModelName:
     def test_enabled_model_without_provider_uses_default(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
+        _, default_model = _get_default_provider_and_model(settings)
 
-        validate_provider_and_model_name(provider=None, model_name="gpt-4o", context=ctx, settings=settings)
+        validate_provider_and_model_name(provider=None, model_name=default_model, context=ctx, settings=settings)
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=True)
     def test_enabled_invalid_model_without_provider_rejected(self, mock_flag):

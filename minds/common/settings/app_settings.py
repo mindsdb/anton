@@ -104,12 +104,12 @@ class DataCatalogSettings(Settings):
 
 class DefaultModelsSettings(Settings):
     default_provider: str = Field(
-        default="openai", description="The default provider"
+        default="anthropic", description="The default provider"
     )  # DEFAULT_MODELS__DEFAULT_PROVIDER
 
     openai_model: str = Field(default="gpt-4o", description="The default OpenAI model")  # DEFAULT_MODELS__OPENAI_MODEL
     anthropic_model: str = Field(
-        default="claude-sonnet-4-5", description="The default Anthropic model"
+        default="claude-opus-4-6", description="The default Anthropic model"
     )  # DEFAULT_MODELS__ANTHROPIC_MODEL
 
 
