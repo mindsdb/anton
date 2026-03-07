@@ -1218,7 +1218,7 @@ def _minds_list_datasources(base_url: str, api_key: str, verify: bool = True) ->
     import ssl
     import urllib.request
 
-    url = f"{base_url}/api/v1/datasources/"
+    url = f"{base_url}/api/v1/datasources"
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Accept", "application/json")
