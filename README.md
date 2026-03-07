@@ -110,7 +110,7 @@ netsh advfirewall firewall add rule name="Anton Scratchpad" dir=out action=allow
 ## How is Anton different from Claude Code / Codex?
 
 Anton is a *doing* tool not a coding tool. Tools like Claude-Code exist for your codebase. The code they write *is* the focus.
-Anton on the other hand, doesn't care. Yes, it writes code too, but that code is a means to an end... Anton does whatever it needs to solve a problem you give it to solve. The output is the answers and insights you want, not the source files.
+Anton on the other hand, doesn't care. Yes, it writes code too, and very well, but that code is a means to an end... Anton does whatever it needs to solve a problem you give it to solve. The output is the answers and insights you want, not what code it generates.
 
 If you're coding a commercial app, use a coding agent. If you need something *done* — a dataset analyzed, a report generated, a workflow automated — talk to Anton.
 
