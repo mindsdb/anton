@@ -776,6 +776,15 @@ def _build_runtime_context(settings: AntonSettings) -> str:
     return ctx
 
 
+def _format_bottom_toolbar(status: str, stats: str, *, width: int) -> str:
+    if not stats and not status:
+        return ""
+    gap = width - len(status) - len(stats)
+    if gap < 1:
+        gap = 1
+    return status + " " * gap + stats
+
+
 def _rebuild_session(
     *,
     settings: AntonSettings,
@@ -1978,11 +1987,8 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
             width = os.get_terminal_size().columns
         except OSError:
             width = 80
-        gap = width - len(status) - len(stats)
-        if gap < 1:
-            gap = 1
-        line = status + " " * gap + stats
-        return HTML(f"\n<style fg='#555570'>{line}</style>")
+        line = _format_bottom_toolbar(status, stats, width=width)
+        return HTML(f"<style fg='#555570'>{line}</style>")
 
     pt_style = PTStyle.from_dict({
         "bottom-toolbar": "noreverse nounderline bg:default",

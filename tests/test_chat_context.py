@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from anton.chat import ChatSession
+from anton.chat import ChatSession, _format_bottom_toolbar
 from anton.tools import MEMORIZE_TOOL
 from anton.context.self_awareness import SelfAwarenessContext
 from anton.llm.provider import LLMResponse, ToolCall, Usage
@@ -285,3 +285,12 @@ class TestRuntimeContext:
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
         assert "WAIT for their reply" in system_prompt
+
+
+class TestPromptToolbar:
+    def test_bottom_toolbar_does_not_prefix_newline(self):
+        rendered = _format_bottom_toolbar("working", "stats", width=30)
+
+        assert rendered
+        assert not rendered.startswith("\n")
+        assert rendered.startswith("working")
