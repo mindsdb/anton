@@ -656,7 +656,6 @@ class MindsService:
             .where(
                 and_(
                     Mind.name == mind_name,
-                    Mind.user_id == self.user_id,
                     Mind.organization_id == self.organization_id,
                     Mind.deleted_at.is_(None),
                 )

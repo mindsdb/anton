@@ -443,7 +443,6 @@ class TestMindsService:
             name="test-mind",
             provider="openai",
             model_name="gpt-4o",
-            user_id=minds_service.user_id,
             organization_id=minds_service.organization_id,
             parameters={},
             deleted_at=None,
@@ -464,7 +463,6 @@ class TestMindsService:
 
         where_sql = " ".join(str(c) for c in getattr(statement, "_where_criteria", ()))
         assert "minds.name" in where_sql
-        assert "minds.user_id" in where_sql
         assert "minds.organization_id" in where_sql
         assert "minds.deleted_at" in where_sql
         assert "IS NULL" in where_sql
