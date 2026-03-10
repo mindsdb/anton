@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-ai==1.3.0",
     "mindsdb_sdk @ https://github.com/mindsdb/mindsdb_python_sdk/archive/refs/heads/main.zip",
     "prefect==3.4.18",
+    "statsig-python-core==0.15.1",
 ]
 
 [build-system]
