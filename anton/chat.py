@@ -1456,6 +1456,214 @@ def _minds_test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
         return False
 
 
+_MINDS_KEYS = {
+    "ANTON_MINDS_API_KEY", "ANTON_MINDS_URL", "ANTON_MINDS_MIND_NAME",
+    "ANTON_MINDS_DATASOURCE", "ANTON_MINDS_DATASOURCE_ENGINE", "ANTON_MINDS_SSL_VERIFY",
+}
+
+_LLM_KEYS = {
+    "ANTON_PLANNING_PROVIDER", "ANTON_CODING_PROVIDER",
+    "ANTON_PLANNING_MODEL", "ANTON_CODING_MODEL",
+    "ANTON_ANTHROPIC_API_KEY", "ANTON_OPENAI_API_KEY", "ANTON_OPENAI_BASE_URL",
+}
+
+_SECRET_PATTERNS = ("KEY", "TOKEN", "SECRET", "PAT", "PASSWORD")
+
+
+def _is_secret_key(key: str) -> bool:
+    upper = key.upper()
+    return any(p in upper for p in _SECRET_PATTERNS)
+
+
+def _display_value(key: str, value: str) -> str:
+    if _is_secret_key(key) and value:
+        return _mask_secret(value)
+    return value or "[dim]<empty>[/]"
+
+
+async def _handle_data_connections(
+    console: Console,
+    settings: AntonSettings,
+    workspace: Workspace,
+    session: ChatSession,
+) -> ChatSession:
+    """View and manage stored keys and connections across global and project vaults."""
+    from rich.prompt import Confirm, Prompt
+
+    from anton.workspace import Workspace as _Workspace
+
+    global_ws = _Workspace(Path.home())
+
+    global_env = global_ws.load_env()
+    project_env = workspace.load_env()
+
+    # Merge with source tags: project keys override global for display,
+    # but we track where each lives for writes/removals.
+    all_keys: dict[str, tuple[str, str, str]] = {}  # key -> (value, source, scope_label)
+    for k, v in global_env.items():
+        all_keys[k] = (v, "global", "~/.anton/.env")
+    for k, v in project_env.items():
+        all_keys[k] = (v, "project", f"{workspace.base}/.anton/.env")
+
+    console.print()
+
+    if not all_keys:
+        console.print("[anton.warning]No connections or secrets configured.[/]")
+        console.print("[anton.muted]Use /connect to set up a Minds connection, or ask Anton to store a key.[/]")
+        console.print()
+        return session
+
+    def _print_table() -> list[tuple[str, str, str, str]]:
+        """Print grouped key table and return flat list for menu selection."""
+        minds = {k: all_keys[k] for k in sorted(all_keys) if k in _MINDS_KEYS}
+        llm = {k: all_keys[k] for k in sorted(all_keys) if k in _LLM_KEYS}
+        other = {k: all_keys[k] for k in sorted(all_keys) if k not in _MINDS_KEYS and k not in _LLM_KEYS}
+
+        flat: list[tuple[str, str, str, str]] = []  # (key, value, source, scope_label)
+        idx = 1
+
+        if minds:
+            console.print("[anton.cyan]Minds Connection[/]")
+            for k, (v, src, lbl) in minds.items():
+                console.print(f"    [bold]{idx}[/]  {k} = {_display_value(k, v)}  [dim]({lbl})[/]")
+                flat.append((k, v, src, lbl))
+                idx += 1
+            console.print()
+
+        if llm:
+            console.print("[anton.cyan]LLM Configuration[/]")
+            for k, (v, src, lbl) in llm.items():
+                console.print(f"    [bold]{idx}[/]  {k} = {_display_value(k, v)}  [dim]({lbl})[/]")
+                flat.append((k, v, src, lbl))
+                idx += 1
+            console.print()
+
+        if other:
+            console.print("[anton.cyan]Other Integrations[/]")
+            for k, (v, src, lbl) in other.items():
+                console.print(f"    [bold]{idx}[/]  {k} = {_display_value(k, v)}  [dim]({lbl})[/]")
+                flat.append((k, v, src, lbl))
+                idx += 1
+            console.print()
+
+        return flat
+
+    while True:
+        console.print("[anton.cyan]/data-connections[/]")
+        console.print()
+        flat = _print_table()
+
+        console.print("  [bold]1[/]  Edit a key")
+        console.print("  [bold]2[/]  Remove a key")
+        console.print("  [bold]3[/]  Add a new key")
+        console.print("  [bold]q[/]  Back")
+        console.print()
+
+        action = Prompt.ask("Select", choices=["1", "2", "3", "q"], default="q", console=console)
+
+        if action == "q":
+            console.print()
+            return session
+
+        if action == "1":
+            # --- Edit ---
+            console.print()
+            pick = Prompt.ask(
+                f"Key number to edit (1-{len(flat)})",
+                console=console,
+            )
+            try:
+                pick_idx = int(pick) - 1
+                if not 0 <= pick_idx < len(flat):
+                    raise ValueError
+            except ValueError:
+                console.print("[anton.warning]Invalid selection.[/]")
+                console.print()
+                continue
+
+            key, old_val, src, lbl = flat[pick_idx]
+            use_password = _is_secret_key(key)
+            new_val = Prompt.ask(
+                f"New value for {key}",
+                default="" if use_password else old_val,
+                console=console,
+                password=use_password,
+            ).strip()
+            if not new_val:
+                console.print("[anton.muted]Value unchanged.[/]")
+                console.print()
+                continue
+
+            target_ws = global_ws if src == "global" else workspace
+            target_ws.set_secret(key, new_val)
+            target_ws.apply_env_to_process()
+            all_keys[key] = (new_val, src, lbl)
+            console.print(f"[anton.success]Updated {key}.[/]")
+            console.print()
+
+        elif action == "2":
+            # --- Remove ---
+            console.print()
+            pick = Prompt.ask(
+                f"Key number to remove (1-{len(flat)})",
+                console=console,
+            )
+            try:
+                pick_idx = int(pick) - 1
+                if not 0 <= pick_idx < len(flat):
+                    raise ValueError
+            except ValueError:
+                console.print("[anton.warning]Invalid selection.[/]")
+                console.print()
+                continue
+
+            key, _, src, lbl = flat[pick_idx]
+            if not Confirm.ask(f"Remove {key} from {lbl}?", default=False, console=console):
+                console.print("[anton.muted]Cancelled.[/]")
+                console.print()
+                continue
+
+            target_ws = global_ws if src == "global" else workspace
+            target_ws.remove_secret(key)
+            del all_keys[key]
+            console.print(f"[anton.success]Removed {key}.[/]")
+            console.print()
+
+        elif action == "3":
+            # --- Add ---
+            console.print()
+            new_key = Prompt.ask("Key name (e.g. HUBSPOT_API_KEY)", console=console).strip()
+            if not new_key:
+                console.print("[anton.warning]Key name cannot be empty.[/]")
+                console.print()
+                continue
+
+            use_password = _is_secret_key(new_key)
+            new_val = Prompt.ask(
+                f"Value for {new_key}",
+                console=console,
+                password=use_password,
+            ).strip()
+            if not new_val:
+                console.print("[anton.warning]Value cannot be empty.[/]")
+                console.print()
+                continue
+
+            scope = Prompt.ask(
+                "Store in",
+                choices=["global", "project"],
+                default="global",
+                console=console,
+            )
+            target_ws = global_ws if scope == "global" else workspace
+            scope_label = "~/.anton/.env" if scope == "global" else f"{workspace.base}/.anton/.env"
+            target_ws.set_secret(new_key, new_val)
+            target_ws.apply_env_to_process()
+            all_keys[new_key] = (new_val, scope, scope_label)
+            console.print(f"[anton.success]Saved {new_key}.[/]")
+            console.print()
+
+
 async def _handle_connect(
     console: Console,
     settings: AntonSettings,
@@ -1818,13 +2026,14 @@ def _print_slash_help(console: Console) -> None:
     """Print available slash commands."""
     console.print()
     console.print("[anton.cyan]Available commands:[/]")
-    console.print("  [bold]/connect[/]     — Connect to a Minds server and select a mind")
-    console.print("  [bold]/setup[/]       — Configure models or memory settings")
-    console.print("  [bold]/memory[/]      — Show memory status dashboard")
-    console.print("  [bold]/paste[/]       — Attach clipboard image to your message")
-    console.print("  [bold]/resume[/]      — Resume a previous chat session")
-    console.print("  [bold]/help[/]        — Show this help message")
-    console.print("  [bold]exit[/]         — Quit the chat")
+    console.print("  [bold]/connect[/]           — Connect to a Minds server and select a mind")
+    console.print("  [bold]/data-connections[/]  — View and manage stored keys and connections")
+    console.print("  [bold]/setup[/]             — Configure models or memory settings")
+    console.print("  [bold]/memory[/]            — Show memory status dashboard")
+    console.print("  [bold]/paste[/]             — Attach clipboard image to your message")
+    console.print("  [bold]/resume[/]            — Resume a previous chat session")
+    console.print("  [bold]/help[/]              — Show this help message")
+    console.print("  [bold]exit[/]               — Quit the chat")
     console.print()
 
 
@@ -2148,6 +2357,11 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
                     continue
                 elif cmd == "/memory":
                     _handle_memory(console, settings, cortex, episodic=episodic)
+                    continue
+                elif cmd == "/data-connections":
+                    session = await _handle_data_connections(
+                        console, settings, workspace, session,
+                    )
                     continue
                 elif cmd == "/resume":
                     session, resumed_id = await _handle_resume(
