@@ -747,8 +747,12 @@ class Scratchpad:
         if self._proc is not None:
             for attr in ("stdin", "stdout", "stderr"):
                 pipe = getattr(self._proc, attr, None)
-                if pipe and not pipe.is_closing() if hasattr(pipe, "is_closing") else False:
-                    pipe.close()
+                if pipe is not None:
+                    if hasattr(pipe, "is_closing"):
+                        if not pipe.is_closing():
+                            pipe.close()
+                    else:
+                        pipe.close()
         self._proc = None
         if self._boot_path is not None:
             try:
