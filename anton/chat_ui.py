@@ -290,13 +290,16 @@ class StreamDisplay:
             return
 
         if phase == "scratchpad_start":
-            # Print the scratchpad activity line NOW (before execution)
+            # Print the scratchpad activity line NOW (before execution) with ETA
             for act in reversed(self._activities):
                 if act.name == "scratchpad" and not act.printed:
+                    if eta:
+                        act.eta_str = f"~{int(eta)}s"
                     self._stop_spinner()
                     self._print_activity_line(act)
                     act.printed = True
-                    self._thinking_msg = "Running..."
+                    eta_str = f" ~{int(eta)}s" if eta else ""
+                    self._thinking_msg = f"Running{eta_str}..."
                     self._footer_msg = act.description
                     self._start_spinner()
                     break
@@ -396,6 +399,8 @@ class StreamDisplay:
         prefix = "\u23bf " if act is self._activities[0] else "  "
         line.append(prefix)
         line.append(label, style="bold")
+        if act.eta_str:
+            line.append(f" {act.eta_str}", style="anton.muted")
         self._console.print(line)
 
     def _print_done_line(self, act: _ToolActivity, elapsed: float) -> None:
