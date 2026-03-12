@@ -258,10 +258,11 @@ class StreamDisplay:
             if act.tool_id == tool_id:
                 raw = "".join(act.json_parts)
                 act.description = _tool_display_text(act.name, raw)
-                # Print activity line permanently
-                self._stop_spinner()
-                self._print_activity_line(act)
-                self._start_spinner()
+                # Scratchpad lines are printed by scratchpad_start (which has the ETA)
+                if act.name != "scratchpad":
+                    self._stop_spinner()
+                    self._print_activity_line(act)
+                    self._start_spinner()
                 return
 
     def update_progress(self, phase: str, message: str, eta: float | None = None) -> None:
