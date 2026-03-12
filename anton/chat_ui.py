@@ -258,11 +258,10 @@ class StreamDisplay:
             if act.tool_id == tool_id:
                 raw = "".join(act.json_parts)
                 act.description = _tool_display_text(act.name, raw)
-                # Scratchpad lines are printed by scratchpad_start (which has the ETA)
-                if act.name != "scratchpad":
-                    self._stop_spinner()
-                    self._print_activity_line(act)
-                    self._start_spinner()
+                # Print immediately — before execution starts
+                self._stop_spinner()
+                self._print_activity_line(act)
+                self._start_spinner()
                 return
 
     def update_progress(self, phase: str, message: str, eta: float | None = None) -> None:
@@ -275,17 +274,12 @@ class StreamDisplay:
             self._update_spinner()
             return
 
-        if phase == "scratchpad_start" and self._activities:
-            for act in reversed(self._activities):
-                if act.name == "scratchpad":
-                    act.description = _tool_display_text(act.name, "".join(act.json_parts)) or f"Scratchpad({message})"
-                    if eta:
-                        act.eta_str = f"~{int(eta)}s"
-                    # Print/update the activity line
-                    self._stop_spinner()
-                    self._print_activity_line(act)
-                    self._start_spinner()
-                    break
+        if phase == "scratchpad_start":
+            # Activity line was already printed by on_tool_use_end.
+            # Show the ETA in the spinner so the user knows how long to wait.
+            eta_str = f" ~{int(eta)}s" if eta else ""
+            self._thinking_msg = f"Running{eta_str}..."
+            self._update_spinner()
             return
 
         if phase == "scratchpad" and self._activities:
