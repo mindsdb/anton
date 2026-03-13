@@ -197,7 +197,9 @@ def main(
     settings.resolve_workspace(folder)
 
     from anton.updater import check_and_update
-    check_and_update(console, settings)
+    if check_and_update(console, settings):
+        console.print("[anton.muted]  Restart anton to use the updated version.[/]")
+        raise typer.Exit(0)
 
     ctx.ensure_object(dict)
     ctx.obj["settings"] = settings
