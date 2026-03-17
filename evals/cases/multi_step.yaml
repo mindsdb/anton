@@ -1,0 +1,92 @@
+- id: stats-and-filter
+  category: multi_step
+  description: "Compute statistics on a dataset then filter outliers"
+  estimated_cost_usd: 0.015
+  tags: [scratchpad, multi-round, computation]
+  turns:
+    - user_input: |
+        I have the numbers [12, 45, 7, 89, 23, 56, 34, 78, 11, 90].
+        Calculate the mean, median, and standard deviation.
+        Then tell me which numbers are more than one standard deviation above the mean.
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The correct values are approximately:
+        - Mean: 44.5
+        - Median: 39.5
+        - Std dev: ~29.2 (population) or ~30.8 (sample)
+        - Numbers > 1 std dev above mean (~73.7 or ~75.3): 78, 89, 90
+        Score 1 if all values correct within reasonable rounding, 0.5 if partially, 0 if wrong.
+      weight: 2.0
+
+- id: build-then-query
+  category: multi_step
+  description: "Build a data structure then query it in a follow-up"
+  estimated_cost_usd: 0.012
+  tags: [scratchpad, multi-round, stateful]
+  turns:
+    - user_input: |
+        Create a dictionary mapping country codes to country names:
+        US -> United States, GB -> United Kingdom, DE -> Germany, JP -> Japan, BR -> Brazil
+    - user_input: "Now look up the country for code 'JP' and tell me how many countries are in the dictionary."
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: contains
+      value: "Japan"
+      weight: 2.0
+    - type: contains
+      value: "5"
+      weight: 1.5
+
+- id: csv-generation-and-analysis
+  category: multi_step
+  description: "Generate CSV data then analyze it"
+  estimated_cost_usd: 0.015
+  tags: [scratchpad, multi-round, data-processing]
+  turns:
+    - user_input: |
+        Create a CSV string with columns: name, age, city for these people:
+        Alice (30, NYC), Bob (25, London), Charlie (35, Tokyo), Diana (28, Paris)
+        Then find the average age.
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: contains
+      value: "29.5"
+      weight: 2.0
+    - type: llm_judge
+      value: |
+        The average age of [30, 25, 35, 28] is 29.5.
+        The assistant should have created the CSV data and computed the average.
+        Score 1 if correct, 0 otherwise.
+      weight: 1.5
+
+- id: iterative-refinement
+  category: multi_step
+  description: "Build a function then test it with multiple inputs"
+  estimated_cost_usd: 0.015
+  tags: [scratchpad, multi-round, function-building]
+  turns:
+    - user_input: |
+        Write a function that checks if a string is a palindrome
+        (ignoring case and spaces). Test it with: "racecar", "hello",
+        "A man a plan a canal Panama", and "Python".
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The correct results are:
+        - "racecar" -> True (palindrome)
+        - "hello" -> False
+        - "A man a plan a canal Panama" -> True (palindrome, ignoring case/spaces)
+        - "Python" -> False
+        Score 1 if all four are correct, 0.5 if three correct, 0 otherwise.
+      weight: 2.0

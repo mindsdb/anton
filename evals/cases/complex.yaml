@@ -1,0 +1,513 @@
+# Complex eval cases — multi-step, real-world-ish tasks that stress
+# tool orchestration, code generation quality, and reasoning depth.
+
+# ---------------------------------------------------------------------------
+# DATA PIPELINE & TRANSFORMATION
+# ---------------------------------------------------------------------------
+
+- id: etl-pipeline
+  category: complex
+  description: "Build a mini ETL: generate → clean → aggregate → summarize"
+  estimated_cost_usd: 0.025
+  tags: [scratchpad, multi-round, data-processing]
+  turns:
+    - user_input: |
+        I have this raw sales data as a list of dicts:
+        [
+          {"date": "2024-01-15", "product": "Widget A", "qty": 10, "price": 5.99, "region": "North"},
+          {"date": "2024-01-15", "product": "Widget B", "qty": 3, "price": 12.50, "region": "South"},
+          {"date": "2024-01-16", "product": "Widget A", "qty": 7, "price": 5.99, "region": "North"},
+          {"date": "2024-01-16", "product": "Widget A", "qty": "", "price": 5.99, "region": "South"},
+          {"date": "2024-01-17", "product": "Widget B", "qty": 5, "price": null, "region": "North"},
+          {"date": "2024-01-17", "product": "Widget A", "qty": 15, "price": 5.99, "region": "North"},
+          {"date": "2024-01-17", "product": "Widget B", "qty": 8, "price": 12.50, "region": "South"},
+          {"date": "invalid", "product": "Widget A", "qty": 2, "price": 5.99, "region": "East"}
+        ]
+
+        Clean this data (handle missing/invalid values), then give me:
+        1. Total revenue per product
+        2. Total revenue per region
+        3. Which product-region combo had the highest revenue
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        Valid records after cleaning (dropping rows with empty qty, null price, or invalid date):
+        - Row 4: qty="" → drop or treat as 0
+        - Row 5: price=null → drop or treat as 0
+        - Row 8: date="invalid" → drop
+
+        Expected approximate results (depending on cleaning strategy):
+        - Widget A revenue: (10*5.99)+(7*5.99)+(15*5.99) = 191.68 (or +2*5.99=203.66 if row 8 kept)
+        - Widget B revenue: (3*12.50)+(8*12.50) = 137.50 (or +5*12.50=200 if row 5 kept with price=0→drop)
+        - North region should have the highest revenue
+        - Best product-region combo: Widget A / North
+
+        Score 1 if all three questions are answered with reasonable values and
+        the data cleaning is explained. Score 0.5 if mostly right. Score 0 if wrong.
+      weight: 3.0
+
+- id: regex-log-parser
+  category: complex
+  description: "Parse structured log lines with regex, extract stats"
+  estimated_cost_usd: 0.020
+  tags: [scratchpad, multi-round, text-processing]
+  turns:
+    - user_input: |
+        Parse these web server logs and give me a summary:
+
+        ```
+        192.168.1.10 - - [15/Jan/2024:10:15:32 +0000] "GET /api/users HTTP/1.1" 200 1234
+        192.168.1.15 - - [15/Jan/2024:10:15:33 +0000] "POST /api/login HTTP/1.1" 200 567
+        10.0.0.5 - - [15/Jan/2024:10:15:34 +0000] "GET /api/users HTTP/1.1" 200 1234
+        192.168.1.10 - - [15/Jan/2024:10:15:35 +0000] "GET /api/products HTTP/1.1" 404 89
+        192.168.1.15 - - [15/Jan/2024:10:15:36 +0000] "POST /api/login HTTP/1.1" 401 45
+        10.0.0.5 - - [15/Jan/2024:10:15:37 +0000] "GET /api/users HTTP/1.1" 500 0
+        192.168.1.10 - - [15/Jan/2024:10:15:38 +0000] "DELETE /api/users/5 HTTP/1.1" 204 0
+        192.168.1.10 - - [15/Jan/2024:10:15:39 +0000] "GET /static/main.css HTTP/1.1" 200 8901
+        10.0.0.5 - - [15/Jan/2024:10:16:01 +0000] "GET /api/users HTTP/1.1" 200 1234
+        ```
+
+        Tell me:
+        1. Request count per HTTP method
+        2. Count of each status code
+        3. Which IP made the most requests
+        4. Which endpoint had the most errors (4xx or 5xx)
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        Correct answers:
+        1. Methods: GET=6, POST=2, DELETE=1
+        2. Status codes: 200=5, 404=1, 401=1, 500=1, 204=1
+        3. Most requests: 192.168.1.10 (4 requests)
+        4. Most errors: /api/users (1×500) and /api/products (1×404) and /api/login (1×401)
+           — /api/users or /api/login are acceptable answers for "most errors"
+
+        Score 1 if all four answers are correct. Score 0.5 if 3/4 correct. Score 0 if fewer.
+      weight: 3.0
+
+# ---------------------------------------------------------------------------
+# ALGORITHM & LOGIC
+# ---------------------------------------------------------------------------
+
+- id: graph-shortest-path
+  category: complex
+  description: "Implement BFS/Dijkstra on a weighted graph"
+  estimated_cost_usd: 0.020
+  tags: [scratchpad, algorithm]
+  turns:
+    - user_input: |
+        I have a weighted directed graph:
+          A → B (weight 4)
+          A → C (weight 2)
+          B → D (weight 3)
+          B → C (weight 1)
+          C → B (weight 1)
+          C → D (weight 5)
+          D → E (weight 2)
+          C → E (weight 8)
+
+        Find the shortest path from A to E and its total cost.
+        Show me the path step by step.
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: contains
+      value: "A"
+      weight: 0.5
+    - type: contains
+      value: "E"
+      weight: 0.5
+    - type: llm_judge
+      value: |
+        The shortest path from A to E is: A → C → B → D → E
+        With cost: 2 + 1 + 3 + 2 = 8
+
+        Alternative valid answer: if they find A→B→D→E = 4+3+2 = 9 (longer).
+        The optimal is A→C→B→D→E = 8.
+
+        Score 1 if the correct shortest path (cost 8) is found.
+        Score 0.5 if a valid path is found but not the shortest.
+        Score 0 if wrong or no path found.
+      weight: 3.0
+
+- id: matrix-operations
+  category: complex
+  description: "Matrix multiplication, determinant, and inverse"
+  estimated_cost_usd: 0.018
+  tags: [scratchpad, math, computation]
+  turns:
+    - user_input: |
+        Given these two matrices:
+        A = [[1, 2, 3],
+             [4, 5, 6],
+             [7, 8, 10]]
+
+        B = [[2, 0, 1],
+             [1, 3, 0],
+             [0, 1, 2]]
+
+        Calculate:
+        1. A × B (matrix multiplication)
+        2. The determinant of A
+        3. The inverse of A (if it exists)
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        Correct answers:
+        1. A × B = [[4, 9, 7], [13, 21, 16], [22, 34, 27]]
+        2. det(A) = -3
+        3. A is invertible (det ≠ 0). Inverse exists.
+           A^-1 ≈ [[-2/3, -4/3, 1], [-2/3, 11/3, -2], [1, -2, 1]]
+           (or equivalently in decimal: [[-0.667, -1.333, 1], [-0.667, 3.667, -2], [1, -2, 1]])
+
+        Score 1 if all three are correct (within floating point tolerance).
+        Score 0.5 if matrix multiply and determinant are correct but inverse is wrong.
+        Score 0 if matrix multiply is wrong.
+      weight: 3.0
+
+- id: recursive-tree-traversal
+  category: complex
+  description: "Build a tree from edges, perform multiple traversals"
+  estimated_cost_usd: 0.020
+  tags: [scratchpad, algorithm, data-structures]
+  turns:
+    - user_input: |
+        Build a binary tree from this list of (parent, left_child, right_child) tuples:
+        (1, 2, 3), (2, 4, 5), (3, 6, 7), (5, 8, None), (7, None, 9)
+
+        Then give me:
+        1. Pre-order traversal
+        2. In-order traversal
+        3. Post-order traversal
+        4. The height of the tree
+        5. All leaf nodes
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The tree structure:
+                1
+               / \
+              2   3
+             / \ / \
+            4  5 6  7
+              /     \
+             8       9
+
+        Correct answers:
+        1. Pre-order: [1, 2, 4, 5, 8, 3, 6, 7, 9]
+        2. In-order: [4, 2, 8, 5, 1, 6, 3, 7, 9]
+        3. Post-order: [4, 8, 5, 2, 6, 9, 7, 3, 1]
+        4. Height: 4 (or 3 if counting edges instead of nodes)
+        5. Leaf nodes: [4, 8, 6, 9]
+
+        Score 1 if all five answers are correct.
+        Score 0.5 if at least 3/5 are correct.
+        Score 0 if fewer than 3 are correct.
+      weight: 3.0
+
+# ---------------------------------------------------------------------------
+# MULTI-TURN REASONING & STATEFUL TASKS
+# ---------------------------------------------------------------------------
+
+- id: iterative-debugging
+  category: complex
+  description: "User provides buggy code, assistant must debug across turns"
+  estimated_cost_usd: 0.025
+  tags: [scratchpad, multi-round, debugging]
+  turns:
+    - user_input: |
+        I wrote this function but it's not working right. Can you help debug it?
+
+        ```python
+        def merge_sorted_lists(list1, list2):
+            result = []
+            i = j = 0
+            while i < len(list1) and j < len(list2):
+                if list1[i] <= list2[j]:
+                    result.append(list1[i])
+                    i += 1
+                else:
+                    result.append(list2[j])
+                    i += 1
+            return result
+        ```
+
+        When I call merge_sorted_lists([1, 3, 5], [2, 4, 6]) I expect [1, 2, 3, 4, 5, 6]
+        but I'm not getting all elements.
+    - user_input: "Great, now can you also make it handle the case where the lists have duplicates? Test with [1, 2, 2, 5] and [2, 3, 5, 7]"
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        Bug 1: In the else branch, `i += 1` should be `j += 1`.
+        Bug 2: The remaining elements of either list are never appended.
+
+        The fixed function should:
+        1. Fix j increment in else branch
+        2. Append remaining elements from list1[i:] and list2[j:]
+        3. Handle duplicates correctly (they should all appear in output)
+
+        merge_sorted_lists([1, 3, 5], [2, 4, 6]) → [1, 2, 3, 4, 5, 6]
+        merge_sorted_lists([1, 2, 2, 5], [2, 3, 5, 7]) → [1, 2, 2, 2, 3, 5, 5, 7]
+
+        Score 1 if both bugs identified and both test cases pass.
+        Score 0.5 if one bug found and fixed.
+        Score 0 if wrong diagnosis.
+      weight: 3.0
+
+- id: schema-design-and-query
+  category: complex
+  description: "Design an in-memory data model then answer analytical questions"
+  estimated_cost_usd: 0.030
+  tags: [scratchpad, multi-round, data-modeling]
+  turns:
+    - user_input: |
+        Model this data in Python: A school has students, courses, and enrollments.
+
+        Students: (id=1, name="Alice", grade=10), (id=2, name="Bob", grade=11),
+        (id=3, name="Charlie", grade=10), (id=4, name="Diana", grade=11),
+        (id=5, name="Eve", grade=10)
+
+        Courses: (id=101, name="Math", teacher="Dr. Smith"),
+        (id=102, name="Physics", teacher="Dr. Jones"),
+        (id=103, name="English", teacher="Ms. Park")
+
+        Enrollments: Alice→Math, Alice→Physics, Bob→Math, Bob→English,
+        Charlie→Physics, Charlie→English, Diana→Math, Diana→Physics,
+        Diana→English, Eve→Math
+    - user_input: |
+        Now answer these queries:
+        1. Which course has the most enrollments?
+        2. Which students are enrolled in ALL three courses?
+        3. How many grade-10 students are in Physics?
+        4. Which teacher has the most students?
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        Correct answers:
+        1. Math has 4 enrollments (Alice, Bob, Diana, Eve)
+        2. Diana is enrolled in all three courses
+        3. Two grade-10 students in Physics: Alice and Charlie
+        4. Dr. Smith (Math) has 4 students — the most
+
+        Score 1 if all four answers are correct.
+        Score 0.5 if 3/4 correct.
+        Score 0 if fewer than 3 correct.
+      weight: 3.0
+
+# ---------------------------------------------------------------------------
+# PACKAGE USAGE & REAL LIBRARIES
+# ---------------------------------------------------------------------------
+
+- id: datetime-timezone-math
+  category: complex
+  description: "Complex timezone arithmetic across DST boundaries"
+  estimated_cost_usd: 0.018
+  tags: [scratchpad, stdlib]
+  turns:
+    - user_input: |
+        Using Python's datetime and zoneinfo modules, answer these:
+
+        1. If it's 2024-03-10 01:30 AM in US/Eastern, what time is it in UTC?
+           (Note: March 10 2024 is when US clocks spring forward)
+        2. If a meeting is at 9:00 AM Tokyo time (Asia/Tokyo) on 2024-07-15,
+           what time is that in London (Europe/London) and New York (America/New_York)?
+        3. How many hours between 2024-11-02 23:00 US/Eastern and 2024-11-03 23:00 US/Eastern?
+           (Note: Nov 3 2024 is when US clocks fall back)
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        Correct answers:
+        1. 2024-03-10 01:30 AM EST = 06:30 UTC (before spring forward at 2AM)
+        2. Tokyo 9:00 AM → London 1:00 AM (BST, UTC+1) → New York 8:00 PM previous day (EDT, UTC-4)
+           (Tokyo is UTC+9, so 9AM Tokyo = 00:00 UTC = 1:00 BST = 20:00 EDT)
+        3. 25 hours (not 24), because clocks fall back — gaining one hour
+
+        Score 1 if all three are correct.
+        Score 0.5 if 2/3 correct.
+        Score 0 if fewer.
+      weight: 3.0
+
+- id: json-schema-validator
+  category: complex
+  description: "Build a JSON schema validator from scratch and test edge cases"
+  estimated_cost_usd: 0.022
+  tags: [scratchpad, multi-round]
+  turns:
+    - user_input: |
+        Write a simple JSON schema validator function (don't use jsonschema library).
+        It should support these types: string, integer, number, boolean, array, object.
+        And these constraints: required fields, minLength, maxLength, minimum, maximum.
+
+        Test it with this schema:
+        {
+          "type": "object",
+          "required": ["name", "age"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 50},
+            "age": {"type": "integer", "minimum": 0, "maximum": 150},
+            "email": {"type": "string"},
+            "scores": {"type": "array"}
+          }
+        }
+
+        And these test cases:
+        1. {"name": "Alice", "age": 30} → valid
+        2. {"name": "", "age": 30} → invalid (minLength)
+        3. {"name": "Bob"} → invalid (missing required 'age')
+        4. {"name": "Charlie", "age": -5} → invalid (minimum)
+        5. {"name": "Diana", "age": 30, "scores": [95, 87]} → valid
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The validator function should:
+        1. Handle type checking for all 6 types
+        2. Check required fields
+        3. Validate minLength/maxLength for strings
+        4. Validate minimum/maximum for numbers
+        5. Return clear pass/fail for each test case
+
+        All 5 test cases should produce the correct result:
+        1. Valid, 2. Invalid, 3. Invalid, 4. Invalid, 5. Valid
+
+        Score 1 if all 5 test cases pass correctly and the code is well-structured.
+        Score 0.5 if 4/5 pass or the code has minor issues.
+        Score 0 if fewer than 4 pass.
+      weight: 3.0
+
+# ---------------------------------------------------------------------------
+# ADVERSARIAL / EDGE CASES
+# ---------------------------------------------------------------------------
+
+- id: contradictory-requirements
+  category: complex
+  description: "Handle contradictory user requirements gracefully"
+  estimated_cost_usd: 0.010
+  tags: [reasoning, no-tools]
+  turns:
+    - user_input: |
+        Write me a Python function that:
+        - Takes no arguments
+        - Returns the sum of its two arguments
+        - Is a one-liner
+        - Has comprehensive error handling with try/except
+  scorers:
+    - type: llm_judge
+      value: |
+        The requirements are self-contradictory:
+        - "Takes no arguments" vs "returns the sum of its two arguments"
+        - "Is a one-liner" vs "has comprehensive error handling with try/except"
+
+        The assistant should IDENTIFY the contradictions and ask for
+        clarification, rather than silently choosing one interpretation.
+        Score 1 if it clearly identifies at least one contradiction.
+        Score 0.5 if it acknowledges ambiguity but still writes code.
+        Score 0 if it ignores contradictions entirely.
+      weight: 3.0
+
+- id: large-output-handling
+  category: complex
+  description: "Generate and process a large dataset without crashing"
+  estimated_cost_usd: 0.020
+  tags: [scratchpad, performance]
+  turns:
+    - user_input: |
+        Generate a list of 10,000 random integers between 1 and 1,000,000.
+        Then find:
+        1. The 5 most common values (with their counts)
+        2. The median
+        3. The 95th percentile
+        4. How many unique values there are
+        Don't print the full list — just the statistics.
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        With 10,000 random ints from 1-1,000,000:
+        - Most common values should have low counts (likely 2-4 each due to
+          birthday paradox — 10,000 from 1,000,000)
+        - Median should be approximately 500,000 (within ~20,000)
+        - 95th percentile should be approximately 950,000 (within ~20,000)
+        - Unique values should be approximately 9,950-10,000 (very few collisions)
+
+        The key test is that the code RUNS without printing 10,000 values,
+        uses an appropriate method (collections.Counter, statistics module, etc.),
+        and reports sensible numbers.
+
+        Score 1 if all stats are computed and values are in reasonable ranges.
+        Score 0.5 if the code runs but some stats are missing.
+        Score 0 if it crashes, times out, or prints the full list.
+      weight: 3.0
+
+- id: class-design-with-inheritance
+  category: complex
+  description: "Design a class hierarchy and test polymorphism"
+  estimated_cost_usd: 0.025
+  tags: [scratchpad, oop]
+  turns:
+    - user_input: |
+        Design a shape class hierarchy in Python:
+        - Abstract base class Shape with abstract methods area() and perimeter()
+        - Circle (takes radius)
+        - Rectangle (takes width, height)
+        - Square (inherits from Rectangle, takes side)
+        - Triangle (takes three sides, use Heron's formula for area)
+
+        Then create one of each, put them in a list, and sort by area
+        (ascending). Print each shape's name, dimensions, area, and perimeter.
+
+        Use these dimensions:
+        - Circle: radius=5
+        - Rectangle: 4×7
+        - Square: side=6
+        - Triangle: sides 3, 4, 5
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        Expected results:
+        - Triangle(3,4,5): area=6.0, perimeter=12
+        - Rectangle(4,7): area=28.0, perimeter=22
+        - Square(6): area=36.0, perimeter=24
+        - Circle(5): area≈78.54, perimeter≈31.42
+
+        Sorted by area: Triangle(6) < Rectangle(28) < Square(36) < Circle(78.54)
+
+        Code should:
+        - Use ABC and abstractmethod properly
+        - Square should inherit from Rectangle (not Shape directly)
+        - Heron's formula for triangle: s=(a+b+c)/2, area=sqrt(s*(s-a)*(s-b)*(s-c))
+        - Sort should work via key=lambda or __lt__
+
+        Score 1 if all areas/perimeters correct, sorted properly, and proper OOP design.
+        Score 0.5 if values correct but OOP design has issues (e.g., Square not inheriting Rectangle).
+        Score 0 if values are wrong or code doesn't run.
+      weight: 3.0

@@ -1,0 +1,79 @@
+- id: friendly-greeting
+  category: simple_qa
+  description: "Respond conversationally to a greeting without using tools"
+  estimated_cost_usd: 0.002
+  tags: [fast, cheap, no-tools]
+  turns:
+    - user_input: "Hey! How's it going?"
+  scorers:
+    - type: tool_not_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The response should be friendly and conversational.
+        It should NOT use any tools — just reply naturally.
+        Score 1 if natural and appropriate, 0 otherwise.
+      weight: 1.0
+
+- id: explain-list-vs-tuple
+  category: simple_qa
+  description: "Explain a Python concept without using the scratchpad"
+  estimated_cost_usd: 0.003
+  tags: [fast, cheap, no-tools]
+  turns:
+    - user_input: "What's the difference between a list and a tuple in Python?"
+  scorers:
+    - type: contains
+      value: "immutable"
+      weight: 1.0
+    - type: tool_not_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The response should correctly explain that tuples are immutable
+        and lists are mutable. It should mention at least one practical
+        difference (e.g. performance, hashability, or use as dict keys).
+        Score 1 if accurate and clear, 0.5 if partially correct, 0 if wrong.
+      weight: 1.0
+
+- id: explain-async-await
+  category: simple_qa
+  description: "Explain async/await without running code"
+  estimated_cost_usd: 0.003
+  tags: [fast, cheap, no-tools]
+  turns:
+    - user_input: "Can you explain what async and await do in Python? Keep it short."
+  scorers:
+    - type: contains
+      value: "async"
+      weight: 0.5
+    - type: tool_not_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The response should explain that async defines a coroutine and await
+        pauses execution until an awaitable completes. Should mention
+        concurrency or non-blocking I/O. Score 1 if clear and correct, 0 otherwise.
+      weight: 1.0
+
+- id: clarifying-question
+  category: simple_qa
+  description: "Ask a clarifying question when the request is ambiguous"
+  estimated_cost_usd: 0.002
+  tags: [fast, cheap, no-tools]
+  turns:
+    - user_input: "Can you sort it?"
+  scorers:
+    - type: tool_not_called
+      value: scratchpad
+      weight: 1.5
+    - type: llm_judge
+      value: |
+        The user said "Can you sort it?" with no context. The assistant
+        should ask a clarifying question about what "it" refers to, rather
+        than guessing or running code. Score 1 if it asks for clarification,
+        0 if it assumes and acts.
+      weight: 2.0

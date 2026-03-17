@@ -144,6 +144,7 @@ class LLMProvider(ABC):
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> LLMResponse: ...
 
     async def stream(
@@ -154,6 +155,7 @@ class LLMProvider(ABC):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream LLM responses. Default falls back to complete()."""
         response = await self.complete(
@@ -162,6 +164,7 @@ class LLMProvider(ABC):
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
+            temperature=temperature,
         )
         if response.content:
             yield StreamTextDelta(text=response.content)

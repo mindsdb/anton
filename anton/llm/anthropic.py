@@ -37,6 +37,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> LLMResponse:
         kwargs: dict = {
             "model": model,
@@ -48,6 +49,8 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         try:
             response = await self._client.messages.create(**kwargs)
@@ -96,6 +99,7 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         kwargs: dict = {
             "model": model,
@@ -105,6 +109,8 @@ class AnthropicProvider(LLMProvider):
         }
         if tools:
             kwargs["tools"] = tools
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         content_text = ""
         tool_calls: list[ToolCall] = []

@@ -1,0 +1,103 @@
+- id: fibonacci-20
+  category: code_generation
+  description: "Compute the 20th Fibonacci number using the scratchpad"
+  estimated_cost_usd: 0.008
+  tags: [scratchpad, computation]
+  turns:
+    - user_input: "What is the 20th Fibonacci number? Compute it precisely."
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: code_output
+      value: "6765"
+      weight: 2.0
+    - type: contains
+      value: "6765"
+      weight: 1.5
+
+- id: prime-check
+  category: code_generation
+  description: "Write and run a primality check function"
+  estimated_cost_usd: 0.008
+  tags: [scratchpad, computation]
+  turns:
+    - user_input: "Is 997 a prime number? Write code to check."
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: contains
+      value: "prime"
+      weight: 0.5
+    - type: llm_judge
+      value: |
+        997 is indeed prime. The assistant should have used the scratchpad
+        to verify this computationally and reported that 997 is prime.
+        Score 1 if correct, 0 if wrong.
+      weight: 2.0
+
+- id: list-comprehension
+  category: code_generation
+  description: "Generate squares of even numbers from 1-20"
+  estimated_cost_usd: 0.008
+  tags: [scratchpad, computation]
+  turns:
+    - user_input: "Give me the squares of all even numbers from 1 to 20."
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: contains
+      value: "400"
+      weight: 1.0
+    - type: contains
+      value: "4"
+      weight: 0.5
+    - type: llm_judge
+      value: |
+        The correct answer is: 4, 16, 36, 64, 100, 144, 196, 256, 324, 400.
+        The assistant should have computed these using the scratchpad.
+        Score 1 if all values are present, 0.5 if most are, 0 if wrong.
+      weight: 2.0
+
+- id: string-reversal
+  category: code_generation
+  description: "Reverse a string and count characters"
+  estimated_cost_usd: 0.006
+  tags: [scratchpad, string-ops]
+  turns:
+    - user_input: "Reverse the string 'Hello, World!' and tell me how many characters it has."
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: contains
+      value: "!dlroW ,olleH"
+      weight: 2.0
+    - type: contains
+      value: "13"
+      weight: 1.5
+
+- id: json-parsing
+  category: code_generation
+  description: "Parse JSON and extract nested fields"
+  estimated_cost_usd: 0.008
+  tags: [scratchpad, data-processing]
+  turns:
+    - user_input: |
+        Parse this JSON and tell me the names of all users:
+        {"users": [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}, {"name": "Charlie", "age": 35}]}
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: contains
+      value: "Alice"
+      weight: 1.0
+    - type: contains
+      value: "Bob"
+      weight: 1.0
+    - type: contains
+      value: "Charlie"
+      weight: 1.0

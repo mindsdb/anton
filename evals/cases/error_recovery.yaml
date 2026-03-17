@@ -1,0 +1,65 @@
+- id: name-error-recovery
+  category: error_recovery
+  description: "Recover from a NameError by defining the missing variable"
+  estimated_cost_usd: 0.012
+  tags: [scratchpad, error-handling, multi-round]
+  turns:
+    - user_input: |
+        Calculate the area of a circle with radius 7.
+        Use the formula area = pi * r^2.
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The area of a circle with radius 7 is pi * 49 = approximately 153.94.
+        The assistant should have computed this correctly, importing math.pi
+        or defining pi. If the first attempt had a NameError, the assistant
+        should have self-corrected. Score 1 if final answer is ~153.94, 0 otherwise.
+      weight: 2.0
+
+- id: syntax-error-recovery
+  category: error_recovery
+  description: "Recover from generating code with a syntax error"
+  estimated_cost_usd: 0.012
+  tags: [scratchpad, error-handling, multi-round]
+  turns:
+    - user_input: |
+        Write a Python function that takes a list of integers and returns
+        a new list with only the unique values, preserving order.
+        Test it with [1, 2, 3, 2, 1, 4, 5, 4].
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The correct output should be [1, 2, 3, 4, 5].
+        The assistant should produce working code that returns the correct result.
+        If any errors occurred during execution, the assistant should have
+        self-corrected. Score 1 if the final answer is [1, 2, 3, 4, 5], 0 otherwise.
+      weight: 2.0
+
+- id: division-by-zero-handling
+  category: error_recovery
+  description: "Handle a division by zero gracefully"
+  estimated_cost_usd: 0.010
+  tags: [scratchpad, error-handling]
+  turns:
+    - user_input: |
+        Compute the result of dividing each number in [10, 20, 30, 0, 50]
+        by the number that comes before it. Handle the first element and
+        any division by zero gracefully.
+  scorers:
+    - type: tool_called
+      value: scratchpad
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The ratios should be: [N/A, 2.0, 1.5, 0.0, inf or "undefined" or "N/A"].
+        The key test is handling 50/0 — it should not crash.
+        The assistant should handle edge cases gracefully (try/except or check).
+        Score 1 if division by zero is handled without crashing and results
+        are reasonable, 0.5 if it crashes but self-corrects, 0 if it crashes with no recovery.
+      weight: 2.0

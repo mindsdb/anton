@@ -191,6 +191,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> LLMResponse:
         oai_messages = _translate_messages(system, messages)
 
@@ -203,6 +204,8 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = _translate_tools(tools)
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice(tool_choice)
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -257,6 +260,7 @@ class OpenAIProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         oai_messages = _translate_messages(system, messages)
 
@@ -269,6 +273,8 @@ class OpenAIProvider(LLMProvider):
         }
         if tools:
             kwargs["tools"] = _translate_tools(tools)
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         content_text = ""
         tool_calls: list[ToolCall] = []

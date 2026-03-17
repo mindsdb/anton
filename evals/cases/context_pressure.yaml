@@ -1,0 +1,43 @@
+- id: multi-turn-recall
+  category: context_pressure
+  description: "Remember information across multiple turns in a long conversation"
+  estimated_cost_usd: 0.025
+  tags: [multi-turn, context, slow]
+  turns:
+    - user_input: "My name is Zara and I'm working on a project called Lighthouse."
+    - user_input: "The project uses FastAPI for the backend and React for the frontend."
+    - user_input: "We deploy to AWS ECS with Terraform."
+    - user_input: "Our CI/CD pipeline uses GitHub Actions."
+    - user_input: |
+        Can you summarize everything you know about me and my project?
+        Include my name, project name, tech stack, deployment, and CI/CD.
+  scorers:
+    - type: contains
+      value: "Zara"
+      weight: 2.0
+    - type: contains
+      value: "Lighthouse"
+      weight: 2.0
+    - type: contains
+      value: "FastAPI"
+      weight: 1.0
+    - type: contains
+      value: "React"
+      weight: 1.0
+    - type: contains
+      value: "ECS"
+      weight: 1.0
+    - type: contains
+      value: "GitHub Actions"
+      weight: 1.0
+    - type: llm_judge
+      value: |
+        The assistant should recall ALL of the following from the conversation:
+        - User's name: Zara
+        - Project: Lighthouse
+        - Backend: FastAPI
+        - Frontend: React
+        - Deployment: AWS ECS with Terraform
+        - CI/CD: GitHub Actions
+        Score 1 if all 6 facts are present, 0.5 if 4-5 present, 0 if fewer.
+      weight: 2.0

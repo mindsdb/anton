@@ -32,6 +32,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
         return await self._planning_provider.complete(
             model=self._planning_model,
@@ -39,6 +40,7 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            temperature=temperature,
         )
 
     async def plan_stream(
@@ -48,6 +50,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         async for event in self._planning_provider.stream(
             model=self._planning_model,
@@ -55,6 +58,7 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            temperature=temperature,
         ):
             yield event
 
@@ -75,6 +79,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
         return await self._coding_provider.complete(
             model=self._coding_model,
@@ -82,6 +87,7 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            temperature=temperature,
         )
 
     @classmethod

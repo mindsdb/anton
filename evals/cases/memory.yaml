@@ -1,0 +1,52 @@
+- id: memorize-preference
+  category: memory
+  description: "Use the memorize tool when user states a preference"
+  estimated_cost_usd: 0.005
+  tags: [memory, memorize]
+  turns:
+    - user_input: "I always want you to use type hints in any Python code you write for me."
+  scorers:
+    - type: tool_called
+      value: memorize
+      weight: 2.0
+    - type: llm_judge
+      value: |
+        The user stated a strong preference ("always use type hints").
+        The assistant should have used the memorize tool to store this as
+        a rule (kind: "always"). Score 1 if memorize was called with
+        appropriate content, 0 otherwise.
+      weight: 1.5
+
+- id: memorize-lesson
+  category: memory
+  description: "Memorize a technical fact as a lesson"
+  estimated_cost_usd: 0.005
+  tags: [memory, memorize]
+  turns:
+    - user_input: "Remember that our production database is PostgreSQL 16 running on port 5433."
+  scorers:
+    - type: tool_called
+      value: memorize
+      weight: 2.0
+    - type: llm_judge
+      value: |
+        The user asked to remember a technical fact about their database.
+        The assistant should have used the memorize tool to store this
+        (as a lesson or rule). The stored content should include
+        "PostgreSQL 16" and "5433". Score 1 if properly stored, 0 otherwise.
+      weight: 1.5
+
+- id: no-unnecessary-memorize
+  category: memory
+  description: "Do NOT memorize casual conversation"
+  estimated_cost_usd: 0.003
+  tags: [memory, no-memorize]
+  turns:
+    - user_input: "What's 2 + 2?"
+  scorers:
+    - type: tool_not_called
+      value: memorize
+      weight: 2.0
+    - type: contains
+      value: "4"
+      weight: 1.0

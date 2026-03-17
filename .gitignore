@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Eval results (generated)
+evals/results/*.json
+
+.ideas/
+
 # C extensions
 *.so
 
