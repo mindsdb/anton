@@ -197,6 +197,8 @@ class OllamaProvider(LLMProvider):
             message = str(exc).lower()
             if "context" in message and "length" in message:
                 raise ContextOverflowError(str(exc)) from exc
+            if exc.status_code >= 400 and exc.status_code < 500:
+                raise
             raise ConnectionError(str(exc)) from exc
         except ConnectionError as exc:
             raise ConnectionError(str(exc)) from exc
@@ -281,6 +283,8 @@ class OllamaProvider(LLMProvider):
             message = str(exc).lower()
             if "context" in message and "length" in message:
                 raise ContextOverflowError(str(exc)) from exc
+            if exc.status_code >= 400 and exc.status_code < 500:
+                raise
             raise ConnectionError(str(exc)) from exc
         except ConnectionError as exc:
             raise ConnectionError(str(exc)) from exc
