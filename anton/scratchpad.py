@@ -345,6 +345,8 @@ class Scratchpad:
             env["OPENAI_API_KEY"] = env["ANTON_OPENAI_API_KEY"]
         if "OPENAI_BASE_URL" not in env and "ANTON_OPENAI_BASE_URL" in env:
             env["OPENAI_BASE_URL"] = env["ANTON_OPENAI_BASE_URL"]
+        if "OLLAMA_HOST" not in env and "ANTON_OLLAMA_BASE_URL" in env:
+            env["OLLAMA_HOST"] = env["ANTON_OLLAMA_BASE_URL"]
         # If settings provided an explicit API key (e.g. from ~/.anton/.env or
         # Pydantic settings), inject it so the subprocess SDK can authenticate.
         if self._coding_api_key:

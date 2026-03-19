@@ -458,6 +458,22 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
+    async def test_ollama_host_bridged(self, monkeypatch):
+        """ANTON_OLLAMA_BASE_URL should be bridged to OLLAMA_HOST."""
+        monkeypatch.setenv("ANTON_OLLAMA_BASE_URL", "http://localhost:11434")
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        pad = Scratchpad(name="ollama-host-test", _coding_provider="ollama", _coding_model="qwen3.5:4b")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('OLLAMA_HOST', 'MISSING'))"
+            )
+            assert cell.stdout.strip() == "http://localhost:11434"
+            llm_cell = await pad.execute("llm = get_llm(); print(llm.model)")
+            assert llm_cell.stdout.strip() == "qwen3.5:4b"
+        finally:
+            await pad.close()
+
 
 class TestScratchpadVenv:
     async def test_venv_created_on_start(self):

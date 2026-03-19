@@ -37,6 +37,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
+        request_options: dict | None = None,
     ) -> LLMResponse:
         kwargs: dict = {
             "model": model,
@@ -96,6 +97,7 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
+        request_options: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         kwargs: dict = {
             "model": model,

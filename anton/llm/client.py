@@ -13,14 +13,18 @@ class LLMClient:
     def __init__(
         self,
         *,
+        planning_provider_name: str = "anthropic",
         planning_provider: LLMProvider,
         planning_model: str,
+        coding_provider_name: str = "anthropic",
         coding_provider: LLMProvider,
         coding_model: str,
         max_tokens: int = 8192,
     ) -> None:
+        self._planning_provider_name = planning_provider_name
         self._planning_provider = planning_provider
         self._planning_model = planning_model
+        self._coding_provider_name = coding_provider_name
         self._coding_provider = coding_provider
         self._coding_model = coding_model
         self._max_tokens = max_tokens
@@ -32,6 +36,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        request_options: dict | None = None,
     ) -> LLMResponse:
         return await self._planning_provider.complete(
             model=self._planning_model,
@@ -39,6 +44,7 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            request_options=request_options,
         )
 
     async def plan_stream(
@@ -48,6 +54,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        request_options: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         async for event in self._planning_provider.stream(
             model=self._planning_model,
@@ -55,13 +62,22 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            request_options=request_options,
         ):
             yield event
+
+    @property
+    def planning_provider_name(self) -> str:
+        return self._planning_provider_name
 
     @property
     def coding_provider(self) -> LLMProvider:
         """The LLM provider used for coding/skill execution."""
         return self._coding_provider
+
+    @property
+    def coding_provider_name(self) -> str:
+        return self._coding_provider_name
 
     @property
     def coding_model(self) -> str:
@@ -75,6 +91,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        request_options: dict | None = None,
     ) -> LLMResponse:
         return await self._coding_provider.complete(
             model=self._coding_model,
@@ -82,16 +99,19 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            request_options=request_options,
         )
 
     @classmethod
     def from_settings(cls, settings: AntonSettings) -> LLMClient:
         from anton.llm.anthropic import AnthropicProvider
+        from anton.llm.ollama import OllamaProvider
         from anton.llm.openai import OpenAIProvider
 
         providers = {
             "anthropic": lambda: AnthropicProvider(api_key=settings.anthropic_api_key),
             "openai": lambda: OpenAIProvider(api_key=settings.openai_api_key, base_url=settings.openai_base_url, ssl_verify=settings.minds_ssl_verify),
+            "ollama": lambda: OllamaProvider(base_url=settings.ollama_base_url),
             "openai-compatible": lambda: OpenAIProvider(api_key=settings.openai_api_key, base_url=settings.openai_base_url, ssl_verify=settings.minds_ssl_verify),
         }
 
@@ -104,8 +124,10 @@ class LLMClient:
             raise ValueError(f"Unknown coding provider: {settings.coding_provider}")
 
         return cls(
+            planning_provider_name=settings.planning_provider,
             planning_provider=planning_factory(),
             planning_model=settings.planning_model,
+            coding_provider_name=settings.coding_provider,
             coding_provider=coding_factory(),
             coding_model=settings.coding_model,
             max_tokens=getattr(settings, "max_tokens", 8192),

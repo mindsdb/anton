@@ -228,6 +228,7 @@ class TestScratchpadDumpStreaming:
             ])
 
         mock_llm.plan_stream = fake_plan_stream
+        mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
 
         session = ChatSession(mock_llm)
         try:
@@ -270,6 +271,7 @@ class TestScratchpadStreaming:
             return _FakeAsyncIter([StreamComplete(response=final_response)])
 
         mock_llm.plan_stream = fake_plan_stream
+        mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
 
         session = ChatSession(mock_llm)
         try:

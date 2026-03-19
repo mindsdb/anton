@@ -131,6 +131,7 @@ CANCEL_MESSAGES = [
 PHASE_LABELS = {
     "memory_recall": "Memory",
     "planning": "Planning",
+    "reasoning": "Thinking",
     "executing": "Executing",
     "complete": "Complete",
     "failed": "Failed",
@@ -154,6 +155,7 @@ class StreamDisplay:
         self._buffer = ""  # answer text accumulated during streaming
         self._in_tool_phase = False
         self._last_was_tool = False
+        self._answer_started = False
         self._initial_text = ""
         self._initial_printed = False
         self._active = False
@@ -234,6 +236,7 @@ class StreamDisplay:
         self._initial_printed = False
         self._in_tool_phase = False
         self._last_was_tool = False
+        self._answer_started = False
         self._cancel_msg = ""
         self._active = True
         self._start_spinner()
@@ -244,6 +247,7 @@ class StreamDisplay:
         if self._in_tool_phase:
             self._buffer += delta
             self._last_was_tool = False
+            self._answer_started = True
             self._line3_peek = self._extract_peek(self._buffer)
             self._update_spinner()
         else:
@@ -305,6 +309,13 @@ class StreamDisplay:
             self._line1_fun = random.choice(ANALYZING_MESSAGES)  # noqa: S311
             self._line2_status = "Composing response..."
             self._line3_peek = ""
+            self._update_spinner()
+            return
+
+        if phase == "reasoning":
+            self._line2_status = message or "Thinking..."
+            self._line3_peek = ""
+            self._set_status(self._line2_status)
             self._update_spinner()
             return
 

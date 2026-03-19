@@ -34,6 +34,7 @@ class AntonSettings(BaseSettings):
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    ollama_base_url: str = "http://localhost:11434"
 
     memory_enabled: bool = True
     memory_dir: str = ".anton"

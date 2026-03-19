@@ -20,12 +20,16 @@ if _scratchpad_model:
         _scratchpad_provider_name = os.environ.get("ANTON_SCRATCHPAD_PROVIDER", "anthropic")
         if _scratchpad_provider_name in ("openai", "openai-compatible"):
             from anton.llm.openai import OpenAIProvider as _ProviderClass
+        elif _scratchpad_provider_name == "ollama":
+            from anton.llm.ollama import OllamaProvider as _ProviderClass
         else:
             from anton.llm.anthropic import AnthropicProvider as _ProviderClass
 
         _llm_ssl_verify = os.environ.get("ANTON_MINDS_SSL_VERIFY", "true").lower() != "false"
         if _scratchpad_provider_name in ("openai", "openai-compatible"):
             _llm_provider = _ProviderClass(ssl_verify=_llm_ssl_verify)
+        elif _scratchpad_provider_name == "ollama":
+            _llm_provider = _ProviderClass(base_url=os.environ.get("ANTON_OLLAMA_BASE_URL"))
         else:
             _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
         _llm_model = _scratchpad_model

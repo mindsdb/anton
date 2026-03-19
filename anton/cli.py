@@ -28,6 +28,7 @@ def _reexec() -> None:
 # Core dependencies from pyproject.toml that anton needs at runtime
 _REQUIRED_PACKAGES: dict[str, str] = {
     "anthropic": "anthropic>=0.42.0",
+    "ollama": "ollama>=0.6.1",
     "openai": "openai>=1.0",
     "pydantic": "pydantic>=2.0",
     "pydantic_settings": "pydantic-settings>=2.0",
@@ -224,9 +225,11 @@ def main(
 
 
 def _has_api_key(settings) -> bool:
-    """Check if all configured providers have API keys."""
+    """Check if the configured providers are ready to use."""
     providers = {settings.planning_provider, settings.coding_provider}
     for p in providers:
+        if p == "ollama":
+            continue
         if p == "anthropic" and not (settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")):
             return False
         if p in ("openai", "openai-compatible") and not (settings.openai_api_key or os.environ.get("OPENAI_API_KEY")):
@@ -235,12 +238,11 @@ def _has_api_key(settings) -> bool:
 
 
 def _ensure_api_key(settings) -> None:
-    """Prompt the user to configure a provider and API key if none is set."""
+    """Prompt the user to configure an LLM provider if needed."""
     if _has_api_key(settings):
         return
 
-    from rich.prompt import Prompt
-
+    from anton.llm.setup import configure_llm_settings
     from anton.workspace import Workspace
 
     ws = Workspace(Path.home())
@@ -248,7 +250,14 @@ def _ensure_api_key(settings) -> None:
     if settings.minds_enabled:
         _ensure_minds_api_key(settings, ws)
     else:
-        _ensure_anthropic_api_key(settings, ws)
+        applied = configure_llm_settings(
+            console,
+            settings,
+            ws,
+            show_current_config=False,
+        )
+        if not applied:
+            raise typer.Exit(1)
 
     # Reload env vars into the process so the scratchpad subprocess inherits them
     ws.apply_env_to_process()

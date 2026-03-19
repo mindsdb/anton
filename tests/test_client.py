@@ -6,6 +6,7 @@ import pytest
 
 from anton.config.settings import AntonSettings
 from anton.llm.client import LLMClient
+from anton.llm.ollama import OllamaProvider
 from anton.llm.provider import LLMProvider, LLMResponse, Usage
 
 
@@ -98,3 +99,20 @@ class TestLLMClientFromSettings:
         )
         with pytest.raises(ValueError, match="Unknown coding provider"):
             LLMClient.from_settings(settings)
+
+    def test_from_settings_ollama(self):
+        with patch("anton.llm.ollama.ollama"):
+            settings = AntonSettings(
+                planning_provider="ollama",
+                coding_provider="ollama",
+                planning_model="qwen3.5:4b",
+                coding_model="qwen3.5:4b",
+                ollama_base_url="http://localhost:11434/v1",
+                _env_file=None,
+            )
+            client = LLMClient.from_settings(settings)
+            assert isinstance(client, LLMClient)
+            assert isinstance(client._planning_provider, OllamaProvider)
+            assert isinstance(client._coding_provider, OllamaProvider)
+            assert client.planning_provider_name == "ollama"
+            assert client.coding_provider_name == "ollama"

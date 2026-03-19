@@ -8,34 +8,53 @@ import pytest
 from anton.config.settings import AntonSettings
 
 
+@pytest.fixture(autouse=True)
+def clean_anton_env(monkeypatch):
+    for key in (
+        "ANTON_PLANNING_PROVIDER",
+        "ANTON_PLANNING_MODEL",
+        "ANTON_CODING_PROVIDER",
+        "ANTON_CODING_MODEL",
+        "ANTON_ANTHROPIC_API_KEY",
+        "ANTON_OPENAI_API_KEY",
+        "ANTON_OPENAI_BASE_URL",
+        "ANTON_OLLAMA_BASE_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 class TestAntonSettingsDefaults:
     def test_default_planning_provider(self):
-        s = AntonSettings(anthropic_api_key="test")
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.planning_provider == "anthropic"
 
     def test_default_planning_model(self):
-        s = AntonSettings(anthropic_api_key="test")
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.planning_model == "claude-sonnet-4-6"
 
     def test_default_coding_provider(self):
-        s = AntonSettings(anthropic_api_key="test")
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.coding_provider == "anthropic"
 
     def test_default_coding_model(self):
-        s = AntonSettings(anthropic_api_key="test")
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.coding_model == "claude-haiku-4-5-20251001"
 
     def test_default_memory_dir(self):
-        s = AntonSettings(anthropic_api_key="test")
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.memory_dir == ".anton"
 
     def test_default_context_dir(self):
-        s = AntonSettings(anthropic_api_key="test")
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.context_dir == ".anton/context"
 
     def test_default_api_key_is_none(self):
         s = AntonSettings(_env_file=None)
         assert s.anthropic_api_key is None
+
+    def test_default_ollama_base_url(self):
+        s = AntonSettings(_env_file=None)
+        assert s.ollama_base_url == "http://localhost:11434"
 
 
 class TestAntonSettingsEnvOverride:
@@ -48,6 +67,11 @@ class TestAntonSettingsEnvOverride:
         monkeypatch.setenv("ANTON_ANTHROPIC_API_KEY", "sk-test-key")
         s = AntonSettings(_env_file=None)
         assert s.anthropic_api_key == "sk-test-key"
+
+    def test_env_overrides_ollama_base_url(self, monkeypatch):
+        monkeypatch.setenv("ANTON_OLLAMA_BASE_URL", "http://example.test:11434")
+        s = AntonSettings(_env_file=None)
+        assert s.ollama_base_url == "http://example.test:11434"
 
 class TestWorkspaceResolution:
     def test_resolve_workspace_defaults_to_cwd(self, tmp_path, monkeypatch):

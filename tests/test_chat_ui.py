@@ -86,8 +86,19 @@ class TestStreamDisplay:
         assert live.update.call_count >= 1
 
     def test_phase_labels_cover_all_phases(self):
-        expected = {"memory_recall", "planning", "executing", "complete", "failed", "scratchpad"}
+        expected = {"memory_recall", "planning", "reasoning", "executing", "complete", "failed", "scratchpad"}
         assert expected == set(PHASE_LABELS.keys())
+
+    @patch("anton.chat_ui.Live")
+    def test_reasoning_progress_updates_spinner(self, MockLive):
+        display, _ = self._make_display()
+        display.start()
+        live = MockLive.return_value
+
+        display.update_progress("reasoning", "Thinking...")
+
+        assert display._line2_status == "Thinking..."
+        assert live.update.call_count >= 1
 
 
 class TestActivityTracking:

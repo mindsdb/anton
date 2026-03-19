@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import time
 from collections.abc import AsyncIterator, Callable
@@ -64,6 +65,21 @@ _RESILIENCE_NUDGE = (
     "a public API, archive.org, an alternate library, or a completely different data source. "
     "Only involve the user if the problem truly requires something only they can provide."
 )
+
+_VERIFIER_STATUS_PREFIXES = (
+    "STATUS: COMPLETE",
+    "STATUS: INCOMPLETE",
+    "STATUS: STUCK",
+)
+
+
+def _strip_ollama_think_tags(text: str) -> str:
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _is_parseable_verifier_status(text: str) -> bool:
+    upper = text.upper()
+    return any(prefix in upper for prefix in _VERIFIER_STATUS_PREFIXES)
 
 
 class ChatSession:
@@ -749,6 +765,11 @@ class ChatSession:
                     "has been fully completed based on the conversation above."
                 ),
             }]
+            verifier_request_options = (
+                {"think": False}
+                if self._llm.planning_provider_name == "ollama"
+                else None
+            )
             verification = await self._llm.plan(
                 system=(
                     "You are a task-completion verifier. Given the conversation, determine "
@@ -766,14 +787,21 @@ class ChatSession:
                 ),
                 messages=verify_messages,
                 max_tokens=256,
+                request_options=verifier_request_options,
             )
 
-            status_text = (verification.content or "").strip().upper()
+            verification_text = (verification.content or "").strip()
+            if self._llm.planning_provider_name == "ollama":
+                verification_text = _strip_ollama_think_tags(verification_text).strip()
+                if not verification_text or not _is_parseable_verifier_status(verification_text):
+                    break
+
+            status_text = verification_text.upper()
             if "STATUS: COMPLETE" in status_text:
                 break
             if "STATUS: STUCK" in status_text:
                 # Stuck — inject diagnosis request and let the LLM explain
-                reason = (verification.content or "").strip()
+                reason = verification_text
                 self._history.append({
                     "role": "user",
                     "content": (
@@ -795,7 +823,7 @@ class ChatSession:
 
             # INCOMPLETE — continue working
             continuation += 1
-            reason = (verification.content or "").strip()
+            reason = verification_text
             self._history.append({
                 "role": "user",
                 "content": (
@@ -957,7 +985,7 @@ def _rebuild_session(
     runtime_context = _build_runtime_context(settings)
     api_key = (
         settings.anthropic_api_key if settings.coding_provider == "anthropic"
-        else settings.openai_api_key
+        else settings.openai_api_key if settings.coding_provider in {"openai", "openai-compatible"} else ""
     ) or ""
     return ChatSession(
         state["llm_client"],
@@ -1211,107 +1239,22 @@ async def _handle_setup_models(
     session_id: str | None = None,
 ) -> ChatSession:
     """Setup sub-menu: provider, API key, and models."""
-    from rich.prompt import Prompt
-
+    from anton.llm.setup import configure_llm_settings
     from anton.workspace import Workspace as _Workspace
 
     # Always persist API keys and model settings to global ~/.anton/.env
     global_ws = _Workspace(Path.home())
 
-    console.print()
-    console.print("[anton.cyan]Current configuration:[/]")
-    console.print(f"  Provider (planning): [bold]{settings.planning_provider}[/]")
-    console.print(f"  Provider (coding):   [bold]{settings.coding_provider}[/]")
-    console.print(f"  Planning model:      [bold]{settings.planning_model}[/]")
-    console.print(f"  Coding model:        [bold]{settings.coding_model}[/]")
-    console.print()
-
-    # --- Provider ---
-    providers = {"1": "anthropic", "2": "openai", "3": "openai-compatible"}
-    current_num = {"anthropic": "1", "openai": "2", "openai-compatible": "3"}.get(settings.planning_provider, "1")
-    console.print("[anton.cyan]Available providers:[/]")
-    console.print(r"  [bold]1[/]  Anthropic (Claude)                    [dim]\[recommended][/]")
-    console.print(r"  [bold]2[/]  OpenAI (GPT / o-series)               [dim]\[experimental][/]")
-    console.print(r"  [bold]3[/]  OpenAI-compatible (custom endpoint)   [dim]\[experimental][/]")
-    console.print()
-
-    choice = Prompt.ask(
-        "Select provider",
-        choices=["1", "2", "3"],
-        default=current_num,
-        console=console,
+    applied = configure_llm_settings(
+        console,
+        settings,
+        global_ws,
+        show_current_config=True,
     )
-    provider = providers[choice]
-
-    # --- Base URL (OpenAI-compatible only) ---
-    if provider == "openai-compatible":
-        current_base_url = settings.openai_base_url or ""
-        console.print()
-        base_url = Prompt.ask(
-            f"API base URL [dim](e.g. http://localhost:11434/v1)[/]",
-            default=current_base_url,
-            console=console,
-        )
-        base_url = base_url.strip()
-        if base_url:
-            settings.openai_base_url = base_url
-            global_ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
-
-    # --- API key ---
-    key_attr = "anthropic_api_key" if provider == "anthropic" else "openai_api_key"
-    current_key = getattr(settings, key_attr) or ""
-    masked = current_key[:4] + "..." + current_key[-4:] if len(current_key) > 8 else "***"
-    console.print()
-    api_key = Prompt.ask(
-        f"API key for {provider.title()} [dim](Enter to keep {masked})[/]",
-        default="",
-        console=console,
-    )
-    api_key = api_key.strip()
-
-    # --- Models ---
-    defaults = {
-        "anthropic": ("claude-sonnet-4-6", "claude-haiku-4-5-20251001"),
-        "openai": ("gpt-5-mini", "gpt-5-nano"),
-    }
-    default_planning, default_coding = defaults.get(provider, ("", ""))
-
-    console.print()
-    planning_model = Prompt.ask(
-        "Planning model",
-        default=settings.planning_model if provider == settings.planning_provider else default_planning,
-        console=console,
-    )
-    coding_model = Prompt.ask(
-        "Coding model",
-        default=settings.coding_model if provider == settings.coding_provider else default_coding,
-        console=console,
-    )
-
-    # --- Persist to global ~/.anton/.env ---
-    settings.planning_provider = provider
-    settings.coding_provider = provider
-    settings.planning_model = planning_model
-    settings.coding_model = coding_model
-
-    global_ws.set_secret("ANTON_PLANNING_PROVIDER", provider)
-    global_ws.set_secret("ANTON_CODING_PROVIDER", provider)
-    global_ws.set_secret("ANTON_PLANNING_MODEL", planning_model)
-    global_ws.set_secret("ANTON_CODING_MODEL", coding_model)
-
-    if api_key:
-        setattr(settings, key_attr, api_key)
-        key_name = f"ANTON_{provider.upper()}_API_KEY"
-        global_ws.set_secret(key_name, api_key)
-
-    # Validate that we actually have an API key for the chosen provider
-    final_key = getattr(settings, key_attr)
-    if not final_key:
-        console.print()
-        console.print(f"[anton.error]No API key set for {provider}. Configuration not applied.[/]")
-        console.print()
+    if not applied:
         return session
 
+    global_ws.apply_env_to_process()
     console.print()
     console.print("[anton.success]Configuration updated.[/]")
     console.print()
@@ -1619,6 +1562,7 @@ _LLM_KEYS = {
     "ANTON_PLANNING_PROVIDER", "ANTON_CODING_PROVIDER",
     "ANTON_PLANNING_MODEL", "ANTON_CODING_MODEL",
     "ANTON_ANTHROPIC_API_KEY", "ANTON_OPENAI_API_KEY", "ANTON_OPENAI_BASE_URL",
+    "ANTON_OLLAMA_BASE_URL",
 }
 
 _SECRET_PATTERNS = ("KEY", "TOKEN", "SECRET", "PAT", "PASSWORD")
@@ -2380,7 +2324,7 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
 
     coding_api_key = (
         settings.anthropic_api_key if settings.coding_provider == "anthropic"
-        else settings.openai_api_key
+        else settings.openai_api_key if settings.coding_provider in {"openai", "openai-compatible"} else ""
     ) or ""
     session = ChatSession(
         state["llm_client"],
