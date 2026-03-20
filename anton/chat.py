@@ -42,7 +42,7 @@ from anton.tools import (
     format_cell_result,
     prepare_scratchpad_exec,
 )
-from anton.data_vault import DataVault
+from anton.data_vault import DataVault, _slug_env_prefix
 from anton.datasource_registry import (
     DatasourceEngine,
     DatasourceField,
@@ -1044,13 +1044,23 @@ _DS_SECRET_VARS: set[str] = set()
 _DS_KNOWN_VARS: set[str] = set()
 
 
-def _register_secret_vars(engine_def: "DatasourceEngine") -> None:
-    """Record which DS_* var names correspond to secret fields for engine_def."""
+def _register_secret_vars(
+    engine_def: "DatasourceEngine", *, engine: str = "", name: str = ""
+) -> None:
+    """Record which DS_* var names correspond to known/secret fields for engine_def.
+
+    If engine and name are given, registers namespaced vars (DS_ENGINE_NAME__FIELD).
+    Otherwise registers flat vars (DS_FIELD) — for temporary test_snippet execution.
+    """
     all_fields = list(engine_def.fields)
     for am in engine_def.auth_methods or []:
         all_fields.extend(am.fields)
     for f in all_fields:
-        key = f"DS_{f.name.upper()}"
+        if engine and name:
+            prefix = _slug_env_prefix(engine, name)
+            key = f"{prefix}__{f.name.upper()}"
+        else:
+            key = f"DS_{f.name.upper()}"
         _DS_KNOWN_VARS.add(key)
         if f.secret:
             _DS_SECRET_VARS.add(key)
@@ -1097,8 +1107,9 @@ def _build_datasource_context(active_only: str | None = None) -> str:
         return ""
     lines = ["\n\n## Connected Data Sources"]
     lines.append(
-        "Credentials are pre-injected as DS_* environment variables. "
-        "Use them directly in scratchpad code. "
+        "Credentials are pre-injected as namespaced DS_<ENGINE_NAME>__<FIELD> "
+        "environment variables. Use them directly in scratchpad code "
+        "(e.g. DS_POSTGRES_PROD_DB__HOST). "
         "Never read ~/.anton/data_vault/ files directly.\n"
     )
     for c in conns:
@@ -1106,9 +1117,23 @@ def _build_datasource_context(active_only: str | None = None) -> str:
         if active_only and slug != active_only:
             continue
         fields = vault.load(c["engine"], c["name"]) or {}
-        var_names = ", ".join(f"DS_{k.upper()}" for k in fields)
-        lines.append(f"- `{slug}` → {var_names}")
+        prefix = _slug_env_prefix(c["engine"], c["name"])
+        var_names = ", ".join(f"{prefix}__{k.upper()}" for k in fields)
+        lines.append(f"- `{slug}` ({c['engine']}) → {var_names}")
     return "\n".join(lines)
+
+
+def _restore_namespaced_env(vault: DataVault) -> None:
+    """Clear all DS_* vars, then reinject every saved connection as namespaced."""
+    from anton.datasource_registry import DatasourceRegistry
+
+    vault.clear_ds_env()
+    dreg = DatasourceRegistry()
+    for conn in vault.list_connections():
+        vault.inject_env(conn["engine"], conn["name"])  # flat=False by default
+        edef = dreg.get(conn["engine"])
+        if edef is not None:
+            _register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
 
 
 def _build_runtime_context(settings: AntonSettings) -> str:
@@ -2728,7 +2753,7 @@ async def _handle_connect_datasource(
     vault = DataVault()
     registry = DatasourceRegistry()
 
-    # ── /edit-data-source path: re-enter credentials for an existing slug ─────
+    # ── /edit-data-source path: update credentials for an existing slug ────────
     if datasource_name is not None:
         slug_parts = datasource_name.split("-", 1)
         if len(slug_parts) != 2:
@@ -2739,7 +2764,8 @@ async def _handle_connect_datasource(
             console.print()
             return session
         edit_engine, edit_name = slug_parts
-        if vault.load(edit_engine, edit_name) is None:
+        existing = vault.load(edit_engine, edit_name)
+        if existing is None:
             console.print(
                 f"[anton.warning]No connection '{datasource_name}' found in Local Vault.[/]"
             )
@@ -2756,39 +2782,73 @@ async def _handle_connect_datasource(
 
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] Updating credentials for "
-            f'[bold]"{datasource_name}"[/bold] ({engine_def.display_name}).'
+            f"[anton.cyan](anton)[/] Editing [bold]\"{datasource_name}\"[/bold]"
+            f" ({engine_def.display_name})."
         )
+        console.print("[anton.muted]        Press Enter to keep the current value.[/]")
         console.print()
 
-        credentials: dict[str, str] = {}
-        for f in engine_def.fields:
+        # Detect which fields to present (handle auth_method=choice)
+        active_fields = engine_def.fields
+        if engine_def.auth_method == "choice" and engine_def.auth_methods:
+            for am in engine_def.auth_methods:
+                am_field_names = {af.name for af in am.fields}
+                if any(k in am_field_names for k in existing):
+                    active_fields = am.fields
+                    break
+            if not active_fields:
+                active_fields = engine_def.auth_methods[0].fields
+
+        # Start from existing values; let user update field-by-field
+        credentials: dict[str, str] = dict(existing)
+        for f in active_fields:
+            current = existing.get(f.name, "")
             prompt_label = f"[anton.cyan](anton)[/] {f.name}"
             if not f.required:
-                prompt_label += " [anton.muted](optional, press enter to skip)[/]"
+                prompt_label += " [anton.muted](optional)[/]"
+
             if f.secret:
-                value = Prompt.ask(
-                    prompt_label, password=True, console=console, default=""
+                masked = "••••••••" if current else ""
+                label = (
+                    f"{prompt_label} [anton.muted][{masked}][/]"
+                    if masked
+                    else prompt_label
                 )
+                value = Prompt.ask(label, password=True, console=console, default="")
+                if value:
+                    credentials[f.name] = value
+                # else: keep existing (already in credentials)
+            elif current:
+                value = Prompt.ask(
+                    f"{prompt_label} [anton.muted][{current}][/]",
+                    console=console,
+                    default=current,
+                )
+                credentials[f.name] = value if value else current
             elif f.default:
                 value = Prompt.ask(
                     f"{prompt_label} [anton.muted][{f.default}][/]",
                     console=console,
                     default=f.default,
                 )
+                if value:
+                    credentials[f.name] = value
             else:
                 value = Prompt.ask(prompt_label, console=console, default="")
-            if value:
-                credentials[f.name] = value
+                if value:
+                    credentials[f.name] = value
 
         if engine_def.test_snippet:
             while True:
                 console.print()
                 console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
-                import os as _os
 
-                for key, value in credentials.items():
-                    _os.environ[f"DS_{key.upper()}"] = value
+                # Temporarily save credentials so inject_env(flat=True) can load them,
+                # then restore all namespaced env vars in the finally block.
+                vault.save(edit_engine, edit_name, credentials)
+                vault.clear_ds_env()
+                vault.inject_env(edit_engine, edit_name, flat=True)
+                _register_secret_vars(engine_def)  # flat names for scrubbing during test
                 try:
                     pad = await scratchpads.get_or_create("__datasource_test__")
                     await pad.reset()
@@ -2796,9 +2856,7 @@ async def _handle_connect_datasource(
                         await pad.install_packages([engine_def.pip])
                     cell = await pad.execute(engine_def.test_snippet)
                 finally:
-                    ds_keys = [k for k in _os.environ if k.startswith("DS_")]
-                    for k in ds_keys:
-                        del _os.environ[k]
+                    _restore_namespaced_env(vault)
 
                 if cell.error or (cell.stdout.strip() != "ok" and cell.stderr.strip()):
                     error_text = (
@@ -2824,7 +2882,7 @@ async def _handle_connect_datasource(
                     if retry != "y":
                         return session
                     console.print()
-                    for f in engine_def.fields:
+                    for f in active_fields:
                         if not f.secret:
                             continue
                         value = Prompt.ask(
@@ -2841,8 +2899,8 @@ async def _handle_connect_datasource(
                 break
 
         vault.save(edit_engine, edit_name, credentials)
-        vault.inject_env(edit_engine, edit_name)
-        _register_secret_vars(engine_def)
+        _restore_namespaced_env(vault)
+        _register_secret_vars(engine_def, engine=edit_engine, name=edit_name)
         console.print()
         console.print(
             f'        Credentials updated for [bold]"{datasource_name}"[/bold].'
@@ -2880,12 +2938,11 @@ async def _handle_connect_datasource(
     known_slugs = {f"{c['engine']}-{c['name']}": c for c in vault.list_connections()}
     if stripped_answer in known_slugs:
         conn = known_slugs[stripped_answer]
-        vault.clear_ds_env()
-        vault.inject_env(conn["engine"], conn["name"])
+        _restore_namespaced_env(vault)
         session._active_datasource = stripped_answer
         recon_engine_def = registry.get(conn["engine"])
         if recon_engine_def:
-            _register_secret_vars(recon_engine_def)
+            _register_secret_vars(recon_engine_def, engine=conn["engine"], name=conn["name"])
             engine_label = recon_engine_def.display_name
         else:
             engine_label = conn["engine"]
@@ -3086,11 +3143,14 @@ async def _handle_connect_datasource(
             console.print()
             console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
 
-            # Temporarily inject DS_* into os.environ (test before committing to vault)
+            # Temporarily inject flat DS_* vars for test_snippet execution.
+            # conn_name is not yet known, so inject directly from credentials.
             import os as _os
 
+            vault.clear_ds_env()
             for key, value in credentials.items():
                 _os.environ[f"DS_{key.upper()}"] = value
+            _register_secret_vars(engine_def)  # flat mode, for scrubbing during test
 
             try:
                 pad = await scratchpads.get_or_create("__datasource_test__")
@@ -3101,10 +3161,7 @@ async def _handle_connect_datasource(
 
                 cell = await pad.execute(engine_def.test_snippet)
             finally:
-                # Always clean up DS_* regardless of outcome
-                ds_keys = [k for k in _os.environ if k.startswith("DS_")]
-                for k in ds_keys:
-                    del _os.environ[k]
+                _restore_namespaced_env(vault)
 
             if cell.error or (cell.stdout.strip() != "ok" and cell.stderr.strip()):
                 error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
@@ -3177,8 +3234,8 @@ async def _handle_connect_datasource(
             console.print("[anton.muted]Cancelled.[/]")
             console.print()
             return session
-        vault.inject_env(engine_def.engine, conn_name)
-        _register_secret_vars(engine_def)
+        _restore_namespaced_env(vault)
+        _register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
         console.print()
         console.print(
             f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
@@ -3196,7 +3253,9 @@ async def _handle_connect_datasource(
         return session
 
     vault.save(engine_def.engine, conn_name, credentials)
-    _register_secret_vars(engine_def)
+    _restore_namespaced_env(vault)
+    session._active_datasource = slug
+    _register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
     console.print(f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].')
 
     console.print()
@@ -3219,8 +3278,11 @@ async def _handle_connect_datasource(
 
 
 def _handle_list_data_sources(console: Console) -> None:
-    """Print all saved Local Vault connections with their DS_* var names."""
+    """Print all saved Local Vault connections in a table with status."""
+    from rich.table import Table
+
     vault = DataVault()
+    registry = DatasourceRegistry()
     conns = vault.list_connections()
     console.print()
     if not conns:
@@ -3228,16 +3290,31 @@ def _handle_list_data_sources(console: Console) -> None:
         console.print("[anton.muted]Use /connect-data-source to add one.[/]")
         console.print()
         return
-    console.print("[anton.cyan]Connected data sources:[/]")
-    console.print()
+
+    table = Table(title="Local Vault — Saved Connections", show_lines=False)
+    table.add_column("Name", style="bold")
+    table.add_column("Source")
+    table.add_column("Status")
+
     for c in conns:
-        fields = vault.load(c["engine"], c["name"]) or {}
-        var_names = ", ".join(f"DS_{k.upper()}" for k in fields)
         slug = f"{c['engine']}-{c['name']}"
-        complete = "✓" if var_names else "⚠ incomplete"
-        console.print(f"  [bold]{slug}[/]  {complete}")
-        if var_names:
-            console.print(f"  [anton.muted]  {var_names}[/]")
+        engine_def = registry.get(c["engine"])
+        source = engine_def.display_name if engine_def else c["engine"]
+        fields = vault.load(c["engine"], c["name"]) or {}
+
+        if not fields:
+            status = "[yellow]incomplete[/]"
+        elif engine_def and engine_def.auth_method != "choice":
+            required = [f.name for f in engine_def.fields if f.required]
+            missing = [name for name in required if name not in fields]
+            status = "[yellow]incomplete[/]" if missing else "[green]saved[/]"
+        else:
+            # choice-auth engine or unknown engine: presence of any field = saved
+            status = "[green]saved[/]"
+
+        table.add_row(slug, source, status)
+
+    console.print(table)
     console.print()
 
 
@@ -3266,6 +3343,98 @@ def _handle_remove_data_source(console: Console, slug: str) -> None:
     console.print()
 
 
+async def _handle_test_datasource(
+    console: Console,
+    scratchpads: ScratchpadManager,
+    slug: str,
+) -> None:
+    """Test an existing Local Vault connection by running its test_snippet."""
+    if not slug:
+        console.print(
+            "[anton.warning]Usage: /test-data-source <engine-name>[/]"
+        )
+        console.print()
+        return
+
+    parts = slug.split("-", 1)
+    if len(parts) != 2:
+        console.print(
+            f"[anton.warning]Invalid name '{slug}'. Use engine-name format.[/]"
+        )
+        console.print()
+        return
+
+    vault = DataVault()
+    registry = DatasourceRegistry()
+    engine, name = parts
+    fields = vault.load(engine, name)
+    if fields is None:
+        console.print(
+            f"[anton.warning]No connection '{slug}' found in Local Vault.[/]"
+        )
+        console.print()
+        return
+
+    engine_def = registry.get(engine)
+    if engine_def is None:
+        console.print(
+            f"[anton.warning]Unknown engine '{engine}'. Cannot test.[/]"
+        )
+        console.print()
+        return
+
+    if not engine_def.test_snippet:
+        console.print(
+            f"[anton.warning]No test snippet defined for '{engine}'. Cannot test.[/]"
+        )
+        console.print()
+        return
+
+    console.print()
+    console.print(
+        f"[anton.cyan](anton)[/] Testing connection [bold]{slug}[/bold]…"
+    )
+
+    vault.clear_ds_env()
+    vault.inject_env(engine, name, flat=True)
+    _register_secret_vars(engine_def)  # flat names for scrubbing during test
+
+    cell = None
+    try:
+        pad = await scratchpads.get_or_create("__datasource_test__")
+        await pad.reset()
+        if engine_def.pip:
+            await pad.install_packages([engine_def.pip])
+        cell = await pad.execute(engine_def.test_snippet)
+    finally:
+        _restore_namespaced_env(vault)
+
+    if cell is None or cell.error or (
+        cell.stdout.strip() != "ok" and cell.stderr.strip()
+    ):
+        error_text = ""
+        if cell is not None:
+            error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
+        first_line = (
+            next((ln for ln in error_text.splitlines() if ln.strip()), error_text)
+            if error_text
+            else "unknown error"
+        )
+        console.print()
+        console.print(
+            f"[anton.warning](anton)[/] ✗ Connection test failed for"
+            f" [bold]{slug}[/bold]."
+        )
+        console.print()
+        console.print(f"        Error: {first_line}")
+    else:
+        console.print(
+            f"[anton.success]        ✓ Connection test passed for"
+            f" [bold]{slug}[/bold]![/]"
+        )
+    console.print()
+
+
 def _print_slash_help(console: Console) -> None:
     """Print available slash commands."""
     console.print()
@@ -3279,7 +3448,9 @@ def _print_slash_help(console: Console) -> None:
     console.print(
         "  [bold]/list-data-sources[/]      — List all saved data source connections"
     )
+    console.print("  [bold]/edit-data-source[/]       — Edit a saved connection's credentials")
     console.print("  [bold]/remove-data-source[/]     — Remove a saved connection")
+    console.print("  [bold]/test-data-source[/]       — Test a saved connection")
     console.print(
         "  [bold]/data-connections[/]       — View and manage stored keys and connections"
     )
@@ -3440,15 +3611,15 @@ async def _chat_loop(
     workspace = Workspace(settings.workspace_path)
     workspace.apply_env_to_process()
 
-    # Inject all Local Vault connections as DS_* env vars so every scratchpad
-    # subprocess inherits them. Must happen before any ChatSession is created.
+    # Inject all Local Vault connections as namespaced DS_* env vars so every
+    # scratchpad subprocess inherits them. Must happen before any ChatSession is created.
     _dv = DataVault()
     _dreg = DatasourceRegistry()
     for _conn in _dv.list_connections():
-        _dv.inject_env(_conn["engine"], _conn["name"])
+        _dv.inject_env(_conn["engine"], _conn["name"])  # flat=False by default
         _edef = _dreg.get(_conn["engine"])
         if _edef is not None:
-            _register_secret_vars(_edef)
+            _register_secret_vars(_edef, engine=_conn["engine"], name=_conn["name"])
     del _dv, _dreg
 
     # --- Memory system (brain-inspired architecture) ---
@@ -3710,6 +3881,8 @@ async def _chat_loop(
                             "[anton.warning]Usage: /remove-data-source"
                             " <engine-name>[/]"
                         )
+                        console.print()
+                    else:
                         _handle_remove_data_source(console, arg)
                     continue
                 elif cmd == "/edit-data-source":
@@ -3728,10 +3901,10 @@ async def _chat_loop(
                         )
                     continue
                 elif cmd == "/test-data-source":
-                    console.print(
-                        "[anton.muted]/test-data-source is not yet" " implemented.[/]"
+                    arg = parts[1].strip() if len(parts) > 1 else ""
+                    await _handle_test_datasource(
+                        console, session._scratchpads, arg
                     )
-                    console.print()
                     continue
                 elif cmd == "/data-connections":
                     session = await _handle_data_connections(

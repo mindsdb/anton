@@ -509,3 +509,96 @@ def connect_data_source(
         await updated._scratchpads.close_all()
 
     asyncio.run(_run())
+
+
+@app.command("list-data-sources")
+def list_data_sources(ctx: typer.Context) -> None:
+    """List all saved data source connections in the Local Vault."""
+    from anton.chat import _handle_list_data_sources
+
+    _handle_list_data_sources(console)
+
+
+@app.command("edit-data-source")
+def edit_data_source(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Connection slug to edit (e.g. postgres-mydb)."),
+) -> None:
+    """Edit credentials for an existing Local Vault connection."""
+    import asyncio
+
+    from anton.chat import ChatSession, _handle_connect_datasource
+    from anton.llm.client import LLMClient
+    from anton.scratchpad import ScratchpadManager
+
+    settings = _get_settings(ctx)
+    _ensure_workspace(settings)
+    _ensure_api_key(settings)
+
+    llm_client = LLMClient.from_settings(settings)
+    scratchpads = ScratchpadManager(
+        coding_provider=settings.coding_provider,
+        coding_model=settings.coding_model,
+        coding_api_key=(
+            settings.anthropic_api_key
+            if settings.coding_provider == "anthropic"
+            else settings.openai_api_key
+        )
+        or "",
+    )
+    session = ChatSession(llm_client)
+
+    async def _run() -> None:
+        updated = await _handle_connect_datasource(
+            console,
+            scratchpads,
+            session,
+            datasource_name=name,
+        )
+        await updated._scratchpads.close_all()
+
+    asyncio.run(_run())
+
+
+@app.command("remove-data-source")
+def remove_data_source(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Connection slug to remove (e.g. postgres-mydb)."),
+) -> None:
+    """Remove a saved connection from the Local Vault."""
+    from anton.chat import _handle_remove_data_source
+
+    _handle_remove_data_source(console, name)
+
+
+@app.command("test-data-source")
+def test_data_source(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Connection slug to test (e.g. postgres-mydb)."),
+) -> None:
+    """Test a saved Local Vault connection using its test snippet."""
+    import asyncio
+
+    from anton.chat import _handle_test_datasource
+    from anton.scratchpad import ScratchpadManager
+
+    settings = _get_settings(ctx)
+    _ensure_workspace(settings)
+    _ensure_api_key(settings)
+
+    scratchpads = ScratchpadManager(
+        coding_provider=settings.coding_provider,
+        coding_model=settings.coding_model,
+        coding_api_key=(
+            settings.anthropic_api_key
+            if settings.coding_provider == "anthropic"
+            else settings.openai_api_key
+        )
+        or "",
+    )
+
+    async def _run() -> None:
+        await _handle_test_datasource(console, scratchpads, name)
+        await scratchpads.close_all()
+
+    asyncio.run(_run())

@@ -12,6 +12,18 @@ def _sanitize(value: str) -> str:
     return re.sub(r"[^\w\-]", "_", value).strip("_")
 
 
+def _slug_env_prefix(engine: str, name: str) -> str:
+    """Return the DS_ prefix for a namespaced connection env var.
+
+    Examples:
+      engine="postgres", name="prod_db"  → "DS_POSTGRES_PROD_DB"
+      engine="hubspot",  name="main"     → "DS_HUBSPOT_MAIN"
+      engine="postgres", name="prod-db.eu" → "DS_POSTGRES_PROD_DB_EU"
+    """
+    raw = f"{engine}-{name}"
+    return "DS_" + re.sub(r"[^\w]", "_", raw).upper()
+
+
 class DataVault:
     """Manages data source connection credentials in ~/.anton/data_vault/."""
 
@@ -81,20 +93,30 @@ class DataVault:
                 continue
         return results
 
-    def inject_env(self, engine: str, name: str) -> list[str] | None:
-        """Load credentials and set DS_<FIELD_UPPER> in os.environ.
+    def inject_env(self, engine: str, name: str, *, flat: bool = False) -> list[str] | None:
+        """Load credentials and set DS_* environment variables.
+
+        Default (flat=False): injects namespaced vars, e.g. DS_POSTGRES_PROD_DB__HOST.
+        flat=True: injects legacy flat vars, e.g. DS_HOST — use only during
+        single-connection test_snippet execution.
 
         Returns the list of env var names set, or None if connection not found.
-        Call this before a scratchpad exec that needs the data source.
         """
         fields = self.load(engine, name)
         if fields is None:
             return None
         var_names: list[str] = []
-        for key, value in fields.items():
-            var = f"DS_{key.upper()}"
-            os.environ[var] = value
-            var_names.append(var)
+        if flat:
+            for key, value in fields.items():
+                var = f"DS_{key.upper()}"
+                os.environ[var] = value
+                var_names.append(var)
+        else:
+            prefix = _slug_env_prefix(engine, name)
+            for key, value in fields.items():
+                var = f"{prefix}__{key.upper()}"
+                os.environ[var] = value
+                var_names.append(var)
         return var_names
 
     def clear_ds_env(self) -> None:
