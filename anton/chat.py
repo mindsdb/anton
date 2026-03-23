@@ -2622,20 +2622,20 @@ async def _handle_add_custom_datasource(
     registry,
     session: "ChatSession",
 ):
-    """Ask the user how they authenticate, use the LLM to identify fields, save definition."""
+    """Ask for the tool name, use the LLM to identify required fields, then collect credentials."""
 
     console.print()
+    preamble = "[anton.cyan](anton)[/] "
     if name:
-        preamble = f"[anton.cyan](anton)[/] '{name}' isn't in my built-in list.\n        "
+        tool_name = name
     else:
-        preamble = "[anton.cyan](anton)[/] "
-    user_answer = Prompt.ask(
-        f"{preamble}How do you authenticate with it? "
-        f"Describe what you have or paste credentials directly",
-        console=console,
-    )
-    if not user_answer.strip():
+        tool_name = Prompt.ask(
+            f"{preamble}What is the name of the tool or service?",
+            console=console,
+        )
+    if not tool_name.strip():
         return None
+    tool_name = tool_name.strip()
 
     console.print()
     console.print("[anton.muted]    Got it — working out the connection details…[/]")
@@ -2647,7 +2647,7 @@ async def _handle_add_custom_datasource(
                 {
                     "role": "user",
                     "content": (
-                        f"The user wants to connect to{(' ' + repr(name)) if name else ' a custom data source'} and said: {user_answer}\n\n"
+                        f"The user wants to connect to {repr(tool_name)}.\n\n"
                         "Return ONLY valid JSON (no markdown fences, no commentary):\n"
                         '{"display_name":"Human-readable name","pip":"pip-package or empty string",'
                         '"fields":[{"name":"snake_case_name","value":"value if given inline else empty",'
@@ -2658,6 +2658,7 @@ async def _handle_add_custom_datasource(
             max_tokens=1024,
         )
         text = response.content.strip()
+        # Keep 
         text = _re.sub(r"^```[^\n]*\n|```\s*$", "", text, flags=_re.MULTILINE).strip()
         data = _json.loads(text)
     except Exception:
@@ -3139,10 +3140,18 @@ async def _handle_connect_datasource(
             return session
         engine_def, credentials = result
         conn_num = vault.next_connection_number(engine_def.engine)
-        vault.save(engine_def.engine, str(conn_num), credentials)
+        conn_name = str(conn_num)
+        vault.save(engine_def.engine, conn_name, credentials)
         slug = f"{engine_def.engine}-{conn_num}"
+        _restore_namespaced_env(vault)
+        session._active_datasource = slug
+        _register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
         console.print(
             f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].'
+        )
+        console.print()
+        console.print(
+            "[anton.muted]        You can now ask me questions about your data.[/]"
         )
         console.print()
         session._history.append(
