@@ -564,35 +564,27 @@ Setup → Users/Roles → Access Tokens. The account ID can be found in Setup �
 
 ---
 
-## Denodo
+## Big Commerce
 
 ```yaml
-engine: denodo
-display_name: Denodo
-pip: psycopg2-binary
-name_from: [host, database]
+engine: bigcommerce
+display_name: Big Commerce
+pip: httpx
+name_from: store_hash
 fields:
-  - { name: host,     required: true,  secret: false, description: "hostname or IP of the Denodo server" }
-  - { name: port,     required: false, secret: false, description: "port number (default 9996)", default: "9996" }
-  - { name: database, required: true,  secret: false, description: "Denodo virtual database name" }
-  - { name: user,     required: true,  secret: false, description: "Denodo username" }
-  - { name: password, required: true,  secret: true,  description: "Denodo password" }
+  - { name: api_base,     required: true,  secret: false, description: "Base URL of the BigCommerce API (e.g. https://api.bigcommerce.com/stores/0fh0fh0fh0/v3/)" }
+  - { name: access_token, required: true,  secret: true,  description: "API token for authenticating with BigCommerce" }
 test_snippet: |
-  import psycopg2, os
-  conn = psycopg2.connect(
-      host=os.environ['DS_HOST'],
-      port=int(os.environ.get('DS_PORT', '9996')),
-      dbname=os.environ['DS_DATABASE'],
-      user=os.environ['DS_USER'],
-      password=os.environ['DS_PASSWORD'],
-  )
-  conn.close()
+  import httpx, os
+  api_base = os.environ['DS_API_BASE'].rstrip('/')
+  access_token = os.environ['DS_ACCESS_TOKEN']
+  headers = {'X-Auth-Token': access_token}
+  r = httpx.get(f'{api_base}/catalog/products', headers=headers)
+  assert r.status_code < 400, f'HTTP {r.status_code}: {r.text[:200]}'
   print("ok")
 ```
 
-Denodo exposes a PostgreSQL-compatible wire protocol on port 9996 by default.
-Connect via the Denodo Platform Control Center → Server Configuration → ODBC/JDBC to find the port.
-
+BigCommerce API tokens can be created in the BigCommerce control panel under Advanced Settings → API Accounts. Choose "Create API Account", then select "V2/V3 API Token" and grant the necessary permissions (e.g. "Products: Read-Only" to access product data).
 ---
 
 ## TimescaleDB
