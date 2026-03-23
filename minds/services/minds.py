@@ -24,6 +24,8 @@ from minds.model.data_catalog.foreign_key_constraint import ForeignKeyConstraint
 from minds.model.data_catalog.primary_key_constraint import PrimaryKeyConstraint
 from minds.model.data_catalog.table import Table
 from minds.model.datasource import Datasource
+from minds.model.memory_rule import MemoryRule
+from minds.model.memory_topic import MemoryTopic
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus, MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
@@ -501,6 +503,17 @@ class MindsService:
             await self._cancel_data_catalog_loader_flows_for_mind(mind)
 
             mind.deleted_at = datetime.now(timezone.utc)
+
+            # Soft-delete associated memory rules and topics with the same timestamp
+            # so they can be restored together if the mind is restored later.
+            self.session.query(MemoryRule).filter(
+                MemoryRule.mind_id == mind.id,
+                MemoryRule.deleted_at.is_(None),
+            ).update({"deleted_at": mind.deleted_at})
+            self.session.query(MemoryTopic).filter(
+                MemoryTopic.mind_id == mind.id,
+                MemoryTopic.deleted_at.is_(None),
+            ).update({"deleted_at": mind.deleted_at})
 
             self.session.add(mind)
             self.session.commit()

@@ -8,6 +8,8 @@ from .base import BaseSQLModel
 from .conversation import Conversation
 from .data_catalog import Column, ColumnStatistics, DataCatalog, ForeignKeyConstraint, PrimaryKeyConstraint, Table
 from .datasource import Datasource
+from .memory_rule import MemoryRule, RuleType
+from .memory_topic import MemoryTopic
 from .message import Message
 from .mind import Mind
 from .mind_datasource import MindDatasource
@@ -27,4 +29,7 @@ __all__ = [
     "ColumnStatistics",
     "ForeignKeyConstraint",
     "PrimaryKeyConstraint",
+    "MemoryRule",
+    "RuleType",
+    "MemoryTopic",
 ]

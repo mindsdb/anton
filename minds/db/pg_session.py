@@ -116,3 +116,18 @@ def get_session(db_uri: str = settings.database.uri):
     finally:
         logger.debug("🔒 Closing database session")
         db.close()
+
+
+def get_open_session(db_uri: str = settings.database.uri):
+    """
+    Get an open SQLModel session.
+
+    Args:
+        db_uri: Database connection URI (defaults to settings value)
+
+    Returns:
+        SQLModelSession: Open SQLModel session
+    """
+    engine = get_engine(db_uri=db_uri)
+    session_factory = get_session_factory(engine)
+    return session_factory()

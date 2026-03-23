@@ -6,6 +6,7 @@ import pytest
 from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
+from minds.common.settings.app_settings import Agent
 from minds.requests.responses_request import ResponsesRequest
 from minds.schemas.chat import Message, Role
 from minds.schemas.conversations import ConversationMetadata, ConversationResponse
@@ -32,7 +33,12 @@ def handler_mod(monkeypatch):
 @pytest.fixture
 def mock_session():
     """Mock SQLModel session."""
-    return Mock(spec=Session)
+    sess = Mock(spec=Session)
+    # Default: no explicit agent parameter stored in DB.
+    row = Mock()
+    row.parameters = {"agent": None}
+    sess.exec.return_value.first.return_value = row
+    return sess
 
 
 @pytest.fixture
@@ -144,12 +150,18 @@ class TestResponsesRequestHandler:
         with (
             patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
+            patch.object(handler_mod.MindsService, "get_mind_model", new_callable=AsyncMock) as mock_get_mind_model,
         ):
             # Setup mocks
             mock_handler_instance = Mock()
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_handler_instance.responses = AsyncMock()
             mock_process_streaming.return_value = mock_streaming_response
+
+            fake_mind = Mock()
+            # Ensure streaming path does not switch to Anton-specific DB session/service.
+            fake_mind.parameters = {"agent_name": "candidate_sql_agent"}
+            mock_get_mind_model.return_value = fake_mind
 
             # Mock conversation service methods
             mock_conversation_service.create_conversation = AsyncMock(return_value=sample_conversation_response)
@@ -209,6 +221,76 @@ class TestResponsesRequestHandler:
 
             # Verify return value
             assert result == mock_streaming_response
+
+    @pytest.mark.asyncio
+    async def test_responses_request_handler_streaming_anton_stores_events_and_closes_owned_session(
+        self,
+        handler_mod,
+        mock_session,
+        mock_mindsdb_client,
+        sample_streaming_responses_request,
+        mock_context,
+        sample_conversation_response,
+        sample_message_responses,
+    ):
+        """Streaming + Anton should pass event_callback and use owned session."""
+        mock_streaming_response = Mock(spec=StreamingResponse)
+        message_id = uuid4()
+
+        owned_session = Mock()
+        owned_session.close = Mock()
+
+        anton_service = Mock()
+        anton_service.create_conversation = AsyncMock(return_value=sample_conversation_response)
+        anton_service.get_conversation_messages = AsyncMock(return_value=sample_message_responses)
+        mock_message = Mock()
+        mock_message.id = message_id
+        anton_service.create_conversation_message_placeholder = AsyncMock(return_value=mock_message)
+        anton_service.update_conversation_message_content = AsyncMock()
+        anton_service.create_conversation_message_event = AsyncMock()
+
+        with (
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
+            patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
+            patch.object(handler_mod.MindsService, "get_mind_model", new_callable=AsyncMock) as mock_get_mind_model,
+            patch.object(handler_mod, "get_open_session", return_value=owned_session) as mock_get_open_session,
+            patch.object(handler_mod, "ConversationsService", return_value=anton_service) as mock_cs_ctor,
+        ):
+            mock_handler_instance = Mock()
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+            mock_handler_instance.responses = AsyncMock()
+            mock_process_streaming.return_value = mock_streaming_response
+
+            fake_mind = Mock()
+            fake_mind.parameters = {"agent_name": Agent.ANTON.value}
+            mock_get_mind_model.return_value = fake_mind
+
+            result = await handler_mod.responses_request_handler(
+                session=mock_session,
+                context=mock_context,
+                mindsdb_client=mock_mindsdb_client,
+                responses_request=sample_streaming_responses_request,
+                conversation_service=Mock(),
+            )
+
+            # Owned session created and used to build a new ConversationsService.
+            mock_get_open_session.assert_called_once()
+            mock_cs_ctor.assert_called_once_with(
+                session=owned_session,
+                mindsdb_client=mock_mindsdb_client,
+                user_id=mock_context.user_id,
+                organization_id=mock_context.organization_id,
+            )
+
+            # process_streaming_producer should receive event_callback for persistence.
+            mock_process_streaming.assert_called_once()
+            call_kwargs = mock_process_streaming.call_args.kwargs
+            assert call_kwargs["event_callback"] == anton_service.create_conversation_message_event
+
+            # Response should close owned session in background.
+            assert result == mock_streaming_response
+            assert result.background is not None
+            assert result.background.func == owned_session.close
 
     @pytest.mark.asyncio
     async def test_responses_request_handler_non_streaming(

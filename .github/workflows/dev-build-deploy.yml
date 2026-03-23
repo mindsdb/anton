@@ -58,6 +58,27 @@ jobs:
           module-name: ${{ env.CI_REPOSITORY_SLUG }}
           build-for-environment: development
 
+  build-anton-scratchpad:
+    runs-on: mdb-dev
+    needs: [run-unit-tests, get-deploy-labels]
+    if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - uses: ./github-actions/setup-env
+      - uses: ./github-actions/build-push-ecr
+        with:
+          module-name: minds-anton-scratchpad
+          build-for-environment: development
+          extra-build-args: -f Dockerfile.scratchpad
+
   migrate:
     runs-on: mdb-dev
     needs: [ get-deploy-labels, build ]

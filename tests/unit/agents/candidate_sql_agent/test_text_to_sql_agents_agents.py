@@ -50,17 +50,21 @@ def _mk_mind(name: str = "test-mind", ds_names: list[str] | None = None):
 
 
 class TestTextToSQLPipelineHelpers:
-    def test_set_native_datasource_from_linked_schema_selects_most_frequent(self):
+    def test_set_native_datasource_from_linked_schema_single_datasource_updates(self):
         mind = _mk_mind(ds_names=["fallback_ds"])
         p = TextToSQLPipeline(mind=mind, mindsdb_client=Mock(), is_native_query_mode_enabled=True)
 
-        linked = LinkedSchema(
-            tables=["ds1.t1", "ds1.t2", "ds2.t3"],
-            columns={},
-            joins=[],
-        )
+        linked = LinkedSchema(tables=["ds1.t1", "ds1.t2"], columns={}, joins=[])
         p._set_native_datasource_from_linked_schema(linked)
-        assert p._get_native_datasource_name() == "ds1"
+        assert p._native_datasource_name == "ds1"
+
+    def test_set_native_datasource_from_linked_schema_multiple_datasources_unchanged(self):
+        mind = _mk_mind(ds_names=["fallback_ds"])
+        p = TextToSQLPipeline(mind=mind, mindsdb_client=Mock(), is_native_query_mode_enabled=True)
+
+        linked = LinkedSchema(tables=["ds1.t1", "ds1.t2", "ds2.t3"], columns={}, joins=[])
+        p._set_native_datasource_from_linked_schema(linked)
+        assert p._native_datasource_name == "fallback_ds"
 
     def test_strip_datasource_prefix_for_native_is_case_insensitive(self):
         mind = _mk_mind()
@@ -248,6 +252,7 @@ async def test_plan_with_retry_uses_retry_agent_after_failure():
                 prompt="q",
                 message_history=[],
                 data_catalog_context_str="ctx",
+                data_catalogs=[_mk_catalog("ds", ["t"])],
                 streamer=mock_streamer,
                 usage=Mock(),
                 usage_limits=Mock(),
@@ -343,7 +348,7 @@ async def test_execute_multi_path_step_invalid_columns_is_recorded():
             return False, ["t.bad"]
 
         def preflight_score(self, *_a, **_k):
-            raise AssertionError("should not be called when columns invalid")
+            return 0, "SELECT t.bad FROM t", "Hallucinated columns detected: t.bad", None
 
     linked_schema = LinkedSchema(tables=["ds.t"], columns={"ds.t": ["good"]}, joins=[])
 
@@ -359,6 +364,42 @@ async def test_execute_multi_path_step_invalid_columns_is_recorded():
     assert len(ak.items) == 1
     assert ak.items[0].attempts
     assert "Hallucinated columns" in (ak.items[0].attempts[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_execute_multi_path_step_validation_exception_is_recorded():
+    mind = _mk_mind()
+    p = TextToSQLPipeline(mind=mind, mindsdb_client=Mock())
+    ak = AcquiredKnowledge()
+
+    streamer = Mock()
+    streamer.push = AsyncMock()
+
+    candidate = SimpleNamespace(query="SELECT 1", strategy="direct", executed=False, execution_error=None)
+
+    class FakeCG:
+        def __init__(self, *_a, **_k): ...
+
+        async def generate(self, **_):
+            return [candidate]
+
+        def preflight_score(self, *_a, **_k):
+            return 0, "SELECT 1", "Column validation failed: parse failed", None
+
+    linked_schema = LinkedSchema(tables=["ds.t"], columns={"ds.t": ["good"]}, joins=[])
+
+    with patch("minds.agents.candidate_sql_agent.text_to_sql_agents.agents.CandidateGenerator", FakeCG):
+        await p._execute_multi_path_step(
+            step_description="step",
+            data_catalog_subset_context="ctx",
+            acquired_knowledge=ak,
+            streamer=streamer,
+            linked_schema=linked_schema,
+        )
+
+    assert len(ak.items) == 1
+    assert ak.items[0].attempts
+    assert "Column validation failed" in (ak.items[0].attempts[0].error or "")
 
 
 @pytest.mark.asyncio
@@ -398,12 +439,12 @@ async def test_execute_multi_path_step_early_exits_on_first_successful_candidate
         def validate_columns(self, *_a, **_k):
             return True, []
 
-        def preflight_score(self, query, sanitize_fn=None):
+        def preflight_score(self, query, sanitize_fn=None, **_k):
             FakeCG.calls += 1
             sanitized = sanitize_fn(query) if sanitize_fn else query
-            return 2, sanitized, ""
+            return 2, sanitized, "", pd.DataFrame({"x": [1]})
 
-    p._execute_sql = Mock(return_value=pd.DataFrame({"x": [1]}))
+    p._execute_sql = Mock(side_effect=AssertionError("should not execute when preflight has result"))
 
     with patch("minds.agents.candidate_sql_agent.text_to_sql_agents.agents.CandidateGenerator", FakeCG):
         await p._execute_multi_path_step(
@@ -542,10 +583,39 @@ async def test_instruction_builders_include_expected_context_and_mode_specific_r
                 data_catalog_subset_context="SUB",
                 acquired_knowledge="K",
                 is_native_query_mode_enabled=True,
+                native_engine="snowflake",
             )
         )
     )
     assert "SNOWFLAKE CASE SENSITIVITY" in g_native
+
+    g_bigquery = await sql_gen_instructions(
+        SimpleNamespace(
+            deps=SQLGenAgentDeps(
+                mind=mind,
+                data_catalog_subset_context="SUB",
+                acquired_knowledge="K",
+                is_native_query_mode_enabled=True,
+                native_engine="bigquery",
+            )
+        )
+    )
+    assert "BigQuery Standard SQL" in g_bigquery
+
+    g_mssql = await sql_gen_instructions(
+        SimpleNamespace(
+            deps=SQLGenAgentDeps(
+                mind=mind,
+                data_catalog_subset_context="SUB",
+                acquired_knowledge="K",
+                is_native_query_mode_enabled=True,
+                native_engine="mssql",
+            )
+        )
+    )
+    assert "T-SQL" in g_mssql
+    assert "GETDATE" in g_mssql
+    assert "SELECT TOP" in g_mssql
 
     g_mindsdb = await sql_gen_instructions(
         SimpleNamespace(
@@ -554,6 +624,7 @@ async def test_instruction_builders_include_expected_context_and_mode_specific_r
                 data_catalog_subset_context="SUB",
                 acquired_knowledge="K",
                 is_native_query_mode_enabled=False,
+                native_engine=None,
             )
         )
     )
@@ -566,6 +637,7 @@ async def test_instruction_builders_include_expected_context_and_mode_specific_r
                 data_catalog_subset_context="SUB",
                 acquired_knowledge="K",
                 is_native_query_mode_enabled=False,
+                native_engine=None,
                 failed_query="SELECT 1",
                 error_message="bad",
                 previous_attempts=[],
@@ -574,6 +646,23 @@ async def test_instruction_builders_include_expected_context_and_mode_specific_r
     )
     assert "SELECT 1" in retry
     assert "bad" in retry
+
+    retry_mssql = await sql_retry_instructions(
+        SimpleNamespace(
+            deps=SQLGenRetryAgentDeps(
+                mind=mind,
+                data_catalog_subset_context="SUB",
+                acquired_knowledge="K",
+                is_native_query_mode_enabled=True,
+                native_engine="mssql",
+                failed_query="SELECT 1 LIMIT 10",
+                error_message="Incorrect syntax near 'LIMIT'",
+                previous_attempts=[],
+            )
+        )
+    )
+    assert "T-SQL" in retry_mssql
+    assert "TRY_CAST" in retry_mssql  # from error instructions
 
     summ = await summarize_instructions(
         SimpleNamespace(

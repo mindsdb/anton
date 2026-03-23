@@ -44,10 +44,11 @@ def _make_settings(enable_model_selection: bool = False, **overrides) -> AppSett
     return AppSettings(**defaults)
 
 
-def _get_default_provider_and_model(settings: AppSettings) -> tuple[str, str]:
+def _get_default_provider_and_models(settings: AppSettings) -> tuple[str, str, str]:
     default_provider = settings.default_models.default_provider
     default_model = getattr(settings.default_models, f"{default_provider}_model")
-    return default_provider, default_model
+    default_coding_model = getattr(settings.default_models, f"{default_provider}_coding_model")
+    return default_provider, default_model, default_coding_model
 
 
 class TestLLMProvider:
@@ -110,33 +111,46 @@ class TestGetSupportedModelsByProvider:
     def test_disabled_returns_only_default(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
-        expected_default_provider, expected_default_model = _get_default_provider_and_model(settings)
+        expected_default_provider, expected_default_model, expected_default_coding_model = (
+            _get_default_provider_and_models(settings)
+        )
 
-        is_enabled, default_provider, default_model, providers = get_supported_models_by_provider(
+        is_enabled, default_provider, default_model, default_coding_model, providers = get_supported_models_by_provider(
             context=ctx, settings=settings
         )
 
         assert is_enabled is False
         assert default_provider == expected_default_provider
         assert default_model == expected_default_model
-        assert providers == {expected_default_provider: [expected_default_model]}
+        assert default_coding_model == expected_default_coding_model
+        assert providers == {
+            expected_default_provider: {
+                "reasoning_models": [expected_default_model],
+                "coding_models": [expected_default_coding_model],
+            }
+        }
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=True)
     def test_enabled_returns_all_providers(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
-        expected_default_provider, expected_default_model = _get_default_provider_and_model(settings)
+        expected_default_provider, expected_default_model, expected_default_coding_model = (
+            _get_default_provider_and_models(settings)
+        )
 
-        is_enabled, default_provider, default_model, providers = get_supported_models_by_provider(
+        is_enabled, default_provider, default_model, default_coding_model, providers = get_supported_models_by_provider(
             context=ctx, settings=settings
         )
 
         assert is_enabled is True
         assert default_provider == expected_default_provider
         assert default_model == expected_default_model
+        assert default_coding_model == expected_default_coding_model
         assert set(providers.keys()) == {p.value for p in LLMProvider}
-        assert settings.openai.supported_models == providers["openai"]
-        assert settings.anthropic.supported_models == providers["anthropic"]
+        assert settings.openai.supported_models == providers["openai"]["reasoning_models"]
+        assert settings.openai.supported_coding_models == providers["openai"]["coding_models"]
+        assert settings.anthropic.supported_models == providers["anthropic"]["reasoning_models"]
+        assert settings.anthropic.supported_coding_models == providers["anthropic"]["coding_models"]
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=False)
     def test_disabled_with_anthropic_default(self, mock_flag):
@@ -145,21 +159,26 @@ class TestGetSupportedModelsByProvider:
             default_models={"default_provider": "anthropic", "anthropic_model": "claude-sonnet-4-5"},
         )
 
-        is_enabled, default_provider, default_model, providers = get_supported_models_by_provider(
+        is_enabled, default_provider, default_model, default_coding_model, providers = get_supported_models_by_provider(
             context=ctx, settings=settings
         )
 
         assert is_enabled is False
         assert default_provider == "anthropic"
         assert default_model == "claude-sonnet-4-5"
-        assert providers == {"anthropic": ["claude-sonnet-4-5"]}
+        assert providers == {
+            "anthropic": {
+                "reasoning_models": ["claude-sonnet-4-5"],
+                "coding_models": [default_coding_model],
+            }
+        }
 
     @patch("minds.common.llm_provider.is_model_selection_enabled", return_value=True)
     def test_enabled_iterates_all_enum_members(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
 
-        _, _, _, providers = get_supported_models_by_provider(context=ctx, settings=settings)
+        _, _, _, _, providers = get_supported_models_by_provider(context=ctx, settings=settings)
 
         assert set(providers.keys()) == {p.value for p in LLMProvider}
 
@@ -205,7 +224,7 @@ class TestValidateProviderAndModelName:
     def test_disabled_default_provider_accepted(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
-        default_provider, _ = _get_default_provider_and_model(settings)
+        default_provider, _, _ = _get_default_provider_and_models(settings)
 
         validate_provider_and_model_name(provider=default_provider, model_name=None, context=ctx, settings=settings)
 
@@ -213,7 +232,7 @@ class TestValidateProviderAndModelName:
     def test_disabled_non_default_provider_rejected(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
-        default_provider, _ = _get_default_provider_and_model(settings)
+        default_provider, _, _ = _get_default_provider_and_models(settings)
         non_default_provider = next(p.value for p in LLMProvider if p.value != default_provider)
 
         with pytest.raises(ValueError, match="Model selection is disabled"):
@@ -225,7 +244,7 @@ class TestValidateProviderAndModelName:
     def test_disabled_default_model_accepted(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
-        _, default_model = _get_default_provider_and_model(settings)
+        _, default_model, _ = _get_default_provider_and_models(settings)
 
         validate_provider_and_model_name(provider=None, model_name=default_model, context=ctx, settings=settings)
 
@@ -233,7 +252,7 @@ class TestValidateProviderAndModelName:
     def test_disabled_non_default_model_rejected(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
-        _, default_model = _get_default_provider_and_model(settings)
+        _, default_model, _ = _get_default_provider_and_models(settings)
         non_default_model = f"{default_model}-not"
 
         with pytest.raises(ValueError, match="Model selection is disabled"):
@@ -285,7 +304,7 @@ class TestValidateProviderAndModelName:
     def test_enabled_model_without_provider_uses_default(self, mock_flag):
         ctx = _make_context()
         settings = _make_settings()
-        _, default_model = _get_default_provider_and_model(settings)
+        _, default_model, _ = _get_default_provider_and_models(settings)
 
         validate_provider_and_model_name(provider=None, model_name=default_model, context=ctx, settings=settings)
 

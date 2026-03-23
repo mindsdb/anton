@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 from uuid import UUID
@@ -113,7 +114,6 @@ def extract_sql_query_from_thoughts(content: Any) -> str | None:
 async def format_messages_for_streaming_chat_completions_api(
     message_generator: AsyncGenerator[StreamMessage, Any],
     model: str,
-    on_complete_callback: Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None = None,
     **kwargs,
 ) -> AsyncGenerator[str, None]:
     """
@@ -122,8 +122,6 @@ async def format_messages_for_streaming_chat_completions_api(
     Args:
             message_generator: An async generator that yields Message objects
             model (str): The model name to include in the SSE event.
-            on_complete_callback (Callable[[list[ChatCompletionChunk]], Awaitable[None]] | None): Optional callback
-                    function (ignored for chat completions API).
     Returns:
             An async generator yielding SSE formatted events
     """
@@ -184,6 +182,7 @@ async def format_messages_for_streaming_responses_api(
     message_generator: AsyncGenerator[StreamMessage, Any],
     model: str,
     message_id: UUID,
+    event_callback: Callable[[UUID, int, dict], Awaitable[None]] | None = None,
     **kwargs,
 ) -> AsyncGenerator[str, None]:
     """
@@ -192,14 +191,15 @@ async def format_messages_for_streaming_responses_api(
     Args:
         message_generator: An async generator that yields StreamMessage objects
         model (str): The model name to include in the SSE event.
-        on_complete_callback (Callable[[str], Awaitable[None]]): A callback function to call after
-                the messages are processed.
         message_id: UUID, The ID of the message to include in the response.
+        event_callback: Callable[[UUID, int, dict], Awaitable[None]] | None = None, The callback function
+        to call when an event is emitted.
 
     Returns:
         An async generator yielding SSE formatted events
     """
     async_index = 1
+    event_sequence_number = 0
 
     # First emit a chunk with status set to 'created' with no output
     created_chunk = StreamingResponseSchema(
@@ -213,6 +213,17 @@ async def format_messages_for_streaming_responses_api(
     yield f"event: {created_chunk.type.value}\ndata: {created_chunk.model_dump_json()}\n\n"
 
     # Emit each incoming message immediately.
+    # When storing assistant events, storing each chunk separately will mean a huge number of
+    # items stored in the database.
+    # Anton can also generate messages assistant messages that are not the final answer,
+    # such as 'let me query your data..' etc.
+    # Therefore, assistant chunks will be collected and when the role changes, they will be stored
+    # as a single event.
+
+    # This is the switch to indicate if it is currently streaming an assistant message.
+    is_assistant_stream = False
+
+    assistant_event_content = ""
     assistant_content = ""
     async for msg in message_generator:
         # Properly serialize BaseModel content
@@ -240,6 +251,30 @@ async def format_messages_for_streaming_responses_api(
                 ),
             )
 
+            # If is_assistant_stream is True, it means that an assistant stream was active,
+            # and it just ended because the role changed.
+            # Therefore, the assistant_event_content will be stored and then reset.
+            if event_callback is not None and is_assistant_stream:
+                event_sequence_number += 1
+                assistant_event_chunk = StreamingResponseSchema(
+                    type=StreamingResponseEvent.output_text_delta.value,
+                    sequence_number=async_index,
+                    response=ResponseDelta(
+                        item_id=str(message_id),
+                        delta=assistant_event_content,
+                    ),
+                )
+                await event_callback(message_id, event_sequence_number, assistant_event_chunk.model_dump())
+
+                # Reset the assistant event content and switch off the assistant stream.
+                assistant_event_content = ""
+                is_assistant_stream = False
+
+            if event_callback is not None:
+                event_sequence_number += 1
+                # Store other events immediately.
+                await event_callback(message_id, event_sequence_number, chunk.model_dump())
+
         # Emit assistant messages as delta chunks
         else:
             chunk = StreamingResponseSchema(
@@ -251,10 +286,32 @@ async def format_messages_for_streaming_responses_api(
                 ),
             )
 
+            if not is_assistant_stream:
+                is_assistant_stream = True
+
+            assistant_event_content += content
             assistant_content += content
 
         yield f"event: {chunk.type.value}\ndata: {chunk.model_dump_json()}\n\n"
         async_index += 1
+
+    # The stream will typically end with a final assistant message.
+    # Therefore, we need to store the assistant event content if it exists.
+    if assistant_event_content and event_callback is not None:
+        assistant_event_chunk = StreamingResponseSchema(
+            type=StreamingResponseEvent.output_text_delta.value,
+            sequence_number=async_index,
+            response=ResponseDelta(
+                item_id=str(message_id),
+                delta=assistant_event_content,
+            ),
+        )
+        # The events are committed when the message is committed.
+        # At times, the message is committed before this is flushed.
+        # Therefore, this is committed here.
+        # Commit this event explicitly because it can run after the message is committed.
+        event_sequence_number += 1
+        await event_callback(message_id, event_sequence_number, assistant_event_chunk.model_dump(), commit=True)
 
     # After the producer finished, emit a final small chunk marking completion
     # with status set to 'completed'.
@@ -284,6 +341,7 @@ async def process_streaming_producer(
     request_id: str,
     format_func: Callable[..., AsyncGenerator[str, None]],
     message_id: UUID | None = None,
+    event_callback: Callable[[UUID, int, dict], Awaitable[None]] | None = None,
     **format_kwargs,
 ) -> StreamingResponse:
     """
@@ -298,6 +356,8 @@ async def process_streaming_producer(
         request_id (str): The unique ID for the request, used to identify the stream.
         format_func (Callable[..., AsyncGenerator[str, None]]): The format function to use for formatting messages.
         message_id (UUID | None): Optional ID of the message to include in the response. Required for responses API.
+        event_callback: Callable[[UUID, int, dict], Awaitable[None]] | None = None, The callback function
+        to call when an event is emitted.
         **format_kwargs: Additional keyword arguments to pass to the format function.
 
     Returns:
@@ -320,13 +380,26 @@ async def process_streaming_producer(
                 await streamer.close()
 
         task = asyncio.create_task(run_producer())
-        async for message in streamer:
-            logger.debug(f"Message: {message}")
-            yield message
+        try:
+            async for message in streamer:
+                logger.debug(f"Message: {message}")
+                yield message
 
-        await task
+            await task
+        except asyncio.CancelledError:
+            logger.debug(f"Stream cancelled for request {request_id}")
+            task.cancel()
+            # The Anton runtime does not need to be cancelled separately.
+            # This is already handled when the producer task (running the agent) is cancelled.
+            # Line 145 in agents/anton_agent/agent.py (at the time of writing)
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            logger.info(f"Re-raising cancellation for request_id={request_id}")
+            raise
 
     format_args = {"message_generator": stream(), **format_kwargs}
+    if event_callback is not None:
+        format_args["event_callback"] = event_callback
     # Conditionally include message_id in format_func call only if provided
     # This is only required for responses API.
     if message_id is not None:
@@ -348,7 +421,6 @@ async def process_streaming_producer(
 async def format_messages_for_non_streaming_chat_completions_api(
     messages: list[StreamMessage],
     model: str,
-    on_complete_callback: Callable[[ChatCompletion], Awaitable[None]] | None = None,
     **kwargs,
 ) -> JSONResponse:
     """
@@ -357,8 +429,6 @@ async def format_messages_for_non_streaming_chat_completions_api(
     Args:
         messages (list[StreamMessage]): A list of StreamMessage objects.
         model (str): The model name to include in the response.
-        on_complete_callback (Callable[[ChatCompletion], Awaitable[None]] | None): Optional callback
-            function (ignored for chat completions API). Required for responses API.
 
     Returns:
             JSONResponse: A response that contains the ChatCompletion built from the messages.

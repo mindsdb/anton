@@ -34,15 +34,16 @@ class LLMProvider(Enum):
 
 def get_supported_models_by_provider(
     context: Context, settings: AppSettings | None = None
-) -> tuple[bool, str, str, dict[str, list[str]]]:
+) -> tuple[bool, str, str, str, dict[str, dict[str, list[str]]]]:
     """
     Get the supported models by provider.
     If model selection is disabled, return only the default provider and model.
     If model selection is enabled, return all supported providers and models.
 
     Returns:
-        tuple[bool, str, str, dict[str, list[str]]]: A tuple with a boolean flag indicating if model selection is
-        enabled, the default provider, the default model, and a dictionary of supported providers and models
+        tuple[bool, str, str, str, dict[str, dict[str, list[str]]]]: A tuple with a boolean flag indicating if model
+        selection is enabled, the default provider, the default reasoning model, the default coding model, and a
+        dictionary mapping providers -> {reasoning_models: [...], coding_models: [...]}.
     """
     settings = settings or get_app_settings()
 
@@ -51,18 +52,25 @@ def get_supported_models_by_provider(
 
     default_provider = settings.default_models.default_provider
     default_model = getattr(settings.default_models, f"{default_provider}_model")
+    default_coding_model = getattr(settings.default_models, f"{default_provider}_coding_model")
     if not model_selection_enabled:
         providers_and_models = {
-            default_provider: [default_model],
+            default_provider: {
+                "reasoning_models": [default_model],
+                "coding_models": [default_coding_model],
+            }
         }
 
     else:
-        providers_and_models: dict[str, list[str]] = {}
+        providers_and_models: dict[str, dict[str, list[str]]] = {}
         for provider in LLMProvider:
             provider_str = provider.value
-            providers_and_models[provider_str] = getattr(settings, provider_str).supported_models
+            providers_and_models[provider_str] = {
+                "reasoning_models": getattr(settings, provider_str).supported_models,
+                "coding_models": getattr(settings, provider_str).supported_coding_models,
+            }
 
-    return model_selection_enabled, default_provider, default_model, providers_and_models
+    return model_selection_enabled, default_provider, default_model, default_coding_model, providers_and_models
 
 
 def validate_provider_and_model_name(
@@ -89,8 +97,8 @@ def validate_provider_and_model_name(
 
     settings = settings or get_app_settings()
 
-    model_selection_enabled, default_provider, default_model, providers_and_models = get_supported_models_by_provider(
-        context=context, settings=settings
+    model_selection_enabled, default_provider, default_model, _default_coding_model, providers_and_models = (
+        get_supported_models_by_provider(context=context, settings=settings)
     )
 
     if provider:
@@ -112,12 +120,11 @@ def validate_provider_and_model_name(
             if model_name != default_model:
                 raise ValueError(f"Model selection is disabled. Only the default model '{default_model}' can be used.")
         else:
-            supported_models = providers_and_models.get(
-                provider,
-                providers_and_models[default_provider],
-            )
-            if model_name not in supported_models:
+            provider_key = provider or default_provider
+            supported = providers_and_models.get(provider_key, providers_and_models[default_provider])
+            supported_reasoning_models = supported.get("reasoning_models", [])
+            if model_name not in supported_reasoning_models:
                 raise ValueError(
                     f"Model '{model_name}' is not supported for provider '{provider or default_provider}'. "
-                    f"Supported models: {', '.join(supported_models)}"
+                    f"Supported models: {', '.join(supported_reasoning_models)}"
                 )

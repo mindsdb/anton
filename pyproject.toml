@@ -1,21 +1,44 @@
 [project]
 name = "minds"
-version = "1.6.2"
+version = "1.7.0"
 requires-python = ">=3.10,<4.0"
 dependencies = [
-    "fastapi==0.128.0",
     "pydantic==2.12.5",
+    "fastapi==0.128.0",
+    "uvicorn==0.40.0",
+    "watchfiles==1.1.0",
     "python-dotenv==1.1.0",
     "pyodbc>=4.0.39",
+    "openai==1.107.2",
+    "redis==6.4.0",
     "httpx==0.28.1",
+    "langfuse==3.10.3",
     "alembic==1.16.4",
     "sqlmodel==0.0.24",
     "SQLAlchemy==2.0.43",
     "psycopg2-binary==2.9.10",
     "pydantic-ai==1.3.0",
+    "sqlglot==27.2.0",
+    "anthropic>=0.70.0,<0.76.0",
     "mindsdb_sdk @ https://github.com/mindsdb/mindsdb_python_sdk/archive/refs/heads/main.zip",
+    "pandas==2.3.1",
     "prefect==3.4.18",
+    "async-property==0.2.2",
+    "pydantic-settings==2.10.1",
+    "tabulate==0.9.0",
+    "mind-castle==0.4.9",
     "statsig-python-core==0.15.1",
+    "docker==7.1.0",
+    "statsig-python-core==0.15.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.1",
+    "pytest-asyncio==1.1.0",
+    "pytest-cov==6.2.1",
+    "ruff==0.12.8",
+    "watchfiles==1.1.0",
 ]
 
 [build-system]
@@ -26,16 +49,7 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["minds", "minds.*"]
 
-[tool.poetry.dependencies]
-python-dotenv = "^1.1.0"
-pytest-asyncio = "^1.1.0"
-watchfiles = "^1.1.0"
-ruff = "^0.12.8"
-pytest-cov = "^6.2.1"
-pytest = "^8.4.1"
-
 # Pytest
-
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --maxfail=1 --disable-warnings"
 testpaths = ["tests"]
@@ -65,6 +79,7 @@ ignore = ["B008"]  # Allow Depends() calls in FastAPI function signatures
 "minds/agents/database_agent/prompt_templates.py" = ["E501"]
 "minds/agents/helpers/chart_generation_instructions.py" = ["E501"]
 "minds/agents/candidate_sql_agent/**/instruction*.py" = ["E501"]
+"minds/agents/anton_agent/anton/prompts.py" = ["E501"]
 [tool.ruff.lint.pycodestyle]
 ignore-overlong-task-comments = true
 

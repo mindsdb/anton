@@ -10,18 +10,29 @@ Each path runs independently and may produce different SQL approaches.
 """
 
 import asyncio
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindsdb_sql_parser import parse_sql
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
+from sqlglot import exp, parse_one
+from sqlglot.errors import ParseError
 
 from minds.agents.candidate_sql_agent.candidate_generator_agent.instructions_templates import (
-    DIRECT_SYSTEM_PROMPT,
-    DIVIDE_CONQUER_SYSTEM_PROMPT,
-    QUERY_PLAN_SYSTEM_PROMPT,
+    DIRECT_SYSTEM_PROMPT_BIGQUERY,
+    DIRECT_SYSTEM_PROMPT_MINDSDB,
+    DIRECT_SYSTEM_PROMPT_MSSQL,
+    DIRECT_SYSTEM_PROMPT_SNOWFLAKE,
+    DIVIDE_CONQUER_SYSTEM_PROMPT_BIGQUERY,
+    DIVIDE_CONQUER_SYSTEM_PROMPT_MINDSDB,
+    DIVIDE_CONQUER_SYSTEM_PROMPT_MSSQL,
+    DIVIDE_CONQUER_SYSTEM_PROMPT_SNOWFLAKE,
+    QUERY_PLAN_SYSTEM_PROMPT_BIGQUERY,
+    QUERY_PLAN_SYSTEM_PROMPT_MINDSDB,
+    QUERY_PLAN_SYSTEM_PROMPT_MSSQL,
+    QUERY_PLAN_SYSTEM_PROMPT_SNOWFLAKE,
 )
 from minds.agents.candidate_sql_agent.linker_agent.agent import LinkedSchema
 from minds.agents.candidate_sql_agent.settings import CandidateSQLAgentSettings
@@ -46,7 +57,7 @@ class SQLCandidate:
     executed: bool = False
     execution_result: str | None = None
     execution_error: str | None = None
-    preflight_score: int = 0  # 0=failed, 1=explain ok, 2=explain+exec ok
+    preflight_score: int = 0  # 0=failed, 1=executed successfully
 
 
 class DivideConquerOutput(BaseModel):
@@ -91,24 +102,51 @@ class CandidateGeneratorDeps:
 
 divide_conquer_agent = Agent(
     model=None,  # Set at runtime
-    system_prompt=DIVIDE_CONQUER_SYSTEM_PROMPT,
+    system_prompt=DIVIDE_CONQUER_SYSTEM_PROMPT_SNOWFLAKE,
     output_type=DivideConquerOutput,
     retries=0,
 )
 
 query_plan_agent = Agent(
     model=None,  # Set at runtime
-    system_prompt=QUERY_PLAN_SYSTEM_PROMPT,
+    system_prompt=QUERY_PLAN_SYSTEM_PROMPT_SNOWFLAKE,
     output_type=QueryPlanOutput,
     retries=0,
 )
 
 direct_agent = Agent(
     model=None,  # Set at runtime
-    system_prompt=DIRECT_SYSTEM_PROMPT,
+    system_prompt=DIRECT_SYSTEM_PROMPT_SNOWFLAKE,
     output_type=DirectOutput,
     retries=0,
 )
+
+
+def _select_system_prompts(*, native_mode: bool, engine: str | None) -> tuple[str, str, str]:
+    engine_lower = (engine or "").lower()
+    if native_mode and engine_lower == "bigquery":
+        return (
+            DIVIDE_CONQUER_SYSTEM_PROMPT_BIGQUERY,
+            QUERY_PLAN_SYSTEM_PROMPT_BIGQUERY,
+            DIRECT_SYSTEM_PROMPT_BIGQUERY,
+        )
+    if native_mode and engine_lower == "snowflake":
+        return (
+            DIVIDE_CONQUER_SYSTEM_PROMPT_SNOWFLAKE,
+            QUERY_PLAN_SYSTEM_PROMPT_SNOWFLAKE,
+            DIRECT_SYSTEM_PROMPT_SNOWFLAKE,
+        )
+    if native_mode and engine_lower == "mssql":
+        return (
+            DIVIDE_CONQUER_SYSTEM_PROMPT_MSSQL,
+            QUERY_PLAN_SYSTEM_PROMPT_MSSQL,
+            DIRECT_SYSTEM_PROMPT_MSSQL,
+        )
+    return (
+        DIVIDE_CONQUER_SYSTEM_PROMPT_MINDSDB,
+        QUERY_PLAN_SYSTEM_PROMPT_MINDSDB,
+        DIRECT_SYSTEM_PROMPT_MINDSDB,
+    )
 
 
 class CandidateGenerator:
@@ -145,14 +183,20 @@ class CandidateGenerator:
         if last_error:
             raise last_error
 
-    def validate_columns(self, sql: str, linked_schema: LinkedSchema) -> tuple[bool, list[str]]:
+    def validate_columns(
+        self,
+        sql: str,
+        linked_schema: LinkedSchema,
+        *,
+        use_parser: bool = True,
+        dialect: str | None = None,
+    ) -> tuple[bool, list[str]]:
         """
         Validate that column references in SQL exist in the linked schema.
 
         Returns (is_valid, invalid_columns).
         This catches column hallucination before execution.
         """
-        import re
 
         def _strip_identifier(token: str) -> str:
             token = token.strip()
@@ -160,8 +204,33 @@ class CandidateGenerator:
                 token = token[1:-1]
             return token.strip().lower()
 
+        def _alias_name(alias_expr: exp.Expression | None) -> str | None:
+            if alias_expr is None:
+                return None
+            if isinstance(alias_expr, exp.TableAlias):
+                if isinstance(alias_expr.this, exp.Identifier):
+                    return alias_expr.this.name
+                if hasattr(alias_expr, "name"):
+                    return alias_expr.name
+                return None
+            if isinstance(alias_expr, exp.Identifier):
+                return alias_expr.name
+            if isinstance(alias_expr, str):
+                return alias_expr
+            return None
+
+        def _parse_with_sqlglot(sql_text: str) -> exp.Expression:
+            dialect_name = dialect.lower() if dialect else None
+            try:
+                if dialect_name:
+                    return parse_one(sql_text, read=dialect_name)
+                return parse_one(sql_text)
+            except ParseError as e:
+                raise ValueError(f"SQL parsing failed for validation: {e}") from e
+
         # Build set of valid column names from linked schema
         valid_columns: set[str] = set()
+        column_to_tables: dict[str, set[str]] = {}
         table_basenames: set[str] = set()
         datasource_names: set[str] = set()
         schema_names: set[str] = set()
@@ -177,28 +246,92 @@ class CandidateGenerator:
                 col_lower = str(col).lower()
                 valid_columns.add(col_lower)
                 valid_columns.add(f"{table_name.lower()}.{col_lower}")
+                column_to_tables.setdefault(col_lower, set()).add(table_name.lower())
 
-        # Extract alias mappings from FROM / JOIN clauses (table [AS] alias)
-        alias_map: dict[str, str] = {}
-        from_join_pattern = re.compile(
-            r"\b(from|join)\s+([`\"\\w]+(?:\s*\\.\s*[`\"\\w]+){0,2})\s*(?:as\s+)?([`\"\\w]+)?",
-            re.IGNORECASE,
-        )
-        for _kw, table_ref, alias in from_join_pattern.findall(sql):
-            base = _strip_identifier(table_ref.split(".")[-1])
-            if base:
-                alias_map[base] = base
-            if alias:
-                alias_clean = _strip_identifier(alias)
-                if alias_clean:
-                    alias_map[alias_clean] = base
+        def _collect_refs_sqlglot(sql_text: str) -> tuple[dict[str, str], list[tuple[str, str]], list[str]]:
+            alias_map: dict[str, str] = {}
+            dot_refs: list[tuple[str, str]] = []
+            unqualified_tokens: list[str] = []
 
-        # Extract column references (qualified only)
-        dot_ref_pattern = re.compile(
-            r'([`"\w]+)\s*\.\s*([`"\w]+)',
-            re.IGNORECASE,
-        )
-        dot_refs = dot_ref_pattern.findall(sql)
+            parsed = _parse_with_sqlglot(sql_text)
+            for table_expr in parsed.find_all(exp.Table):
+                table_name = table_expr.name
+                if not table_name:
+                    continue
+                base = _strip_identifier(table_name)
+                if base:
+                    alias_map[base] = base
+                alias = _alias_name(table_expr.args.get("alias"))
+                if alias:
+                    alias_clean = _strip_identifier(alias)
+                    if alias_clean:
+                        alias_map[alias_clean] = base
+
+            for col_expr in parsed.find_all(exp.Column):
+                col_name = col_expr.name
+                if not col_name:
+                    continue
+                table_name = col_expr.table
+                if table_name:
+                    dot_refs.append((table_name, col_name))
+                else:
+                    unqualified_tokens.append(col_name)
+
+            return alias_map, dot_refs, unqualified_tokens
+
+        def _collect_refs_mindsdb(sql_text: str) -> tuple[dict[str, str], list[tuple[str, str]], list[str]]:
+            from mindsdb_sql_parser.ast import Identifier
+
+            from minds.common.mindsdb import query_traversal
+
+            alias_map: dict[str, str] = {}
+            dot_refs: list[tuple[str, str]] = []
+            unqualified_tokens: list[str] = []
+
+            def _alias_from_node(node) -> str | None:
+                for attr in ("alias", "alias_name", "as_name", "table_alias", "alias_identifier"):
+                    val = getattr(node, attr, None)
+                    if val is None:
+                        continue
+                    if isinstance(val, Identifier):
+                        parts = [p for p in getattr(val, "parts", []) if p]
+                        if parts:
+                            return parts[-1]
+                    if isinstance(val, str):
+                        return val
+                    name = getattr(val, "name", None)
+                    if name:
+                        return name
+                return None
+
+            parsed = parse_sql(sql_text)
+
+            def _collect_identifiers(node, is_table, **_kwargs):
+                if isinstance(node, Identifier):
+                    parts = [p for p in node.parts if p]
+                    if is_table:
+                        if parts:
+                            base = _strip_identifier(parts[-1])
+                            if base:
+                                alias_map[base] = base
+                            alias = _alias_from_node(node)
+                            if alias:
+                                alias_clean = _strip_identifier(alias)
+                                if alias_clean:
+                                    alias_map[alias_clean] = base
+                        return
+                    if len(parts) >= 2:
+                        dot_refs.append((parts[-2], parts[-1]))
+                    elif len(parts) == 1:
+                        unqualified_tokens.append(parts[0])
+
+            query_traversal(parsed, _collect_identifiers)
+            return alias_map, dot_refs, unqualified_tokens
+
+        if use_parser:
+            alias_map, dot_refs, unqualified_tokens = _collect_refs_mindsdb(sql)
+        else:
+            alias_map, dot_refs, unqualified_tokens = _collect_refs_sqlglot(sql)
 
         invalid: list[str] = []
 
@@ -214,69 +347,72 @@ class CandidateGenerator:
 
             # Resolve aliases to base table name if available
             table_base = alias_map.get(table_clean, table_clean)
-
-            if col_clean not in valid_columns and f"{table_base}.{col_clean}" not in valid_columns:
+            # If we can resolve the table, require the column to exist on that table
+            if table_base in table_basenames:
+                if f"{table_base}.{col_clean}" not in valid_columns:
+                    invalid.append(f"{table_ref}.{col_ref}")
+                continue
+            # Unknown table: fall back to global column existence check
+            if col_clean not in valid_columns:
                 invalid.append(f"{table_ref}.{col_ref}")
 
         return (len(invalid) == 0, invalid)
 
-    def preflight_score(self, sql: str, sanitize_fn=None) -> tuple[int, str, str]:
+    def preflight_score(
+        self,
+        sql: str,
+        sanitize_fn=None,
+        *,
+        linked_schema: LinkedSchema | None = None,
+        engine: str | None = None,
+        is_native_query_mode: bool = False,
+    ) -> tuple[int, str, str, object | None]:
         """
         Score a SQL candidate using preflight checks.
 
-        Returns (score, sanitized_sql, error):
-        - Score 2: Both EXPLAIN and execution succeed (perfect)
-        - Score 1: Only EXPLAIN succeeds (syntax ok, runtime issue)
-        - Score 0: Both fail
-
-        This allows early exit when a perfect candidate is found.
+        Returns (score, sanitized_sql, error, exec_result):
+        - Score 1: Query executed successfully
+        - Score 0: Failed (invalid syntax, hallucinated columns, or execution error)
         """
-        if not self.mindsdb_client:
-            return (0, sql, "No MindsDB client available for preflight")
-
-        # Sanitize if function provided
+        # 1. Sanitize
         try:
             sanitized = sanitize_fn(sql) if sanitize_fn else sql
         except Exception as e:
-            return (0, sql, str(e))
+            return (0, sql, str(e), None)
 
-        explain_ok = 0
-        exec_ok = 0
-        exec_err = ""
-
-        # Check if this is a native dialect query - MindsDB parser can't EXPLAIN these
-        # Native dialect format: raw SQL only (no datasource wrapper)
-        is_native_dialect = re.search(r"SELECT\s+\*\s+FROM\s+\w+\s*\(", sanitized, re.IGNORECASE)
-
-        # Try EXPLAIN first (validates syntax) - skip for native dialect queries
-        if not is_native_dialect:
+        # 2. Parse + schema validation (non-native only — native queries are validated by execution)
+        if not is_native_query_mode:
             try:
-                self.mindsdb_client.query(f"EXPLAIN {sanitized}").fetch()
-                explain_ok = 1
+                parse_sql(sanitized)
             except Exception as e:
-                logger.debug(f"EXPLAIN failed: {e}")
-        else:
-            # For native dialect, skip EXPLAIN (parser can't handle it)
-            # Give it a pass on syntax check since we'll validate via execution
-            explain_ok = 1
+                return (0, sanitized, f"SQL parsing failed: {e}", None)
 
-        # Try actual execution
+        if linked_schema and linked_schema.columns:
+            try:
+                is_valid, invalid_cols = self.validate_columns(
+                    sanitized,
+                    linked_schema,
+                    use_parser=not is_native_query_mode,
+                    dialect=engine,
+                )
+            except Exception as e:
+                return (0, sanitized, f"Column validation failed: {e}", None)
+            if not is_valid:
+                return (0, sanitized, f"Hallucinated columns detected: {', '.join(invalid_cols[:5])}", None)
+
         try:
-            self.mindsdb_client.query(sanitized).fetch()
-            exec_ok = 1
+            exec_result = self.mindsdb_client.query(sanitized).fetch()
+            return (1, sanitized, "", exec_result)
         except Exception as e:
-            exec_err = str(e)
-
-        score = explain_ok + exec_ok
-        error = "" if score == 2 else (exec_err if exec_err else "Failed preflight")
-        return (score, sanitized, error)
+            return (0, sanitized, str(e), None)
 
     async def generate(
         self,
         question: str,
         linked_schema: LinkedSchema,
         schema_context: str,
-        num_candidates: int = 3,
+        engine: str | None = None,
+        is_native_query_mode: bool = False,
     ) -> list[SQLCandidate]:
         """
         Generate SQL candidates via multiple paths.
@@ -285,7 +421,6 @@ class CandidateGenerator:
             question: The natural language question
             linked_schema: Schema elements identified by schema linker
             schema_context: Formatted schema context string
-            num_candidates: Target number of candidates (default 3)
 
         Returns:
             List of SQLCandidate objects from different strategies
@@ -301,10 +436,15 @@ Schema:
 
 Generate SQL to answer this question."""
 
+        divide_prompt, plan_prompt, direct_prompt = _select_system_prompts(
+            native_mode=is_native_query_mode,
+            engine=engine,
+        )
+
         tasks = [
-            self._divide_and_conquer(user_prompt, model),
-            self._query_plan_cot(user_prompt, model),
-            self._direct_generation(user_prompt, model),
+            self._divide_and_conquer(user_prompt, model, agent=divide_conquer_agent, system_prompt=divide_prompt),
+            self._query_plan_cot(user_prompt, model, agent=query_plan_agent, system_prompt=plan_prompt),
+            self._direct_generation(user_prompt, model, agent=direct_agent, system_prompt=direct_prompt),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -325,11 +465,12 @@ Generate SQL to answer this question."""
         logger.info(f"Generated {len(candidates)} SQL candidates")
         return candidates
 
-    async def _divide_and_conquer(self, user_prompt: str, model) -> SQLCandidate:
+    async def _divide_and_conquer(self, user_prompt: str, model, *, agent: Agent, system_prompt: str) -> SQLCandidate:
         """Generate SQL using divide and conquer strategy."""
         logger.debug("Running divide and conquer strategy")
 
-        result = await self._run_agent_with_retry(divide_conquer_agent, user_prompt, model)
+        agent.system_prompt = system_prompt
+        result = await self._run_agent_with_retry(agent, user_prompt, model)
 
         reasoning = (
             f"Tables: {result.output.tables_needed}\n"
@@ -345,11 +486,12 @@ Generate SQL to answer this question."""
             reasoning=reasoning,
         )
 
-    async def _query_plan_cot(self, user_prompt: str, model) -> SQLCandidate:
+    async def _query_plan_cot(self, user_prompt: str, model, *, agent: Agent, system_prompt: str) -> SQLCandidate:
         """Generate SQL using query plan chain-of-thought strategy."""
         logger.debug("Running query plan CoT strategy")
 
-        result = await self._run_agent_with_retry(query_plan_agent, user_prompt, model)
+        agent.system_prompt = system_prompt
+        result = await self._run_agent_with_retry(agent, user_prompt, model)
 
         reasoning = (
             f"Scan: {result.output.scan_tables}\n"
@@ -364,11 +506,12 @@ Generate SQL to answer this question."""
             reasoning=reasoning,
         )
 
-    async def _direct_generation(self, user_prompt: str, model) -> SQLCandidate:
+    async def _direct_generation(self, user_prompt: str, model, *, agent: Agent, system_prompt: str) -> SQLCandidate:
         """Generate SQL directly without explicit reasoning steps."""
         logger.debug("Running direct generation strategy")
 
-        result = await self._run_agent_with_retry(direct_agent, user_prompt, model)
+        agent.system_prompt = system_prompt
+        result = await self._run_agent_with_retry(agent, user_prompt, model)
 
         return SQLCandidate(
             query=result.output.query,
@@ -420,6 +563,8 @@ Generate SQL to answer this question."""
         for attempt in range(max_fix_attempts + 1):
             try:
                 result = execute_fn(current_sql)
+                if asyncio.iscoroutine(result):
+                    result = await result
                 candidate.executed = True
                 candidate.execution_result = str(result)
                 candidate.query = current_sql

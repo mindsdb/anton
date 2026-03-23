@@ -10,6 +10,11 @@ class DeploymentMode(str, Enum):
     CLOUD = "cloud"
 
 
+class Agent(str, Enum):
+    ANTON = "anton_agent"
+    TEXT_TO_SQL = "candidate_sql_agent"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -52,8 +57,11 @@ class OpenAISettings(Settings):
     supported_models: list[str] = Field(
         default=["gpt-4o", "gpt-4.1", "gpt-5.2"], description="The supported OpenAI models"
     )  # OPENAI__SUPPORTED_MODELS
+    supported_coding_models: list[str] = Field(
+        default=["gpt-4.1", "gpt-5.3-codex", "gpt-5.3-instant"], description="The supported OpenAI coding models"
+    )  # OPENAI__SUPPORTED_CODING_MODELS
 
-    @field_validator("supported_models", mode="before")
+    @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
     def split_supported_openai_models(cls, v: list[str] | str) -> list[str]:
         if isinstance(v, str):
@@ -65,11 +73,15 @@ class AnthropicSettings(Settings):
     api_key: str = Field(default="", description="The Anthropic API key")  # ANTHROPIC__API_KEY
     # TODO: Should the models be extracted programmatically?
     supported_models: list[str] = Field(
-        default=["claude-sonnet-4-5", "claude-opus-4-5", "claude-opus-4-6"],
+        default=["claude-sonnet-4-5", "claude-opus-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
         description="The supported Anthropic models",
     )  # ANTHROPIC__SUPPORTED_MODELS
+    supported_coding_models: list[str] = Field(
+        default=["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6"],
+        description="The supported Anthropic coding models",
+    )  # ANTHROPIC__SUPPORTED_CODING_MODELS
 
-    @field_validator("supported_models", mode="before")
+    @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
     def split_supported_anthropic_models(cls, v: list[str] | str) -> list[str]:
         if isinstance(v, str):
@@ -106,11 +118,20 @@ class DefaultModelsSettings(Settings):
     default_provider: str = Field(
         default="anthropic", description="The default provider"
     )  # DEFAULT_MODELS__DEFAULT_PROVIDER
-
     openai_model: str = Field(default="gpt-4o", description="The default OpenAI model")  # DEFAULT_MODELS__OPENAI_MODEL
     anthropic_model: str = Field(
         default="claude-opus-4-6", description="The default Anthropic model"
     )  # DEFAULT_MODELS__ANTHROPIC_MODEL
+
+    default_coding_provider: str = Field(
+        default="anthropic", description="The default coding provider"
+    )  # DEFAULT_MODELS__DEFAULT_CODING_PROVIDER
+    openai_coding_model: str = Field(
+        default="gpt-5.3-codex", description="The default OpenAI coding model"
+    )  # DEFAULT_MODELS__OPENAI_CODING_MODEL
+    anthropic_coding_model: str = Field(
+        default="claude-haiku-4-5-20251001", description="The default Anthropic coding model"
+    )  # DEFAULT_MODELS__ANTHROPIC_CODING_MODEL
 
 
 class RedisSettings(Settings):
@@ -164,9 +185,16 @@ class StatsigSettings(Settings):
 
 
 class AgentsSettings(Settings):
-    default_agent: str = Field(
-        default="candidate_sql_agent", description="The default agent to use"
+    default_agent: Agent = Field(
+        default=Agent.TEXT_TO_SQL, description="The default agent to use"
     )  # AGENTS__DEFAULT_AGENT
+
+    @field_validator("default_agent", mode="before")
+    @classmethod
+    def validate_default_agent(cls, v: Agent | str) -> Agent:
+        if isinstance(v, str):
+            v = Agent(v)
+        return v
 
 
 class AppSettings(Settings):

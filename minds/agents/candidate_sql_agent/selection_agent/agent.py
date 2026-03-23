@@ -135,7 +135,7 @@ class SelectionAgent:
         schema_context: str,
     ) -> int:
         """Compare two candidates and return the winner's index."""
-
+        # TODO: Move this to insturctions prompt
         prompt = f"""Which SQL query better answers the question?
 
 Question: {question}

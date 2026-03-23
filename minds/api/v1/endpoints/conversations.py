@@ -16,6 +16,7 @@ from minds.schemas.charts import ChartRequest, ChartResponse
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.schemas.messages import MessageResponse, MessageResultResponse
 from minds.services.conversations import (
+    AgentNotAntonError,
     ConversationNotFoundError,
     ConversationsService,
     ConversationsServiceError,
@@ -150,6 +151,7 @@ async def get_conversation(
 async def get_conversation_messages(
     conversation_id: UUID,
     conversations_service: ConversationsService = Depends(get_conversations_service),
+    with_events: bool = Query(True, description="Whether to include events in the response"),
 ) -> dict[Literal["object", "data"], list[MessageResponse] | str]:
     """
     Get the messages of a conversation by ID.
@@ -163,6 +165,7 @@ async def get_conversation_messages(
         messages = await conversations_service.get_conversation_messages(
             conversation_id,
             with_sql_query=True,
+            with_events=with_events,
         )
         return {
             "object": "list",
@@ -480,6 +483,147 @@ async def get_chart_for_message(
     except Exception as e:
         logger.error(
             f"Unexpected error in get_chart_for_message "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.head("/{conversation_id}/items/{message_id}/report")
+async def check_conversation_message_report_exists(
+    conversation_id: UUID,
+    message_id: UUID,
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> None:
+    """
+    Check if a report exists for a message by ID.
+    """
+    logger.debug(
+        f"Check conversation message report exists requested (v1) "
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
+    )
+
+    try:
+        await conversations_service.check_conversation_message_report_exists(conversation_id, message_id)
+    # FileNotFoundError is the obvious 404 here.
+    except FileNotFoundError as e:
+        logger.warning(
+            f"Report not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    # The other errors here that are more related to the conversation or message,
+    # will also be treated as 404s for this endpoint.
+    except ConversationNotFoundError as e:
+        logger.warning(
+            f"Conversation not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotFoundError as e:
+        logger.warning(
+            f"Message not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotAssistantError as e:
+        logger.warning(
+            f"Message is not an assistant message "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    # This is also treated as a 404 to avoid having to make conditional calls in the UI.
+    # It will be treated as a 400 in the GET endpoint below.
+    except AgentNotAntonError as e:
+        logger.warning(
+            f"Mind is not using the Anton agent "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    # This is a 400 because the agent name is invalid, so it is a user error.
+    # This is unlikely because it is checked previously.
+    except ValueError as e:
+        logger.warning(
+            f"Invalid agent name "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    # These are unexpected errors, so we return a 500.
+    except ConversationsServiceError as e:
+        logger.error(
+            f"Service error in check_conversation_message_report_exists "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e)) from None
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in check_conversation_message_report_exists "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.get("/{conversation_id}/items/{message_id}/report")
+async def get_conversation_message_report(
+    conversation_id: UUID,
+    message_id: UUID,
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> Response:
+    """
+    Get the report of a message by ID.
+    """
+    logger.debug(
+        f"Get conversation message report requested (v1) "
+        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
+    )
+
+    try:
+        report = await conversations_service.get_conversation_message_report(conversation_id, message_id)
+        return Response(content=report, media_type="text/html")
+    except ConversationNotFoundError as e:
+        logger.warning(
+            f"Conversation not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotFoundError as e:
+        logger.warning(
+            f"Message not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except MessageNotAssistantError as e:
+        logger.warning(
+            f"Message is not an assistant message "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except AgentNotAntonError as e:
+        logger.warning(
+            f"Mind is not using the Anton agent "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ValueError as e:
+        logger.warning(
+            f"Invalid agent name "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except FileNotFoundError as e:
+        logger.warning(
+            f"Report not found "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except ConversationsServiceError as e:
+        logger.error(
+            f"Service error in get_conversation_message_report "
+            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e)) from None
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in get_conversation_message_report "
             f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail="Internal server error") from None

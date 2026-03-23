@@ -65,5 +65,5 @@ class CandidateSQLAgentSettings(Settings):
         default=True, description="Whether to use native query mode"
     )  # CANDIDATE_SQL_AGENT__USE_NATIVE_QUERY_MODE
     native_query_mode_supported_engines: list[str] = Field(
-        default=["snowflake"], description="The engines that support native query mode"
+        default=["snowflake", "bigquery", "mssql"], description="The engines that support native query mode"
     )  # CANDIDATE_SQL_AGENT__NATIVE_QUERY_MODE_SUPPORTED_ENGINES

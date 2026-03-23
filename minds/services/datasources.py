@@ -711,8 +711,13 @@ class DatasourcesService:
         Raises:
             InvalidDatasourceQueryError: If the query is not valid.
         """
+        # Map the engines to dialects that do not coincide.
+        # TODO: Complete this list for all engines that need to be supported.
+        ENGINE_TO_DIALECT_MAP = {"mssql": "tsql"}
 
         try:
+            if dialect in ENGINE_TO_DIALECT_MAP:
+                dialect = ENGINE_TO_DIALECT_MAP[dialect]
             statements = sqlglot.parse(query, read=dialect)
         except ParseError:
             raise InvalidDatasourceQueryError(f"Invalid query: {query}") from None
@@ -724,7 +729,16 @@ class DatasourcesService:
         statement = statements[0]
 
         # 2) Root must be a query expression
-        if not isinstance(statement, exp.Select | exp.With | exp.Union | exp.Intersect | exp.Except):
+        ALLOWED_ROOT_NODES = (
+            exp.Select,
+            exp.With,
+            exp.Union,
+            exp.Intersect,
+            exp.Except,
+            exp.Show,
+            exp.Describe,
+        )
+        if not isinstance(statement, ALLOWED_ROOT_NODES):
             raise InvalidDatasourceQueryError(
                 f"Query must be a read-only query (SELECT/WITH/set-ops): {query}"
             ) from None
@@ -752,8 +766,6 @@ class DatasourcesService:
             # Utility (not a query)
             exp.Use,
             exp.Set,
-            exp.Show,
-            exp.Describe,
         )
 
         for node_type in FORBIDDEN_NODES:

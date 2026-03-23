@@ -161,3 +161,25 @@ def test_get_session_returns_session_from_factory(monkeypatch, mod):
     # on success, we just get back the session and it's not closed
     assert hasattr(sess, "close")
     assert getattr(sess, "closed", False) is False
+
+
+# ---------- get_open_session ----------
+
+
+def test_get_open_session_returns_session_from_factory(monkeypatch, mod):
+    engine = object()
+    dummy_session = object()
+    factory = MagicMock(return_value=dummy_session)
+
+    get_engine_mock = MagicMock(return_value=engine)
+    get_session_factory_mock = MagicMock(return_value=factory)
+    monkeypatch.setattr(mod, "get_engine", get_engine_mock)
+    monkeypatch.setattr(mod, "get_session_factory", get_session_factory_mock)
+
+    uri = "postgresql://test:test@localhost:5432/test"
+    sess = mod.get_open_session(db_uri=uri)
+
+    assert sess is dummy_session
+    get_engine_mock.assert_called_once_with(db_uri=uri)
+    get_session_factory_mock.assert_called_once_with(engine)
+    factory.assert_called_once_with()

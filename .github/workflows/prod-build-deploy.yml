@@ -45,6 +45,26 @@ jobs:
           build-for-environment: production
           image-ref: ${{ env.CI_REF_SLUG }}
 
+  build-anton-scratchpad:
+    runs-on: mdb-dev
+    needs: [run-unit-tests, linter]
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - uses: ./github-actions/setup-env
+      - uses: ./github-actions/build-push-ecr
+        with:
+          module-name: minds-anton-scratchpad
+          build-for-environment: production
+          extra-build-args: -f Dockerfile.scratchpad
+
   migrate:
     runs-on: mdb-prod
     needs: [ build ]

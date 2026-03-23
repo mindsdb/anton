@@ -90,15 +90,29 @@ class TestTextToSQLPipelineSanitizeValidate:
 
 
 class TestTextToSQLPipelineNativeHelpers:
-    def test_set_native_datasource_from_linked_schema_chooses_most_frequent(self):
+    def test_set_native_datasource_from_linked_schema_single_datasource_updates(self):
+        datasource = Mock()
+        datasource.name = "fallback"
         pipeline = TextToSQLPipeline(
-            mind=Mock(mind_datasources=[Mock(datasource=Mock(name="fallback"))]),
+            mind=Mock(mind_datasources=[Mock(datasource=datasource)]),
+            mindsdb_client=Mock(),
+            is_native_query_mode_enabled=True,
+        )
+        linked = LinkedSchema(tables=["a.t1", "a.t2"], columns={}, joins=[])
+        pipeline._set_native_datasource_from_linked_schema(linked)
+        assert pipeline._native_datasource_name == "a"
+
+    def test_set_native_datasource_from_linked_schema_multiple_datasources_unchanged(self):
+        datasource = Mock()
+        datasource.name = "fallback"
+        pipeline = TextToSQLPipeline(
+            mind=Mock(mind_datasources=[Mock(datasource=datasource)]),
             mindsdb_client=Mock(),
             is_native_query_mode_enabled=True,
         )
         linked = LinkedSchema(tables=["a.t1", "a.t2", "b.t3"], columns={}, joins=[])
         pipeline._set_native_datasource_from_linked_schema(linked)
-        assert pipeline._get_native_datasource_name() == "a"
+        assert pipeline._native_datasource_name == "fallback"
 
     def test_strip_datasource_prefix_for_native(self):
         pipeline = TextToSQLPipeline(
@@ -123,3 +137,18 @@ class TestTextToSQLPipelineMarkdownTable:
         df = pd.DataFrame({"id": list(range(25))})
         md = pipeline._generate_markdown_table(df, override_max_rows=5)
         assert "[Showing 5 of 25 rows]" in md
+
+    def test_generate_markdown_table_formats_numeric_columns(self):
+        pipeline = TextToSQLPipeline(mind=Mock(), mindsdb_client=Mock(), is_native_query_mode_enabled=False)
+        df = pd.DataFrame(
+            {
+                "int_col": [1000, 2000000],
+                "float_col": [1234.56, 98765.4321],
+                "str_col": ["abc", "def"],
+            }
+        )
+        md = pipeline._generate_markdown_table(df, override_max_rows=2)
+        assert "1,000" in md
+        assert "2,000,000" in md
+        assert "1,234.6" in md
+        assert "98,765.4" in md

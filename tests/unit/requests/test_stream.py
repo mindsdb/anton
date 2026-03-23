@@ -1,5 +1,7 @@
+import asyncio
 import importlib
 import json
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -255,3 +257,183 @@ async def test_process_streaming_producer_includes_system_messages(streaming_mod
 
     assert found_system, "Expected system message to be present in streaming output"
     assert found_stop, "Did not find final stop chunk in stream"
+
+
+@pytest.mark.asyncio
+async def test_process_streaming_producer_cancellation_propagates_and_cancels_producer_chat_completions(
+    streaming_mod, monkeypatch
+):
+    model = "model_test_streaming_cancellation_chat_completions"
+    request_id = "chatcmpl-cancel-1"
+
+    producer_started = asyncio.Event()
+    producer_cancelled = asyncio.Event()
+    block_forever = asyncio.Event()
+
+    log_calls: list[tuple[str, tuple]] = []
+
+    def fake_info(msg, *args, **kwargs):
+        log_calls.append((msg, args))
+
+    monkeypatch.setattr(streaming_mod.logger, "info", fake_info)
+
+    async def producer(streamer):
+        producer_started.set()
+        try:
+            await streamer.push(streaming_mod.Role.user, "hello")
+            await block_forever.wait()
+        except asyncio.CancelledError:
+            producer_cancelled.set()
+            raise
+
+    resp = await streaming_mod.process_streaming_producer(
+        producer,
+        request_id=request_id,
+        format_func=streaming_mod.format_messages_for_streaming_chat_completions_api,
+        model=model,
+    )
+
+    first_chunk_read = asyncio.Event()
+
+    async def consumer():
+        ait = resp.body_iterator.__aiter__()
+        await ait.__anext__()  # first chunk should arrive promptly
+        first_chunk_read.set()
+        await ait.__anext__()  # should block until cancelled
+
+    consumer_task = asyncio.create_task(consumer())
+    await asyncio.wait_for(producer_started.wait(), timeout=2)
+    await asyncio.wait_for(first_chunk_read.wait(), timeout=2)
+
+    consumer_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer_task
+
+    await asyncio.wait_for(producer_cancelled.wait(), timeout=2)
+
+    assert any(msg == f"Re-raising cancellation for request_id={request_id}" for msg, _args in log_calls), (
+        "Expected cancellation re-raise log line to be emitted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_streaming_producer_cancellation_propagates_and_cancels_producer_responses_api(
+    streaming_mod, monkeypatch
+):
+    model = "model_test_streaming_cancellation_responses_api"
+    request_id = "resp-cancel-1"
+    message_id = uuid4()
+
+    producer_started = asyncio.Event()
+    producer_cancelled = asyncio.Event()
+    block_forever = asyncio.Event()
+
+    log_calls: list[tuple[str, tuple]] = []
+
+    def fake_info(msg, *args, **kwargs):
+        log_calls.append((msg, args))
+
+    monkeypatch.setattr(streaming_mod.logger, "info", fake_info)
+
+    async def producer(streamer):
+        producer_started.set()
+        try:
+            # Don't push anything; responses formatter yields a "created" chunk regardless.
+            await block_forever.wait()
+        except asyncio.CancelledError:
+            producer_cancelled.set()
+            raise
+
+    resp = await streaming_mod.process_streaming_producer(
+        producer,
+        request_id=request_id,
+        format_func=streaming_mod.format_messages_for_streaming_responses_api,
+        model=model,
+        message_id=message_id,
+    )
+
+    first_chunk_read = asyncio.Event()
+
+    async def consumer():
+        ait = resp.body_iterator.__aiter__()
+        await ait.__anext__()  # "created" chunk
+        first_chunk_read.set()
+        await ait.__anext__()  # should block until cancelled
+
+    consumer_task = asyncio.create_task(consumer())
+    await asyncio.wait_for(producer_started.wait(), timeout=2)
+    await asyncio.wait_for(first_chunk_read.wait(), timeout=2)
+
+    consumer_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer_task
+
+    await asyncio.wait_for(producer_cancelled.wait(), timeout=2)
+
+    assert any(msg == f"Re-raising cancellation for request_id={request_id}" for msg, _args in log_calls), (
+        "Expected cancellation re-raise log line to be emitted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_format_messages_for_streaming_responses_api_calls_event_callback_and_aggregates_assistant(streaming_mod):
+    """
+    When an event_callback is provided, non-assistant chunks are stored immediately,
+    assistant deltas are aggregated and stored when the role changes, and the final
+    assistant aggregation is committed with commit=True.
+    """
+    model = "model_test_streaming_responses_event_callback"
+    message_id = UUID("12345678-1234-5678-1234-567812345678")
+
+    calls: list[tuple[int, bool, dict]] = []
+
+    async def event_callback(mid, seq, event_data, commit: bool = False, **_kwargs):
+        assert mid == message_id
+        calls.append((seq, commit, event_data))
+
+    async def gen():
+        # Thought/system event -> stored immediately
+        yield streaming_mod.StreamMessage(id="x1", role=streaming_mod.Role.system, content="t1")
+        # Assistant deltas -> aggregated ("hello")
+        yield streaming_mod.StreamMessage(id="x2", role=streaming_mod.Role.assistant, content="he")
+        yield streaming_mod.StreamMessage(id="x3", role=streaming_mod.Role.assistant, content="llo")
+        # Role change flushes assistant aggregation, then stores this thought immediately
+        yield streaming_mod.StreamMessage(id="x4", role=streaming_mod.Role.system, content="t2")
+        # Final assistant aggregation -> committed at end ("bye")
+        yield streaming_mod.StreamMessage(id="x5", role=streaming_mod.Role.assistant, content="bye")
+
+    # Drain SSE output (we only care about callback invocations).
+    out = []
+    async for chunk in streaming_mod.format_messages_for_streaming_responses_api(
+        gen(),
+        model=model,
+        message_id=message_id,
+        event_callback=event_callback,
+    ):
+        out.append(chunk)
+
+    # Sanity: stream includes a created event and a completed event.
+    assert any(s.startswith("event: response.created") for s in out)
+    assert any(s.startswith("event: response.completed") for s in out)
+
+    # Callback calls:
+    # 1) thought t1
+    # 2) assistant aggregated "hello" (commit False)
+    # 3) thought t2
+    # 4) final assistant aggregated "bye" (commit True)
+    assert [c[0] for c in calls] == [1, 2, 3, 4]
+    assert [c[1] for c in calls] == [False, False, False, True]
+
+    assert calls[0][2]["type"] == "response.in_progress"
+    assert calls[0][2]["response"]["output"][0]["role"] == "system"
+    assert calls[0][2]["response"]["output"][0]["content"][0]["text"] == "t1"
+
+    assert calls[1][2]["type"] == "response.output_text.delta"
+    assert calls[1][2]["response"]["delta"] == "hello"
+
+    assert calls[2][2]["type"] == "response.in_progress"
+    assert calls[2][2]["response"]["output"][0]["role"] == "system"
+    assert calls[2][2]["response"]["output"][0]["content"][0]["text"] == "t2"
+
+    assert calls[3][2]["type"] == "response.output_text.delta"
+    assert calls[3][2]["response"]["delta"] == "bye"

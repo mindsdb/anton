@@ -3,6 +3,7 @@ Unit tests for ConversationsService.
 """
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
@@ -18,6 +19,7 @@ from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContentType, MessageResponse, MessageResultResponse
 from minds.services.conversations import (
+    AgentNotAntonError,
     ConversationNotFoundError,
     ConversationsService,
     ConversationsServiceError,
@@ -250,6 +252,110 @@ class TestConversationsService:
         conversation_id = uuid4()
         with pytest.raises(ConversationsServiceError, match="Failed to get conversation"):
             await service.get_conversation(conversation_id)
+
+    @pytest.mark.asyncio
+    async def test_check_conversation_message_report_exists_success(self, service, monkeypatch):
+        """check_conversation_message_report_exists returns None when report exists."""
+        import minds.services.conversations as conversations_mod
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+
+        service._get_conversation = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                mind=SimpleNamespace(agent="anton_agent", name="anton", parameters={"agent_name": "anton_agent"})
+            )
+        )
+        service._get_message = AsyncMock(return_value=SimpleNamespace(role=Role.assistant))  # type: ignore[method-assign]
+
+        factory = SimpleNamespace(report_exists=AsyncMock(return_value=True))
+        monkeypatch.setattr(conversations_mod, "ScratchpadRuntimeFactory", lambda: factory)
+        monkeypatch.setattr(conversations_mod, "AntonAgentSettings", lambda: SimpleNamespace(backend="docker"))
+
+        result = await service.check_conversation_message_report_exists(conversation_id, message_id)
+        assert result is None
+        factory.report_exists.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_check_conversation_message_report_exists_false_raises_file_not_found(self, service, monkeypatch):
+        """check_conversation_message_report_exists raises FileNotFoundError when report does not exist."""
+        import minds.services.conversations as conversations_mod
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+
+        service._get_conversation = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                mind=SimpleNamespace(agent="anton_agent", name="anton", parameters={"agent_name": "anton_agent"})
+            )
+        )
+        service._get_message = AsyncMock(return_value=SimpleNamespace(role=Role.assistant))  # type: ignore[method-assign]
+
+        factory = SimpleNamespace(report_exists=AsyncMock(return_value=False))
+        monkeypatch.setattr(conversations_mod, "ScratchpadRuntimeFactory", lambda: factory)
+        monkeypatch.setattr(conversations_mod, "AntonAgentSettings", lambda: SimpleNamespace(backend="docker"))
+
+        with pytest.raises(FileNotFoundError, match="report is not available"):
+            await service.check_conversation_message_report_exists(conversation_id, message_id)
+
+    @pytest.mark.asyncio
+    async def test_check_conversation_message_report_exists_non_anton_conversation_raises(self, service, monkeypatch):
+        """If default agent and mind agent aren't Anton, raise AgentNotAntonError."""
+        import minds.services.conversations as conversations_mod
+
+        service._get_conversation = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                mind=SimpleNamespace(agent="other", name="other", parameters={"agent_name": "candidate_sql_agent"})
+            )
+        )
+        service._get_message = AsyncMock(return_value=SimpleNamespace(role=Role.assistant))  # type: ignore[method-assign]
+
+        monkeypatch.setattr(
+            conversations_mod, "app_settings", SimpleNamespace(agents=SimpleNamespace(default_agent="not_anton"))
+        )
+
+        with pytest.raises(AgentNotAntonError, match="not using the Anton agent"):
+            await service.check_conversation_message_report_exists(uuid4(), uuid4())
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_report_success(self, service, monkeypatch):
+        """get_conversation_message_report returns HTML string when available."""
+        import minds.services.conversations as conversations_mod
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+
+        service._get_conversation = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                mind=SimpleNamespace(agent="anton_agent", name="anton", parameters={"agent_name": "anton_agent"})
+            )
+        )
+        service._get_message = AsyncMock(return_value=SimpleNamespace(role=Role.assistant))  # type: ignore[method-assign]
+
+        factory = SimpleNamespace(get_report=AsyncMock(return_value="<html>ok</html>"))
+        monkeypatch.setattr(conversations_mod, "ScratchpadRuntimeFactory", lambda: factory)
+        monkeypatch.setattr(conversations_mod, "AntonAgentSettings", lambda: SimpleNamespace(backend="docker"))
+
+        report = await service.get_conversation_message_report(conversation_id, message_id)
+        assert report == "<html>ok</html>"
+        factory.get_report.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_report_message_not_assistant_raises(self, service, monkeypatch):
+        """get_conversation_message_report raises MessageNotAssistantError before calling backend."""
+        import minds.services.conversations as conversations_mod
+
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(mind=SimpleNamespace(agent="anton_agent")))  # type: ignore[method-assign]
+        service._get_message = AsyncMock(return_value=SimpleNamespace(role=Role.user))  # type: ignore[method-assign]
+
+        monkeypatch.setattr(
+            conversations_mod,
+            "get_app_settings",
+            lambda: SimpleNamespace(agents=SimpleNamespace(default_agent="anton_agent")),
+        )
+
+        with pytest.raises(MessageNotAssistantError):
+            await service.get_conversation_message_report(uuid4(), uuid4())
 
     @pytest.mark.asyncio
     async def test_create_conversation_success(

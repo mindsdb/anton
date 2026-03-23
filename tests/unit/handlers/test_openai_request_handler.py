@@ -7,6 +7,7 @@ import pytest
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
 
+from minds.agents.base import AgentRunContext
 from minds.handlers.openai_request_handler import OpenAIRequestHandler
 from minds.model.mind_datasource import DataCatalogStatus
 from minds.requests.context import Context
@@ -163,7 +164,12 @@ async def test_chat_completions_calls_agent_run_when_ready(
 
     await handler.chat_completions(streamer)
 
-    handler.agent.run.assert_awaited_once_with(messages=sample_messages, streamer=streamer, stream=True)
+    handler.agent.run.assert_awaited_once_with(
+        messages=sample_messages,
+        streamer=streamer,
+        stream=True,
+        run_context=AgentRunContext(metadata=None, instrument=True),
+    )
 
 
 @pytest.mark.asyncio
@@ -192,6 +198,8 @@ async def test_responses_updates_conversation_message(mock_session, mock_context
     streamer.push = AsyncMock()
 
     message = Mock()
+    message.conversation_id = UUID("00000000-0000-0000-0000-0000000000aa")
+    message.id = UUID("00000000-0000-0000-0000-0000000000bb")
 
     with patch("minds.handlers.openai_request_handler.ConversationsService") as mock_conv_service_cls:
         conv_service = Mock()

@@ -13,14 +13,22 @@ from mindsdb_sql_parser import parse_sql
 from mindsdb_sql_parser.ast import Select
 from mindsdb_sql_parser.exceptions import ParsingException
 from sqlalchemy.exc import PendingRollbackError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, func, select
 
+# Anton agent imports - required only for the feature for exporting reports.
+from minds.agents.anton_agent.anton.backends.base import ScratchpadRuntimeFactory
+from minds.agents.anton_agent.settings import AntonAgentSettings
+from minds.agents.helpers import is_anton_agent
+
+# Common imports.
 from minds.common.logger import setup_logging
 from minds.common.mindsdb import extract_database_engines_from_select
+from minds.common.settings.app_settings import get_app_settings
 from minds.common.utilities import format_numeric_columns
 from minds.model.conversation import Conversation
 from minds.model.message import Message
+from minds.model.message_event import MessageEvent
 from minds.schemas.charts import ChartResponse, PieIntent, ScatterIntent, XYIntent
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
@@ -28,6 +36,8 @@ from minds.schemas.messages import MessageContent, MessageContentType, MessageRe
 from minds.services.minds import MindNotFoundError, MindsService
 
 logger = setup_logging()
+
+app_settings = get_app_settings()
 
 
 class ConversationNotFoundError(Exception):
@@ -62,6 +72,12 @@ class MessageNoSQLQueryError(Exception):
 
 class InvalidSQLQueryError(Exception):
     """Exception for when a SQL query is invalid."""
+
+    pass
+
+
+class AgentNotAntonError(Exception):
+    """Exception for when a message is not an Anton message."""
 
     pass
 
@@ -315,6 +331,7 @@ class ConversationsService:
         self,
         conversation_id: UUID,
         with_sql_query: bool = False,
+        with_events: bool = False,
     ) -> list[MessageResponse]:
         """
         Get the messages of a conversation by ID.
@@ -322,6 +339,7 @@ class ConversationsService:
         Args:
             conversation_id: ID of the conversation to get the messages from.
             with_sql_query: Whether to include the SQL query in the response.
+            with_events: Whether to include the events in the response.
 
         Returns:
             List[MessageResponse]: List of messages.
@@ -347,10 +365,26 @@ class ConversationsService:
                 )
                 .order_by(Message.created_at.asc())
             )
+            if with_events:
+                statement = statement.options(
+                    selectinload(Message.message_events),
+                    with_loader_criteria(
+                        MessageEvent,
+                        lambda cls: cls.deleted_at.is_(None),
+                        include_aliases=True,
+                    ),
+                )
+
             messages = self.session.exec(statement).all()
             messages_list = []
             for message in messages:
-                messages_list.append(await self._message_to_response(message, with_sql_query=with_sql_query))
+                messages_list.append(
+                    await self._message_to_response(
+                        message,
+                        with_sql_query=with_sql_query,
+                        with_events=with_events,
+                    )
+                )
             return messages_list
         except ConversationNotFoundError:
             raise
@@ -446,6 +480,56 @@ class ConversationsService:
                 f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to create message placeholder: {str(e)}") from None
+
+    async def create_conversation_message_event(
+        self,
+        message_id: UUID,
+        sequence_number: int,
+        event_data: dict,
+        commit: bool = False,
+    ) -> None:
+        """
+        Create a new message event.
+
+        Args:
+            message_id: ID of the message to add the event to.
+            sequence_number: Sequence number of the event.
+            event_data: Data of the event.
+            commit: Whether to commit the session.
+
+        Returns:
+            None.
+
+        Raises:
+            MessageNotFoundError: If message with the given ID does not exist.
+            ConversationsServiceError: If there is an error creating the message event.
+        """
+        logger.debug(
+            f"Creating message event for message {message_id} "
+            f"for user {self.user_id} in organization {self.organization_id} with event data {event_data}"
+        )
+        try:
+            event = MessageEvent(
+                message_id=message_id,
+                organization_id=self.organization_id,
+                user_id=self.user_id,
+                sequence_number=sequence_number,
+                event_data=event_data,
+            )
+            self.session.add(event)
+            self.session.flush()  # The event will be committed when the message is committed
+            if commit:
+                self.session.commit()
+            logger.info(
+                f"Created message event {event.id} for message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Error creating message event for message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to create message event: {str(e)}") from None
 
     async def update_conversation_message_content(
         self,
@@ -645,20 +729,21 @@ class ConversationsService:
                 )
                 result = self.mindsdb_client.query(paginated_sql_query).fetch()
 
-            # Format numeric columns to prevent scientific notation
-            # TODO: This is a costly operation, can it be improved?
-            result = format_numeric_columns(result)
-
             # Convert DataFrame to structured response
             column_names = result.columns.tolist()
             data = result.values.tolist()
             if total_rows is None:
                 total_rows = len(data)
 
+            # Format numeric columns for display (prevents scientific notation in UI).
+            # Uses a copy so raw numeric values in `data` are preserved for evaluation.
+            display_data = format_numeric_columns(result.copy()).values.tolist()
+
             return (
                 MessageResultResponse(
                     data=data,
                     column_names=column_names,
+                    display_data=display_data,
                 ),
                 int(total_rows),
                 is_pagination_consistent,
@@ -712,10 +797,6 @@ class ConversationsService:
             _ = self._validate_and_parse_sql_query(sql_query)
 
             result = self.mindsdb_client.query(sql_query).fetch()
-
-            # Format numeric columns to prevent scientific notation
-            # TODO: This is a costly operation, can it be improved?
-            result = format_numeric_columns(result)
 
             # Convert DataFrame to structured response
             column_names = result.columns.tolist()
@@ -830,6 +911,145 @@ class ConversationsService:
             )
             raise ConversationsServiceError(f"Failed to generate chart: {str(e)}") from None
 
+    async def check_conversation_message_report_exists(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+    ) -> None:
+        """
+        Check if a report exists for a message by ID.
+
+        Args:
+            conversation_id: ID of the conversation to check the report for.
+            message_id: ID of the message to check the report for.
+
+        Returns:
+            None
+
+        Raises:
+            ConversationNotFoundError: If conversation is not found.
+            MessageNotFoundError: If message is not found.
+            MessageNotAssistantError: If message is not from the assistant.
+            ConversationsServiceError: If there is an error checking if the report exists.
+            FileNotFoundError: If the report does not exist.
+        """
+        logger.debug(
+            f"Checking if report exists for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in organization {self.organization_id}"
+        )
+        try:
+            conversation = await self._get_conversation(conversation_id)
+            if not conversation:
+                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+
+            message = await self._get_message(conversation_id, message_id)
+            if not message:
+                raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
+
+            if message.role != Role.assistant:
+                raise MessageNotAssistantError(f"Message with ID '{message_id}' is not an assistant message")
+
+            if not is_anton_agent(conversation.mind):
+                raise AgentNotAntonError(f"Mind {conversation.mind.name} is not using the Anton agent")
+
+            anton_settings = AntonAgentSettings()
+            exists = await ScratchpadRuntimeFactory().report_exists(
+                backend=anton_settings.backend,
+                organization_id=self.organization_id,
+                user_id=self.user_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
+            )
+            if exists:
+                logger.debug(
+                    f"Report exists for conversation {conversation_id} and message {message_id} "
+                    f"for user {self.user_id} in organization {self.organization_id}"
+                )
+            else:
+                logger.debug(
+                    f"Report does not exist for conversation {conversation_id} and message {message_id} "
+                    f"for user {self.user_id} in organization {self.organization_id}"
+                )
+                raise FileNotFoundError("A report is not available for this message")
+        except (
+            ConversationNotFoundError,
+            MessageNotFoundError,
+            MessageNotAssistantError,
+            AgentNotAntonError,
+            ValueError,
+            FileNotFoundError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error checking if report exists for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to check if report exists: {str(e)}") from None
+
+    async def get_conversation_message_report(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+    ) -> str:
+        """
+        Get the report of a message by ID.
+        This will be a file system path to the HTML file containing the report.
+        Applies only to the Anton agent.
+
+        Args:
+            conversation_id: ID of the conversation to get the report from.
+            message_id: ID of the message to get the report from.
+
+        Returns:
+            str: The file system path to the HTML file containing the report.
+        """
+        logger.debug(
+            f"Getting report for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in organization {self.organization_id}"
+        )
+
+        try:
+            conversation = await self._get_conversation(conversation_id)
+            if not conversation:
+                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+
+            message = await self._get_message(conversation_id, message_id)
+            if not message:
+                raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
+
+            if message.role != Role.assistant:
+                raise MessageNotAssistantError(f"Message with ID '{message_id}' is not an assistant message")
+
+            if not is_anton_agent(conversation.mind):
+                raise AgentNotAntonError(f"Mind {conversation.mind.name} is not using the Anton agent")
+
+            anton_settings = AntonAgentSettings()
+            report = await ScratchpadRuntimeFactory().get_report(
+                backend=anton_settings.backend,
+                organization_id=self.organization_id,
+                user_id=self.user_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
+            )
+            return report
+
+        except (
+            ConversationNotFoundError,
+            MessageNotFoundError,
+            MessageNotAssistantError,
+            AgentNotAntonError,
+            ValueError,
+            FileNotFoundError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error getting report for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to get report: {str(e)}") from None
+
     def _validate_and_parse_sql_query(self, sql_query: str) -> Select:
         """
         Validate and parse the SQL query to ensure it is valid and a SELECT query.
@@ -924,13 +1144,16 @@ class ConversationsService:
             modified_at=conversation.modified_at.isoformat(),
         )
 
-    async def _message_to_response(self, message: Message, with_sql_query: bool = False) -> MessageResponse:
+    async def _message_to_response(
+        self, message: Message, with_sql_query: bool = False, with_events: bool = False
+    ) -> MessageResponse:
         """
         Convert Message database model to MessageResponse object.
 
         Args:
             message: Message database model.
             with_sql_query: Whether to include the SQL query in the response.
+            with_events: Whether to include the events in the response.
 
         Returns:
             MessageResponse: Message response object.
@@ -949,5 +1172,8 @@ class ConversationsService:
 
         if with_sql_query:
             message_response.sql_query = str(message.sql_query)
+
+        if with_events:
+            message_response.events = [event.event_data for event in message.message_events]
 
         return message_response

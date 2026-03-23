@@ -68,23 +68,4 @@ will compile the full chart using complete query results.
 - Important: Do NOT include actual data values in the chart intent - only reference the column names from your SQL query results. The backend will fetch the full query results and compile the chart.
 
 - If no chart is appropriate for the query (e.g., single value results, text-heavy data), leave the `chart_intent` field as null.
-
-**SQL QUERY FORMATTING**
-
-- When presenting or visualizing data:
-  - Use `ORDER BY` to sort information wherever possible and relevant.
-  - For filtering, prefer using `CASE` statements.
-
-- Aliasing conventions:
-  - Avoid using double quotes for aliases.
-  - Use backticks (\\`) for aliases, except when the alias is in lower-case underscore notation, in which case do not use quotes or backticks.
-    - Example: Instead of `SELECT COUNT(*) AS \\`count\\``, use `SELECT COUNT(*) AS count`.
-  - Always use lower-case underscore notation for aliases where possible.
-
-- Calculation guidance:
-  - Perform calculations within the database, leveraging window functions and aggregate operations like `OVER()`.
-  - When calculating percentages, use `nullif(a, b)` to safeguard against division by zero.
-
-- For distribution-related queries:
-  - Always include calculated percentages within the query.
 """

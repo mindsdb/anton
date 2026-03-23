@@ -2,6 +2,8 @@ import sys
 from types import ModuleType
 from unittest.mock import Mock
 
+import pytest
+
 
 def _ensure_module(name: str) -> ModuleType:
     mod = sys.modules.get(name)
@@ -14,18 +16,6 @@ def _ensure_module(name: str) -> ModuleType:
 
 # Some environments running unit tests may not have optional deps installed.
 # Stub them so that importing agent modules is possible without installing extras.
-
-# - stub minds.agents.helpers to avoid importing full LLM/config + model stack during unit tests
-helpers_name = "minds.agents.helpers"
-if helpers_name not in sys.modules:
-    helpers = ModuleType(helpers_name)
-
-    helpers.current_date_time_layer = lambda: "The current date and time is 2000-01-01 00:00:00"
-    helpers.mind_layer = lambda _mind: ""
-    helpers.charting_layer = lambda: ""
-    helpers.model_for = lambda _mind: Mock()
-    helpers.is_native_query_mode_enabled = lambda _mind, _settings: False
-    sys.modules[helpers_name] = helpers
 
 # - langfuse is used for instrumentation in some code paths
 langfuse = _ensure_module("langfuse")
@@ -56,3 +46,57 @@ if not hasattr(mc_sqlalchemy_type, "SecretData"):
             return value
 
     mc_sqlalchemy_type.SecretData = SecretData
+
+
+@pytest.fixture(autouse=True)
+def _patch_helpers_for_candidate_sql_agent_tests(monkeypatch):
+    """Patch `minds.agents.helpers` to avoid heavy config/model stack.
+
+    We patch the real module instead of replacing it in `sys.modules` so we don't
+    affect unrelated unit tests that import `minds.agents.helpers`.
+    """
+    import minds.agents.helpers as helpers
+
+    fixed_now = "The current date and time is 2000-01-01 00:00:00"
+
+    def fixed_model(_mind):
+        return Mock()
+
+    def fixed_mind_layer(_mind):
+        return ""
+
+    def fixed_chart_layer():
+        return ""
+
+    def fixed_native_enabled(_mind, _settings):
+        return False
+
+    monkeypatch.setattr(helpers, "current_date_time_layer", lambda: "The current date and time is 2000-01-01 00:00:00")
+    monkeypatch.setattr(helpers, "mind_layer", fixed_mind_layer)
+    monkeypatch.setattr(helpers, "charting_layer", fixed_chart_layer)
+    monkeypatch.setattr(helpers, "model_for", fixed_model)
+    monkeypatch.setattr(helpers, "is_native_query_mode_enabled", fixed_native_enabled)
+
+    # Patch modules that imported helpers symbols directly.
+    import minds.agents.candidate_sql_agent.agent as candidate_sql_agent
+    import minds.agents.candidate_sql_agent.controller_agents.agents as controller_agents
+    import minds.agents.candidate_sql_agent.linker_agent.agent as linker_agent
+    import minds.agents.candidate_sql_agent.selection_agent.agent as selection_agent
+    import minds.agents.candidate_sql_agent.text_to_sql_agents.agents as t2s_agents
+
+    monkeypatch.setattr(controller_agents, "current_date_time_layer", lambda: fixed_now)
+    monkeypatch.setattr(controller_agents, "mind_layer", fixed_mind_layer)
+
+    monkeypatch.setattr(linker_agent, "current_date_time_layer", lambda: fixed_now)
+    monkeypatch.setattr(linker_agent, "mind_layer", fixed_mind_layer)
+    monkeypatch.setattr(linker_agent, "model_for", fixed_model)
+
+    monkeypatch.setattr(selection_agent, "model_for", fixed_model)
+
+    monkeypatch.setattr(t2s_agents, "current_date_time_layer", lambda: fixed_now)
+    monkeypatch.setattr(t2s_agents, "mind_layer", fixed_mind_layer)
+    monkeypatch.setattr(t2s_agents, "charting_layer", fixed_chart_layer)
+    monkeypatch.setattr(t2s_agents, "model_for", fixed_model)
+
+    monkeypatch.setattr(candidate_sql_agent, "is_native_query_mode_enabled", fixed_native_enabled)
+    monkeypatch.setattr(candidate_sql_agent, "model_for", fixed_model)

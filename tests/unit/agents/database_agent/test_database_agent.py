@@ -15,16 +15,18 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from minds.agents.database_agent.agent import DatabaseAgent, DatabaseAgentConfig, DatabaseDeps
-from minds.agents.database_agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
-from minds.model.mind import Mind
-from minds.schemas.chat import Message, Role
-
 # Mock langfuse before importing any modules that use it
 if "langfuse" not in sys.modules:
     mock_langfuse = Mock()
     mock_langfuse.observe = lambda f=None, **_: (lambda *a, **k: f(*a, **k)) if f else (lambda x: x)
     sys.modules["langfuse"] = mock_langfuse
+
+from minds.agents.base import AgentRunContext
+from minds.agents.database_agent.agent import DatabaseAgent, DatabaseDeps
+from minds.agents.database_agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
+from minds.model.mind import Mind
+from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
+from minds.schemas.chat import Message, Role
 
 
 class TestDatabaseDeps:
@@ -71,62 +73,65 @@ class TestDatabaseAgent:
     @pytest.fixture
     def database_agent(self, mock_mind, mock_mindsdb_client):
         """Create a DatabaseAgent instance for testing."""
-        with (
-            patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm,
-            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
-            patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
-        ):
-            mock_llm = Mock()
-            mock_get_llm.return_value = mock_llm
+        with patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class:
             mock_toolkit_class.return_value = Mock()
-            mock_agent = Mock()
-            mock_agent_class.return_value = mock_agent
             return DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
     def test_database_agent_initialization(self, mock_mind, mock_mindsdb_client):
         """Test DatabaseAgent initialization."""
-        with (
-            patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm,
-            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
-            patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
-        ):
-            mock_llm = Mock()
-            mock_get_llm.return_value = mock_llm
+        with patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class:
             mock_toolkit = Mock()
             mock_toolkit_class.return_value = mock_toolkit
-            mock_agent = Mock()
-            mock_agent_class.return_value = mock_agent
 
             agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
             assert agent.mind == mock_mind
             assert agent.deps.toolkit == mock_toolkit
             assert agent.deps.conversation_context is None
-            assert agent._pydantic_agent is not None
-            mock_get_llm.assert_called_once_with(mock_mind.provider, mock_mind.model_name)
+            mock_toolkit_class.assert_called_once_with(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
     def test_database_agent_initialization_with_llm_config_error(self, mock_mind, mock_mindsdb_client):
-        """Test DatabaseAgent initialization when LLM config fails."""
-        with patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm:
+        """Test _setup_agent when LLM config fails."""
+        with (
+            patch("minds.agents.database_agent.agent.DatabaseToolkit", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm,
+        ):
             mock_get_llm.side_effect = ValueError("Unsupported provider")
+            agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
             with pytest.raises(ValueError, match="Unsupported provider"):
-                DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
+                agent._setup_agent(enable_charting=False)
 
-    def test_database_agent_initialization_respects_instrument_config(self, mock_mind, mock_mindsdb_client):
-        """Test that initialization wires instrument flag to PydanticAIAgent."""
-        config = DatabaseAgentConfig(instrument=False)
+    @pytest.mark.asyncio
+    async def test_database_agent_initialization_respects_instrument_config(self, mock_mind, mock_mindsdb_client):
+        """Test that run_context.instrument wires to PydanticAIAgent.instrument_all."""
         with (
-            patch("minds.agents.database_agent.agent.get_llm_config", return_value=Mock()),
-            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
-            patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
+            patch("minds.agents.database_agent.agent.DatabaseToolkit", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.PydanticAIAgent.instrument_all") as mock_instrument_all,
+            patch.object(DatabaseAgent, "_setup_agent") as mock_setup_agent,
         ):
-            mock_toolkit_class.return_value = Mock()
-            mock_agent_class.return_value = Mock()
+            mock_agent = Mock()
+            mock_result = Mock()
+            mock_result.output = "Final answer"
+            mock_result.usage.return_value = 3
+            mock_agent.run = AsyncMock(return_value=mock_result)
+            mock_setup_agent.return_value = mock_agent
 
-            DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client, config=config)
+            agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
+            streamer = Mock()
+            streamer.push = AsyncMock()
 
-            mock_agent_class.instrument_all.assert_called_once_with(instrument=False)
+            await agent.run(
+                messages=[Message(role=Role.user, content="Query")],
+                streamer=streamer,
+                stream=False,
+                run_context=AgentRunContext(
+                    instrument=False,
+                    metadata=ChatCompletionRequestMetadata(enable_charting=False),
+                ),
+            )
+
+            mock_instrument_all.assert_called_once_with(instrument=False)
 
     def test_get_system_prompt_includes_system_prompt_charting_and_time(self, mock_mind, mock_mindsdb_client):
         """Test system prompt composition with charting and custom prompt."""
@@ -134,20 +139,14 @@ class TestDatabaseAgent:
         fixed_now = datetime(2026, 2, 16, 10, 55, 0)
 
         with (
-            patch("minds.agents.database_agent.agent.get_llm_config", return_value=Mock()),
             patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
-            patch("minds.agents.database_agent.agent.PydanticAIAgent", return_value=Mock()),
             patch("minds.agents.database_agent.agent.datetime") as mock_datetime,
         ):
             mock_toolkit_class.return_value = Mock()
             mock_datetime.now.return_value = fixed_now
-            agent = DatabaseAgent(
-                mind=mock_mind,
-                mindsdb_client=mock_mindsdb_client,
-                config=DatabaseAgentConfig(enable_charting=True),
-            )
+            agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
 
-            prompt = agent._get_system_prompt()
+            prompt = agent._get_system_prompt(enable_charting=True)
             assert "Follow strict SQL style." in prompt
             assert CHART_GENERATION_INSTRUCTIONS in prompt
             assert "Current date: 2026-02-16" in prompt
@@ -158,15 +157,13 @@ class TestDatabaseAgent:
         mock_mind.parameters = {"prompt_template": "Use concise answers."}
         fixed_now = datetime(2026, 2, 16, 10, 55, 0)
         with (
-            patch("minds.agents.database_agent.agent.get_llm_config", return_value=Mock()),
             patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
-            patch("minds.agents.database_agent.agent.PydanticAIAgent", return_value=Mock()),
             patch("minds.agents.database_agent.agent.datetime") as mock_datetime,
         ):
             mock_toolkit_class.return_value = Mock()
             mock_datetime.now.return_value = fixed_now
             agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
-            prompt = agent._get_system_prompt()
+            prompt = agent._get_system_prompt(enable_charting=False)
             assert "Use concise answers." in prompt
 
     def test_build_conversation_context_empty_messages(self, database_agent):
@@ -255,28 +252,23 @@ class TestDatabaseAgent:
     def test_setup_agent_creates_tool(self, mock_mind, mock_mindsdb_client):
         """Test that _setup_agent creates the generate_and_execute_sql tool."""
         with (
-            patch("minds.agents.database_agent.agent.get_llm_config") as mock_get_llm,
-            patch("minds.agents.database_agent.agent.DatabaseToolkit") as mock_toolkit_class,
+            patch("minds.agents.database_agent.agent.DatabaseToolkit", return_value=Mock()),
+            patch("minds.agents.database_agent.agent.get_llm_config", return_value=Mock()),
             patch("minds.agents.database_agent.agent.PydanticAIAgent") as mock_agent_class,
         ):
-            mock_llm = Mock()
-            mock_get_llm.return_value = mock_llm
-            mock_toolkit_class.return_value = Mock()
             mock_agent = Mock()
             mock_agent_class.return_value = mock_agent
 
             agent = DatabaseAgent(mind=mock_mind, mindsdb_client=mock_mindsdb_client)
-
-            # Verify the agent was created
-            assert agent._pydantic_agent is not None
-            assert agent._pydantic_agent == mock_agent
+            created = agent._setup_agent(enable_charting=False)
+            assert created == mock_agent
 
     @pytest.mark.asyncio
     async def test_tool_generate_and_execute_sql(self, database_agent):
         """Test the generate_and_execute_sql tool function."""
         # This test would require more complex mocking of the PydanticAI agent
         # For now, we'll test that the tool is properly configured
-        assert database_agent._pydantic_agent is not None
+        assert database_agent is not None
 
     def test_conversation_context_preservation(self, database_agent):
         """Test that conversation context is preserved across multiple calls."""
@@ -345,13 +337,23 @@ class TestDatabaseAgent:
         mock_result.output = "Final answer"
         usage = 3
         mock_result.usage.return_value = usage
-        database_agent._pydantic_agent.run = AsyncMock(return_value=mock_result)
+        mock_agent = Mock()
+        mock_agent.run = AsyncMock(return_value=mock_result)
 
         # Prepare a mock streamer with AsyncMock push
         mock_streamer = Mock()
         mock_streamer.push = AsyncMock()
 
-        await database_agent.run(messages=messages, streamer=mock_streamer, stream=False)
+        with patch.object(database_agent, "_setup_agent", return_value=mock_agent):
+            await database_agent.run(
+                messages=messages,
+                streamer=mock_streamer,
+                stream=False,
+                run_context=AgentRunContext(
+                    instrument=True,
+                    metadata=ChatCompletionRequestMetadata(enable_charting=False),
+                ),
+            )
 
         # Ensure the agent's conversation was set and streamer.push was called with the output
         assert database_agent.deps.conversation_context == "Query"
@@ -383,12 +385,22 @@ class TestDatabaseAgent:
             async def __aexit__(self, exc_type, exc_val, exc_tb):
                 pass
 
-        database_agent._pydantic_agent.run_stream = Mock(return_value=MockAsyncContextManager())
+        mock_agent = Mock()
+        mock_agent.run_stream = Mock(return_value=MockAsyncContextManager())
 
         mock_streamer = Mock()
         mock_streamer.push = AsyncMock()
 
-        await database_agent.run(messages=messages, streamer=mock_streamer, stream=True)
+        with patch.object(database_agent, "_setup_agent", return_value=mock_agent):
+            await database_agent.run(
+                messages=messages,
+                streamer=mock_streamer,
+                stream=True,
+                run_context=AgentRunContext(
+                    instrument=True,
+                    metadata=ChatCompletionRequestMetadata(enable_charting=False),
+                ),
+            )
 
         # Ensure push was called for each delta: "a", "b", "c"
         assert mock_streamer.push.await_count == 3

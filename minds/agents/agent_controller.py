@@ -5,11 +5,11 @@ from types import ModuleType
 
 from mindsdb_sdk.server import Server
 
-from minds.agents.base import AgentRunContext, BaseAgent
-from minds.common.logger import setup_logging
+from minds.agents.base import BaseAgent
+from minds.common.logger import get_logger
 from minds.model.mind import Mind
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class AgentController:
@@ -21,7 +21,7 @@ class AgentController:
         self.agents = {}
         self._discover_agents()
 
-    def get_agent(self, agent_name: str, mind: Mind, mindsdb_client: Server, run_context: AgentRunContext) -> BaseAgent:
+    def get_agent(self, agent_name: str, mind: Mind, mindsdb_client: Server) -> BaseAgent:
         """
         Get the agent instance for the given agent name.
 
@@ -37,11 +37,7 @@ class AgentController:
         agent_class = self.agents[agent_name]
         logger.debug(f"Found agent class: {agent_class}")
 
-        logger.debug(f"Building config for agent with run context: {run_context}")
-        config = agent_class.build_config(run_context)
-        logger.debug(f"Built config: {config}")
-
-        return agent_class(mind, mindsdb_client, config=config)
+        return agent_class(mind, mindsdb_client)
 
     def _discover_agents(self):
         """

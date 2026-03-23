@@ -126,7 +126,7 @@ class TestDataCatalogLoaderFlow:
             result = _call_task(get_tables, mock_mindsdb_client, "test_datasource", None)
 
             expected_query = """
-    SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
+    SELECT * FROM INFORMATION_SCHEMA.META_TABLES
     WHERE TABLE_SCHEMA = 'test_datasource'
     """
             mock_execute.assert_called_once()

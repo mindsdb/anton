@@ -10,7 +10,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from minds.agents.base import BaseAgent, BaseAgentConfig
+from minds.agents.base import AgentRunContext, BaseAgent
 from minds.agents.base_response import AgentResponse
 from minds.agents.candidate_sql_agent.controller_agents.agents import (
     FeedbackAgentDeps,
@@ -32,20 +32,27 @@ agent_settings = CandidateSQLAgentSettings()
 
 
 class CandidateSQLAgent(BaseAgent):
-    def __init__(self, mind: Mind, mindsdb_client: Server, config: BaseAgentConfig | None = None):
-        super().__init__(mind=mind, mindsdb_client=mindsdb_client, config=config)
+    def __init__(self, mind: Mind, mindsdb_client: Server):
+        super().__init__(mind=mind, mindsdb_client=mindsdb_client)
 
-        Agent.instrument_all(instrument=self.config.instrument)
-
-    async def run(self, messages: list[Message], streamer: MessageStreamer, stream: bool = False) -> AgentResponse:
+    async def _run(
+        self,
+        messages: list[Message],
+        streamer: MessageStreamer,
+        run_context: AgentRunContext,
+        stream: bool,
+    ) -> AgentResponse:
         """Run completion and push results to the streamer.
         The streamer will also be added to the dependencies to allow tools to push messages (thoughts).
 
         Args:
             messages: List of message dictionaries.
             streamer: MessageStreamer instance to push messages to.
+            run_context: The run context for the agent.
             stream: Whether to stream the response.
         """
+        Agent.instrument_all(instrument=run_context.instrument)
+
         prompt = messages.pop(-1).content
         message_history = self._convert_to_pydantic_ai_messages(messages)
 

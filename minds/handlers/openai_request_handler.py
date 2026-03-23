@@ -3,6 +3,7 @@ from sqlmodel import Session
 
 from minds.agents.agent_controller import AgentController
 from minds.agents.base import AgentRunContext
+from minds.agents.helpers import get_agent
 from minds.common.logger import setup_logging
 from minds.common.settings.app_settings import get_app_settings
 from minds.model.chat_completion import ChatCompletion
@@ -119,14 +120,11 @@ class OpenAIRequestHandler:
             handler.mind_ready = False
 
         agent_controller = AgentController()
+
         agent = agent_controller.get_agent(
-            agent_name=mind.parameters.get("agent_name") or settings.agents.default_agent,
+            agent_name=get_agent(mind).value,
             mind=mind,
             mindsdb_client=mindsdb_client,
-            run_context=AgentRunContext(
-                metadata=metadata,
-                instrument=instrument,
-            ),
         )
         handler.agent = agent
 
@@ -146,7 +144,12 @@ class OpenAIRequestHandler:
             await streamer.push(role=Role.assistant, content="The Mind is not ready yet. Please try again later.")
             return
 
-        _ = await self.agent.run(messages=self.messages, streamer=streamer, stream=self.stream)
+        _ = await self.agent.run(
+            messages=self.messages,
+            streamer=streamer,
+            stream=self.stream,
+            run_context=AgentRunContext(metadata=self.metadata, instrument=self.instrument),
+        )
 
         usage = await self.agent.get_last_run_usage()
 
@@ -185,7 +188,17 @@ class OpenAIRequestHandler:
             organization_id=self.context.organization_id,
         )
 
-        response = await self.agent.run(messages=self.messages, streamer=streamer, stream=self.stream)
+        response = await self.agent.run(
+            messages=self.messages,
+            streamer=streamer,
+            stream=self.stream,
+            run_context=AgentRunContext(
+                metadata=self.metadata,
+                instrument=self.instrument,
+                conversation_id=message.conversation_id,
+                message_id=message.id,
+            ),
+        )
 
         usage = await self.agent.get_last_run_usage()
 

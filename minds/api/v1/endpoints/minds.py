@@ -37,7 +37,7 @@ router = APIRouter()
 async def get_supported_models(
     context: Context = Depends(get_context),
     minds_service: MindsService = Depends(get_minds_service),
-) -> dict[str, bool | str | str | dict[str, list[str]]]:
+) -> dict[str, bool | str | str | dict[str, dict[str, list[str]]]]:
     """
     Get the supported models for the current user/company.
     """
@@ -45,14 +45,17 @@ async def get_supported_models(
         f"Get supported models requested for user {minds_service.user_id} in "
         f"organization {minds_service.organization_id}"
     )
-    model_selection_enabled, default_provider, default_model, providers_and_models = get_supported_models_by_provider(
-        context=context,
-        settings=get_app_settings(),
+    model_selection_enabled, default_provider, default_model, default_coding_model, providers_and_models = (
+        get_supported_models_by_provider(
+            context=context,
+            settings=get_app_settings(),
+        )
     )
     return {
         "model_selection_enabled": model_selection_enabled,
         "default_provider": default_provider,
         "default_model": default_model,
+        "default_coding_model": default_coding_model,
         "providers": providers_and_models,
     }
 

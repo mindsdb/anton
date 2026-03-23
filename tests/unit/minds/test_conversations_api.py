@@ -9,10 +9,12 @@ import pytest
 from fastapi import HTTPException
 
 from minds.api.v1.endpoints.conversations import (
+    check_conversation_message_report_exists,
     create_conversation,
     delete_conversation,
     export_conversation_message_result,
     get_conversation,
+    get_conversation_message_report,
     get_conversation_message_result,
     get_conversation_messages,
     get_conversations_service,
@@ -299,6 +301,7 @@ class TestConversationsAPI:
         result = await get_conversation_messages(
             conversation_id=conversation_id,
             conversations_service=mock_conversations_service,
+            with_events=True,
         )
 
         assert isinstance(result, dict)
@@ -309,6 +312,7 @@ class TestConversationsAPI:
         mock_conversations_service.get_conversation_messages.assert_called_once_with(
             conversation_id,
             with_sql_query=True,
+            with_events=True,
         )
 
     @pytest.mark.asyncio
@@ -722,3 +726,72 @@ class TestConversationsAPI:
 
         assert exc_info.value.status_code == 500
         assert "Internal server error" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_check_conversation_message_report_exists_success(self, mock_conversations_service):
+        """HEAD report endpoint: returns 200/None when service succeeds."""
+        mock_conversations_service.check_conversation_message_report_exists = AsyncMock(return_value=None)
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+        result = await check_conversation_message_report_exists(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            conversations_service=mock_conversations_service,
+        )
+
+        assert result is None
+        mock_conversations_service.check_conversation_message_report_exists.assert_awaited_once_with(
+            conversation_id, message_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_conversation_message_report_exists_not_found(self, mock_conversations_service):
+        """HEAD report endpoint: maps missing report to 404."""
+        mock_conversations_service.check_conversation_message_report_exists = AsyncMock(
+            side_effect=FileNotFoundError("A report is not available for this message")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_conversation_message_report_exists(
+                conversation_id=uuid4(),
+                message_id=uuid4(),
+                conversations_service=mock_conversations_service,
+            )
+
+        assert exc_info.value.status_code == 404
+        assert "report is not available" in str(exc_info.value.detail).lower()
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_report_success(self, mock_conversations_service):
+        """GET report endpoint: returns HTML response when service succeeds."""
+        mock_conversations_service.get_conversation_message_report = AsyncMock(return_value="<html>ok</html>")
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+        resp = await get_conversation_message_report(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            conversations_service=mock_conversations_service,
+        )
+
+        assert resp.media_type == "text/html"
+        assert resp.body.decode() == "<html>ok</html>"
+        mock_conversations_service.get_conversation_message_report.assert_awaited_once_with(conversation_id, message_id)
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_report_message_not_assistant_is_400(self, mock_conversations_service):
+        """GET report endpoint: returns 400 if message is not assistant."""
+        mock_conversations_service.get_conversation_message_report = AsyncMock(
+            side_effect=MessageNotAssistantError("Message is not an assistant message")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_conversation_message_report(
+                conversation_id=uuid4(),
+                message_id=uuid4(),
+                conversations_service=mock_conversations_service,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "not an assistant" in str(exc_info.value.detail).lower()

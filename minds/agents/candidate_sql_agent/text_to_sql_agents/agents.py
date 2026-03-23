@@ -17,6 +17,10 @@ from minds.agents.candidate_sql_agent.selection_agent.agent import QueryComplexi
 from minds.agents.candidate_sql_agent.settings import CandidateSQLAgentSettings
 from minds.agents.candidate_sql_agent.text_to_sql_agents.instructions_templates import (
     MINDSDB_SQL_INSTRUCTIONS,
+    NATIVE_BIGQUERY_SQL_ERROR_INSTRUCTIONS,
+    NATIVE_BIGQUERY_SQL_INSTRUCTIONS,
+    NATIVE_MSSQL_SQL_ERROR_INSTRUCTIONS,
+    NATIVE_MSSQL_SQL_INSTRUCTIONS,
     NATIVE_SNOWFLAKE_SQL_ERROR_INSTRUCTIONS,
     NATIVE_SNOWFLAKE_SQL_INSTRUCTIONS,
 )
@@ -38,6 +42,7 @@ from minds.agents.candidate_sql_agent.text_to_sql_agents.models import (
     DataCatalogSubset,
     QueryAttempt,
     QueryPlan,
+    QueryPlanStep,
     QueryPlanStepType,
     SQLQuery,
     TextToSQLToolResult,
@@ -88,6 +93,7 @@ class SQLGenAgentDeps:
     data_catalog_subset_context: str
     acquired_knowledge: str
     is_native_query_mode_enabled: bool
+    native_engine: str | None
 
 
 @dataclass
@@ -171,10 +177,18 @@ async def sql_gen_instructions(ctx: RunContext[SQLGenAgentDeps]) -> str:
         acquired_knowledge=ctx.deps.acquired_knowledge,
     )
 
-    # Only Snowflake will be supported in native query mode for now
+    # Native query mode instructions depend on the engine
     if ctx.deps.is_native_query_mode_enabled:
-        # TODO: Make this more general?
-        p += "\n\n" + NATIVE_SNOWFLAKE_SQL_INSTRUCTIONS
+        engine = (ctx.deps.native_engine or "").strip().lower()
+        if engine == "bigquery":
+            p += "\n\n" + NATIVE_BIGQUERY_SQL_INSTRUCTIONS
+        elif engine == "snowflake":
+            p += "\n\n" + NATIVE_SNOWFLAKE_SQL_INSTRUCTIONS
+        elif engine == "mssql":
+            p += "\n\n" + NATIVE_MSSQL_SQL_INSTRUCTIONS
+        else:
+            logger.warning(f"Unsupported native engine '{ctx.deps.native_engine}'. Falling back to MindsDB SQL.")
+            p += "\n\n" + MINDSDB_SQL_INSTRUCTIONS
     else:
         p += "\n\n" + MINDSDB_SQL_INSTRUCTIONS
 
@@ -217,10 +231,22 @@ async def sql_retry_instructions(ctx: RunContext[SQLGenRetryAgentDeps]) -> str:
         error_guidance=error_guidance,
     )
 
-    # Only Snowflake will be supported in native query mode for now
+    # Native query mode instructions depend on the engine
     if ctx.deps.is_native_query_mode_enabled:
-        p += "\n\n" + NATIVE_SNOWFLAKE_SQL_INSTRUCTIONS
-        p += "\n\n" + NATIVE_SNOWFLAKE_SQL_ERROR_INSTRUCTIONS
+        engine = (ctx.deps.native_engine or "").strip().lower()
+        if engine == "bigquery":
+            p += "\n\n" + NATIVE_BIGQUERY_SQL_INSTRUCTIONS
+            p += "\n\n" + NATIVE_BIGQUERY_SQL_ERROR_INSTRUCTIONS
+        elif engine == "snowflake":
+            p += "\n\n" + NATIVE_SNOWFLAKE_SQL_INSTRUCTIONS
+            p += "\n\n" + NATIVE_SNOWFLAKE_SQL_ERROR_INSTRUCTIONS
+        elif engine == "mssql":
+            p += "\n\n" + NATIVE_MSSQL_SQL_INSTRUCTIONS
+            p += "\n\n" + NATIVE_MSSQL_SQL_ERROR_INSTRUCTIONS
+        else:
+            logger.warning(f"Unsupported native engine '{ctx.deps.native_engine}'. Falling back to MindsDB SQL.")
+            p += "\n\n" + MINDSDB_SQL_INSTRUCTIONS
+            # TODO Add mindsdb error instructions
     else:
         p += "\n\n" + MINDSDB_SQL_INSTRUCTIONS
 
@@ -241,6 +267,8 @@ summarize_agent: Agent[SummarizeAgentDeps, str] = Agent(
 @summarize_agent.instructions
 async def summarize_instructions(ctx: RunContext[SummarizeAgentDeps]) -> str:
     p = current_date_time_layer()
+    # TODO: Move this into instructions templates, double check if it is true for native queries
+    # especiall the functions part as SUM etc
     p += f"""
 You are a summarization assistant. Your task is to explain the acquired knowledge from SQL queries in clear, " \
     "natural language for the user.
@@ -298,36 +326,91 @@ class TextToSQLPipeline:
         self.mindsdb_client = mindsdb_client
         self.is_native_query_mode_enabled = is_native_query_mode_enabled
 
-        self.datasource_name = None
-        self._native_datasource_name = None
-        if self.is_native_query_mode_enabled:
-            self.datasource_name = self.mind.mind_datasources[0].datasource.name
+        self._native_datasource_name: str | None = (
+            self.mind.mind_datasources[0].datasource.name if is_native_query_mode_enabled else None
+        )
 
     def _set_native_datasource_from_linked_schema(self, linked_schema: LinkedSchema | None) -> None:
         if not linked_schema or not linked_schema.tables:
             return
+        datasources = {table.split(".", 1)[0] for table in linked_schema.tables if "." in table}
+        if len(datasources) == 1:
+            self._native_datasource_name = next(iter(datasources))
 
-        datasource_counts: dict[str, int] = {}
-        for table in linked_schema.tables:
-            if "." not in table:
-                continue
-            datasource = table.split(".", 1)[0]
-            datasource_counts[datasource] = datasource_counts.get(datasource, 0) + 1
-
-        if not datasource_counts:
-            return
-
-        # Choose the most frequent datasource in linked tables
-        self._native_datasource_name = max(datasource_counts.items(), key=lambda item: item[1])[0]
-
-    def _get_native_datasource_name(self) -> str | None:
-        return self._native_datasource_name or self.datasource_name
+    def _get_native_datasource_engine_for(self, datasource_name: str | None) -> str | None:
+        ds_name = (datasource_name or "").strip().lower()
+        if not ds_name or not self.mind.mind_datasources:
+            return None
+        for md in self.mind.mind_datasources:
+            ds = md.datasource
+            if ds and (ds.name or "").strip().lower() == ds_name:
+                return ds.engine
+        return None
 
     def _strip_datasource_prefix_for_native(self, query: str, datasource_name: str) -> str:
         if not query or not datasource_name:
             return query
-        pattern = re.compile(rf"(?i)\b{re.escape(datasource_name)}\s*\.", re.IGNORECASE)
+        pattern = re.compile(
+            rf"(?i)\b{re.escape(datasource_name)}\s*\.",
+            re.IGNORECASE,
+        )
         return pattern.sub("", query)
+
+    def _resolve_step_native_datasource(
+        self,
+        step: QueryPlanStep,
+        pruned_data_catalogs: list[DataCatalog],
+    ) -> str | None:
+        available_ds = {
+            (c.mind_datasource.datasource.name or "").strip()
+            for c in pruned_data_catalogs
+            if c.mind_datasource and c.mind_datasource.datasource
+        }
+        available_ds = {n for n in available_ds if n}
+        available_ds_lower = {n.lower(): n for n in available_ds}
+
+        resolved: str | None = None
+
+        # 1) Explicit datasource selection from the plan — native mode requires exactly one
+        selected_ds = [ds.strip() for ds in (step.data_catalog_subset.datasources or []) if ds.strip()]
+        if len(selected_ds) == 1:
+            resolved = available_ds_lower.get(selected_ds[0].lower())
+        elif len(selected_ds) > 1:
+            return None  # Cross-datasource step — native mode not applicable
+
+        # 2) Infer from table tokens — only valid when all tables share one datasource
+        if not resolved:
+            datasources_in_tables = {
+                token.split(".", 1)[0].strip()
+                for token in (step.data_catalog_subset.tables or [])
+                if token and "." in token and token.split(".", 1)[0].strip()
+            }
+            if len(datasources_in_tables) == 1:
+                top_ds = next(iter(datasources_in_tables))
+                resolved = available_ds_lower.get(top_ds.lower(), top_ds)
+            elif len(datasources_in_tables) > 1:
+                return None  # Cross-datasource step — native mode not applicable
+
+        # 3) Single available datasource in pruned catalogs
+        if not resolved and len(available_ds) == 1:
+            resolved = next(iter(available_ds))
+
+        # 4) Global fallback
+        if not resolved:
+            resolved = self._native_datasource_name
+
+        # Avoid routing to `mindsdb` — use first non-mindsdb datasource instead
+        if resolved and resolved.lower() == "mindsdb":
+            resolved = next(
+                (
+                    (md.datasource.name or "").strip()
+                    for md in self.mind.mind_datasources
+                    if md.datasource and (md.datasource.name or "").strip().lower() != "mindsdb"
+                ),
+                None,
+            )
+
+        return resolved
 
     async def run(
         self,
@@ -434,6 +517,7 @@ class TextToSQLPipeline:
             prompt=prompt,
             message_history=message_history,
             data_catalog_context_str=data_catalog_context_str,
+            data_catalogs=data_catalogs,
             streamer=streamer,
             usage=usage,
             usage_limits=usage_limits,
@@ -449,30 +533,6 @@ class TextToSQLPipeline:
                 role=Role.thought_planning,
                 content=f"  Step {i} ({step.type.value}): {step.description}",
             )
-
-        # Validate that tables referenced in plan steps exist in the data catalog
-        try:
-            plan_table_names = self._extract_plan_table_names(query_plan)
-            if plan_table_names:
-                logger.info(f"Validating {len(plan_table_names)} table(s) referenced in plan steps")
-                await streamer.push(
-                    role=Role.thought_planning,
-                    content=f"Validating {len(plan_table_names)} table(s) referenced in plan steps",
-                )
-                self._validate_tables_exist_in_catalog(plan_table_names, data_catalogs)
-                logger.info("Table validation passed")
-        except DataCatalogValidationError as e:
-            logger.warning(f"Table validation failed: {str(e)}")
-            await streamer.push(
-                role=Role.thought_planning,
-                content=f"Table validation failed: {str(e)}",
-            )
-            # Convert to QueryPlanningError to trigger retry mechanism
-            raise QueryPlanningError(
-                f"Data catalog validation failed: {str(e)}. "
-                "The plan references tables that don't exist in the catalog. "
-                "Please adjust the plan to use only tables that are available in the data catalog."
-            ) from e
 
         # (2) Execute loop with handoffs
         logger.info(f"Starting execution of query plan with {len(query_plan.steps)} initial step(s)")
@@ -506,6 +566,7 @@ class TextToSQLPipeline:
         prompt: str,
         message_history: list[ModelMessage],
         data_catalog_context_str: str,
+        data_catalogs: list[DataCatalog],
         streamer: MessageStreamer,
         usage: RunUsage,
         usage_limits: UsageLimits,
@@ -548,6 +609,30 @@ class TextToSQLPipeline:
 
                 last_plan = plan_res.output
                 self._validate_query_plan(last_plan)
+
+                # Validate that tables referenced in plan steps exist in the data catalog
+                try:
+                    plan_table_names = self._extract_plan_table_names(last_plan)
+                    if plan_table_names:
+                        logger.info(f"Validating {len(plan_table_names)} table(s) referenced in plan steps")
+                        await streamer.push(
+                            role=Role.thought_planning,
+                            content=f"Validating {len(plan_table_names)} table(s) referenced in plan steps",
+                        )
+                        self._validate_tables_exist_in_catalog(plan_table_names, data_catalogs)
+                        logger.info("Table validation passed")
+                except DataCatalogValidationError as e:
+                    logger.warning(f"Table validation failed: {str(e)}")
+                    await streamer.push(
+                        role=Role.thought_planning,
+                        content=f"Table validation failed: {str(e)}",
+                    )
+                    # Convert to QueryPlanningError to trigger retry mechanism
+                    raise QueryPlanningError(
+                        f"Data catalog validation failed: {str(e)}. "
+                        "The plan references tables that don't exist in the catalog. "
+                        "Please adjust the plan to use only tables that are available in the data catalog."
+                    ) from e
                 return last_plan
 
             except Exception as e:
@@ -742,6 +827,15 @@ class TextToSQLPipeline:
                 data_catalogs=data_catalogs,
                 data_catalog_subset=step.data_catalog_subset,
             )
+            step_native_datasource_name: str | None = None
+            if self.is_native_query_mode_enabled:
+                step_native_datasource_name = self._resolve_step_native_datasource(step, pruned_data_catalogs)
+            step_native_mode = step_native_datasource_name is not None
+            logger.info(
+                "Step native mode resolution: enabled=%s, datasource=%s",
+                step_native_mode,
+                step_native_datasource_name or "none",
+            )
             # Apply token limits to prevent context length exceeded during SQL generation
             tokens_per_catalog = (
                 agent_settings.max_catalog_tokens_orchestrator // len(pruned_data_catalogs)
@@ -753,7 +847,7 @@ class TextToSQLPipeline:
                     c.to_context_str(
                         max_tokens=tokens_per_catalog,
                         include_statistics=False,
-                        include_datasource_name=not self.is_native_query_mode_enabled,
+                        include_datasource_name=not step_native_mode,
                     )
                     for c in pruned_data_catalogs
                 ]
@@ -795,6 +889,8 @@ class TextToSQLPipeline:
                         streamer=streamer,
                         usage=usage,
                         usage_limits=usage_limits,
+                        native_datasource_name=step_native_datasource_name,
+                        is_native_query_mode_enabled=step_native_mode,
                     )
 
                     execution_result = self._generate_markdown_table(
@@ -832,6 +928,8 @@ class TextToSQLPipeline:
                         acquired_knowledge=acquired_knowledge,
                         streamer=streamer,
                         linked_schema=linked_schema,
+                        native_datasource_name=step_native_datasource_name,
+                        is_native_query_mode_enabled=step_native_mode,
                     )
                 else:
                     await self._execute_exploratory_step(
@@ -842,6 +940,8 @@ class TextToSQLPipeline:
                         streamer=streamer,
                         usage=usage,
                         usage_limits=usage_limits,
+                        native_datasource_name=step_native_datasource_name,
+                        is_native_query_mode_enabled=step_native_mode,
                     )
                 logger.info(
                     f"Step {step_count} completed. Information has been added to the acquired knowledge.",
@@ -1034,11 +1134,17 @@ class TextToSQLPipeline:
         streamer: MessageStreamer,
         usage: RunUsage,
         usage_limits: UsageLimits,
+        native_datasource_name: str | None = None,
+        is_native_query_mode_enabled: bool | None = None,
     ) -> None:
         """Execute an exploratory step: generate SQL, execute it, and add to acquired knowledge."""
         last_error: Exception | None = None
         last_query = ""
         query_attempts: list[QueryAttempt] = []
+        native_mode = (
+            self.is_native_query_mode_enabled if is_native_query_mode_enabled is None else is_native_query_mode_enabled
+        )
+        native_engine = self._get_native_datasource_engine_for(native_datasource_name)
 
         for attempt in range(agent_settings.max_sql_retries):
             logger.info(f"SQL generation attempt {attempt + 1} of {agent_settings.max_sql_retries}")
@@ -1055,7 +1161,8 @@ class TextToSQLPipeline:
                             mind=self.mind,
                             data_catalog_subset_context=data_catalog_subset_context,
                             acquired_knowledge=acquired_knowledge.to_string(),
-                            is_native_query_mode_enabled=self.is_native_query_mode_enabled,
+                            is_native_query_mode_enabled=native_mode,
+                            native_engine=native_engine,
                         ),
                         model=model_for(self.mind),
                         usage=usage,
@@ -1077,7 +1184,8 @@ class TextToSQLPipeline:
                             failed_query=last_query,
                             error_message=str(last_error),
                             previous_attempts=query_attempts,
-                            is_native_query_mode_enabled=self.is_native_query_mode_enabled,
+                            is_native_query_mode_enabled=native_mode,
+                            native_engine=native_engine,
                         ),
                         model=model_for(self.mind),
                         usage=usage,
@@ -1095,8 +1203,8 @@ class TextToSQLPipeline:
                 )
 
                 # If native query mode is enabled, wrap the query in a native query block
-                if self.is_native_query_mode_enabled:
-                    datasource_name = self._get_native_datasource_name()
+                if native_mode:
+                    datasource_name = native_datasource_name or self._native_datasource_name
                     if not datasource_name:
                         raise QueryGenerationError("Native query mode enabled but no datasource available")
                     query = self._strip_datasource_prefix_for_native(query, datasource_name)
@@ -1105,6 +1213,7 @@ class TextToSQLPipeline:
 
                 sanitized = self._sanitize_and_validate_sql_mindsdb(query)
                 logger.info("SQL query validated and sanitized")
+                logger.info("Final SQL to execute: %s", sanitized)
 
                 result_df = self._execute_sql(sanitized)
                 logger.info(f"SQL execution successful. Number of rows: {len(result_df)}")
@@ -1142,6 +1251,8 @@ class TextToSQLPipeline:
         acquired_knowledge: AcquiredKnowledge,
         streamer: MessageStreamer,
         linked_schema: LinkedSchema | None = None,
+        native_datasource_name: str | None = None,
+        is_native_query_mode_enabled: bool | None = None,
     ) -> None:
         """
         Execute a step using multi-path candidate generation.
@@ -1167,11 +1278,18 @@ class TextToSQLPipeline:
                 reasoning="No schema linking performed",
             )
 
+        native_mode = (
+            self.is_native_query_mode_enabled if is_native_query_mode_enabled is None else is_native_query_mode_enabled
+        )
+        native_engine = self._get_native_datasource_engine_for(native_datasource_name)
+
         try:
             candidates = await candidate_generator.generate(
                 question=step_description,
                 linked_schema=linked_schema,
                 schema_context=data_catalog_subset_context,
+                engine=native_engine,
+                is_native_query_mode=native_mode,
             )
         except Exception as e:
             logger.error(f"Multi-path generation failed: {e}")
@@ -1191,9 +1309,24 @@ class TextToSQLPipeline:
         for candidate in candidates:
             # First validate columns against linked schema (catches hallucination)
             if linked_schema and linked_schema.columns:
-                is_valid, invalid_cols = candidate_generator.validate_columns(candidate.query, linked_schema)
+                try:
+                    is_valid, invalid_cols = candidate_generator.validate_columns(
+                        candidate.query,
+                        linked_schema,
+                        use_parser=not native_mode,
+                        dialect=native_engine,
+                    )
+                except Exception as e:
+                    error = f"Column validation failed: {str(e)}"
+                    # Score 0: invalid candidate due to validation error (no preflight/execution)
+                    candidate.execution_error = error
+                    candidate.preflight_score = 0
+                    logger.warning(f"Candidate {candidate.strategy} column validation failed: {e}")
+                    query_attempts.append(QueryAttempt(query=candidate.query, error=error))
+                    continue
                 if not is_valid:
                     error = f"Hallucinated columns detected: {', '.join(invalid_cols[:5])}"
+                    # Score 0: invalid candidate due to hallucinated columns (no preflight/execution)
                     candidate.execution_error = error
                     candidate.preflight_score = 0
                     logger.warning(f"Candidate {candidate.strategy} has invalid columns: {invalid_cols}")
@@ -1202,16 +1335,19 @@ class TextToSQLPipeline:
 
             # Preflight score: 0=failed, 1=explain ok, 2=explain+exec ok
             candidate_query = candidate.query
-            if self.is_native_query_mode_enabled:
-                datasource_name = self._get_native_datasource_name()
+            if native_mode:
+                datasource_name = native_datasource_name or self._native_datasource_name
                 if not datasource_name:
                     raise QueryGenerationError("Native query mode enabled but no datasource available")
                 candidate_query = self._strip_datasource_prefix_for_native(candidate_query, datasource_name)
                 candidate_query = f"SELECT * FROM {datasource_name} ({candidate_query})"
                 logger.info(f"Native query mode enabled. Wrapped query: {candidate_query}")
 
-            score, sanitized, error = candidate_generator.preflight_score(
-                candidate_query, sanitize_fn=self._sanitize_and_validate_sql_mindsdb
+            score, sanitized, error, preflight_result_df = candidate_generator.preflight_score(
+                candidate_query,
+                sanitize_fn=self._sanitize_and_validate_sql_mindsdb,
+                engine=native_engine,
+                is_native_query_mode=native_mode,
             )
             candidate.preflight_score = score
 
@@ -1221,31 +1357,21 @@ class TextToSQLPipeline:
                 query_attempts.append(QueryAttempt(query=candidate.query, error=error))
                 continue
 
-            # Score >= 1 means at least EXPLAIN passed, try full execution
-            try:
-                result_df = self._execute_sql(sanitized)
-                candidate.executed = True
-                candidate.execution_result = self._generate_markdown_table(result_df)
-                candidate.preflight_score = 2  # Full success
+            candidate.executed = True
+            candidate.execution_result = self._generate_markdown_table(preflight_result_df)
 
-                logger.info(f"Candidate {candidate.strategy} executed: {len(result_df)} rows (score=2)")
-                await streamer.push(
-                    role=Role.thought_execution_step,
-                    content=f"Candidate {candidate.strategy}: {len(result_df)} rows ✓",
-                )
+            logger.info(f"Candidate {candidate.strategy} executed: {len(preflight_result_df)} rows (score=1)")
+            await streamer.push(
+                role=Role.thought_execution_step,
+                content=f"Candidate {candidate.strategy}: {len(preflight_result_df)} rows ✓",
+            )
 
-                query_attempts.append(QueryAttempt(query=sanitized, result=candidate.execution_result))
+            query_attempts.append(QueryAttempt(query=sanitized, result=candidate.execution_result))
 
-                # Early exit on perfect score
-                best_candidate = candidate
-                logger.info(f"Perfect score candidate found: {candidate.strategy}, skipping remaining")
-                break
-
-            except Exception as e:
-                candidate.execution_error = str(e)
-                candidate.preflight_score = 1  # EXPLAIN passed but exec failed
-                logger.warning(f"Candidate {candidate.strategy} exec failed (score=1): {str(e)[:100]}")
-                query_attempts.append(QueryAttempt(query=sanitized, error=str(e)))
+            # First successful candidate wins — exit early
+            best_candidate = candidate
+            logger.info(f"Successful candidate found: {candidate.strategy}, skipping remaining")
+            break
 
         # Select best candidate (may already be set from early exit)
         if best_candidate is None:
@@ -1293,11 +1419,17 @@ class TextToSQLPipeline:
         streamer: MessageStreamer,
         usage: RunUsage,
         usage_limits: UsageLimits,
+        native_datasource_name: str | None = None,
+        is_native_query_mode_enabled: bool | None = None,
     ) -> tuple[str, pd.DataFrame, dict | None]:
         """Execute the final step: generate SQL, execute it, and return the result with optional chart intent."""
         last_error: Exception | None = None
         last_query = ""
         query_attempts: list[QueryAttempt] = []
+        native_mode = (
+            self.is_native_query_mode_enabled if is_native_query_mode_enabled is None else is_native_query_mode_enabled
+        )
+        native_engine = self._get_native_datasource_engine_for(native_datasource_name)
 
         for attempt in range(agent_settings.max_sql_retries):
             logger.info(f"SQL generation attempt {attempt + 1} of {agent_settings.max_sql_retries}")
@@ -1314,7 +1446,8 @@ class TextToSQLPipeline:
                             mind=self.mind,
                             data_catalog_subset_context=data_catalog_subset_context,
                             acquired_knowledge=acquired_knowledge.to_string(),
-                            is_native_query_mode_enabled=self.is_native_query_mode_enabled,
+                            is_native_query_mode_enabled=native_mode,
+                            native_engine=native_engine,
                         ),
                         model=model_for(self.mind),
                         usage=usage,
@@ -1337,7 +1470,8 @@ class TextToSQLPipeline:
                             failed_query=last_query,
                             error_message=str(last_error),
                             previous_attempts=query_attempts,
-                            is_native_query_mode_enabled=self.is_native_query_mode_enabled,
+                            is_native_query_mode_enabled=native_mode,
+                            native_engine=native_engine,
                         ),
                         model=model_for(self.mind),
                         usage=usage,
@@ -1356,8 +1490,8 @@ class TextToSQLPipeline:
                 )
 
                 # If native query mode is enabled, wrap the query in a native query block
-                if self.is_native_query_mode_enabled:
-                    datasource_name = self._get_native_datasource_name()
+                if native_mode:
+                    datasource_name = native_datasource_name or self._native_datasource_name
                     if not datasource_name:
                         raise QueryGenerationError("Native query mode enabled but no datasource available")
                     query = self._strip_datasource_prefix_for_native(query, datasource_name)
@@ -1366,6 +1500,7 @@ class TextToSQLPipeline:
 
                 sanitized = self._sanitize_and_validate_sql_mindsdb(query)
                 logger.info("SQL query validated and sanitized")
+                logger.info("Final SQL to execute: %s", sanitized)
 
                 result_df = self._execute_sql(sanitized)
                 logger.info(f"SQL execution successful. Number of rows: {len(result_df)}")
@@ -1484,10 +1619,9 @@ class TextToSQLPipeline:
 
     def _execute_sql(self, query: str) -> pd.DataFrame:
         try:
-            logger.info(f"Executing SQL: {query}")
             query_result = self.mindsdb_client.query(query)
             df = query_result.fetch()
-
+            logger.info("\\n%s", df)
             return df
 
         except Exception as e:

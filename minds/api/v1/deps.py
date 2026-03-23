@@ -10,7 +10,7 @@ FastAPI caches a single ``Context`` (and MindsDB client) per request,
 avoiding duplicate header parsing and request-ID generation.
 """
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from sqlmodel import Session
 
 from minds.client.mindsdb import create_mindsdb_client_from_request
@@ -21,6 +21,7 @@ from minds.services.conversations import ConversationsService
 from minds.services.data_catalog.data_catalog_loader import DataCatalogLoader
 from minds.services.datasources import DatasourcesService
 from minds.services.limits import LimitsService
+from minds.services.memory import MemoryAdminService
 from minds.services.minds import MindsService
 from minds.services.tree import TreeService
 from minds.services.usage import UsageService
@@ -187,6 +188,24 @@ def get_usage_service(
         The UsageService.
     """
     return UsageService(session=session, context=context)
+
+
+def require_admin(context: Context = Depends(get_context)) -> None:
+    """Raise 403 if the caller does not have an admin-level role."""
+    admin_roles = {"admin", "sysadmin", "mindsdb-admin"}
+    if not admin_roles.intersection(context.user_roles):
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+
+def get_memory_admin_service(
+    context: Context = Depends(get_context),
+    session: Session = Depends(get_session),
+) -> MemoryAdminService:
+    return MemoryAdminService(
+        session=session,
+        user_id=context.user_id,
+        organization_id=context.organization_id,
+    )
 
 
 def get_limits_service(

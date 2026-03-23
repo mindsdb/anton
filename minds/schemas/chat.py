@@ -20,6 +20,13 @@ class Role(str, Enum):
     thought_execution_step_sql = "thought.execution.step.sql"
     thought_execution_step_end = "thought.execution.step.end"
 
+    # Anton agent thought roles
+    thought_scratchpad_start = "thought.scratchpad.start"
+    thought_scratchpad_end = "thought.scratchpad.end"
+    thought_memorize_start = "thought.memorize"
+    thought_recall = "thought.recall"
+    thought_context_compacted = "thought.context.compacted"
+
 
 class Message(BaseModel):
     role: Role

@@ -19,7 +19,7 @@ if "langfuse" not in sys.modules:
 
 import pytest
 
-from minds.agents.base import BaseAgentConfig
+from minds.agents.base import AgentRunContext
 from minds.agents.base_response import AgentResponse
 from minds.agents.candidate_sql_agent.agent import CandidateSQLAgent
 from minds.schemas.chat import Message, Role
@@ -28,7 +28,7 @@ from minds.schemas.chat import Message, Role
 class TestCandidateSQLAgentConvertMessages:
     def test_convert_to_pydantic_ai_messages_user_and_assistant_and_system(self):
         mind = Mock()
-        agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock(), config=BaseAgentConfig(instrument=False))
+        agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock())
 
         messages = [
             Message(role=Role.system, content="sys"),
@@ -45,7 +45,7 @@ class TestCandidateSQLAgentConvertMessages:
 
     def test_convert_to_pydantic_ai_messages_unsupported_role_raises(self):
         mind = Mock()
-        agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock(), config=BaseAgentConfig(instrument=False))
+        agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock())
 
         messages = [Message(role=Role.function, content="not supported here")]
         with pytest.raises(ValueError, match="Unsupported role"):
@@ -78,8 +78,13 @@ class TestCandidateSQLAgentRun:
         ):
             mock_router_agent.run = AsyncMock(return_value=router_result)
 
-            agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock(), config=BaseAgentConfig(instrument=False))
-            resp = await agent.run(messages=list(messages), streamer=streamer, stream=False)
+            agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock())
+            resp = await agent.run(
+                messages=list(messages),
+                streamer=streamer,
+                stream=False,
+                run_context=AgentRunContext(instrument=False),
+            )
 
             streamer.push.assert_awaited_once_with(role=Role.assistant, content="Need more details.")
             assert isinstance(resp, AgentResponse)
@@ -126,8 +131,13 @@ class TestCandidateSQLAgentRun:
             mock_pipeline_cls.return_value = mock_pipeline
             mock_answer_feedback_agent.run_stream = Mock(return_value=MockAsyncContextManager())
 
-            agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock(), config=BaseAgentConfig(instrument=False))
-            resp = await agent.run(messages=list(messages), streamer=streamer, stream=True)
+            agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock())
+            resp = await agent.run(
+                messages=list(messages),
+                streamer=streamer,
+                stream=True,
+                run_context=AgentRunContext(instrument=False),
+            )
 
             # Expected pushed deltas:
             # - feedback deltas: "F", then "B" (from "FB")
@@ -162,8 +172,13 @@ class TestCandidateSQLAgentRun:
             mock_pipeline_cls.return_value = mock_pipeline
             mock_feedback_agent.run = AsyncMock(return_value=feedback_result)
 
-            agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock(), config=BaseAgentConfig(instrument=False))
-            resp = await agent.run(messages=list(messages), streamer=streamer, stream=False)
+            agent = CandidateSQLAgent(mind=mind, mindsdb_client=Mock())
+            resp = await agent.run(
+                messages=list(messages),
+                streamer=streamer,
+                stream=False,
+                run_context=AgentRunContext(instrument=False),
+            )
 
             streamer.push.assert_awaited_with(role=Role.assistant, content="Sorry, something went wrong.")
             assert resp.sql == ""

@@ -462,7 +462,14 @@ class TestGetSupportedModels:
             True,
             "openai",
             "gpt-4o",
-            {"openai": ["gpt-4o"], "anthropic": ["claude-sonnet-4-5"]},
+            "gpt-4o-mini",
+            {
+                "openai": {"reasoning_models": ["gpt-4o"], "coding_models": ["gpt-4o-mini"]},
+                "anthropic": {
+                    "reasoning_models": ["claude-sonnet-4-5"],
+                    "coding_models": ["claude-sonnet-4-5"],
+                },
+            },
         )
         mock_settings = Mock()
         mock_get_settings.return_value = mock_settings
@@ -477,14 +484,24 @@ class TestGetSupportedModels:
         assert result["model_selection_enabled"] is True
         assert result["default_provider"] == "openai"
         assert result["default_model"] == "gpt-4o"
-        assert result["providers"] == {"openai": ["gpt-4o"], "anthropic": ["claude-sonnet-4-5"]}
+        assert result["default_coding_model"] == "gpt-4o-mini"
+        assert result["providers"] == {
+            "openai": {"reasoning_models": ["gpt-4o"], "coding_models": ["gpt-4o-mini"]},
+            "anthropic": {"reasoning_models": ["claude-sonnet-4-5"], "coding_models": ["claude-sonnet-4-5"]},
+        }
         mock_get_models.assert_called_once_with(context=mock_context, settings=mock_settings)
 
     @pytest.mark.asyncio
     @patch("minds.api.v1.endpoints.minds.get_app_settings")
     @patch("minds.api.v1.endpoints.minds.get_supported_models_by_provider")
     async def test_returns_disabled_with_single_provider(self, mock_get_models, mock_get_settings):
-        mock_get_models.return_value = (False, "openai", "gpt-4o", {"openai": ["gpt-4o"]})
+        mock_get_models.return_value = (
+            False,
+            "openai",
+            "gpt-4o",
+            "gpt-4o-mini",
+            {"openai": {"reasoning_models": ["gpt-4o"], "coding_models": ["gpt-4o-mini"]}},
+        )
         mock_get_settings.return_value = Mock()
 
         mock_context = Mock()
@@ -495,7 +512,8 @@ class TestGetSupportedModels:
         result = await get_supported_models(context=mock_context, minds_service=mock_service)
 
         assert result["model_selection_enabled"] is False
-        assert result["providers"] == {"openai": ["gpt-4o"]}
+        assert result["default_coding_model"] == "gpt-4o-mini"
+        assert result["providers"] == {"openai": {"reasoning_models": ["gpt-4o"], "coding_models": ["gpt-4o-mini"]}}
 
 
 class TestMindsAPIErrorHandling:

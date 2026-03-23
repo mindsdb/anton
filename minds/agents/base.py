@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from uuid import UUID
 
 from mindsdb_sdk.server import Server
 from pydantic import BaseModel, Field
@@ -15,9 +15,9 @@ class AgentRunContext(BaseModel):
     metadata: ChatCompletionRequestMetadata | None = Field(default=None)
     instrument: bool = Field(default=True)
 
-
-class BaseAgentConfig(BaseModel):
-    instrument: bool = Field(default=True)
+    # Applies only when calling the Conversations API
+    conversation_id: UUID | None = Field(default=None)
+    message_id: UUID | None = Field(default=None)
 
 
 class BaseAgent(ABC):
@@ -28,17 +28,27 @@ class BaseAgent(ABC):
         mind: The mind to use for the agent.
     """
 
-    def __init__(self, mind: Mind, mindsdb_client: Server | None = None, config: Any | None = None):
+    def __init__(self, mind: Mind, mindsdb_client: Server | None = None):
         self.mind = mind
         self.mindsdb_client = mindsdb_client
-        self.config = config
 
-    @classmethod
-    def build_config(cls, run_context: AgentRunContext) -> BaseAgentConfig:
-        return BaseAgentConfig(instrument=run_context.instrument)
+    async def run(
+        self,
+        messages: list[Message],
+        streamer: MessageStreamer,
+        run_context: AgentRunContext,
+        stream: bool,
+    ) -> AgentResponse:
+        return await self._run(messages=messages, streamer=streamer, stream=stream, run_context=run_context)
 
     @abstractmethod
-    async def run(self, messages: list[Message], streamer: MessageStreamer, stream: bool = True) -> AgentResponse: ...
+    async def _run(
+        self,
+        messages: list[Message],
+        streamer: MessageStreamer,
+        run_context: AgentRunContext,
+        stream: bool,
+    ) -> AgentResponse: ...
 
     @abstractmethod
     async def get_last_run_usage(self) -> tuple[int, int] | None: ...

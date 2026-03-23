@@ -7,7 +7,7 @@ that can be included in the main FastAPI application.
 
 from fastapi import APIRouter
 
-from minds.api.v1.endpoints import chat, conversations, datasources, health, limits, minds, responses, tree
+from minds.api.v1.endpoints import chat, conversations, datasources, health, limits, memory, minds, responses, tree
 
 # Create the v1 API router
 api_router = APIRouter(prefix="/api/v1")
@@ -18,6 +18,7 @@ api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(conversations.router, prefix="/conversations", tags=["conversations"])
 api_router.include_router(datasources.router, prefix="/datasources", tags=["datasources"])
 api_router.include_router(minds.router, prefix="/minds", tags=["minds"])
+api_router.include_router(memory.router, prefix="/minds/{mind_name}/memory", tags=["memory"])
 api_router.include_router(responses.router, prefix="/responses", tags=["responses"])
 api_router.include_router(tree.router, prefix="/tree", tags=["tree"])
 api_router.include_router(limits.router, prefix="/limits", tags=["limits"])

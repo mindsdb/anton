@@ -24,6 +24,7 @@ from minds.jobs.settings import get_prefect_settings
 from minds.model.conversation import Conversation  # noqa: F401
 from minds.model.data_catalog import Column, ColumnStatistics, ForeignKeyConstraint, PrimaryKeyConstraint, Table
 from minds.model.message import Message  # noqa: F401
+from minds.model.message_event import MessageEvent  # noqa: F401
 from minds.model.mind import Mind  # noqa: F401
 from minds.model.mind_datasource import MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
@@ -213,7 +214,7 @@ def get_tables(mindsdb_client: Server, datasource_name: str, table_names: list[s
     logger.info(f"Getting table metadata for datasource '{datasource_name}' with filter: {table_names}")
 
     query = f"""
-    SELECT * FROM INFORMATION_SCHEMA.META_TABLES 
+    SELECT * FROM INFORMATION_SCHEMA.META_TABLES
     WHERE TABLE_SCHEMA = '{datasource_name}'
     """
 

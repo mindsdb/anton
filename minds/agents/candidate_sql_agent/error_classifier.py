@@ -92,7 +92,8 @@ Example: SELECT o."user_id", p."category" FROM ORDERS o JOIN PRODUCTS p ON o."pr
     (
         r"(?i)invalid column name",
         "column_not_found",
-        "Invalid column name. Copy column names exactly from the schema - case matters.",
+        "Invalid column name (T-SQL). Copy column names exactly from the schema. "
+        "Wrap reserved words or names with spaces in square brackets: [column name].",
     ),
     (
         r"(?i)does not exist.*column",
@@ -159,6 +160,38 @@ VALUE_PATTERNS = [
 ]
 
 DIALECT_PATTERNS = [
+    # MS SQL (T-SQL) specific patterns
+    (
+        r"(?i)incorrect syntax near.*limit",
+        "mssql_no_limit",
+        "T-SQL does not support LIMIT. Use SELECT TOP n or OFFSET n ROWS FETCH NEXT m ROWS ONLY (requires ORDER BY).",
+    ),
+    (
+        r"(?i)the order by clause is invalid.*unless.*top.*offset",
+        "mssql_order_in_subquery",
+        """T-SQL requires TOP or OFFSET/FETCH when using ORDER BY in a subquery.
+
+FIX: Use a CTE and apply ORDER BY in the outermost SELECT:
+  WITH ordered AS (SELECT * FROM table_name)
+  SELECT * FROM ordered ORDER BY col""",
+    ),
+    (
+        r"(?i)conversion failed when converting",
+        "mssql_type_conversion",
+        "T-SQL type conversion failed. Use TRY_CAST() or TRY_CONVERT() for unsafe conversions,"
+        " or CAST(col AS target_type).",
+    ),
+    (
+        r"(?i)arithmetic overflow error converting",
+        "mssql_arithmetic_overflow",
+        "Arithmetic overflow in T-SQL. Use CAST to a larger type such as BIGINT or DECIMAL(18,2).",
+    ),
+    (
+        r"(?i)dateadd.*is not a recognized.*function name",
+        "mssql_invalid_date_func",
+        "Check DATEADD syntax: DATEADD(datepart, number, date)."
+        " Valid dateparts: year, month, day, hour, minute, second.",
+    ),
     (
         r"(?i)date_trunc.*does not support.*number",
         "epoch_to_date",

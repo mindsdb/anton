@@ -6,7 +6,7 @@ from mindsdb_sdk.server import Server
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai import RunContext
 
-from minds.agents.base import AgentRunContext, BaseAgent, BaseAgentConfig
+from minds.agents.base import AgentRunContext, BaseAgent
 from minds.agents.base_response import AgentResponse
 from minds.agents.database_agent.database_toolkit import DatabaseToolkit
 from minds.agents.database_agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
@@ -28,12 +28,6 @@ class DatabaseDeps:
     streamer: MessageStreamer | None = None
 
 
-class DatabaseAgentConfig(BaseAgentConfig):
-    """Config for the database agent."""
-
-    enable_charting: bool = False
-
-
 class DatabaseAgent(BaseAgent):
     """Experimental agent implementation using Pydantic instead of Langchain.
 
@@ -45,7 +39,6 @@ class DatabaseAgent(BaseAgent):
         self,
         mind: Mind,
         mindsdb_client: Server,
-        config: DatabaseAgentConfig | None = DatabaseAgentConfig(),
     ):
         """Initialize the PydanticAgent.
 
@@ -54,39 +47,23 @@ class DatabaseAgent(BaseAgent):
             database_toolkit: DatabaseToolkit instance for executing database operations.
             config: Config for the database agent.
         """
-        super().__init__(mind=mind, mindsdb_client=mindsdb_client, config=config)
+        super().__init__(mind=mind, mindsdb_client=mindsdb_client)
 
         database_toolkit = DatabaseToolkit(mind=mind, mindsdb_client=mindsdb_client)
         self.deps = DatabaseDeps(toolkit=database_toolkit)
 
-        PydanticAIAgent.instrument_all(instrument=self.config.instrument)
-
-        self._pydantic_agent = self._setup_agent()
-
-    @classmethod
-    def build_config(cls, run_context: AgentRunContext) -> DatabaseAgentConfig:
-        """Build the config for the database agent.
+    def _setup_agent(self, enable_charting: bool) -> PydanticAIAgent:
+        """Set up and configure the Pydantic AI agent with database tools.
 
         Args:
-            run_context: The run context for the agent.
-
-        Returns:
-            The config for the database agent.
-        """
-        return DatabaseAgentConfig(
-            instrument=run_context.instrument,
-            enable_charting=run_context.metadata.enable_charting if run_context.metadata else False,
-        )
-
-    def _setup_agent(self) -> PydanticAIAgent:
-        """Set up and configure the Pydantic AI agent with database tools.
+            enable_charting: Whether to enable charting.
 
         Returns:
             PydanticAIAgent: Configured agent with database tools.
         """
         llm_model = get_llm_config(self.mind.provider, self.mind.model_name)
 
-        system_prompt = self._get_system_prompt()
+        system_prompt = self._get_system_prompt(enable_charting=enable_charting)
 
         agent = PydanticAIAgent(
             model=llm_model,
@@ -113,7 +90,7 @@ class DatabaseAgent(BaseAgent):
 
         return agent
 
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, enable_charting: bool) -> str:
         """Get the system prompt for the database agent.
 
         Returns:
@@ -133,7 +110,7 @@ class DatabaseAgent(BaseAgent):
             )
 
         # Add charting instructions if enabled
-        if self.config and getattr(self.config, "enable_charting", False):
+        if enable_charting:
             prompt += "\n\n" + CHART_GENERATION_INSTRUCTIONS
 
         current_date = datetime.now().strftime("%Y-%m-%d")
@@ -185,17 +162,27 @@ class DatabaseAgent(BaseAgent):
 
         return conversation_context
 
-    async def run(self, messages: list[Message], streamer: MessageStreamer, stream: bool = False) -> AgentResponse:
+    async def _run(
+        self,
+        messages: list[Message],
+        streamer: MessageStreamer,
+        run_context: AgentRunContext,
+        stream: bool,
+    ) -> AgentResponse:
         """Run completion and push results to the streamer.
         The streamer will also be added to the dependencies to allow tools to push messages (thoughts).
 
         Args:
             messages: List of message dictionaries.
             streamer: MessageStreamer instance to push messages to.
+            run_context: The run context for the agent.
             stream: Whether to stream the response.
         """
+        PydanticAIAgent.instrument_all(instrument=run_context.instrument)
+
         # Use the preconfigured agent with tools
-        agent = self._pydantic_agent
+        enable_charting = run_context.metadata.enable_charting if run_context.metadata else False
+        agent = self._setup_agent(enable_charting=enable_charting)
 
         # Build conversation context string from all messages
         conversation_context = self._build_conversation_context(messages)
