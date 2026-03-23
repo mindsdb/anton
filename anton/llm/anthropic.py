@@ -149,7 +149,10 @@ class AnthropicProvider(LLMProvider):
                         info = blocks.get(idx, {})
                         if info.get("type") == "tool_use":
                             raw_json = "".join(info["json_parts"])
-                            parsed_input = json.loads(raw_json) if raw_json else {}
+                            try:
+                                parsed_input = json.loads(raw_json) if raw_json else {}
+                            except json.JSONDecodeError:
+                                parsed_input = {"_parse_error": f"Malformed tool input: {raw_json[:200]}"}
                             tool_calls.append(
                                 ToolCall(id=info["id"], name=info["name"], input=parsed_input)
                             )

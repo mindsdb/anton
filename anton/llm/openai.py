@@ -182,6 +182,15 @@ class OpenAIProvider(LLMProvider):
             kwargs["http_client"] = httpx.AsyncClient(verify=False)
         self._client = openai.AsyncOpenAI(**kwargs)
 
+    @staticmethod
+    def _safe_parse_json(raw: str | None) -> dict:
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {"_parse_error": f"Malformed tool input: {raw[:200]}"}
+
     async def complete(
         self,
         *,
@@ -232,7 +241,7 @@ class OpenAIProvider(LLMProvider):
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
-                        input=json.loads(tc.function.arguments) if tc.function.arguments else {},
+                        input=self._safe_parse_json(tc.function.arguments),
                     )
                 )
 
@@ -348,7 +357,7 @@ class OpenAIProvider(LLMProvider):
         for idx in sorted(tc_state):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
-            parsed = json.loads(raw_json) if raw_json else {}
+            parsed = self._safe_parse_json(raw_json)
             tool_calls.append(ToolCall(id=info["id"], name=info["name"], input=parsed))
             yield StreamToolUseEnd(id=info["id"])
 
