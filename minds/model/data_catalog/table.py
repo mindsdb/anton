@@ -23,6 +23,11 @@ class Table(BaseSQLModel, table=True):
     type: str | None = Field(default=None, description="Table type")
     row_count: int | None = Field(default=None, description="Row count")
 
+    @property
+    def qualified_name(self) -> str:
+        """Schema-qualified table name, e.g. 'SalesLT.Orders'."""
+        return f"{self.schema}.{self.name}" if self.schema else self.name
+
     columns: list["Column"] = Relationship()
     primary_key_constraints: list["PrimaryKeyConstraint"] = Relationship()
     foreign_key_constraints: list["ForeignKeyConstraint"] = Relationship(
