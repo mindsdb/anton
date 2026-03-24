@@ -191,6 +191,11 @@ class AntonAgent(BaseAgent):
                     await streamer.push(role=role, content=content)
                     if role == Role.assistant:
                         complete_answer += content
+                    else:
+                        # Discard intermediate assistant text from prior thinking
+                        # phases (e.g. "Let me try again..." between failed
+                        # scratchpad retries). Only the final segment is the answer.
+                        complete_answer = ""
         except Exception:
             logger.exception("Error during Anton agent execution")
             raise
