@@ -252,7 +252,7 @@ def _onboard(settings) -> None:
     _INTRO_LINES = [
         "Hi! I'm Anton, an autonomous AI coworker built by MindsDB.",
         "",
-        "For the best experience, I recommend MindsDB Cloud (mdb.ai)",
+        "For the best experience, I recommend MindsDB Cloud (https://mdb.ai)",
         "as your LLM provider. It is optimized for me with:",
         "",
         "  \u2713 Smart model routing",
@@ -359,18 +359,21 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
     console.print(f"[anton.glow] {'━' * 40}[/]")
     console.print()
     console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]MindsDB Cloud[/][/link] [anton.success](recommended)[/]")
-    console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
+    console.print("  [bold]2[/]  [anton.cyan]MindsDB Enterprise Server[/]")
+    console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
     console.print()
 
     choice = Prompt.ask(
         "Choose LLM Provider",
-        choices=["1", "2"],
+        choices=["1", "2", "3"],
         default="1",
         console=console,
     )
 
     if choice == "1":
         _setup_minds(settings, ws)
+    elif choice == "2":
+        _setup_minds(settings, ws, enterprise=True)
     else:
         _setup_other_provider(settings, ws)
 
@@ -391,33 +394,41 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
     console.print()
 
 
-def _setup_minds(settings, ws) -> None:
-    """Set up Minds (mdb.ai) as the LLM provider."""
+def _setup_minds(settings, ws, *, enterprise: bool = False) -> None:
+    """Set up Minds as the LLM provider (cloud or enterprise)."""
     from rich.prompt import Confirm, Prompt
 
     import webbrowser
 
     console.print()
-    console.print(
-        "  [anton.muted]Don't have a key yet? Create one in seconds at[/]"
-        " [link=https://mdb.ai][bold anton.cyan]mdb.ai[/][/link]"
-    )
-    webbrowser.open("https://mdb.ai")
-    console.print()
+
+    if enterprise:
+        # Enterprise: ask for server URL first
+        minds_url = Prompt.ask(
+            "  [anton.cyan]Server URL[/]",
+            console=console,
+        ).strip()
+        if not minds_url:
+            console.print("  [anton.error]No URL provided.[/]")
+            raise typer.Exit(1)
+        if not minds_url.startswith("http://") and not minds_url.startswith("https://"):
+            minds_url = "https://" + minds_url
+        minds_url = minds_url.rstrip("/")
+        console.print()
+    else:
+        minds_url = "https://mdb.ai"
+        console.print(
+            "  [anton.muted]Don't have a key yet? Create one in seconds at[/]"
+            " [link=https://mdb.ai][bold anton.cyan]https://mdb.ai[/][/link]"
+        )
+        webbrowser.open("https://mdb.ai")
+        console.print()
+
     api_key = Prompt.ask("  [anton.cyan]API key[/]", console=console)
     if not api_key.strip():
         console.print("  [anton.error]No API key provided.[/]")
         raise typer.Exit(1)
     api_key = api_key.strip()
-
-    minds_url = Prompt.ask(
-        "  [anton.cyan]Minds URL[/]",
-        default="https://mdb.ai",
-        console=console,
-    ).strip()
-    if not minds_url.startswith("http://") and not minds_url.startswith("https://"):
-        minds_url = "https://" + minds_url
-    minds_url = minds_url.rstrip("/")
 
     # Store Minds credentials
     settings.minds_api_key = api_key
