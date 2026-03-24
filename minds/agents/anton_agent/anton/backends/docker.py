@@ -47,6 +47,19 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
         # (Re)copy the bootstrap each time (safe + keeps it up to date)
         self._copy_files_to_container(container)
 
+        # Idempotency: if we already have an active exec socket, don't create a new one.
+        if self.sock is not None:
+            try:
+                underlying = getattr(self.sock, "_sock", None)
+                if underlying is not None and underlying.fileno() != -1:
+                    return
+            except Exception:
+                # Treat any socket inspection failure as "not started" and re-create.
+                pass
+            with contextlib.suppress(Exception):
+                self.sock.close()
+            self.sock = None
+
         exec_id = self.client.api.exec_create(
             container.id,
             cmd=["python", "/scratchpad_boot.py"],
@@ -141,24 +154,21 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
             self.sock = None
             logger.info(f"Old exec session closed for Docker scratchpad container '{self.name}'.")
 
-        # Clear in-memory history
-        self.cells.clear()
-        logger.info(f"In-memory history cleared for Docker scratchpad container '{self.name}'.")
+        container = self._get_or_run_container()
 
-        # 2) Record the cancelled execution in a cell
-        self.cells.append(
-            Cell(
-                code="# (cancelled by user)",
-                stdout="",
-                stderr="",
-                error="Cancelled by user.",
-                description="Cancelled.",
-            )
-        )
+        # 2) Clear in-memory history
+        # TODO: Cells will be cleared for the current turn, but re-introduced on the next.
+        self.cells.clear()
+        # Remove the session file
+        if anton_settings.scratchpad_persist_session:
+            container.exec_run(["rm", "-f", anton_settings.scratchpad_session_path])
+            logger.info(f"Session file removed for Docker scratchpad container '{self.name}'.")
+        else:
+            logger.info(f"Session file not removed for Docker scratchpad container '{self.name}'.")
+        logger.info(f"In-memory history cleared for Docker scratchpad container '{self.name}'.")
 
         # 3) Restart container (kills prior exec session)
         logger.info(f"Restarting Docker scratchpad container '{self.name}'.")
-        container = self._get_or_run_container()
         await asyncio.to_thread(container.restart)
         await asyncio.to_thread(container.reload)
 
@@ -185,7 +195,12 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
                 self.sock.close()
             self.sock = None
 
-        container = self.client.containers.get(self.name)
+        try:
+            container = self.client.containers.get(self.name)
+        except NotFound:
+            logger.info(f"Docker scratchpad container '{self.name}' not found, skipping stop.")
+            return
+
         await asyncio.to_thread(container.stop)
         await asyncio.to_thread(container.reload)
         logger.info(f"Docker scratchpad container '{self.name}' stopped.")
@@ -211,10 +226,22 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
         await asyncio.to_thread(container.restart)
         await asyncio.to_thread(container.reload)
 
-        # 3) Ensure latest boot script is present
+        # 3) Record the cancelled execution in a cell
+        # TODO: This will only be recorded for the current turn, but lost on the next.
+        self.cells.append(
+            Cell(
+                code="# (cancelled by user)",
+                stdout="",
+                stderr="",
+                error="Cancelled by user.",
+                description="Cancelled.",
+            )
+        )
+
+        # 4) Ensure latest boot script is present
         self._copy_files_to_container(container)
 
-        # 4) Start a fresh boot exec + reconnect socket
+        # 5) Start a fresh boot exec + reconnect socket
         exec_id = self.client.api.exec_create(
             container.id,
             cmd=["python", "/scratchpad_boot.py"],

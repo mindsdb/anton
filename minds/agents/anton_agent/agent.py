@@ -16,6 +16,7 @@ from minds.db.pg_session import get_engine, get_session_factory
 from minds.model.mind import Mind
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
+from minds.services.conversations import ConversationsService
 from minds.services.memory import MemoryRepository, MemoryService
 
 logger = get_logger(__name__)
@@ -140,30 +141,59 @@ class AntonAgent(BaseAgent):
         extra_env["ANTON_SCRATCHPAD_MODEL"] = coding_model
         extra_env["ANTON_SCRATCHPAD_API_KEY"] = coding_api_key
 
+        # Scratchpad persistence settings
+        extra_env["ANTON_SCRATCHPAD_PERSIST_SESSION"] = str(agent_settings.scratchpad_persist_session)
+        extra_env["ANTON_SCRATCHPAD_SESSION_PATH"] = agent_settings.scratchpad_session_path
+
         # 6. Build history and prompt
         prompt = messages[-1].content
         history = [message.model_dump() for message in messages[:-1]]
 
-        # 7. Build mind memory service (optional — skipped if mind.id is unavailable)
+        # 7. Build mind memory service and conversation service
+        # (optional — skipped if mind.id is unavailable)
         shared_memory: MemoryService | None = None
+        conversations_service: ConversationsService | None = None
         db_session = None
         if self.mind.id is not None:
             try:
                 engine = get_engine(app_settings.database.uri)
                 session_factory = get_session_factory(engine)
                 db_session = session_factory()
-                repo = MemoryRepository(session=db_session, mind_id=self.mind.id)
-                shared_memory = MemoryService(
-                    repo=repo,
-                    token_budget=agent_settings.shared_memory_token_budget,
-                    max_topics=agent_settings.shared_memory_max_topics,
-                )
+
+                try:
+                    repo = MemoryRepository(session=db_session, mind_id=self.mind.id)
+                    shared_memory = MemoryService(
+                        repo=repo,
+                        token_budget=agent_settings.shared_memory_token_budget,
+                        max_topics=agent_settings.shared_memory_max_topics,
+                    )
+                except Exception:
+                    logger.exception("Failed to initialise mind memory service — continuing without it")
+                try:
+                    conversations_service = ConversationsService(
+                        session=db_session,
+                        mindsdb_client=self.mindsdb_client,
+                        user_id=self.mind.user_id,
+                        organization_id=self.mind.organization_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to initialise conversation service — continuing without it")
             except Exception:
-                logger.exception("Failed to initialise mind memory service — continuing without it")
+                logger.exception("Failed to initialise both memory and conversation services")
                 if db_session is not None:
                     db_session.close()
                     db_session = None
-                shared_memory = None
+
+        # Get all events created as part of the conversation so far
+        events: list[dict] = []
+        if conversations_service is not None and run_context.conversation_id:
+            messages = await conversations_service.get_conversation_messages(
+                run_context.conversation_id,
+                with_events=True,
+            )
+            for message in messages:
+                for event in message.events:
+                    events.append(event)
 
         # 8. Create Anton instance with all params
         mind_workspace = self.workspace_dir / str(self.mind.id)
@@ -180,6 +210,7 @@ class AntonAgent(BaseAgent):
             coding_api_key=coding_api_key,
             extra_env=extra_env,
             shared_memory=shared_memory,
+            events=events,
         )
 
         formatter = AntonStreamEventFormatter()

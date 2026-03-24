@@ -37,6 +37,7 @@ class Anton:
         coding_api_key: str,
         extra_env: dict[str, str] | None = None,
         shared_memory: MemoryService | None = None,
+        events: list[dict] = None,
     ):
         workspace = Path(workspace_dir)
         workspace.mkdir(parents=True, exist_ok=True)
@@ -91,6 +92,7 @@ class Anton:
             workspace_path=workspace,
             extra_env=extra_env,
             shared_memory=shared_memory,
+            events=events,
         )
 
         # 6. Load history into session if provided

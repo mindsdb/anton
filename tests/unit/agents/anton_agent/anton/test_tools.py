@@ -79,12 +79,22 @@ async def test_tools_more_branches():
     )
 
     sess2 = SimpleNamespace(
-        _scratchpads=SimpleNamespace(get=lambda: None, get_or_create=AsyncMock(), remove=AsyncMock()),
+        _scratchpads=SimpleNamespace(
+            get=lambda: None,
+            get_or_create=AsyncMock(
+                return_value=SimpleNamespace(
+                    view=lambda: "No scratchpad available for this session.",
+                    reset=AsyncMock(return_value=None),
+                    render_notebook=lambda: "No scratchpad available for this session.",
+                )
+            ),
+            remove=AsyncMock(),
+        ),
         _episodic=None,
         _cortex=None,
     )
     assert await dispatch_tool(sess2, "scratchpad", {"action": "view"}) == "No scratchpad available for this session."
-    assert await dispatch_tool(sess2, "scratchpad", {"action": "reset"}) == "No scratchpad available for this session."
+    assert await dispatch_tool(sess2, "scratchpad", {"action": "reset"}) == "Scratchpad reset. All state cleared."
     assert await dispatch_tool(sess2, "scratchpad", {"action": "dump"}) == "No scratchpad available for this session."
     assert await dispatch_tool(sess2, "scratchpad", {"action": "install"}) == "No packages specified."
     assert "Unknown scratchpad action" in await dispatch_tool(sess2, "scratchpad", {"action": "wat"})

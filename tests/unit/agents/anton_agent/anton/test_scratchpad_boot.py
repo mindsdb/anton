@@ -19,6 +19,23 @@ def _run_boot_once(
     monkeypatch: pytest.MonkeyPatch,
     clear_optional_env: bool = True,
 ) -> str:
+    # The boot script imports `dill` unconditionally (it is installed in the scratchpad runtime),
+    # but the unit-test environment may not include it. Provide a tiny stub so the script can run.
+    class _FakeDill(types.SimpleNamespace):
+        @staticmethod
+        def dump(obj, fp):  # noqa: ANN001
+            import pickle
+
+            return pickle.dump(obj, fp)
+
+        @staticmethod
+        def load(fp):  # noqa: ANN001
+            import pickle
+
+            return pickle.load(fp)
+
+    monkeypatch.setitem(sys.modules, "dill", _FakeDill())
+
     if clear_optional_env:
         # Ensure optional integrations are off for deterministic behavior.
         monkeypatch.delenv("ANTON_SCRATCHPAD_MODEL", raising=False)

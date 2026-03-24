@@ -357,12 +357,16 @@ async def test_docker_reset_closes_sock_clears_cells_and_restarts(monkeypatch):
             self.status = "running"
             self.restart_calls = 0
             self.reload_calls = 0
+            self.exec_calls: list[list[str]] = []
 
         def restart(self):
             self.restart_calls += 1
 
         def reload(self):
             self.reload_calls += 1
+
+        def exec_run(self, cmd):
+            self.exec_calls.append(list(cmd))
 
     container = Container()
 
@@ -387,11 +391,12 @@ async def test_docker_reset_closes_sock_clears_cells_and_restarts(monkeypatch):
 
     await rt.reset()
     assert rt.sock is not None
-    assert len(rt.cells) == 1
-    assert rt.cells[0].error == "Cancelled by user."
+    # reset() clears in-memory history
+    assert len(rt.cells) == 0
     assert copied == ["ok"]
     assert container.restart_calls == 1
     assert container.reload_calls == 2
+    assert container.exec_calls == [["rm", "-f", "/anton_scratchpad_session.pkl"]]
 
 
 @pytest.mark.asyncio

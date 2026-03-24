@@ -50,8 +50,8 @@ async def test_scratchpad_manager_get_or_create_remove_and_close(monkeypatch, tm
     got2 = await mgr.get_or_create()
     assert got2 is pad
 
-    await mgr.cancel_all_running()
+    await got.cancel()
     assert pad.cancelled
     assert await mgr.remove() == "Scratchpad removed."
     await mgr.close_all()
-    assert mgr.get() is None
+    assert mgr._pad is None

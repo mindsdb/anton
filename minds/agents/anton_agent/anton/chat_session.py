@@ -74,6 +74,7 @@ class ChatSession:
         runtime_context: str = "",
         extra_env: dict[str, str] | None = None,
         shared_memory: MemoryService | None = None,
+        events: list[dict] = None,
     ) -> None:
         self._llm = llm_client
         self._cortex = cortex
@@ -92,6 +93,7 @@ class ChatSession:
             coding_api_key=coding_api_key,
             workspace_path=workspace_path,
             extra_env=extra_env,
+            events=events,
         )
 
     @property
@@ -402,12 +404,11 @@ class ChatSession:
                     else:
                         result_text = await dispatch_tool(self, tc.name, tc.input)
                         if tc.name == "scratchpad" and tc.input.get("action") == "dump":
-                            # yield StreamToolResult(content=result_text)
-                            # result_text = (
-                            #     "The full notebook has been displayed to the user above. "
-                            #     "Do not repeat it. Here is the content for your reference:\n\n" + result_text
-                            # )
-                            result_text = "Here is the full notebook content for your reference:\n\n" + result_text
+                            yield StreamToolResult(content=result_text)
+                            result_text = (
+                                "The full notebook has been displayed to the user above. "
+                                "Do not repeat it. Here is the content for your reference:\n\n" + result_text
+                            )
                 except Exception as exc:
                     result_text = f"Tool '{tc.name}' failed: {exc}"
 

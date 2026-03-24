@@ -3,10 +3,12 @@ import inspect
 import pkgutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from json import loads
 from pathlib import Path
 from uuid import UUID
 
 from minds.common.logger import get_logger
+from minds.schemas.chat import Role
 
 logger = get_logger(__name__)
 
@@ -396,6 +398,7 @@ class ScratchpadRuntimeFactory:
         coding_api_key: str = "",
         workspace_path: Path = Path("~/.anton").expanduser(),
         extra_env: dict[str, str] | None = None,
+        events: list[dict] = None,
     ) -> ScratchpadRuntime:
         """
         Create a new scratchpad runtime.
@@ -407,6 +410,7 @@ class ScratchpadRuntimeFactory:
         - coding_api_key: the coding API key to use.
         - workspace_path: the workspace path to use.
         - extra_env: additional environment variables to pass to the scratchpad runtime.
+        - events: the events that have been created as part of the conversation so far.
         """
         logger.info(f"Creating scratchpad runtime '{name}' with backend '{backend}'.")
         self.discover()
@@ -416,8 +420,67 @@ class ScratchpadRuntimeFactory:
             raise ValueError(f"Unknown backend '{backend}'. Available: {sorted(self._registry)}")
         runtime_cls = self._registry[backend]
 
+        # Find all of the cell code that has been executed as part of the conversation so far
+        # These can be extracted from the events using the thought.scratchpad.result role.
+        def _first_output(e: dict | None) -> dict | None:
+            if not e:
+                return None
+            output = e.get("response", {}).get("output")
+            if not output:
+                return None
+            return output[0]
+
+        previous_event = None
+        cells: list[Cell] = []
+        if events:
+            for event in events:
+                output = _first_output(event)
+                if output:
+                    role = output.get("role")
+
+                    if role and role == Role.thought_scratchpad_result.value:
+                        # thought_scratchpad_result is emitted for both exec and dump actions.
+                        # We need to check the previous event to determine if it was an exec or dump action.
+                        previous_role = None
+                        previous_action = None
+
+                        previous_output = _first_output(previous_event)
+                        if previous_output:
+                            previous_role = previous_output.get("role")
+                            previous_content = previous_output.get("content")
+                            if previous_content:
+                                previous_content = loads(previous_content[0].get("text"))
+                                previous_action = previous_content.get("action")
+
+                        if (
+                            previous_role
+                            and previous_role == Role.thought_scratchpad_end.value
+                            and previous_action
+                            and previous_action == "exec"
+                        ):
+                            content = output.get("content")
+                            if content:
+                                cell_data = content[0].get("text")
+                                if cell_data:
+                                    cell_data = loads(cell_data)
+                                    cells.append(Cell(**cell_data))
+
+                    # Look for reset events.
+                    # All cells prior to the reset event should be cleared.
+                    if role and role == Role.thought_scratchpad_end.value:
+                        content = output.get("content")
+                        if content:
+                            data = content[0].get("text")
+                            if data:
+                                data = loads(data)
+                                if data.get("action") == "reset":
+                                    cells.clear()
+
+                previous_event = event
+
         runtime = runtime_cls(
             name=name,
+            cells=cells,
             _coding_provider=coding_provider,
             _coding_model=coding_model,
             _coding_api_key=coding_api_key,

@@ -42,6 +42,8 @@ async def test_anton_agent_run_builds_context_and_streams(monkeypatch, tmp_path)
             default_openai_planning_model="pO",
             default_openai_coding_model="cO",
             backend="docker",
+            scratchpad_persist_session=True,
+            scratchpad_session_path="/anton_scratchpad_session.pkl",
         ),
     )
     monkeypatch.setattr("minds.agents.anton_agent.agent.mind_layer", lambda _mind: "SYS")

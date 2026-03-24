@@ -118,7 +118,7 @@ SCRATCHPAD_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["exec", "list", "view", "reset", "remove", "dump", "install"]},
+            "action": {"type": "string", "enum": ["exec", "view", "reset", "remove", "dump", "install"]},
             "code": {
                 "type": "string",
                 "description": "Python code (exec only). Use print() for output.",

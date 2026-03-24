@@ -232,6 +232,48 @@ class TestConversationsAPI:
         assert "Internal server error" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
+    async def test_get_conversation_messages_passes_with_events_flag_and_returns_list_wrapper(
+        self,
+        mock_conversations_service,
+        sample_message_response,
+    ):
+        """Endpoint should pass with_events through and return {'object':'list','data':...}."""
+        conversation_id = uuid4()
+
+        sample_message_response.sql_query = "SELECT 1"
+        sample_message_response.events = [{"type": "tool", "value": 1}]
+
+        mock_conversations_service.get_conversation_messages = AsyncMock(return_value=[sample_message_response])
+
+        out = await get_conversation_messages(
+            conversation_id=conversation_id,
+            conversations_service=mock_conversations_service,
+            with_events=True,
+        )
+
+        assert out["object"] == "list"
+        assert out["data"] == [sample_message_response]
+        mock_conversations_service.get_conversation_messages.assert_awaited_once_with(
+            conversation_id,
+            with_sql_query=True,
+            with_events=True,
+        )
+
+        # Also exercise with_events=False.
+        mock_conversations_service.get_conversation_messages = AsyncMock(return_value=[sample_message_response])
+        out2 = await get_conversation_messages(
+            conversation_id=conversation_id,
+            conversations_service=mock_conversations_service,
+            with_events=False,
+        )
+        assert out2["object"] == "list"
+        mock_conversations_service.get_conversation_messages.assert_awaited_once_with(
+            conversation_id,
+            with_sql_query=True,
+            with_events=False,
+        )
+
+    @pytest.mark.asyncio
     async def test_get_conversation_success(self, mock_conversations_service, sample_conversation_response):
         """Test successful conversation retrieval."""
         mock_conversations_service.get_conversation = AsyncMock(return_value=sample_conversation_response)

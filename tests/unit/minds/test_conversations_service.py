@@ -254,6 +254,426 @@ class TestConversationsService:
             await service.get_conversation(conversation_id)
 
     @pytest.mark.asyncio
+    async def test_create_conversation_mind_not_found_rolls_back_and_reraises(
+        self,
+        service,
+        mock_session,
+        sample_create_request,
+        mock_mind_service,
+    ):
+        """MindNotFoundError should rollback and bubble up unchanged."""
+        from minds.services.minds import MindNotFoundError
+
+        mock_mind_service.get_mind_model = AsyncMock(side_effect=MindNotFoundError("missing"))
+
+        with pytest.raises(MindNotFoundError, match="missing"):
+            await service.create_conversation(sample_create_request, mock_mind_service)
+
+        mock_session.rollback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_conversation_message_unexpected_error_wrapped(self, service, mock_session):
+        """create_conversation_message should wrap unexpected exceptions."""
+        conversation_id = uuid4()
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(id=conversation_id))  # type: ignore[method-assign]
+        mock_session.commit.side_effect = Exception("commit failed")
+
+        with pytest.raises(ConversationsServiceError, match="Failed to create message: commit failed"):
+            await service.create_conversation_message(conversation_id, role=Role.user, content="hi")
+
+    @pytest.mark.asyncio
+    async def test_create_conversation_message_placeholder_conversation_missing_raises_not_found(self, service):
+        """create_conversation_message_placeholder should raise if conversation lookup returns falsy."""
+        conversation_id = uuid4()
+        service._get_conversation = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        with pytest.raises(ConversationNotFoundError, match=f"Conversation with ID '{conversation_id}' not found"):
+            await service.create_conversation_message_placeholder(conversation_id, role=Role.user)
+
+    @pytest.mark.asyncio
+    async def test_create_conversation_message_placeholder_unexpected_error_wrapped(self, service, mock_session):
+        """create_conversation_message_placeholder should wrap unexpected exceptions."""
+        conversation_id = uuid4()
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(id=conversation_id))  # type: ignore[method-assign]
+        mock_session.flush.side_effect = Exception("flush failed")
+
+        with pytest.raises(ConversationsServiceError, match="Failed to create message placeholder: flush failed"):
+            await service.create_conversation_message_placeholder(conversation_id, role=Role.user)
+
+    @pytest.mark.asyncio
+    async def test_create_conversation_message_event_unexpected_error_wrapped(self, service, mock_session):
+        """create_conversation_message_event should wrap unexpected exceptions."""
+        mock_session.flush.side_effect = Exception("flush failed")
+        with pytest.raises(ConversationsServiceError, match="Failed to create message event: flush failed"):
+            await service.create_conversation_message_event(
+                message_id=uuid4(),
+                sequence_number=1,
+                event_data={"x": 1},
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_conversation_message_content_pending_rollback_recovers_by_creating_message(
+        self, service, mock_session
+    ):
+        """PendingRollbackError path should rollback, create message, commit, and return response."""
+        from sqlalchemy.exc import PendingRollbackError
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+        msg = SimpleNamespace(
+            id=message_id,
+            conversation_id=conversation_id,
+            role=Role.assistant,
+            content="old",
+            sql_query=None,
+            model_name=None,
+            request_id=None,
+            langfuse_trace_id=None,
+            input_tokens=0,
+            output_tokens=0,
+        )
+
+        mock_session.merge.return_value = msg
+        mock_session.commit.side_effect = [PendingRollbackError("rolled back"), None]
+
+        service._get_message = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        expected = SimpleNamespace(id=message_id, ok=True)
+        service._message_to_response = AsyncMock(return_value=expected)  # type: ignore[method-assign]
+
+        out = await service.update_conversation_message_content(
+            msg,
+            content="new",
+            sql_query="SELECT 1",
+            model_name="m",
+            request_id="r",
+            langfuse_trace_id="t",
+            input_tokens=1,
+            output_tokens=2,
+        )
+
+        assert out is expected
+        mock_session.rollback.assert_called_once()
+        assert mock_session.commit.call_count == 2
+        mock_session.add.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_conversation_message_content_unexpected_error_wrapped(self, service, mock_session):
+        """update_conversation_message_content should rollback and wrap unexpected exceptions."""
+        msg = SimpleNamespace(id=uuid4(), conversation_id=uuid4(), role=Role.user)
+        mock_session.merge.side_effect = Exception("merge failed")
+
+        with pytest.raises(ConversationsServiceError, match="Failed to update message content: merge failed"):
+            await service.update_conversation_message_content(msg, content="x")
+
+        mock_session.rollback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_result_unexpected_error_wrapped(self, service, monkeypatch):
+        """Unexpected exceptions should be wrapped as ConversationsServiceError."""
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(id=uuid4()))  # type: ignore[method-assign]
+        service._get_message = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(role=Role.assistant, sql_query="SELECT 1")
+        )
+        service._validate_and_parse_sql_query = Mock(return_value=SimpleNamespace(order_by=[]))  # type: ignore[method-assign]
+        service.mindsdb_client.query = Mock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(ConversationsServiceError, match="Failed to get message result: boom"):
+            await service.get_conversation_message_result(uuid4(), uuid4())
+
+    @pytest.mark.asyncio
+    async def test_export_conversation_message_result_unexpected_error_wrapped(self, service, mock_mindsdb_client):
+        """export_conversation_message_result should wrap unexpected exceptions."""
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(id=uuid4()))  # type: ignore[method-assign]
+        service._get_message = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(role=Role.assistant, sql_query="SELECT 1")
+        )
+        service._validate_and_parse_sql_query = Mock(return_value=SimpleNamespace())  # type: ignore[method-assign]
+        mock_mindsdb_client.query.side_effect = Exception("query failed")
+
+        with pytest.raises(ConversationsServiceError, match="Failed to export message result: query failed"):
+            await service.export_conversation_message_result(uuid4(), uuid4())
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_chart_mssql_uses_top_and_returns_chart_response(
+        self, service, mock_mindsdb_client, monkeypatch
+    ):
+        """MSSQL branch should use TOP in query and return ChartResponse."""
+        import minds.services.chart_compiler as chart_compiler_mod
+        import minds.services.conversations as conversations_mod
+
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(id=uuid4()))  # type: ignore[method-assign]
+        service._get_message = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(role=Role.assistant, sql_query="SELECT * FROM t")
+        )
+        service._validate_and_parse_sql_query = Mock(return_value=SimpleNamespace(order_by=[]))  # type: ignore[method-assign]
+
+        monkeypatch.setattr(conversations_mod, "extract_database_engines_from_select", lambda *_a, **_k: {"mssql"})
+
+        df = pd.DataFrame({"a": [1]})
+        mock_mindsdb_client.query.return_value.fetch.return_value = df
+
+        from minds.schemas.charts import XYIntent
+
+        called = {}
+
+        def _fake_compile_chartjs(result, intent):
+            called["rows"] = len(result)
+            called["intent"] = intent
+            return (
+                {"type": "bar"},
+                [],
+                {"row_count": len(result), "used_rows": len(result), "points": len(result), "series": 1},
+            )
+
+        monkeypatch.setattr(chart_compiler_mod, "compile_chartjs", _fake_compile_chartjs)
+        monkeypatch.setattr(chart_compiler_mod, "MAX_ROWS_TO_PROCESS", 10)
+
+        out = await service.get_conversation_message_chart(uuid4(), uuid4(), XYIntent(type="bar", x="a", y="a"))
+        assert out.config["type"] == "bar"
+        q = mock_mindsdb_client.query.call_args.args[0]
+        assert "SELECT TOP 10" in q
+        assert called["rows"] == 1
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_chart_non_mssql_uses_limit(self, service, mock_mindsdb_client, monkeypatch):
+        """Non-MSSQL branch should use LIMIT in query."""
+        import minds.services.chart_compiler as chart_compiler_mod
+        import minds.services.conversations as conversations_mod
+
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(id=uuid4()))  # type: ignore[method-assign]
+        service._get_message = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(role=Role.assistant, sql_query="SELECT * FROM t")
+        )
+        service._validate_and_parse_sql_query = Mock(return_value=SimpleNamespace(order_by=[]))  # type: ignore[method-assign]
+
+        monkeypatch.setattr(conversations_mod, "extract_database_engines_from_select", lambda *_a, **_k: set())
+        monkeypatch.setattr(
+            chart_compiler_mod,
+            "compile_chartjs",
+            lambda result, _intent: (
+                {"type": "line"},
+                [],
+                {"row_count": len(result), "used_rows": len(result), "points": len(result), "series": 1},
+            ),
+        )
+        monkeypatch.setattr(chart_compiler_mod, "MAX_ROWS_TO_PROCESS", 7)
+
+        df = pd.DataFrame({"a": [1]})
+        mock_mindsdb_client.query.return_value.fetch.return_value = df
+
+        from minds.schemas.charts import XYIntent
+
+        out = await service.get_conversation_message_chart(uuid4(), uuid4(), XYIntent(type="line", x="a", y="a"))
+        assert out.config["type"] == "line"
+        q = mock_mindsdb_client.query.call_args.args[0]
+        assert "LIMIT 7" in q
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_chart_unexpected_error_wrapped(
+        self, service, mock_mindsdb_client, monkeypatch
+    ):
+        """Unexpected exceptions in chart generation should be wrapped."""
+        import minds.services.conversations as conversations_mod
+
+        service._get_conversation = AsyncMock(return_value=SimpleNamespace(id=uuid4()))  # type: ignore[method-assign]
+        service._get_message = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(role=Role.assistant, sql_query="SELECT * FROM t")
+        )
+        service._validate_and_parse_sql_query = Mock(return_value=SimpleNamespace(order_by=[]))  # type: ignore[method-assign]
+        monkeypatch.setattr(conversations_mod, "extract_database_engines_from_select", lambda *_a, **_k: set())
+        mock_mindsdb_client.query.side_effect = Exception("boom")
+
+        from minds.schemas.charts import XYIntent
+
+        with pytest.raises(ConversationsServiceError, match="Failed to generate chart: boom"):
+            await service.get_conversation_message_chart(uuid4(), uuid4(), XYIntent(type="bar", x="a", y="a"))
+
+    def test_validate_and_parse_sql_query_empty_raises(self, service):
+        from minds.services.conversations import InvalidSQLQueryError
+
+        with pytest.raises(InvalidSQLQueryError, match="Empty input"):
+            service._validate_and_parse_sql_query("")
+
+    def test_validate_and_parse_sql_query_parse_error_raises(self, service, monkeypatch):
+        from mindsdb_sql_parser.exceptions import ParsingException
+
+        import minds.services.conversations as conversations_mod
+        from minds.services.conversations import InvalidSQLQueryError
+
+        monkeypatch.setattr(conversations_mod, "parse_sql", lambda _s: (_ for _ in ()).throw(ParsingException("bad")))
+        with pytest.raises(InvalidSQLQueryError, match="Invalid SQL query:"):
+            service._validate_and_parse_sql_query("SELECT")
+
+    def test_validate_and_parse_sql_query_non_select_raises(self, service, monkeypatch):
+        import minds.services.conversations as conversations_mod
+        from minds.services.conversations import InvalidSQLQueryError
+
+        class _FakeSelect:  # local stand-in for isinstance check
+            pass
+
+        monkeypatch.setattr(conversations_mod, "Select", _FakeSelect)
+        monkeypatch.setattr(conversations_mod, "parse_sql", lambda _s: object())
+
+        with pytest.raises(InvalidSQLQueryError, match="not a SELECT query"):
+            service._validate_and_parse_sql_query("DELETE FROM t")
+
+    @pytest.mark.asyncio
+    async def test_get_message_not_found_raises(self, service, mock_session):
+        """_get_message should raise MessageNotFoundError when not found."""
+        from minds.services.conversations import MessageNotFoundError
+
+        mock_result = Mock()
+        mock_result.first.return_value = None
+        mock_session.exec.return_value = mock_result
+
+        with pytest.raises(MessageNotFoundError):
+            await service._get_message(uuid4(), uuid4())
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_messages_with_events_includes_events_and_adds_loader_options(
+        self,
+        service,
+        mock_session,
+        sample_conversation,
+        sample_message,
+    ):
+        """with_events=True should attach loader options and include event_data in responses."""
+        from minds.model.message_event import MessageEvent
+
+        # Avoid re-testing _get_conversation() here; focus on message query + event shaping.
+        service._get_conversation = AsyncMock(return_value=sample_conversation)  # type: ignore[method-assign]
+
+        # Attach events on the message as the ORM would when selectinload() is used.
+        sample_message.user_id = UUID(service.user_id)
+        sample_message.sql_query = "SELECT 1"
+        sample_message.message_events = [
+            MessageEvent(
+                message_id=sample_message.id,
+                organization_id=sample_message.organization_id,
+                user_id=sample_message.user_id,
+                sequence_number=1,
+                event_data={"type": "tool", "value": 1},
+            ),
+            MessageEvent(
+                message_id=sample_message.id,
+                organization_id=sample_message.organization_id,
+                user_id=sample_message.user_id,
+                sequence_number=2,
+                event_data={"type": "tool", "value": 2},
+            ),
+        ]
+
+        mock_result = Mock()
+        mock_result.all.return_value = [sample_message]
+        mock_session.exec.return_value = mock_result
+
+        out = await service.get_conversation_messages(
+            sample_conversation.id,
+            with_sql_query=True,
+            with_events=True,
+        )
+
+        assert len(out) == 1
+        msg = out[0]
+        assert isinstance(msg, MessageResponse)
+        assert msg.sql_query == "SELECT 1"
+        assert msg.events == [{"type": "tool", "value": 1}, {"type": "tool", "value": 2}]
+        assert msg.content.type == MessageContentType.input_text
+
+        # Ensure we exercised the "statement.options(...)" branch.
+        stmt = mock_session.exec.call_args.args[0]
+        with_opts = getattr(stmt, "_with_options", ())
+        assert len(with_opts) > 0
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_messages_without_events_does_not_include_events_or_loader_options(
+        self,
+        service,
+        mock_session,
+        sample_conversation,
+        sample_message,
+    ):
+        """with_events=False should not add loader options and should leave events unset."""
+        from minds.model.message_event import MessageEvent
+
+        service._get_conversation = AsyncMock(return_value=sample_conversation)  # type: ignore[method-assign]
+
+        sample_message.user_id = UUID(service.user_id)
+        sample_message.sql_query = "SELECT 1"
+        sample_message.message_events = [
+            MessageEvent(
+                message_id=sample_message.id,
+                organization_id=sample_message.organization_id,
+                user_id=sample_message.user_id,
+                sequence_number=1,
+                event_data={"x": 1},
+            )
+        ]
+
+        mock_result = Mock()
+        mock_result.all.return_value = [sample_message]
+        mock_session.exec.return_value = mock_result
+
+        out = await service.get_conversation_messages(
+            sample_conversation.id,
+            with_sql_query=True,
+            with_events=False,
+        )
+
+        assert len(out) == 1
+        msg = out[0]
+        assert msg.sql_query == "SELECT 1"
+        assert msg.events is None
+
+        stmt = mock_session.exec.call_args.args[0]
+        with_opts = getattr(stmt, "_with_options", ())
+        assert len(with_opts) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_messages_conversation_not_found_propagates(self, service):
+        """ConversationNotFoundError should bubble up unchanged."""
+        service._get_conversation = AsyncMock(side_effect=ConversationNotFoundError("nope"))  # type: ignore[method-assign]
+        with pytest.raises(ConversationNotFoundError, match="nope"):
+            await service.get_conversation_messages(uuid4(), with_events=True)
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_messages_unexpected_error_wrapped(self, service, mock_session, sample_conversation):
+        """Unexpected errors should be wrapped as ConversationsServiceError."""
+        service._get_conversation = AsyncMock(return_value=sample_conversation)  # type: ignore[method-assign]
+        mock_session.exec.side_effect = Exception("db down")
+
+        with pytest.raises(ConversationsServiceError, match="Failed to get conversation with messages"):
+            await service.get_conversation_messages(sample_conversation.id, with_events=True)
+
+    @pytest.mark.asyncio
+    async def test_create_conversation_message_event_commit_flag_controls_commit(self, service, mock_session):
+        """create_conversation_message_event should flush always and commit only when commit=True."""
+        message_id = uuid4()
+
+        await service.create_conversation_message_event(
+            message_id=message_id,
+            sequence_number=1,
+            event_data={"k": "v"},
+            commit=False,
+        )
+        mock_session.add.assert_called()
+        mock_session.flush.assert_called()
+        mock_session.commit.assert_not_called()
+
+        mock_session.add.reset_mock()
+        mock_session.flush.reset_mock()
+        mock_session.commit.reset_mock()
+
+        await service.create_conversation_message_event(
+            message_id=message_id,
+            sequence_number=2,
+            event_data={"k2": "v2"},
+            commit=True,
+        )
+        mock_session.add.assert_called()
+        mock_session.flush.assert_called()
+        mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_check_conversation_message_report_exists_success(self, service, monkeypatch):
         """check_conversation_message_report_exists returns None when report exists."""
         import minds.services.conversations as conversations_mod
