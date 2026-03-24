@@ -427,18 +427,22 @@ def _setup_prompt(label: str, default: str | None = None) -> str:
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.styles import Style as PTStyle
 
+    _esc_pressed = False
+
     bindings = KeyBindings()
 
     @bindings.add("escape")
     def _on_esc(event):
-        event.app.exit(exception=_SetupRetry())
+        nonlocal _esc_pressed
+        _esc_pressed = True
+        event.app.exit(result="")
 
     pt_style = PTStyle.from_dict({
         "bottom-toolbar": "noreverse nounderline bg:default",
     })
 
     def _toolbar():
-        return HTML("<style fg='#555570'>  press ESC to go back</style>")
+        return HTML("<style fg='#ff69b4'>⏵⏵ Esc to go back</style>")
 
     suffix = f" ({default}): " if default else ": "
     session: PromptSession[str] = PromptSession(
@@ -449,6 +453,11 @@ def _setup_prompt(label: str, default: str | None = None) -> str:
     )
 
     result = session.prompt(f"  {label}{suffix}")
+
+    if _esc_pressed:
+        console.print("  [anton.muted]Going back...[/]")
+        raise _SetupRetry()
+
     if not result and default:
         return default
     return result
