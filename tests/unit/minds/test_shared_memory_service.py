@@ -292,6 +292,77 @@ class TestFormatBlock:
         assert "### Topic B" in output
 
 
+class TestLoadRaw:
+    def test_returns_rules_and_topics(self):
+        rules = [make_rule()]
+        topics = [make_topic()]
+        service = make_service(rules=rules, topics=topics)
+        got_rules, got_topics = service.load_raw()
+        assert got_rules == rules
+        assert got_topics == topics
+
+    def test_returns_empty_lists_when_no_data(self):
+        service = make_service()
+        got_rules, got_topics = service.load_raw()
+        assert got_rules == []
+        assert got_topics == []
+
+
+class TestSelectForQuery:
+    def test_selects_relevant_topic(self):
+        service = make_service()
+        rules = []
+        topics = [
+            make_topic("SQL Optimization", body="x" * 40),
+            make_topic("Pricing Policy", body="x" * 40),
+        ]
+        block = service.select_for_query(rules, topics, "sql performance")
+        assert block.topics[0].title == "SQL Optimization"
+
+    def test_all_rules_always_included(self):
+        service = make_service()
+        rules = [make_rule(RuleType.always, "Use production schema.")]
+        block = service.select_for_query(rules, [], "any query")
+        assert len(block.rules) == 1
+
+    def test_no_db_call(self):
+        """select_for_query must not call the repo."""
+        service = make_service()
+        service.select_for_query([], [], "query")
+        service.repo.get_active_rules.assert_not_called()
+        service.repo.get_active_topics.assert_not_called()
+
+    def test_returns_empty_block_with_no_data(self):
+        service = make_service()
+        block = service.select_for_query([], [], "anything")
+        assert block.is_empty
+
+
+class TestLoadForSessionIsWrapper:
+    def test_same_result_as_load_raw_plus_select(self):
+        rules = [make_rule(RuleType.always, "Always be precise.")]
+        topics = [
+            make_topic("SQL Guide", body="x" * 40),
+            make_topic("Pricing", body="x" * 40),
+        ]
+        service = make_service(rules=rules, topics=topics)
+        query = "sql"
+
+        block_via_wrapper = service.load_for_session(query)
+
+        raw_rules, raw_topics = service.load_raw()
+        block_via_split = service.select_for_query(raw_rules, raw_topics, query)
+
+        assert [r.content for r in block_via_wrapper.rules] == [r.content for r in block_via_split.rules]
+        assert [t.title for t in block_via_wrapper.topics] == [t.title for t in block_via_split.topics]
+
+    def test_db_called_once_in_wrapper(self):
+        service = make_service(rules=[make_rule()], topics=[make_topic()])
+        service.load_for_session("query")
+        service.repo.get_active_rules.assert_called_once()
+        service.repo.get_active_topics.assert_called_once()
+
+
 class TestAdminListRules:
     def test_returns_rules(self, admin_service, admin_session):
         rule = make_rule(rule_id=RULE_ID)

@@ -49,25 +49,42 @@ class MemoryService:
         self.token_budget = token_budget
         self.max_topics = max_topics
 
+    def load_raw(self) -> tuple[list[MemoryRule], list[MemoryTopic]]:
+        """
+        Fetch all active rules and topics from the DB.
+
+        Callers should cache this result and pass it to select_for_query()
+        on each turn to avoid repeated DB round-trips.
+        """
+        return self.repo.get_active_rules(), self.repo.get_active_topics()
+
+    def select_for_query(
+        self,
+        rules: list[MemoryRule],
+        topics: list[MemoryTopic],
+        query: str,
+    ) -> MemoryBlock:
+        """
+        Score pre-loaded topics against a query and apply budget/count caps.
+
+        No DB call — pass the output of load_raw() here.
+        """
+        remaining_budget = self.token_budget - sum(_token_count(r.content) for r in rules)
+        scored_topics = self._score_topics(topics, query)
+        selected_topics = self._apply_caps(scored_topics, remaining_budget)
+        return MemoryBlock(rules=rules, topics=selected_topics)
+
     def load_for_session(self, query: str) -> MemoryBlock:
         """
         Load and select memory relevant to query.
 
-        Rules: all active rules are always included. Their token cost is
-        deducted before topic selection.
-
-        Topics: scored by keyword match against title/tags/description,
-        capped at max_topics and the remaining token budget.
+        Convenience wrapper around load_raw() + select_for_query() for
+        callers that only need a single-shot load. For per-turn re-scoring
+        without repeated DB calls, use load_raw() once and call
+        select_for_query() on each turn.
         """
-        rules = self.repo.get_active_rules()
-        topics = self.repo.get_active_topics()
-
-        remaining_budget = self.token_budget - sum(_token_count(r.content) for r in rules)
-
-        scored_topics = self._score_topics(topics, query)
-        selected_topics = self._apply_caps(scored_topics, remaining_budget)
-
-        return MemoryBlock(rules=rules, topics=selected_topics)
+        rules, topics = self.load_raw()
+        return self.select_for_query(rules, topics, query)
 
     def _score_topics(self, topics: list[MemoryTopic], query: str) -> list[MemoryTopic]:
         """

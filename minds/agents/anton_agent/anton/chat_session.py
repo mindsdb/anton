@@ -90,6 +90,8 @@ class ChatSession:
         self._shared_memory = shared_memory
         self._shared_memory_block: MemoryBlock | None = None
         self._shared_memory_load_failed = False
+        self._cached_rules: list | None = None
+        self._cached_all_topics: list | None = None
         self._scratchpads = ScratchpadManager(
             backend=backend,
             coding_provider=coding_provider,
@@ -135,15 +137,20 @@ class ChatSession:
             }
         )
 
-    def _init_shared_memory(self, query: str) -> None:
-        """Load mind memory once for this session. Failures are non-fatal."""
+    def _refresh_shared_memory(self, query: str) -> None:
+        """Load mind memory from DB once, then re-score on every call. Failures are non-fatal."""
         if self._shared_memory is None:
             return
         try:
-            # NOTE: We load topics per initial question, not for every question. Worth improving
-            self._shared_memory_block = self._shared_memory.load_for_session(query)
+            if self._cached_rules is None:
+                # First turn: fetch rules and all topics from DB, then cache them.
+                self._cached_rules, self._cached_all_topics = self._shared_memory.load_raw()
+            # Every turn: re-score cached data against the current query (no DB call).
+            self._shared_memory_block = self._shared_memory.select_for_query(
+                self._cached_rules, self._cached_all_topics or [], query
+            )
         except Exception:
-            logger.exception("Failed to load mind memory for session — continuing without it")
+            logger.exception("Failed to load/refresh mind memory — continuing without it")
             self._shared_memory_block = MemoryBlock()
             self._shared_memory_load_failed = True
 
@@ -258,11 +265,14 @@ class ChatSession:
         """Streaming version of turn(). Yields events as they arrive."""
         self._history.append({"role": "user", "content": user_input})
 
-        # Load mind memory once on the first turn using the user's query for scoring.
-        if self._shared_memory is not None and self._shared_memory_block is None:
+        # Refresh shared memory on every turn so topic selection stays relevant as
+        # the conversation evolves. The DB is only hit on the first turn; subsequent
+        # turns re-score the cached data in memory.
+        if self._shared_memory is not None:
             query = user_input if isinstance(user_input, str) else ""
-            self._init_shared_memory(query)
-            if self._shared_memory_load_failed:
+            was_failed = self._shared_memory_load_failed
+            self._refresh_shared_memory(query)
+            if self._shared_memory_load_failed and not was_failed:
                 yield StreamContextCompacted(message="Note: Mind memory could not be loaded for this session.")
 
         if self._episodic is not None:
