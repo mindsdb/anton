@@ -224,15 +224,7 @@ def main(
 
 
 def _has_api_key(settings) -> bool:
-    """Check if all configured providers have API keys.
-
-    Also returns False when the Minds API key is missing, so that
-    upgrading users are prompted to set it up on first re-launch.
-    """
-    # Minds key is always required now
-    if not (settings.minds_api_key or os.environ.get("ANTON_MINDS_API_KEY")):
-        return False
-
+    """Check if any LLM provider is fully configured."""
     providers = {settings.planning_provider, settings.coding_provider}
     for p in providers:
         if p == "anthropic" and not (settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")):
@@ -247,64 +239,91 @@ def _ensure_api_key(settings) -> None:
     if _has_api_key(settings):
         return
 
+    from rich.panel import Panel
     from rich.prompt import Prompt
+    from rich.text import Text
 
     from anton.workspace import Workspace
 
     ws = Workspace(Path.home())
 
-    _ensure_minds_api_key(settings, ws)
+    # Header
+    console.print()
+    header = Text()
+    header.append("  First-time setup", style="bold anton.cyan")
+    header.append(" — pick your LLM provider\n", style="anton.muted")
+    console.print(header)
+
+    # Provider choices
+    minds_line = Text()
+    minds_line.append("  1 ", style="bold")
+    minds_line.append("Minds ", style="anton.cyan")
+    minds_line.append("mdb.ai", style="anton.muted")
+    minds_line.append("  recommended", style="bold anton.success")
+    console.print(minds_line)
+
+    benefits = Text()
+    benefits.append("    Optimized model routing  ", style="anton.muted")
+    benefits.append("|", style="dim")
+    benefits.append("  Faster responses  ", style="anton.muted")
+    benefits.append("|", style="dim")
+    benefits.append("  Built-in billing", style="anton.muted")
+    console.print(benefits)
+    console.print()
+
+    other_line = Text()
+    other_line.append("  2 ", style="bold")
+    other_line.append("Bring your own key ", style="anton.cyan")
+    other_line.append("Anthropic or OpenAI", style="anton.muted")
+    console.print(other_line)
+    console.print()
+
+    choice = Prompt.ask(
+        "[anton.cyan]>[/]",
+        choices=["1", "2"],
+        default="1",
+        console=console,
+        show_choices=False,
+        show_default=False,
+    )
+
+    if choice == "1":
+        _setup_minds(settings, ws)
+    else:
+        _setup_other_provider(settings, ws)
 
     # Reload env vars into the process so the scratchpad subprocess inherits them
     ws.apply_env_to_process()
 
+    # Summary
     console.print()
-    console.print(f"[anton.success]Saved to {ws.env_path}[/]")
+    provider_label = settings.planning_provider
+    model_label = settings.planning_model
+    if provider_label == "openai-compatible":
+        provider_label = "Minds"
+    summary = Text()
+    summary.append("  Provider  ", style="anton.muted")
+    summary.append(provider_label, style="anton.cyan")
+    summary.append("   Model  ", style="anton.muted")
+    summary.append(model_label, style="anton.cyan")
+    console.print(summary)
+    console.print(f"  [anton.success]Ready.[/] [anton.muted]Saved to {ws.env_path}[/]")
     console.print()
 
 
-def _ensure_anthropic_api_key(settings, ws) -> None:
-    """Prompt for Anthropic API key (default flow)."""
-    from rich.prompt import Prompt
+def _setup_minds(settings, ws) -> None:
+    """Set up Minds (mdb.ai) as the LLM provider."""
+    from rich.prompt import Confirm, Prompt
 
     console.print()
-    console.print("[anton.cyan]Anthropic configuration[/]")
-    console.print()
-
-    api_key = Prompt.ask("Anthropic API key", console=console)
+    api_key = Prompt.ask("  [anton.cyan]Minds API key[/]", console=console)
     if not api_key.strip():
-        console.print("[anton.error]No API key provided. Exiting.[/]")
-        raise typer.Exit(1)
-    api_key = api_key.strip()
-
-    settings.anthropic_api_key = api_key
-    settings.planning_provider = "anthropic"
-    settings.coding_provider = "anthropic"
-    settings.planning_model = "claude-sonnet-4-6"
-    settings.coding_model = "claude-haiku-4-5-20251001"
-    ws.set_secret("ANTON_ANTHROPIC_API_KEY", api_key)
-    ws.set_secret("ANTON_PLANNING_PROVIDER", "anthropic")
-    ws.set_secret("ANTON_CODING_PROVIDER", "anthropic")
-    ws.set_secret("ANTON_PLANNING_MODEL", "claude-sonnet-4-6")
-    ws.set_secret("ANTON_CODING_MODEL", "claude-haiku-4-5-20251001")
-
-
-def _ensure_minds_api_key(settings, ws) -> None:
-    """Prompt for Minds API key and configure LLM endpoints (opt-in flow)."""
-    from rich.prompt import Prompt
-
-    console.print()
-    console.print("[anton.cyan]Minds configuration[/]")
-    console.print()
-
-    api_key = Prompt.ask("Minds API key", console=console)
-    if not api_key.strip():
-        console.print("[anton.error]No API key provided. Exiting.[/]")
+        console.print("  [anton.error]No API key provided.[/]")
         raise typer.Exit(1)
     api_key = api_key.strip()
 
     minds_url = Prompt.ask(
-        "Minds URL",
+        "  [anton.cyan]Minds URL[/]",
         default="https://mdb.ai",
         console=console,
     ).strip()
@@ -318,31 +337,36 @@ def _ensure_minds_api_key(settings, ws) -> None:
     ws.set_secret("ANTON_MINDS_API_KEY", api_key)
     ws.set_secret("ANTON_MINDS_URL", minds_url)
 
-    # Test if the Minds server supports LLM endpoints (_code_/_reason_)
-    from rich.prompt import Confirm
-
+    # Test connection with a spinner
     from anton.chat import _minds_test_llm
+
+    from rich.live import Live
+    from rich.spinner import Spinner
+
     ssl_verify = True
-    llm_ok = _minds_test_llm(minds_url, api_key, verify=True)
-    if not llm_ok:
-        # SSL verification failed — check if the server is reachable without it
-        llm_ok_no_ssl = _minds_test_llm(minds_url, api_key, verify=False)
-        if llm_ok_no_ssl:
-            console.print("[anton.warning]SSL certificate verification failed for this server.[/]")
-            skip_ssl = Confirm.ask(
-                "Continue without verifying SSL certificates?",
-                default=False,
-                console=console,
-            )
-            if skip_ssl:
+    llm_ok = False
+
+    with Live(Spinner("dots", text="  Connecting...", style="anton.cyan"), console=console, transient=True):
+        llm_ok = _minds_test_llm(minds_url, api_key, verify=True)
+        if not llm_ok:
+            llm_ok_no_ssl = _minds_test_llm(minds_url, api_key, verify=False)
+            if llm_ok_no_ssl:
                 ssl_verify = False
                 llm_ok = True
-            else:
-                console.print("[anton.error]Cannot connect with SSL verification. Check your server certificate.[/]")
-                llm_ok = False
+
+    if llm_ok and not ssl_verify:
+        console.print("  [anton.warning]SSL certificate verification failed.[/]")
+        skip_ssl = Confirm.ask(
+            "  Continue without SSL verification?",
+            default=False,
+            console=console,
+        )
+        if not skip_ssl:
+            console.print("  [anton.error]Setup cancelled.[/]")
+            raise typer.Exit(1)
 
     if llm_ok:
-        console.print("[anton.success]LLM endpoints available — using Minds server as LLM provider.[/]")
+        console.print("  [anton.success]Connected[/]")
         base_url = f"{minds_url}/api/v1"
         settings.openai_api_key = api_key
         settings.openai_base_url = base_url
@@ -360,8 +384,116 @@ def _ensure_minds_api_key(settings, ws) -> None:
         if not ssl_verify:
             ws.set_secret("ANTON_MINDS_SSL_VERIFY", "false")
     else:
-        # LLM endpoints not available — fall back to Anthropic
-        _ensure_anthropic_api_key(settings, ws)
+        console.print("  [anton.error]Could not connect. Check your API key and URL.[/]")
+        raise typer.Exit(1)
+
+
+def _setup_other_provider(settings, ws) -> None:
+    """Set up Anthropic or OpenAI as the LLM provider."""
+    from rich.prompt import Prompt
+    from rich.text import Text
+
+    console.print()
+    for label, idx in [("Anthropic (Claude)", "1"), ("OpenAI (GPT)", "2")]:
+        line = Text()
+        line.append(f"  {idx} ", style="bold")
+        line.append(label, style="anton.cyan")
+        console.print(line)
+    console.print()
+
+    provider_choice = Prompt.ask(
+        "[anton.cyan]>[/]",
+        choices=["1", "2"],
+        console=console,
+        show_choices=False,
+    )
+
+    if provider_choice == "1":
+        _setup_anthropic(settings, ws)
+    else:
+        _setup_openai(settings, ws)
+
+
+def _validate_with_spinner(console, label: str, fn) -> None:
+    """Run a validation function with a spinner, print result."""
+    from rich.live import Live
+    from rich.spinner import Spinner
+
+    with Live(Spinner("dots", text=f"  Validating {label}...", style="anton.cyan"), console=console, transient=True):
+        fn()
+    console.print(f"  [anton.success]Validated[/] [anton.muted]{label}[/]")
+
+
+def _setup_anthropic(settings, ws) -> None:
+    """Set up Anthropic with a single model for both reasoning and coding."""
+    from rich.prompt import Prompt
+
+    console.print()
+    api_key = Prompt.ask("  [anton.cyan]API key[/]", console=console)
+    if not api_key.strip():
+        console.print("  [anton.error]No API key provided.[/]")
+        raise typer.Exit(1)
+    api_key = api_key.strip()
+
+    model = Prompt.ask("  [anton.cyan]Model[/]", default="claude-sonnet-4-6", console=console).strip()
+
+    try:
+        def _test():
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            client.messages.create(model=model, max_tokens=1, messages=[{"role": "user", "content": "ping"}])
+
+        _validate_with_spinner(console, model, _test)
+    except Exception as exc:
+        console.print(f"  [anton.error]Failed:[/] {exc}")
+        raise typer.Exit(1)
+
+    settings.anthropic_api_key = api_key
+    settings.planning_provider = "anthropic"
+    settings.coding_provider = "anthropic"
+    settings.planning_model = model
+    settings.coding_model = model
+    ws.set_secret("ANTON_ANTHROPIC_API_KEY", api_key)
+    ws.set_secret("ANTON_PLANNING_PROVIDER", "anthropic")
+    ws.set_secret("ANTON_CODING_PROVIDER", "anthropic")
+    ws.set_secret("ANTON_PLANNING_MODEL", model)
+    ws.set_secret("ANTON_CODING_MODEL", model)
+
+
+def _setup_openai(settings, ws) -> None:
+    """Set up OpenAI with a single model for both reasoning and coding."""
+    from rich.prompt import Prompt
+
+    console.print()
+    api_key = Prompt.ask("  [anton.cyan]API key[/]", console=console)
+    if not api_key.strip():
+        console.print("  [anton.error]No API key provided.[/]")
+        raise typer.Exit(1)
+    api_key = api_key.strip()
+
+    model = Prompt.ask("  [anton.cyan]Model[/]", default="gpt-4o", console=console).strip()
+
+    try:
+        def _test():
+            import openai
+            client = openai.OpenAI(api_key=api_key)
+            client.chat.completions.create(model=model, max_tokens=1, messages=[{"role": "user", "content": "ping"}])
+
+        _validate_with_spinner(console, model, _test)
+    except Exception as exc:
+        console.print(f"  [anton.error]Failed:[/] {exc}")
+        raise typer.Exit(1)
+
+    settings.openai_api_key = api_key
+    settings.planning_provider = "openai"
+    settings.coding_provider = "openai"
+    settings.planning_model = model
+    settings.coding_model = model
+    ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
+    ws.set_secret("ANTON_PLANNING_PROVIDER", "openai")
+    ws.set_secret("ANTON_CODING_PROVIDER", "openai")
+    ws.set_secret("ANTON_PLANNING_MODEL", model)
+    ws.set_secret("ANTON_CODING_MODEL", model)
 
 
 @app.command("setup")
