@@ -376,7 +376,7 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
             if choice == "1":
                 _setup_minds(settings, ws)
             elif choice == "2":
-                _setup_minds(settings, ws, enterprise=True)
+                _setup_minds(settings, ws, default_url=None)
             else:
                 _setup_other_provider(settings, ws)
             break  # success
@@ -410,7 +410,7 @@ class _SetupRetry(Exception):
     pass
 
 
-def _setup_minds(settings, ws, *, enterprise: bool = False) -> None:
+def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") -> None:
     """Set up Minds as the LLM provider (cloud or enterprise)."""
     from rich.prompt import Confirm, Prompt
 
@@ -418,11 +418,10 @@ def _setup_minds(settings, ws, *, enterprise: bool = False) -> None:
 
     console.print()
 
-    minds_url = Prompt.ask(
-        "  [anton.cyan]Server URL[/]",
-        default="https://mdb.ai",
-        console=console,
-    ).strip()
+    prompt_kwargs = {"console": console}
+    if default_url:
+        prompt_kwargs["default"] = default_url
+    minds_url = Prompt.ask("  [anton.cyan]Server URL[/]", **prompt_kwargs).strip()
     if not minds_url.startswith("http://") and not minds_url.startswith("https://"):
         minds_url = "https://" + minds_url
     minds_url = minds_url.rstrip("/")
@@ -501,7 +500,7 @@ def _setup_minds(settings, ws, *, enterprise: bool = False) -> None:
         console.print("  [anton.error]Could not connect. Check your API key and URL.[/]")
         retry = Confirm.ask("  Try again?", default=True, console=console)
         if retry:
-            _setup_minds(settings, ws, enterprise=enterprise)
+            _setup_minds(settings, ws, default_url=default_url)
         else:
             raise _SetupRetry()
 
