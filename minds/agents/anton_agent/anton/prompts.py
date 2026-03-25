@@ -281,6 +281,34 @@ real product quality, and zero JS runtime errors. If not, improve it.
 """
 
 
+INSIGHTS_PROMPT = """
+INSIGHT DELIVERY:
+
+When delivering data insights — whether with or without a dashboard — structure your response as:
+
+1. HEADLINE: One sentence, the single most important finding. Lead with impact, not description. \
+"Revenue dropped 23% in APAC despite 12% growth globally" not "Here are the revenue numbers."
+
+2. CONTEXT: Compare against a benchmark, historical average, or expectation. Raw numbers \
+without comparison are meaningless. "This is 3x the typical monthly variance" or \
+"Outperforming the sector median by 8pp."
+
+3. THE NON-OBVIOUS: What would an expert analyst notice? Disproportionate impacts, hidden \
+correlations, concentration risks, counterintuitive patterns. Don't restate what the user \
+can read in a table — tell them what the table doesn't show.
+
+4. ASSUMPTIONS: Be explicit. What data source? What time range? Closing vs adjusted prices? \
+Timezone? Real-time or delayed? Don't hide these — state them clearly so the user can \
+trust and verify.
+
+5. ACTIONABLE EDGE: What could the user do with this information? Risks to watch, \
+thresholds that matter, scenarios worth considering. Give them a reason to act, not just \
+a reason to read.
+
+Apply this structure whether the answer includes a dashboard or is text-only. \
+The goal is to make every response analyst-grade — not a data dump.
+"""
+
 VISUALIZATIONS_LITE_PROMPT = """
 VISUALIZATIONS:
 - You can generate polished HTML dashboards when the user's question warrants it \
@@ -297,6 +325,7 @@ Classify the user's query. Respond with a JSON object only, no other text.
 
 {{
   "needs_dashboard": true/false,
+  "needs_insights": true/false,
   "dashboard_type": "trend" | "comparison" | "distribution" | "overview" | "none",
   "complexity": "simple" | "moderate" | "complex",
   "key_metrics": ["list of metrics or dimensions the user cares about"],
@@ -312,6 +341,12 @@ Rules:
 distributions, rankings, multi-metric analysis, or the user explicitly asks for a chart/dashboard/visualization.
 - needs_dashboard=false when: simple factual questions, single number answers, \
 yes/no questions, list lookups, text generation, general conversation.
+- needs_insights=true when: the user is asking about data, performance, metrics, analysis, \
+or anything where the answer benefits from expert interpretation beyond raw numbers. \
+This includes questions like "how is X performing", "what happened with Y", "analyze Z", \
+"compare A vs B". Basically any data question that deserves analyst-grade framing.
+- needs_insights=false when: general conversation, greetings, code generation, file operations, \
+or questions that don't involve data interpretation.
 - dashboard_type: "trend" for time-series, "comparison" for entity vs entity, \
 "distribution" for breakdowns/proportions, "overview" for multi-metric summaries.
 - complexity: "simple" for 1-2 metrics, "moderate" for 3-5 metrics or one comparison, \

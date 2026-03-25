@@ -10,6 +10,7 @@ from minds.agents.anton_agent.anton.llm.openai import OpenAIProvider
 from minds.agents.anton_agent.anton.llm.provider import LLMProvider
 from minds.agents.anton_agent.anton.llm.structured import generate_object
 from minds.agents.anton_agent.anton.prompts import (
+    INSIGHTS_PROMPT,
     QUERY_CLASSIFICATION_PROMPT,
     REMOVE_VISUALIZATIONS_BIAS_PROMPT,
     VISUALIZATIONS_LITE_PROMPT,
@@ -42,6 +43,7 @@ def _make_provider(provider_name: str, api_key: str) -> LLMProvider:
 class QueryClassification(BaseModel):
     """Classification of a user query to determine intent and verification criteria."""
     needs_dashboard: bool
+    needs_insights: bool = False
     dashboard_type: str  # trend, comparison, distribution, overview, none
     complexity: str  # simple, moderate, complex
     key_metrics: list[str]
@@ -55,6 +57,7 @@ class QueryClassification(BaseModel):
 
 _DEFAULT_CLASSIFICATION = QueryClassification(
     needs_dashboard=False,
+    needs_insights=False,
     dashboard_type="none",
     complexity="simple",
     key_metrics=[],
@@ -214,6 +217,10 @@ class AntonAgent(BaseAgent):
             visualizations_prompt += task_context
 
         runtime_context_parts.append(visualizations_prompt)
+
+        # Inject insights prompt when the query warrants analyst-grade interpretation
+        if classification.needs_insights:
+            runtime_context_parts.append(INSIGHTS_PROMPT)
 
         # Add the system prompt from the mind
         mind_system_prompt = mind_layer(self.mind)
