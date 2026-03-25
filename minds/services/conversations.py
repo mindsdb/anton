@@ -133,7 +133,7 @@ class ConversationsService:
 
         try:
             # Build query conditions
-            conditions = [Conversation.organization_id == self.organization_id]
+            conditions = [Conversation.organization_id == self.organization_id, Conversation.user_id == self.user_id]
             if topic is not None:
                 conditions.append(Conversation.topic.ilike(f"%{topic}%"))
             if not include_deleted:
