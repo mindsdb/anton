@@ -300,7 +300,11 @@ Classify the user's query. Respond with a JSON object only, no other text.
   "dashboard_type": "trend" | "comparison" | "distribution" | "overview" | "none",
   "complexity": "simple" | "moderate" | "complex",
   "key_metrics": ["list of metrics or dimensions the user cares about"],
-  "task_summary": "one sentence describing what the user wants accomplished"
+  "task_summary": "one sentence describing what the user wants accomplished",
+  "success_criteria": ["list of conditions that must be true for the task to be complete"],
+  "expected_artifacts": ["dashboard", "chart", "number", "table", "text_answer", "list"],
+  "requires_data_query": true/false,
+  "is_multi_step": true/false
 }}
 
 Rules:
@@ -314,6 +318,13 @@ yes/no questions, list lookups, text generation, general conversation.
 "complex" for multi-dimensional analysis.
 - key_metrics: extract the specific metrics, dimensions, or entities mentioned.
 - task_summary: what the user expects as the final deliverable, in one sentence.
+- success_criteria: list the concrete conditions the user expects. E.g. "revenue numbers shown", \
+"chart compares Q1 vs Q2", "data grouped by region". Be specific.
+- expected_artifacts: what the user expects to see — "dashboard", "chart", "number", "table", \
+"text_answer", "list". Can include multiple.
+- requires_data_query: true if answering requires querying a database or data source.
+- is_multi_step: true if the task requires multiple tool calls (data query + visualization, \
+multiple queries, complex analysis). Simple factual questions, greetings, or single lookups are false.
 """
 
 REMOVE_VISUALIZATIONS_BIAS_PROMPT = """
