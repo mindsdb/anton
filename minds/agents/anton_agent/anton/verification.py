@@ -1,5 +1,8 @@
 """Task completion verification for the Anton agent."""
+
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -11,7 +14,8 @@ MAX_VERIFICATION_CONTINUATIONS = 3
 
 class TaskVerification(BaseModel):
     """Result of a task completion check."""
-    status: str  # "complete", "incomplete", "stuck"
+
+    status: Literal["complete", "incomplete", "stuck"]
     reason: str
     remaining_work: list[str] = []
     blocker: str | None = None
@@ -63,9 +67,7 @@ async def verify_task(
                     if block.get("type") == "text":
                         summary_parts.append(f"[{role}]: {block['text'][:800]}")
                     elif block.get("type") == "tool_result":
-                        summary_parts.append(
-                            f"[tool_result]: {str(block.get('content', ''))[:800]}"
-                        )
+                        summary_parts.append(f"[tool_result]: {str(block.get('content', ''))[:800]}")
 
     messages = [{"role": "user", "content": "\n\n".join(summary_parts)}]
 

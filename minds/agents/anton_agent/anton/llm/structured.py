@@ -1,4 +1,5 @@
 """Structured output extraction via forced tool calling."""
+
 from __future__ import annotations
 
 from typing import TypeVar

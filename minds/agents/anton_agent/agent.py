@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from pydantic import BaseModel
 from mindsdb_sdk.server import Server
+from pydantic import BaseModel
 
 from minds.agents.anton_agent.anton.anton import Anton
 from minds.agents.anton_agent.anton.llm.anthropic import AnthropicProvider
@@ -42,6 +42,7 @@ def _make_provider(provider_name: str, api_key: str) -> LLMProvider:
 
 class QueryClassification(BaseModel):
     """Classification of a user query to determine intent and verification criteria."""
+
     needs_dashboard: bool
     needs_insights: bool = False
     dashboard_type: str  # trend, comparison, distribution, overview, none
@@ -83,6 +84,7 @@ async def classify_query(messages: list[dict], llm_provider: LLMProvider, model:
         last_content = messages[-1].get("content", "") if messages else ""
         logger.warning("Query classification failed — defaulting to no dashboard", exc_info=True)
         return _DEFAULT_CLASSIFICATION.model_copy(update={"task_summary": last_content[:100]})
+
 
 agent_settings = AntonAgentSettings()
 
@@ -177,9 +179,11 @@ class AntonAgent(BaseAgent):
         # Current user message in full, with charting context if enabled
         user_content = messages[-1].content if messages else ""
         if enable_charting:
-            user_content += "\n\n[System note: Proactive Dashboards is enabled — the user has opted in " \
-                "to automatic visualizations. Bias toward needs_dashboard=true when the query " \
+            user_content += (
+                "\n\n[System note: Proactive Dashboards is enabled — the user has opted in "
+                "to automatic visualizations. Bias toward needs_dashboard=true when the query "
                 "involves data analysis, even if no chart is explicitly requested.]"
+            )
         classification_messages.append({"role": "user", "content": user_content})
 
         coding_llm = _make_provider(coding_provider, coding_api_key)

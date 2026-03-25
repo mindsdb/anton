@@ -40,7 +40,6 @@ from .prompts import (
     SUMMARIZE_SYSTEM_PROMPT,
 )
 from .scratchpad_manager import ScratchpadManager
-from .verification import MAX_VERIFICATION_CONTINUATIONS, verify_task
 from .tools import (
     MEMORIZE_TOOL,
     RECALL_TOOL,
@@ -49,6 +48,7 @@ from .tools import (
     format_cell_result,
     prepare_scratchpad_exec,
 )
+from .verification import MAX_VERIFICATION_CONTINUATIONS, verify_task
 
 if TYPE_CHECKING:
     from .llm.client import LLMClient
@@ -331,14 +331,16 @@ class ChatSession:
                 break
 
             if verification.status == "stuck":
-                self._history.append({
-                    "role": "user",
-                    "content": (
-                        f"[System: Task verification detected a blocker: {verification.blocker or 'unknown'}. "
-                        f"Reason: {verification.reason}. "
-                        f"Explain to the user what went wrong and suggest specific next steps they can take.]"
-                    ),
-                })
+                self._history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System: Task verification detected a blocker: {verification.blocker or 'unknown'}. "
+                            f"Reason: {verification.reason}. "
+                            f"Explain to the user what went wrong and suggest specific next steps they can take.]"
+                        ),
+                    }
+                )
                 yield StreamTaskProgress(phase="verification", message="Diagnosing blocked task...")
                 system = self._build_system_prompt()
                 async for event in self._llm.plan_stream(
@@ -354,14 +356,16 @@ class ChatSession:
             # status == "incomplete"
             continuation += 1
             if continuation >= MAX_VERIFICATION_CONTINUATIONS:
-                self._history.append({
-                    "role": "user",
-                    "content": (
-                        f"[System: After {continuation} continuation attempts, the task is still incomplete. "
-                        f"Remaining: {', '.join(verification.remaining_work)}. "
-                        f"Provide your best answer with what you have and explain what could not be completed.]"
-                    ),
-                })
+                self._history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System: After {continuation} continuation attempts, the task is still incomplete. "
+                            f"Remaining: {', '.join(verification.remaining_work)}. "
+                            f"Provide your best answer with what you have and explain what could not be completed.]"
+                        ),
+                    }
+                )
                 yield StreamTaskProgress(phase="verification", message="Task incomplete — providing best answer...")
                 system = self._build_system_prompt()
                 async for event in self._llm.plan_stream(
@@ -375,16 +379,18 @@ class ChatSession:
                 break
 
             # Continue working
-            self._history.append({
-                "role": "user",
-                "content": (
-                    f"[System: Task verification found this incomplete "
-                    f"(attempt {continuation}/{MAX_VERIFICATION_CONTINUATIONS}). "
-                    f"Remaining work: {', '.join(verification.remaining_work)}. "
-                    f"Reason: {verification.reason}. "
-                    f"Continue working on the remaining items. Do not repeat work already done.]"
-                ),
-            })
+            self._history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[System: Task verification found this incomplete "
+                        f"(attempt {continuation}/{MAX_VERIFICATION_CONTINUATIONS}). "
+                        f"Remaining work: {', '.join(verification.remaining_work)}. "
+                        f"Reason: {verification.reason}. "
+                        f"Continue working on the remaining items. Do not repeat work already done.]"
+                    ),
+                }
+            )
             yield StreamTaskProgress(
                 phase="verification",
                 message=f"Task incomplete — continuing ({continuation}/{MAX_VERIFICATION_CONTINUATIONS})...",
