@@ -5,6 +5,7 @@ import json as _json
 import os
 import re as _re
 import sys
+import uuid
 import yaml as _yaml
 import time
 from collections.abc import AsyncIterator, Callable
@@ -3141,10 +3142,9 @@ async def _handle_connect_datasource(
         if result is None:
             return session
         engine_def, credentials = result
-        conn_num = vault.next_connection_number(engine_def.engine)
-        conn_name = str(conn_num)
+        conn_name = uuid.uuid4().hex[:8]
         vault.save(engine_def.engine, conn_name, credentials)
-        slug = f"{engine_def.engine}-{conn_num}"
+        slug = f"{engine_def.engine}-{conn_name}"
         _restore_namespaced_env(vault)
         session._active_datasource = slug
         _register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
@@ -3274,8 +3274,7 @@ async def _handle_connect_datasource(
             credentials[f.name] = value
 
     if partial:
-        n = vault.next_connection_number(engine_def.engine)
-        auto_name = str(n)
+        auto_name = uuid.uuid4().hex[:8]
         vault.save(engine_def.engine, auto_name, credentials)
         slug = f"{engine_def.engine}-{auto_name}"
         console.print()
@@ -3359,8 +3358,7 @@ async def _handle_connect_datasource(
 
     conn_name = registry.derive_name(engine_def, credentials)
     if not conn_name:
-        n = vault.next_connection_number(engine_def.engine)
-        conn_name = str(n)
+        conn_name = uuid.uuid4().hex[:8]
 
     slug = f"{engine_def.engine}-{conn_name}"
 
