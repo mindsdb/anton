@@ -151,14 +151,19 @@ class ChatSession:
         prompt = CHAT_SYSTEM_PROMPT.format(
             runtime_context=self._runtime_context,
         )
+        rules_reminder = ""
         if self._shared_memory_block is not None and not self._shared_memory_block.is_empty:
             memory_section = MemoryService.format_block(self._shared_memory_block)
             if memory_section:
                 prompt = memory_section + "\n\n" + prompt
+            if self._shared_memory_block.rules:
+                rules_reminder = "\n\n" + MemoryService.format_rules_reminder(self._shared_memory_block.rules)
         if self._cortex is not None:
             memory_section = self._cortex.build_memory_context()
             if memory_section:
                 prompt += memory_section
+        if rules_reminder:
+            prompt += rules_reminder
         return prompt
 
     def _build_tools(self) -> list[dict]:
