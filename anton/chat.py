@@ -2819,6 +2819,7 @@ async def _handle_add_custom_datasource(
             display_name=display_name,
             pip=pip_pkg,
             fields=fields,
+            test_snippet=test_snippet,
         )
 
     # All required fields must be present before the caller saves credentials
@@ -3025,7 +3026,8 @@ async def _handle_connect_datasource(
         console.print(
             "[anton.cyan](anton)[/] Which data source would you like to connect?\n"
         )
-        console.print("       [bold]  0.[/bold] Create a custom datasource")
+        console.print("       [bold]  0.[/bold] Connect to a custom datasource")
+        console.print("              [bold]OR Select from the list below[/bold]")
         for i, e in enumerate(all_engines, 1):
             console.print(f"        [bold]{i:>2}.[/bold] {e.display_name}")
         console.print()
@@ -3285,7 +3287,7 @@ async def _handle_connect_datasource(
         )
         console.print()
         return session
-
+    
     if engine_def.test_snippet:
         while True:
             console.print()
