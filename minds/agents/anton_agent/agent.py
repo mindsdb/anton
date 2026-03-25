@@ -1,10 +1,23 @@
 import json
 from pathlib import Path
 
+from typing import TypeVar
+
+from pydantic import BaseModel
 from mindsdb_sdk.server import Server
 
 from minds.agents.anton_agent.anton.anton import Anton
-from minds.agents.anton_agent.anton.prompts import REMOVE_VISUALIZATIONS_BIAS_PROMPT, VISUALIZATIONS_PROMPT
+from minds.agents.anton_agent.anton.llm.anthropic import AnthropicProvider
+from minds.agents.anton_agent.anton.llm.openai import OpenAIProvider
+from minds.agents.anton_agent.anton.llm.provider import LLMProvider
+from minds.agents.anton_agent.anton.prompts import (
+    QUERY_CLASSIFICATION_PROMPT,
+    REMOVE_VISUALIZATIONS_BIAS_PROMPT,
+    VISUALIZATIONS_LITE_PROMPT,
+    VISUALIZATIONS_PROMPT,
+)
+
+T = TypeVar("T", bound=BaseModel)
 from minds.agents.anton_agent.settings import AntonAgentSettings
 from minds.agents.anton_agent.stream_event_formatter import AntonStreamEventFormatter
 from minds.agents.base import AgentRunContext, BaseAgent
@@ -20,6 +33,77 @@ from minds.services.conversations import ConversationsService
 from minds.services.memory import MemoryRepository, MemoryService
 
 logger = get_logger(__name__)
+
+
+def _make_provider(provider_name: str, api_key: str) -> LLMProvider:
+    """Instantiate an LLM provider by name."""
+    if provider_name == "openai":
+        return OpenAIProvider(api_key=api_key)
+    return AnthropicProvider(api_key=api_key)
+
+
+async def generate_object(
+    schema_class: type[T],
+    *,
+    llm_provider: LLMProvider,
+    model: str,
+    system: str,
+    messages: list[dict],
+    max_tokens: int = 256,
+) -> T:
+    """Extract a Pydantic object from the LLM using forced tool calling."""
+    schema = schema_class.model_json_schema()
+    tool_name = schema_class.__name__
+    tool = {
+        "name": tool_name,
+        "description": f"Generate structured output matching the {tool_name} schema.",
+        "input_schema": schema,
+    }
+    response = await llm_provider.complete(
+        model=model,
+        system=system,
+        messages=messages,
+        tools=[tool],
+        tool_choice={"type": "tool", "name": tool_name},
+        max_tokens=max_tokens,
+    )
+    if not response.tool_calls:
+        raise ValueError("LLM did not return structured output.")
+    return schema_class.model_validate(response.tool_calls[0].input)
+
+
+class QueryClassification(BaseModel):
+    """Classification of a user query to determine intent."""
+    needs_dashboard: bool
+    dashboard_type: str  # trend, comparison, distribution, overview, none
+    complexity: str  # simple, moderate, complex
+    key_metrics: list[str]
+    task_summary: str
+
+
+_DEFAULT_CLASSIFICATION = QueryClassification(
+    needs_dashboard=False,
+    dashboard_type="none",
+    complexity="simple",
+    key_metrics=[],
+    task_summary="",
+)
+
+
+async def classify_query(messages: list[dict], llm_provider: LLMProvider, model: str) -> QueryClassification:
+    """Classify user query into a structured Pydantic object, using conversation history for context."""
+    try:
+        return await generate_object(
+            QueryClassification,
+            llm_provider=llm_provider,
+            model=model,
+            system=QUERY_CLASSIFICATION_PROMPT,
+            messages=messages,
+        )
+    except Exception:
+        last_content = messages[-1].get("content", "") if messages else ""
+        logger.warning("Query classification failed — defaulting to no dashboard", exc_info=True)
+        return _DEFAULT_CLASSIFICATION.model_copy(update={"task_summary": last_content[:100]})
 
 agent_settings = AntonAgentSettings()
 
@@ -75,25 +159,6 @@ class AntonAgent(BaseAgent):
                 "Write SQL appropriate for each datasource's engine."
             )
 
-        # Add the visualizations prompt
-        visualizations_prompt = VISUALIZATIONS_PROMPT.format(
-            output_dir=output_dir,
-            output_file_name=agent_settings.output_file_name,
-        )
-        # enable_charting means something slightly different here in comparison to the other agents.
-        # If it is set to True, Anton will be biased towards generating visualizations for each turn.
-        # If it is set to False, Anton will only generate visualizations when explicitly requested by the user.
-        enable_charting = run_context.metadata.enable_charting if run_context.metadata else False
-        if not enable_charting:
-            visualizations_prompt += "\n" + REMOVE_VISUALIZATIONS_BIAS_PROMPT
-        runtime_context_parts.append(visualizations_prompt)
-
-        # Add the system prompt from the mind
-        mind_system_prompt = mind_layer(self.mind)
-        if mind_system_prompt:
-            runtime_context_parts.append(mind_system_prompt)
-        runtime_context = "\n".join(runtime_context_parts)
-
         # 3. Resolve LLM config: mind.provider/model_name or mind.parameters overrides
         params = self.mind.parameters or {}
 
@@ -119,6 +184,61 @@ class AntonAgent(BaseAgent):
             coding_api_key = app_settings.openai.api_key
         else:
             raise ValueError(f"Unknown coding provider: {coding_provider}")
+
+        # Classify the query using the coding model to decide visualization prompt
+        # Include recent conversation history for context (e.g. "show me a chart of that")
+        classification_messages = []
+        recent_history = messages[-5:]  # last few turns for context
+        for msg in recent_history[:-1]:
+            role = msg.role if isinstance(msg.role, str) else msg.role.value
+            content = msg.content or ""
+            classification_messages.append({"role": role, "content": content[:500]})
+        # Current user message in full
+        classification_messages.append({"role": "user", "content": messages[-1].content if messages else ""})
+
+        coding_llm = _make_provider(coding_provider, coding_api_key)
+        classification = await classify_query(classification_messages, coding_llm, coding_model)
+        logger.info(
+            "Query classified: needs_dashboard=%s, type=%s, complexity=%s, summary=%s",
+            classification.needs_dashboard,
+            classification.dashboard_type,
+            classification.complexity,
+            classification.task_summary,
+        )
+
+        enable_charting = run_context.metadata.enable_charting if run_context.metadata else False
+
+        if classification.needs_dashboard or enable_charting:
+            visualizations_prompt = VISUALIZATIONS_PROMPT.format(
+                output_dir=output_dir,
+                output_file_name=agent_settings.output_file_name,
+            )
+            if not enable_charting:
+                visualizations_prompt += "\n" + REMOVE_VISUALIZATIONS_BIAS_PROMPT
+        else:
+            visualizations_prompt = VISUALIZATIONS_LITE_PROMPT.format(
+                output_dir=output_dir,
+                output_file_name=agent_settings.output_file_name,
+            )
+            visualizations_prompt += "\n" + REMOVE_VISUALIZATIONS_BIAS_PROMPT
+
+        if classification.needs_dashboard:
+            task_context = (
+                f"\nQUERY INTENT (from classification):\n"
+                f"- Dashboard type: {classification.dashboard_type}\n"
+                f"- Complexity: {classification.complexity}\n"
+                f"- Key metrics: {', '.join(classification.key_metrics)}\n"
+                f"- Task summary: {classification.task_summary}\n"
+            )
+            visualizations_prompt += task_context
+
+        runtime_context_parts.append(visualizations_prompt)
+
+        # Add the system prompt from the mind
+        mind_system_prompt = mind_layer(self.mind)
+        if mind_system_prompt:
+            runtime_context_parts.append(mind_system_prompt)
+        runtime_context = "\n".join(runtime_context_parts)
 
         # 4. Resolve backend
         backend = params.get("backend") or agent_settings.backend
