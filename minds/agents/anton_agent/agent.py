@@ -23,6 +23,7 @@ from minds.agents.base_response import AgentResponse
 from minds.agents.helpers import mind_layer
 from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
+from minds.common.utilities import safe_parse
 from minds.db.pg_session import get_engine, get_session_factory
 from minds.model.mind import Mind
 from minds.requests.stream import MessageStreamer
@@ -116,8 +117,24 @@ class AntonAgent(BaseAgent):
         ds_list = []
         for mind_datasource in self.mind.mind_datasources:
             datasource = mind_datasource.datasource
-            datasource_info.append(f"- {datasource.name}: {datasource.engine}")
-            ds_list.append({"name": datasource.name, "engine": datasource.engine})
+
+            # Retrieve the schema from the MindsDB database.
+            # The other option would be to retrieve it from one of the tables in the data catalog.
+            params = self.mindsdb_client.databases.get(datasource.name).params or {}
+            params = params if isinstance(params, dict) else safe_parse(params)
+            schema = params.get("schema")
+
+            ds_str = f"Name: {datasource.name}, Engine: {datasource.engine}"
+            ds_dict = {
+                "name": datasource.name,
+                "engine": datasource.engine,
+            }
+            if schema:
+                ds_str += f", Schema: {schema}"
+                ds_dict["schema"] = schema
+
+            datasource_info.append(ds_str)
+            ds_list.append(ds_dict)
 
         default_ds = ds_list[0]["name"] if ds_list else ""
 
@@ -138,6 +155,14 @@ class AntonAgent(BaseAgent):
                 'Example: query_minds_data("SELECT * FROM users LIMIT 5")\n'
                 'Optional: query_minds_data("SELECT ...", datasource="other_ds")\n'
                 "Write SQL appropriate for each datasource's engine."
+                "If the schema for a data source has been provided, you are only allowed "
+                "to query tables that are part of that schema.\n"
+                "You are of course allowed to query system tables and views in order to gather "
+                "information about the database and its structure with respect to the schema."
+                "If the user asks to query a table that is not part of the schema, you "
+                "should inform the user that you are not allowed to query that table."
+                "This is a CRITICAL RULE that you must follow."
+                "If a schema has not been provided, you are allowed to query any table."
             )
 
         # 3. Resolve LLM config: mind.provider/model_name or mind.parameters overrides

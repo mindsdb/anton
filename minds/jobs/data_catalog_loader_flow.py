@@ -19,6 +19,7 @@ from sqlmodel import Session, and_, select
 
 from minds.client.mindsdb import create_mindsdb_client_with_credentials
 from minds.common.logger import setup_logging
+from minds.common.utilities import safe_parse
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
 from minds.model.conversation import Conversation  # noqa: F401
@@ -218,10 +219,24 @@ def get_tables(mindsdb_client: Server, datasource_name: str, table_names: list[s
     WHERE TABLE_SCHEMA = '{datasource_name}'
     """
 
+    # At the moment, the schema that is being returned by the above query is the same as the datasource name.
+    # This is because of the way the META_ tables have been implemented
+    # (based on the MYSQL INFORMATION_SCHEMA tables).
+    # Notice how we are filtering by the TABLE_SCHEMA above.
+    # As a result, the schema will have to be retrieved separately via the connection parameters
+    # of the MindsDB database.
+    # This only applies when storing this field in the database.
+    # For all other intents and purposes, TABLE_SCHEMA should be the name of the data source.
+    params = mindsdb_client.databases.get(datasource_name).params or {}
+    params = params if isinstance(params, dict) else safe_parse(params)
+
+    schema = params.get("schema")
+
     if table_names:
         query += f" AND TABLE_NAME IN ({', '.join(f'{name!r}' for name in table_names)})"
 
     df = _execute_mindsdb_query(mindsdb_client, query)
+    df["TABLE_SCHEMA"] = schema
     logger.info(f"Found {len(df)} tables")
 
     return df

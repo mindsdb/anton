@@ -71,6 +71,9 @@ class TestDataCatalogLoaderFlow:
         """Mock MindsDB client."""
         client = Mock()
         client.query = Mock()
+        # get_tables() reads connection params via `mindsdb_client.databases.get(...).params`.
+        # Default to empty dict (individual tests can override as needed).
+        client.databases.get.return_value.params = {}
         return client
 
     @pytest.fixture
@@ -110,7 +113,8 @@ class TestDataCatalogLoaderFlow:
         with pytest.raises(Exception, match="Query failed"):
             _execute_mindsdb_query(mock_mindsdb_client, "SELECT * FROM test")
 
-    def test_get_tables_without_filter(self, mock_mindsdb_client):
+    @pytest.mark.parametrize("db_params", [{"schema": "public"}, '{"schema": "public"}'])
+    def test_get_tables_without_filter(self, mock_mindsdb_client, db_params):
         """Test get_tables without table name filter."""
         mock_df = pd.DataFrame(
             {
@@ -123,6 +127,7 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
+            mock_mindsdb_client.databases.get.return_value.params = db_params
             result = _call_task(get_tables, mock_mindsdb_client, "test_datasource", None)
 
             expected_query = """
@@ -132,9 +137,12 @@ class TestDataCatalogLoaderFlow:
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args[0][1]
             assert call_args.strip() == expected_query.strip()
-            pd.testing.assert_frame_equal(result, mock_df)
+            expected_df = mock_df.copy()
+            expected_df["TABLE_SCHEMA"] = "public"
+            pd.testing.assert_frame_equal(result, expected_df)
 
-    def test_get_tables_with_filter(self, mock_mindsdb_client):
+    @pytest.mark.parametrize("db_params", [{"schema": "public"}, '{"schema": "public"}'])
+    def test_get_tables_with_filter(self, mock_mindsdb_client, db_params):
         """Test get_tables with table name filter."""
         mock_df = pd.DataFrame(
             {
@@ -147,12 +155,15 @@ class TestDataCatalogLoaderFlow:
         )
 
         with patch("minds.jobs.data_catalog_loader_flow._execute_mindsdb_query", return_value=mock_df) as mock_execute:
+            mock_mindsdb_client.databases.get.return_value.params = db_params
             result = _call_task(get_tables, mock_mindsdb_client, "test_datasource", ["table1", "table2"])
 
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args[0][1]
             assert "AND TABLE_NAME IN ('table1', 'table2')" in call_args
-            pd.testing.assert_frame_equal(result, mock_df)
+            expected_df = mock_df.copy()
+            expected_df["TABLE_SCHEMA"] = "public"
+            pd.testing.assert_frame_equal(result, expected_df)
 
     def test_filter_loaded_tables(self, mock_session):
         """Test filter_loaded_tables function."""
