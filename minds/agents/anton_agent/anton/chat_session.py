@@ -48,6 +48,7 @@ from .tools import (
     format_cell_result,
     prepare_scratchpad_exec,
 )
+from .verification import MAX_VERIFICATION_CONTINUATIONS, verify_task
 
 if TYPE_CHECKING:
     from .llm.client import LLMClient
@@ -75,6 +76,7 @@ class ChatSession:
         extra_env: dict[str, str] | None = None,
         shared_memory: MemoryService | None = None,
         events: list[dict] = None,
+        classification=None,
     ) -> None:
         self._llm = llm_client
         self._cortex = cortex
@@ -83,6 +85,8 @@ class ChatSession:
         self._history: list[dict] = []
         self._pending_memory_confirmations: list = []
         self._turn_count = 0
+        self._classification = classification
+        self._last_tool_round = 0
         self._shared_memory = shared_memory
         self._shared_memory_block: MemoryBlock | None = None
         self._shared_memory_load_failed = False
@@ -147,14 +151,19 @@ class ChatSession:
         prompt = CHAT_SYSTEM_PROMPT.format(
             runtime_context=self._runtime_context,
         )
+        rules_reminder = ""
         if self._shared_memory_block is not None and not self._shared_memory_block.is_empty:
             memory_section = MemoryService.format_block(self._shared_memory_block)
             if memory_section:
                 prompt = memory_section + "\n\n" + prompt
+            if self._shared_memory_block.rules:
+                rules_reminder = "\n\n" + MemoryService.format_rules_reminder(self._shared_memory_block.rules)
         if self._cortex is not None:
             memory_section = self._cortex.build_memory_context()
             if memory_section:
                 prompt += memory_section
+        if rules_reminder:
+            prompt += rules_reminder
         return prompt
 
     def _build_tools(self) -> list[dict]:
@@ -283,11 +292,127 @@ class ChatSession:
             asyncio.create_task(self._cortex.maybe_update_identity(user_input))
 
     async def _stream_and_handle_tools(self) -> AsyncIterator[StreamEvent]:
+        """Stream tool loop with completion verification wrapper."""
+        continuation = 0
+
+        while True:
+            # Run the core tool loop
+            async for event in self._run_tool_loop():
+                yield event
+
+            # Decide whether to verify completion
+            should_verify = (
+                self._classification is not None
+                and self._classification.is_multi_step
+                and self._last_tool_round > 0
+                and continuation < MAX_VERIFICATION_CONTINUATIONS
+            )
+
+            if not should_verify:
+                break
+
+            # Build classification context for the verifier
+            cls = self._classification
+            classification_context = (
+                f"TASK CLASSIFICATION:\n"
+                f"- Summary: {cls.task_summary}\n"
+                f"- Success criteria: {', '.join(cls.success_criteria)}\n"
+                f"- Expected artifacts: {', '.join(cls.expected_artifacts)}\n"
+                f"- Requires data query: {cls.requires_data_query}\n"
+            )
+
+            try:
+                verification = await verify_task(
+                    llm_provider=self._llm.coding_provider,
+                    model=self._llm.coding_model,
+                    classification_context=classification_context,
+                    history=self._history,
+                )
+            except Exception:
+                logger.warning("Task verification failed — treating as complete", exc_info=True)
+                break
+
+            if verification.status == "complete":
+                break
+
+            if verification.status == "stuck":
+                self._history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System: Task verification detected a blocker: {verification.blocker or 'unknown'}. "
+                            f"Reason: {verification.reason}. "
+                            f"Explain to the user what went wrong and suggest specific next steps they can take.]"
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(phase="verification", message="Diagnosing blocked task...")
+                system = self._build_system_prompt()
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        resp = event.response
+                        self._history.append({"role": "assistant", "content": resp.content or ""})
+                break
+
+            # status == "incomplete"
+            continuation += 1
+            if continuation >= MAX_VERIFICATION_CONTINUATIONS:
+                self._history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System: After {continuation} continuation attempts, the task is still incomplete. "
+                            f"Remaining: {', '.join(verification.remaining_work)}. "
+                            f"Provide your best answer with what you have and explain what could not be completed.]"
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(phase="verification", message="Task incomplete — providing best answer...")
+                system = self._build_system_prompt()
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        resp = event.response
+                        self._history.append({"role": "assistant", "content": resp.content or ""})
+                break
+
+            # Continue working
+            self._history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[System: Task verification found this incomplete "
+                        f"(attempt {continuation}/{MAX_VERIFICATION_CONTINUATIONS}). "
+                        f"Remaining work: {', '.join(verification.remaining_work)}. "
+                        f"Reason: {verification.reason}. "
+                        f"Continue working on the remaining items. Do not repeat work already done.]"
+                    ),
+                }
+            )
+            yield StreamTaskProgress(
+                phase="verification",
+                message=f"Task incomplete — continuing ({continuation}/{MAX_VERIFICATION_CONTINUATIONS})...",
+            )
+            # Loop back to _run_tool_loop
+
+        # Consolidation: replay scratchpad sessions to extract lessons
+        if self._cortex is not None and self._cortex.mode != "off":
+            self._maybe_consolidate_scratchpads()
+
+    async def _run_tool_loop(self) -> AsyncIterator[StreamEvent]:
         """Stream one LLM call, handle tool loops, yield all events."""
         system = self._build_system_prompt()
         tools = self._build_tools()
 
         response: StreamComplete | None = None
+        _compacted_this_turn = False
 
         try:
             async for event in self._llm.plan_stream(
@@ -301,6 +426,7 @@ class ChatSession:
         except ContextOverflowError:
             await self._summarize_history()
             self._compact_scratchpads()
+            _compacted_this_turn = True
             yield StreamContextCompacted(message="Context was getting long — older history has been summarized.")
             async for event in self._llm.plan_stream(
                 system=system,
@@ -312,13 +438,15 @@ class ChatSession:
                     response = event
 
         if response is None:
+            self._last_tool_round = 0
             return
 
         llm_response = response.response
 
-        if llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
+        if not _compacted_this_turn and llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
             await self._summarize_history()
             self._compact_scratchpads()
+            _compacted_this_turn = True
             yield StreamContextCompacted(message="Context was getting long — older history has been summarized.")
 
         # Tool-call loop with circuit breaker
@@ -341,6 +469,7 @@ class ChatSession:
                     messages=self._history,
                 ):
                     yield event
+                self._last_tool_round = tool_round
                 return
 
             # Build assistant message with content blocks
@@ -449,8 +578,10 @@ class ChatSession:
                     if isinstance(event, StreamComplete):
                         response = event
             except ContextOverflowError:
-                await self._summarize_history()
-                self._compact_scratchpads()
+                if not _compacted_this_turn:
+                    await self._summarize_history()
+                    self._compact_scratchpads()
+                    _compacted_this_turn = True
                 yield StreamContextCompacted(message="Context history has been summarized to free up space.")
                 async for event in self._llm.plan_stream(
                     system=system,
@@ -462,21 +593,21 @@ class ChatSession:
                         response = event
 
             if response is None:
+                self._last_tool_round = tool_round
                 return
             llm_response = response.response
 
-            if llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
+            if not _compacted_this_turn and llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
                 await self._summarize_history()
                 self._compact_scratchpads()
+                _compacted_this_turn = True
                 yield StreamContextCompacted(message="Context was getting long — older history has been summarized.")
+
+        self._last_tool_round = tool_round
 
         # Text-only final response — append to history
         reply = llm_response.content or ""
         self._history.append({"role": "assistant", "content": reply})
-
-        # Consolidation: replay scratchpad sessions to extract lessons
-        if self._cortex is not None and self._cortex.mode != "off":
-            self._maybe_consolidate_scratchpads()
 
     def _maybe_consolidate_scratchpads(self) -> None:
         """Check if any scratchpad sessions warrant consolidation and fire it off."""

@@ -105,6 +105,12 @@ class MemoryService:
         return selected
 
     @staticmethod
+    def _sanitize_rule_content(content: str) -> str:
+        """Collapse rule content into a single line safe for a markdown bullet."""
+        lines = [line.strip() for line in content.splitlines()]
+        return " ".join(line for line in lines if line)
+
+    @staticmethod
     def format_block(block: MemoryBlock) -> str:
         """
         Render memory as a markdown string for system prompt injection.
@@ -118,14 +124,30 @@ class MemoryService:
         if block.rules:
             sections: list[str] = []
             for rule_type in (RuleType.always, RuleType.never, RuleType.when):
-                matching = [r.content for r in block.rules if r.rule_type == rule_type]
-                if matching:
-                    header = f"# {rule_type.value.capitalize()}"
-                    sections.append(header + "\n" + "\n".join(f"- {c}" for c in matching))
-            parts.append("## Memory Rules\n\n" + "\n\n".join(sections))
+                items = [
+                    MemoryService._sanitize_rule_content(r.content) for r in block.rules if r.rule_type == rule_type
+                ]
+                items = [i for i in items if i]
+                if items:
+                    header = f"### {rule_type.value.capitalize()}"
+                    sections.append(header + "\n" + "\n".join(f"- {c}" for c in items))
+            if sections:
+                parts.append(
+                    "## MANDATORY RULES\nApply every rule below carefully where relevant.\n\n" + "\n\n".join(sections)
+                )
 
         if block.topics:
             topic_sections = [f"### {t.title}\n{t.body}" for t in block.topics]
             parts.append("## Memory Topics\n" + "\n\n".join(topic_sections))
 
         return "\n\n".join(parts)
+
+    @staticmethod
+    def format_rules_reminder(rules: list[MemoryRule]) -> str:
+        """Short end-of-prompt reminder referencing rules without repeating them."""
+        if not rules:
+            return ""
+        count = sum(1 for r in rules if MemoryService._sanitize_rule_content(r.content))
+        if count == 0:
+            return ""
+        return f"REMINDER: You have {count} mandatory rule(s) defined above. Apply each one carefully where relevant."

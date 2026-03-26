@@ -221,8 +221,8 @@ class TestFormatBlock:
     def test_rules_section_present(self):
         block = MemoryBlock(rules=[make_rule(RuleType.always, "Always be helpful.")])
         output = MemoryService.format_block(block)
-        assert "## Memory Rules" in output
-        assert "# Always" in output
+        assert "## MANDATORY RULES" in output
+        assert "### Always" in output
         assert "- Always be helpful." in output
 
     def test_topics_section_present(self):
@@ -238,18 +238,18 @@ class TestFormatBlock:
             topics=[make_topic("Privacy Policy", body="Body.")],
         )
         output = MemoryService.format_block(block)
-        assert output.index("## Memory Rules") < output.index("## Memory Topics")
+        assert output.index("## MANDATORY RULES") < output.index("## Memory Topics")
 
     def test_never_rule_label(self):
         block = MemoryBlock(rules=[make_rule(RuleType.never, "Never do X.")])
         output = MemoryService.format_block(block)
-        assert "# Never" in output
+        assert "### Never" in output
         assert "- Never do X." in output
 
     def test_when_rule_label(self):
         block = MemoryBlock(rules=[make_rule(RuleType.when, "When Y, do Z.")])
         output = MemoryService.format_block(block)
-        assert "# When" in output
+        assert "### When" in output
         assert "- When Y, do Z." in output
 
     def test_rules_grouped_by_type(self):
@@ -261,13 +261,24 @@ class TestFormatBlock:
             ]
         )
         output = MemoryService.format_block(block)
-        assert output.index("# Always") < output.index("# Never") < output.index("# When")
+        assert output.index("### Always") < output.index("### Never") < output.index("### When")
 
     def test_empty_type_section_omitted(self):
         block = MemoryBlock(rules=[make_rule(RuleType.always, "Do this.")])
         output = MemoryService.format_block(block)
-        assert "# Never" not in output
-        assert "# When" not in output
+        assert "### Never" not in output
+        assert "### When" not in output
+
+    def test_whitespace_only_rules_skipped(self):
+        block = MemoryBlock(rules=[make_rule(RuleType.always, "  \n  \n  ")])
+        output = MemoryService.format_block(block)
+        assert output == ""
+
+    def test_multiline_content_collapsed_to_single_bullet(self):
+        block = MemoryBlock(rules=[make_rule(RuleType.always, "Line one.\nLine two.\n\nLine three.")])
+        output = MemoryService.format_block(block)
+        assert "- Line one. Line two. Line three." in output
+        assert output.count("\n- ") == 1
 
     def test_multiple_topics_all_present(self):
         block = MemoryBlock(
