@@ -3607,25 +3607,17 @@ def _print_slash_help(console: Console) -> None:
 #    console.print(
 #        "  [bold]/connect[/]                — Connect to a Minds server and select a mind"
 #    )
-    console.print(
-        "  [bold]/connect[/]    — Connect a database or API to the Local Vault"
-    )
-    console.print(
-        "  [bold]/list[/]      — List all saved data source connections"
-    )
-    console.print("  [bold]/edit[/]       — Edit a saved connection's credentials")
-    console.print("  [bold]/remove[/]     — Remove a saved connection")
-    console.print("  [bold]/test[/]       — Test a saved connection")
-    console.print(
-        "  [bold]/setup[/]                  — Configure models or memory settings"
-    )
-    console.print("  [bold]/memory[/]                 — Show memory status dashboard")
-    console.print(
-        "  [bold]/paste[/]                  — Attach clipboard image to your message"
-    )
-    console.print("  [bold]/resume[/]                 — Resume a previous chat session")
-    console.print("  [bold]/help[/]                   — Show this help message")
-    console.print("  [bold]exit[/]                    — Quit the chat")
+    console.print("  [bold]/connect[/]      — Connect a database or API to the Local Vault")
+    console.print("  [bold]/list[/]         — List all saved data source connections")
+    console.print("  [bold]/edit[/]         — Edit a saved connection's credentials")
+    console.print("  [bold]/remove[/]       — Remove a saved connection")
+    console.print("  [bold]/test[/]         — Test a saved connection")
+    console.print("  [bold]/setup[/]        — Configure models or memory settings")
+    console.print("  [bold]/memory[/]       — Show memory status dashboard")
+    console.print("  [bold]/paste[/]        — Attach clipboard image to your message")
+    console.print("  [bold]/resume[/]       — Resume a previous chat session")
+    console.print("  [bold]/help[/]         — Show this help message")
+    console.print("  [bold]exit[/]          — Quit the chat")
     console.print()
 
 
