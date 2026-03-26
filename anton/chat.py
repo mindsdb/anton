@@ -2835,6 +2835,78 @@ async def _handle_add_custom_datasource(
     return engine_def, credentials
 
 
+async def _run_connection_test(
+    console: "Console",
+    scratchpads: "ScratchpadManager",
+    vault: "DataVault",
+    engine_def: "DatasourceEngine",
+    credentials: dict[str, str],
+    retry_fields: "list[DatasourceField]",
+) -> bool:
+    """Inject flat DS_* vars, run engine_def.test_snippet, restore env.
+
+    Returns True on success, False if the user declines retry after failure.
+    Mutates credentials in-place when the user re-enters secrets on retry.
+    """
+    import os as _os
+
+    while True:
+        console.print()
+        console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
+
+        vault.clear_ds_env()
+        for key, value in credentials.items():
+            _os.environ[f"DS_{key.upper()}"] = value
+        _register_secret_vars(engine_def)  # flat mode, for scrubbing during test
+
+        try:
+            pad = await scratchpads.get_or_create("__datasource_test__")
+            await pad.reset()
+            if engine_def.pip:
+                await pad.install_packages([engine_def.pip])
+            cell = await pad.execute(engine_def.test_snippet)
+        finally:
+            _restore_namespaced_env(vault)
+
+        if cell.error or (cell.stdout.strip() != "ok" and cell.stderr.strip()):
+            error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
+            first_line = next(
+                (ln for ln in error_text.splitlines() if ln.strip()), error_text
+            )
+            console.print()
+            console.print("[anton.warning](anton)[/] ✗ Connection failed.")
+            console.print()
+            console.print(f"        Error: {first_line}")
+            console.print()
+            retry = (
+                Prompt.ask(
+                    "[anton.cyan](anton)[/] Would you like to re-enter your credentials? [y/n]",
+                    console=console,
+                    default="n",
+                )
+                .strip()
+                .lower()
+            )
+            if retry != "y":
+                return False
+            console.print()
+            for f in retry_fields:
+                if not f.secret:
+                    continue
+                value = Prompt.ask(
+                    f"[anton.cyan](anton)[/] {f.name}",
+                    password=True,
+                    console=console,
+                    default="",
+                )
+                if value:
+                    credentials[f.name] = value
+            continue
+
+        console.print("[anton.success]        ✓ Connected successfully![/]")
+        return True
+
+
 async def _handle_connect_datasource(
     console: Console,
     scratchpads: ScratchpadManager,
@@ -3066,12 +3138,12 @@ async def _handle_connect_datasource(
         return session
 
     engine_def: DatasourceEngine | None = None
-    _go_custom = False
+    custom_source = False
 
     if stripped_answer.isdigit() or (stripped_answer.lstrip("-").isdigit()):
         pick_num = int(stripped_answer)
         if pick_num == 0:
-            _go_custom = True
+            custom_source = True
         elif 1 <= pick_num <= len(all_engines):
             engine_def = all_engines[pick_num - 1]
         else:
@@ -3082,7 +3154,7 @@ async def _handle_connect_datasource(
             console.print()
             return session
 
-    if engine_def is None and not _go_custom:
+    if engine_def is None and not custom_source:
         engine_def = registry.find_by_name(stripped_answer)
         # if exact match not found, try substring match against display and engine names
         if engine_def is None:
@@ -3136,15 +3208,20 @@ async def _handle_connect_datasource(
                     break
 
         if engine_def is None:
-            _go_custom = True
+            custom_source = True
 
-    if _go_custom:
+    if custom_source:
         result = await _handle_add_custom_datasource(
             console, stripped_answer if not stripped_answer.isdigit() else "", registry, session
         )
         if result is None:
             return session
         engine_def, credentials = result
+        if engine_def.test_snippet:
+            if not await _run_connection_test(
+                console, scratchpads, vault, engine_def, credentials, engine_def.fields
+            ):
+                return session
         conn_name = uuid.uuid4().hex[:8]
         vault.save(engine_def.engine, conn_name, credentials)
         slug = f"{engine_def.engine}-{conn_name}"
@@ -3170,6 +3247,7 @@ async def _handle_connect_datasource(
         )
         return session
 
+    assert engine_def is not None  # custom_source path always returns before this line
     active_fields = engine_def.fields
     if engine_def.auth_method == "choice" and engine_def.auth_methods:
         console.print()
@@ -3290,74 +3368,10 @@ async def _handle_connect_datasource(
         return session
     
     if engine_def.test_snippet:
-        while True:
-            console.print()
-            console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
-
-            # Temporarily inject flat DS_* vars for test_snippet execution.
-            # conn_name is not yet known, so inject directly from credentials.
-            import os as _os
-
-            vault.clear_ds_env()
-            for key, value in credentials.items():
-                _os.environ[f"DS_{key.upper()}"] = value
-            _register_secret_vars(engine_def)  # flat mode, for scrubbing during test
-
-            try:
-                pad = await scratchpads.get_or_create("__datasource_test__")
-                await pad.reset()  # fresh subprocess inherits current os.environ
-
-                if engine_def.pip:
-                    await pad.install_packages([engine_def.pip])
-
-                cell = await pad.execute(engine_def.test_snippet)
-            finally:
-                _restore_namespaced_env(vault)
-
-            if cell.error or (cell.stdout.strip() != "ok" and cell.stderr.strip()):
-                error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
-                # Show first meaningful line of the error
-                first_line = next(
-                    (ln for ln in error_text.splitlines() if ln.strip()), error_text
-                )
-                console.print()
-                console.print("[anton.warning](anton)[/] ✗ Connection failed.")
-                console.print()
-                console.print(f"        Error: {first_line}")
-                console.print()
-
-                retry = (
-                    Prompt.ask(
-                        "[anton.cyan](anton)[/] Would you like to re-enter your credentials? [y/n]",
-                        console=console,
-                        default="n",
-                    )
-                    .strip()
-                    .lower()
-                )
-
-                if retry != "y":
-                    return session
-
-                # Re-collect secret fields only
-                console.print()
-                for f in active_fields:
-                    if not f.secret:
-                        continue
-                    value = Prompt.ask(
-                        f"[anton.cyan](anton)[/] {f.name}",
-                        password=True,
-                        console=console,
-                        default="",
-                    )
-                    if value:
-                        credentials[f.name] = value
-                # Try again with updated credentials
-                continue
-
-            # Success
-            console.print("[anton.success]        ✓ Connected successfully![/]")
-            break
+        if not await _run_connection_test(
+            console, scratchpads, vault, engine_def, credentials, active_fields
+        ):
+            return session
 
     conn_name = registry.derive_name(engine_def, credentials)
     if not conn_name:

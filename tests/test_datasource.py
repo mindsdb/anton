@@ -1821,3 +1821,206 @@ class TestAddCustomDatasourceFlow:
 
         # Must return None — caller must not call vault.save()
         assert result is None
+
+
+class TestCustomDatasourceConnectFlow:
+    """Tests for the custom_source path in _handle_connect_datasource:
+    test_snippet is run before saving, and failures prevent saving."""
+
+    # ── helpers (mirrors TestAddCustomDatasourceFlow) ────────────────────
+
+    def _make_llm_response(
+        self,
+        fields: list[dict],
+        display_name: str = "My API Service",
+        test_snippet: str = "",
+    ) -> str:
+        import json as _json
+        return _json.dumps({
+            "display_name": display_name,
+            "pip": "",
+            "test_snippet": test_snippet,
+            "fields": fields,
+        })
+
+    def _make_registry(self, tmp_path):
+        reg = MagicMock()
+        reg.all_engines.return_value = []
+        reg.find_by_name.return_value = None
+        reg.fuzzy_find.return_value = []
+        reg.validate_file.return_value = {"my_api_service": MagicMock()}
+        reg.reload.return_value = None
+        reg.get.return_value = None  # triggers inline fallback engine_def
+        return reg
+
+    def _make_llm(self, json_text: str):
+        llm = AsyncMock()
+        response = MagicMock()
+        response.content = json_text
+        llm.plan = AsyncMock(return_value=response)
+        return llm
+
+    def _mock_ds_path(self, mock_path_cls, tmp_path):
+        mock_path_cls.return_value.expanduser.return_value = tmp_path / "datasources.md"
+
+    # ── tests ─────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_custom_with_test_snippet_success(
+        self, vault_dir, make_session, make_cell, tmp_path
+    ):
+        """Custom datasource with test_snippet: test passes → connection saved."""
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = AsyncMock()
+        pad.execute = AsyncMock(return_value=make_cell(stdout="ok"))
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(self._make_llm_response(
+            [{"name": "api_key", "value": "", "secret": True, "required": True, "description": "API key"}],
+            test_snippet="print('ok')",
+        ))
+
+        prompt_responses = iter([
+            "0",                  # choose custom
+            "My API Service",     # tool name
+            "I have an API key",  # auth description
+            "my_secret_key",      # api_key (secret prompt)
+        ])
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=self._make_registry(tmp_path)),
+            patch("rich.prompt.Prompt.ask", side_effect=lambda *a, **kw: next(prompt_responses)),
+            patch("anton.chat.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await _handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert saved is not None
+        assert saved.get("api_key") == "my_secret_key"
+        assert result._history
+        assert result._history[-1]["role"] == "assistant"
+        pad.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_custom_with_test_snippet_fail_no_retry(
+        self, vault_dir, make_session, make_cell, tmp_path
+    ):
+        """Custom datasource: test fails and user declines retry → not saved."""
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = AsyncMock()
+        pad.execute = AsyncMock(return_value=make_cell(stdout="", stderr="connection refused"))
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(self._make_llm_response(
+            [{"name": "api_key", "value": "", "secret": True, "required": True, "description": "API key"}],
+            test_snippet="print('ok')",
+        ))
+
+        prompt_responses = iter([
+            "0",
+            "My API Service",
+            "I have an API key",
+            "bad_key",  # api_key
+            "n",        # retry?
+        ])
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=self._make_registry(tmp_path)),
+            patch("rich.prompt.Prompt.ask", side_effect=lambda *a, **kw: next(prompt_responses)),
+            patch("anton.chat.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await _handle_connect_datasource(console, session._scratchpads, session)
+
+        assert vault.list_connections() == []
+        assert not result._history
+
+    @pytest.mark.asyncio
+    async def test_custom_with_test_snippet_fail_retry_success(
+        self, vault_dir, make_session, make_cell, tmp_path
+    ):
+        """Custom datasource: test fails, user retries with corrected creds → saved."""
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = AsyncMock()
+        pad.execute = AsyncMock(side_effect=[
+            make_cell(stdout="", stderr="invalid key"),
+            make_cell(stdout="ok"),
+        ])
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(self._make_llm_response(
+            [{"name": "api_key", "value": "", "secret": True, "required": True, "description": "API key"}],
+            test_snippet="print('ok')",
+        ))
+
+        prompt_responses = iter([
+            "0",
+            "My API Service",
+            "I have an API key",
+            "bad_key",      # api_key first attempt
+            "y",            # retry?
+            "good_key",     # api_key retry
+        ])
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=self._make_registry(tmp_path)),
+            patch("rich.prompt.Prompt.ask", side_effect=lambda *a, **kw: next(prompt_responses)),
+            patch("anton.chat.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await _handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert saved is not None
+        assert saved.get("api_key") == "good_key"
+        assert result._history
+
+    @pytest.mark.asyncio
+    async def test_custom_without_test_snippet_saves(
+        self, vault_dir, make_session, make_cell, tmp_path
+    ):
+        """Custom datasource without test_snippet: saves directly, no scratchpad call."""
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = AsyncMock()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(self._make_llm_response(
+            [{"name": "api_key", "value": "", "secret": True, "required": True, "description": "API key"}],
+            test_snippet="",
+        ))
+
+        prompt_responses = iter([
+            "0",
+            "My API Service",
+            "I have an API key",
+            "my_key",  # api_key
+        ])
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=self._make_registry(tmp_path)),
+            patch("rich.prompt.Prompt.ask", side_effect=lambda *a, **kw: next(prompt_responses)),
+            patch("anton.chat.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            await _handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        pad.execute.assert_not_called()
