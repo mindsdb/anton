@@ -191,8 +191,8 @@ def get_usage_service(
 
 
 def require_admin(context: Context = Depends(get_context)) -> None:
-    """Raise 403 if the caller does not have an admin-level role."""
-    admin_roles = {"admin", "sysadmin", "mindsdb-admin"}
+    """Raise 403 if the caller does not have an admin-level organization role."""
+    admin_roles = {"manage-organization"}
     if not admin_roles.intersection(context.user_roles):
         raise HTTPException(status_code=403, detail="Admin role required")
 
