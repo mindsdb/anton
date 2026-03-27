@@ -205,6 +205,7 @@ class TestScratchpadDumpStreaming:
         """dump action yields a StreamToolResult for display, but sends a short
         summary back to the LLM to avoid it parroting the full notebook."""
         mock_llm = AsyncMock()
+        mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — task done"))
 
         call_count = 0
 
@@ -259,6 +260,7 @@ class TestScratchpadStreaming:
         final_response = _text_response("Got 99.")
 
         mock_llm = AsyncMock()
+        mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — task done"))
 
         call_count = 0
 

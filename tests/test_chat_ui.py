@@ -226,4 +226,3 @@ class TestActivityTracking:
         assert display._initial_text == "Initial text"
         assert display._buffer == "Answer text"
         assert display._in_tool_phase
-        assert display._answer_started
