@@ -3552,6 +3552,19 @@ def _handle_remove_data_source(console: Console, slug: str) -> None:
     ):
         vault.delete(engine, name)
         _restore_namespaced_env(vault)
+        engine_def = registry.get(engine)
+        if engine_def is not None and engine_def.custom:
+            remaining = [
+                c for c in vault.list_connections() if c["engine"] == engine
+            ]
+            if not remaining:
+                user_path = DatasourceRegistry._USER_PATH
+                if user_path.is_file():
+                    updated = _remove_engine_block(
+                        user_path.read_text(encoding="utf-8"), engine
+                    )
+                    user_path.write_text(updated, encoding="utf-8")
+                    registry.reload()
         console.print(f"[anton.success]Removed {slug}.[/]")
     else:
         console.print("[anton.muted]Cancelled.[/]")
