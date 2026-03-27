@@ -3604,14 +3604,12 @@ def _print_slash_help(console: Console) -> None:
     """Print available slash commands."""
     console.print()
     console.print("[anton.cyan]Available commands:[/]")
-    console.print(
-       "  [bold]/minds[/]        — Connect to existing mind"
-    )
     console.print("  [bold]/connect[/]      — Connect a database or API to the Local Vault")
     console.print("  [bold]/list[/]         — List all saved data source connections")
     console.print("  [bold]/edit[/]         — Edit a saved connection's credentials")
     console.print("  [bold]/remove[/]       — Remove a saved connection")
     console.print("  [bold]/test[/]         — Test a saved connection")
+    console.print("  [bold]/minds[/]        — Connect an existing Mind")
     console.print("  [bold]/setup[/]        — Configure models or memory settings")
     console.print("  [bold]/memory[/]       — Show memory status dashboard")
     console.print("  [bold]/paste[/]        — Attach clipboard image to your message")
