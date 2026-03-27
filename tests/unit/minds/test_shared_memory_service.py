@@ -232,13 +232,13 @@ class TestFormatBlock:
         assert "### SQL Guide" in output
         assert "Use indexes." in output
 
-    def test_rules_before_topics(self):
+    def test_topics_before_rules(self):
         block = MemoryBlock(
             rules=[make_rule(RuleType.never, "Never share PII.")],
             topics=[make_topic("Privacy Policy", body="Body.")],
         )
         output = MemoryService.format_block(block)
-        assert output.index("## MANDATORY RULES") < output.index("## Memory Topics")
+        assert output.index("## Memory Topics") < output.index("## MANDATORY RULES")
 
     def test_never_rule_label(self):
         block = MemoryBlock(rules=[make_rule(RuleType.never, "Never do X.")])

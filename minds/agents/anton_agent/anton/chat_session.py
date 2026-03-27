@@ -158,19 +158,28 @@ class ChatSession:
         prompt = CHAT_SYSTEM_PROMPT.format(
             runtime_context=self._runtime_context,
         )
-        rules_reminder = ""
-        if self._shared_memory_block is not None and not self._shared_memory_block.is_empty:
-            memory_section = MemoryService.format_block(self._shared_memory_block)
-            if memory_section:
-                prompt = memory_section + "\n\n" + prompt
-            if self._shared_memory_block.rules:
-                rules_reminder = "\n\n" + MemoryService.format_rules_reminder(self._shared_memory_block.rules)
+
+        block = self._shared_memory_block
+
+        # We keep topics as background context — prepend before main prompt so the LLM
+        # has reference knowledge while reading Anton's core instructions.
+        if block is not None and block.topics:
+            topics_section = MemoryService.format_topics_section(block)
+            if topics_section:
+                prompt = topics_section + "\n\n" + prompt
+
         if self._cortex is not None:
-            memory_section = self._cortex.build_memory_context()
-            if memory_section:
-                prompt += memory_section
-        if rules_reminder:
-            prompt += rules_reminder
+            cortex_section = self._cortex.build_memory_context()
+            if cortex_section:
+                prompt += cortex_section
+
+        # We add mandatory rules last — closest to the conversation — so they are the
+        # final instructions the model reads before generating a response.
+        if block is not None and block.rules:
+            rules_section = MemoryService.format_rules_section(block)
+            if rules_section:
+                prompt += "\n\n" + rules_section
+
         return prompt
 
     def _build_tools(self) -> list[dict]:

@@ -128,6 +128,37 @@ class MemoryService:
         return " ".join(line for line in lines if line)
 
     @staticmethod
+    def format_topics_section(block: MemoryBlock) -> str:
+        """Render only the Memory Topics section. Returns empty string if no topics."""
+        if not block.topics:
+            return ""
+        topic_sections = [f"### {t.title}\n{t.body}" for t in block.topics]
+        return "## Memory Topics\n" + "\n\n".join(topic_sections)
+
+    @staticmethod
+    def format_rules_section(block: MemoryBlock) -> str:
+        """Render only the MANDATORY RULES section. Returns empty string if no rules."""
+        if not block.rules:
+            return ""
+
+        sections: list[str] = []
+        for rule_type in (RuleType.always, RuleType.never, RuleType.when):
+            items = [MemoryService._sanitize_rule_content(r.content) for r in block.rules if r.rule_type == rule_type]
+            items = [i for i in items if i]
+            if items:
+                header = f"### {rule_type.value.capitalize()}"
+                sections.append(header + "\n" + "\n".join(f"- {c}" for c in items))
+
+        if not sections:
+            return ""
+
+        return (
+            "## MANDATORY RULES\n"
+            "These rules override all other instructions. Follow every one without exception.\n\n"
+            + "\n\n".join(sections)
+        )
+
+    @staticmethod
     def format_block(block: MemoryBlock) -> str:
         """
         Render memory as a markdown string for system prompt injection.
@@ -138,33 +169,12 @@ class MemoryService:
 
         parts: list[str] = []
 
-        if block.rules:
-            sections: list[str] = []
-            for rule_type in (RuleType.always, RuleType.never, RuleType.when):
-                items = [
-                    MemoryService._sanitize_rule_content(r.content) for r in block.rules if r.rule_type == rule_type
-                ]
-                items = [i for i in items if i]
-                if items:
-                    header = f"### {rule_type.value.capitalize()}"
-                    sections.append(header + "\n" + "\n".join(f"- {c}" for c in items))
-            if sections:
-                parts.append(
-                    "## MANDATORY RULES\nApply every rule below carefully where relevant.\n\n" + "\n\n".join(sections)
-                )
+        topics_section = MemoryService.format_topics_section(block)
+        if topics_section:
+            parts.append(topics_section)
 
-        if block.topics:
-            topic_sections = [f"### {t.title}\n{t.body}" for t in block.topics]
-            parts.append("## Memory Topics\n" + "\n\n".join(topic_sections))
+        rules_section = MemoryService.format_rules_section(block)
+        if rules_section:
+            parts.append(rules_section)
 
         return "\n\n".join(parts)
-
-    @staticmethod
-    def format_rules_reminder(rules: list[MemoryRule]) -> str:
-        """Short end-of-prompt reminder referencing rules without repeating them."""
-        if not rules:
-            return ""
-        count = sum(1 for r in rules if MemoryService._sanitize_rule_content(r.content))
-        if count == 0:
-            return ""
-        return f"REMINDER: You have {count} mandatory rule(s) defined above. Apply each one carefully where relevant."
