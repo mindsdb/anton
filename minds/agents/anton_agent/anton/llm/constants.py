@@ -17,3 +17,4 @@ _CONTEXT_WINDOWS: list[tuple[str, int]] = [
     ("o1", 200_000),
 ]
 _DEFAULT_CONTEXT_WINDOW = 128_000
+_DEFAULT_MAX_TOKENS = 16384
