@@ -44,9 +44,6 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
     async def start(self) -> None:
         container = self._get_or_run_container()
 
-        # (Re)copy the bootstrap each time (safe + keeps it up to date)
-        self._copy_files_to_container(container)
-
         # Idempotency: if we already have an active exec socket, don't create a new one.
         if self.sock is not None:
             try:
@@ -59,6 +56,9 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
             with contextlib.suppress(Exception):
                 self.sock.close()
             self.sock = None
+
+        # Only copy files when creating a new exec session (not on every cell call).
+        self._copy_files_to_container(container)
 
         exec_id = self.client.api.exec_create(
             container.id,
