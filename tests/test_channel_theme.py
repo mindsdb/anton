@@ -41,8 +41,7 @@ class TestDetectColorMode:
 
     def test_default_is_dark(self):
         with patch.dict("os.environ", {"ANTON_THEME": "", "COLORFGBG": ""}, clear=False):
-            with patch("anton.channel.theme.os.uname") as mock_uname:
-                mock_uname.return_value.sysname = "Linux"
+            with patch("anton.channel.theme.sys.platform", "linux"):
                 assert detect_color_mode() == "dark"
 
     def test_macos_dark_mode(self):
