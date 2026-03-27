@@ -12,8 +12,6 @@ from minds.agents.anton_agent.anton.llm.structured import generate_object
 from minds.agents.anton_agent.anton.prompts import (
     INSIGHTS_PROMPT,
     QUERY_CLASSIFICATION_PROMPT,
-    REMOVE_VISUALIZATIONS_BIAS_PROMPT,
-    VISUALIZATIONS_LITE_PROMPT,
     VISUALIZATIONS_PROMPT,
 )
 from minds.agents.anton_agent.settings import AntonAgentSettings
@@ -192,7 +190,14 @@ class AntonAgent(BaseAgent):
             raise ValueError(f"Unknown coding provider: {coding_provider}")
 
         # Classify the query using the coding model to decide visualization prompt
-        enable_charting = run_context.metadata.enable_charting if run_context.metadata else False
+        # Check if the Mind parameters has the enable_charting parameter.
+        enable_charting = False
+        if self.mind.parameters and "enable_charting" in self.mind.parameters:
+            enable_charting = bool(self.mind.parameters["enable_charting"])
+
+        # Override the enable_charting parameter if it is set in the run context metadata.
+        if run_context.metadata:
+            enable_charting = run_context.metadata.enable_charting
 
         # Include recent conversation history for context (e.g. "show me a chart of that")
         classification_messages = []
@@ -203,11 +208,19 @@ class AntonAgent(BaseAgent):
             classification_messages.append({"role": role, "content": content[:500]})
         # Current user message in full, with charting context if enabled
         user_content = messages[-1].content if messages else ""
+        # enable_charting will only be handled here.
+        # The prompt injection for visualizations will be handled via needs_dashboard.
         if enable_charting:
             user_content += (
                 "\n\n[System note: Proactive Dashboards is enabled — the user has opted in "
                 "to automatic visualizations. Bias toward needs_dashboard=true when the query "
                 "involves data analysis, even if no chart is explicitly requested.]"
+            )
+        else:
+            user_content += (
+                "\n\n[System note: Proactive Dashboards is disabled - the user has opted out of "
+                "automatic visualizations. Therefore, needs_dashboard should be ONLY be set to true "
+                "if the user explicitly asks for a dashboard or visualization."
             )
         classification_messages.append({"role": "user", "content": user_content})
 
@@ -221,21 +234,13 @@ class AntonAgent(BaseAgent):
             classification.task_summary,
         )
 
-        if classification.needs_dashboard or enable_charting:
+        visualizations_prompt = ""
+        if classification.needs_dashboard:
             visualizations_prompt = VISUALIZATIONS_PROMPT.format(
                 output_dir=output_dir,
                 output_file_name=agent_settings.output_file_name,
             )
-            if not enable_charting:
-                visualizations_prompt += "\n" + REMOVE_VISUALIZATIONS_BIAS_PROMPT
-        else:
-            visualizations_prompt = VISUALIZATIONS_LITE_PROMPT.format(
-                output_dir=output_dir,
-                output_file_name=agent_settings.output_file_name,
-            )
-            visualizations_prompt += "\n" + REMOVE_VISUALIZATIONS_BIAS_PROMPT
 
-        if classification.needs_dashboard:
             task_context = (
                 f"\nQUERY INTENT (from classification):\n"
                 f"- Dashboard type: {classification.dashboard_type}\n"
