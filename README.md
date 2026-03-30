@@ -42,9 +42,7 @@ total portfolio value, show me the 30-day performance of each stock, and
 any other information that might be useful. Give me a complete dashboard.
 ```
 
-What happens next is the interesting part. Anton doesn't have any particular skill to begin with. It figures it out live: scrapes live prices, writes scratchpad code on the fly, crunches the numbers, and builds you a full dashboard — all in one conversation, with no setup.
-
-That's the point: you describe a problem in plain language, and Anton assembles the toolchain, writes the code, and delivers the result.
+What happens next is the interesting part. At first, Anton doesn't have any particular skill. However, it figures it out live: scrapes live prices, writes code on the fly, crunches the numbers, and builds you a full dashboard — all in one conversation, with no setup.
 
 
 ```text
