@@ -10,6 +10,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from anton import __version__
+from anton.chat import _prompt_or_cancel
 
 
 def _reexec() -> None:
@@ -279,7 +280,8 @@ def _onboard(settings) -> None:
     ]
 
     if sys.stdout.isatty():
-        _animate_onboard(console, __version__, _INTRO_LINES, settings=settings, ws=ws)
+        import asyncio
+        asyncio.run(_animate_onboard(console, __version__, _INTRO_LINES, settings=settings, ws=ws))
     else:
         # Static fallback for non-interactive terminals
         from anton.channel.branding import render_banner
@@ -294,8 +296,8 @@ def _ensure_api_key(settings) -> None:
     if not _has_api_key(settings):
         _onboard(settings)
 
-
-def _animate_onboard(console, version: str, intro_lines: list[str], *, settings, ws) -> None:
+    
+async def _animate_onboard(console, version: str, intro_lines: list[str], *, settings, ws) -> None:
     """Animate the robot talking while typing out the intro text below."""
     import time
 
@@ -386,12 +388,15 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
     console.print()
 
     while True:
-        choice = Prompt.ask(
-            "Choose LLM Provider",
-            choices=["1", "2", "3"],
-            default="1",
-            console=console,
-        )
+        # choice = Prompt.ask(
+        #     "Choose LLM Provider",
+        #     choices=["1", "2", "3"],
+        #     default="1",
+        #     console=console,
+        # )
+        choice = await _prompt_or_cancel("(anton) Choose LLM Provider",
+                                   choices=["1", "2", "3", "q"],
+                                   default="1")
 
         try:
             if choice == "1":
