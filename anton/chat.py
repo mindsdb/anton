@@ -1581,7 +1581,8 @@ async def _handle_setup_models(
 
     while True:
         choice = await _prompt_or_cancel("(anton) Choose LLM Provider",
-                                         choices=["1", "2", "q"], default="q")
+                                         choices=["1", "2", "3", "q"],
+                                         default="q")
         if choice is None or choice == "q":
             return session
 
@@ -1589,9 +1590,9 @@ async def _handle_setup_models(
             if choice == "1":
                 _setup_minds(settings, global_ws)
             elif choice == "2":
-                _setup_minds(settings, global_ws, default_url=None)
-            else:
                 _setup_other_provider(settings, global_ws)
+            elif choice == "3":
+                _setup_minds(settings, global_ws, default_url=None)
             break
         except _SetupRetry:
             console.print()
@@ -1964,7 +1965,8 @@ def _minds_test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
     try:
         _minds_request(url, api_key, method="POST", payload=payload, verify=verify)
         return True
-    except Exception:
+    except Exception as e:
+        print(e)
         return False
 
 

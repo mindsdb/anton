@@ -388,7 +388,7 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
     while True:
         choice = Prompt.ask(
             "Choose LLM Provider",
-            choices=["1", "2"],
+            choices=["1", "2", "3"],
             default="1",
             console=console,
         )
@@ -398,7 +398,7 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
                 _setup_minds(settings, ws)
             elif choice == "2":
                 _setup_other_provider(settings, ws)
-            else:
+            elif choice == "3":
                 _setup_minds(settings, ws, default_url=None)
             break  # success
         except _SetupRetry:
