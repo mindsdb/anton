@@ -2101,11 +2101,6 @@ class TestEditDatasourceWithTestSnippet:
         assert "psycopg2.OperationalError" in printed
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prompt copy consistency
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class TestPromptCopyConsistency:
     """Verify that interactive prompts use (y/n) style and Esc cancels safely."""
 
