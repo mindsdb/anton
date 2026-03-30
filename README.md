@@ -7,7 +7,7 @@
     ▐   ▐
 ```
 
-# MindsDB Anton — What Business Intelligence is supposed to be.
+# MindsDB Anton — What Business Intelligence is supposed to be
 
 Business intelligence was supposed to give you the right data, at the right time, to get real work done.
 
