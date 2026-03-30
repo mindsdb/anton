@@ -142,7 +142,14 @@ class AntonStreamEventFormatter:
             self._tool_activities[event.id] = _ToolActivity(tool_id=event.id, name=event.name)
             self._tool_order.append(event.id)
 
-            # Don't emit placeholder messages before tool execution; the end summary is sufficient.
+            if event.name == "scratchpad":
+                chunks.append((Role.thought_scratchpad_start, ""))
+            elif event.name == "memorize":
+                chunks.append((Role.thought_memorize_start, ""))
+            elif event.name == "recall":
+                chunks.append((Role.thought_recall_start, ""))
+            else:
+                chunks.append((Role.system, ""))
             return chunks
 
         if isinstance(event, StreamToolUseDelta):
@@ -160,11 +167,11 @@ class AntonStreamEventFormatter:
             act.description = desc
 
             if act.name == "scratchpad":
-                chunks.append((Role.thought_scratchpad_start, raw))
+                chunks.append((Role.thought_scratchpad_end, raw))
             elif act.name == "memorize":
-                chunks.append((Role.thought_memorize_start, raw))
+                chunks.append((Role.thought_memorize_end, raw))
             elif act.name == "recall":
-                chunks.append((Role.thought_recall, raw))
+                chunks.append((Role.thought_recall_end, raw))
             else:
                 chunks.append((Role.system, raw))
             return chunks
@@ -175,7 +182,8 @@ class AntonStreamEventFormatter:
 
         if isinstance(event, StreamToolResult):
             content = self._truncate(event.content, self._tool_result_max_chars)
-            chunks.append((Role.thought_scratchpad_end, content))
+            # StreamToolResult are only emitted for scratchpad tools.
+            chunks.append((Role.thought_scratchpad_result, content))
             return chunks
 
         if isinstance(event, StreamContextCompacted):

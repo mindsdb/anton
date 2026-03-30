@@ -270,6 +270,11 @@ async def format_messages_for_streaming_responses_api(
                 assistant_event_content = ""
                 is_assistant_stream = False
 
+            # Only the final assistant segment (after all thinking) should
+            # appear in response.completed. Reset when a new thought arrives
+            # so intermediate reasoning is excluded.
+            assistant_content = ""
+
             if event_callback is not None:
                 event_sequence_number += 1
                 # Store other events immediately.

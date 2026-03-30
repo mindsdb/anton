@@ -7,12 +7,46 @@ import sys
 import traceback
 from urllib.parse import urljoin
 
+# This does not need to be a project dependency because it is only used by the boot script.
+import dill
+
 _CELL_DELIM = "__ANTON_CELL_END__"
 _RESULT_START = "__ANTON_RESULT__"
 _RESULT_END = "__ANTON_RESULT_END__"
 
+# --- Optional: persist scratchpad interpreter session across restarts (dill) ---
+_PERSIST_SESSION = os.environ.get("ANTON_SCRATCHPAD_PERSIST_SESSION", "true").lower() in {"1", "true", "yes", "on"}
+_SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "/anton_scratchpad_session.pkl")
+
+
+def _load_namespace() -> tuple[dict, str | None]:
+    try:
+        with open(_SESSION_PATH, "rb") as f:
+            ns = dill.load(f)
+        if not isinstance(ns, dict):
+            raise TypeError("Session file did not contain a namespace dict")
+        ns.setdefault("__builtins__", __builtins__)
+        return ns, None
+    except FileNotFoundError:
+        return {"__builtins__": __builtins__}, None
+    except Exception:
+        return (
+            {"__builtins__": __builtins__},
+            "Failed to load scratchpad session; starting fresh.\n" + traceback.format_exc(),
+        )
+
+
+def _dump_namespace(ns: dict) -> str | None:
+    try:
+        with open(_SESSION_PATH, "wb") as f:
+            dill.dump(ns, f)
+        return None
+    except Exception:
+        return "Failed to dump scratchpad session.\n" + traceback.format_exc()
+
+
 # Persistent namespace across cells
-namespace = {"__builtins__": __builtins__}
+namespace, _load_err = _load_namespace()
 
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
@@ -577,6 +611,9 @@ while True:
         sys.stdout = _real_stdout
         sys.stderr = sys.__stderr__
         _cell_log_handler.buf = None
+
+    # Persist session after each cell (best-effort).
+    _dump_namespace(namespace)
 
     result = {
         "stdout": out_buf.getvalue(),

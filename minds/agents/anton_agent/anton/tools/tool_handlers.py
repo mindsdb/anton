@@ -150,25 +150,22 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         return format_cell_result(cell)
 
     elif action == "view":
-        pad = session._scratchpads.get()
-        if pad is None:
-            return "No scratchpad available for this session."
+        # The view op does not require a running backend.
+        pad = await session._scratchpads.get_or_create(start=False)
         return pad.view()
 
     elif action == "reset":
-        pad = session._scratchpads.get()
-        if pad is None:
-            return "No scratchpad available for this session."
+        pad = await session._scratchpads.get_or_create(start=False)
         await pad.reset()
         return "Scratchpad reset. All state cleared."
 
     elif action == "remove":
-        return await session._scratchpads.remove(cleanup=True)
+        # The manager state will also need to be cleared, so it is handled there.
+        return await session._scratchpads.remove()
 
     elif action == "dump":
-        pad = session._scratchpads.get()
-        if pad is None:
-            return "No scratchpad available for this session."
+        # The dump op does not require a running backend.
+        pad = await session._scratchpads.get_or_create(start=False)
         return pad.render_notebook()
 
     elif action == "install":

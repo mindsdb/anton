@@ -41,9 +41,10 @@ def test_stream_event_formatter_tool_use_and_progress_and_truncation():
         chunks += fmt.on_event(StreamToolResult(content="123456789"))
 
     assert chunks[0] == (Role.system, "thinking...")
-    assert (Role.thought_scratchpad_start, '{"action":"exec","one_line_description":"Do X"}') in chunks
+    assert (Role.thought_scratchpad_start, "") in chunks
+    assert (Role.thought_scratchpad_end, '{"action":"exec","one_line_description":"Do X"}') in chunks
     assert (Role.system, "Scratchpad(Do X): running") in chunks
-    assert (Role.thought_scratchpad_end, "1234…") in chunks
+    assert (Role.thought_scratchpad_result, "1234…") in chunks
 
 
 def test_stream_event_formatter_analyzing_and_context_compacted_and_throttle():

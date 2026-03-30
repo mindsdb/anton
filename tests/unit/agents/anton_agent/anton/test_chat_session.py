@@ -377,8 +377,8 @@ async def test_chat_session_dump_tool_result_emitted(monkeypatch, tmp_path):
     )
 
     events = [e async for e in sess.turn_stream("hi")]
-    # Dump content should NOT be streamed to the user.
-    assert not any(isinstance(e, StreamToolResult) for e in events)
+    # Dump content is streamed as a tool result event.
+    assert any(isinstance(e, StreamToolResult) and e.content == "DUMP" for e in events)
 
     # But it should still be returned to the LLM via tool_result blocks in history.
     tool_result_blocks = sess.history[-2]["content"]

@@ -48,6 +48,7 @@ from .tools import (
     format_cell_result,
     prepare_scratchpad_exec,
 )
+from .verification import MAX_VERIFICATION_CONTINUATIONS, verify_task
 
 if TYPE_CHECKING:
     from .llm.client import LLMClient
@@ -74,6 +75,8 @@ class ChatSession:
         runtime_context: str = "",
         extra_env: dict[str, str] | None = None,
         shared_memory: MemoryService | None = None,
+        events: list[dict] = None,
+        classification=None,
     ) -> None:
         self._llm = llm_client
         self._cortex = cortex
@@ -82,9 +85,13 @@ class ChatSession:
         self._history: list[dict] = []
         self._pending_memory_confirmations: list = []
         self._turn_count = 0
+        self._classification = classification
+        self._last_tool_round = 0
         self._shared_memory = shared_memory
         self._shared_memory_block: MemoryBlock | None = None
         self._shared_memory_load_failed = False
+        self._cached_rules: list | None = None
+        self._cached_all_topics: list | None = None
         self._scratchpads = ScratchpadManager(
             backend=backend,
             coding_provider=coding_provider,
@@ -92,6 +99,7 @@ class ChatSession:
             coding_api_key=coding_api_key,
             workspace_path=workspace_path,
             extra_env=extra_env,
+            events=events,
         )
 
     @property
@@ -129,15 +137,20 @@ class ChatSession:
             }
         )
 
-    def _init_shared_memory(self, query: str) -> None:
-        """Load mind memory once for this session. Failures are non-fatal."""
+    def _refresh_shared_memory(self, query: str) -> None:
+        """Load mind memory from DB once, then re-score on every call. Failures are non-fatal."""
         if self._shared_memory is None:
             return
         try:
-            # NOTE: We load topics per initial question, not for every question. Worth improving
-            self._shared_memory_block = self._shared_memory.load_for_session(query)
+            if self._cached_rules is None:
+                # First turn: fetch rules and all topics from DB, then cache them.
+                self._cached_rules, self._cached_all_topics = self._shared_memory.load_raw()
+            # Every turn: re-score cached data against the current query (no DB call).
+            self._shared_memory_block = self._shared_memory.select_for_query(
+                self._cached_rules, self._cached_all_topics or [], query
+            )
         except Exception:
-            logger.exception("Failed to load mind memory for session — continuing without it")
+            logger.exception("Failed to load/refresh mind memory — continuing without it")
             self._shared_memory_block = MemoryBlock()
             self._shared_memory_load_failed = True
 
@@ -145,14 +158,28 @@ class ChatSession:
         prompt = CHAT_SYSTEM_PROMPT.format(
             runtime_context=self._runtime_context,
         )
-        if self._shared_memory_block is not None and not self._shared_memory_block.is_empty:
-            memory_section = MemoryService.format_block(self._shared_memory_block)
-            if memory_section:
-                prompt = memory_section + "\n\n" + prompt
+
+        block = self._shared_memory_block
+
+        # We keep topics as background context — prepend before main prompt so the LLM
+        # has reference knowledge while reading Anton's core instructions.
+        if block is not None and block.topics:
+            topics_section = MemoryService.format_topics_section(block)
+            if topics_section:
+                prompt = topics_section + "\n\n" + prompt
+
         if self._cortex is not None:
-            memory_section = self._cortex.build_memory_context()
-            if memory_section:
-                prompt += memory_section
+            cortex_section = self._cortex.build_memory_context()
+            if cortex_section:
+                prompt += cortex_section
+
+        # We add mandatory rules last — closest to the conversation — so they are the
+        # final instructions the model reads before generating a response.
+        if block is not None and block.rules:
+            rules_section = MemoryService.format_rules_section(block)
+            if rules_section:
+                prompt += "\n\n" + rules_section
+
         return prompt
 
     def _build_tools(self) -> list[dict]:
@@ -247,11 +274,14 @@ class ChatSession:
         """Streaming version of turn(). Yields events as they arrive."""
         self._history.append({"role": "user", "content": user_input})
 
-        # Load mind memory once on the first turn using the user's query for scoring.
-        if self._shared_memory is not None and self._shared_memory_block is None:
+        # Refresh shared memory on every turn so topic selection stays relevant as
+        # the conversation evolves. The DB is only hit on the first turn; subsequent
+        # turns re-score the cached data in memory.
+        if self._shared_memory is not None:
             query = user_input if isinstance(user_input, str) else ""
-            self._init_shared_memory(query)
-            if self._shared_memory_load_failed:
+            was_failed = self._shared_memory_load_failed
+            self._refresh_shared_memory(query)
+            if self._shared_memory_load_failed and not was_failed:
                 yield StreamContextCompacted(message="Note: Mind memory could not be loaded for this session.")
 
         if self._episodic is not None:
@@ -281,11 +311,127 @@ class ChatSession:
             asyncio.create_task(self._cortex.maybe_update_identity(user_input))
 
     async def _stream_and_handle_tools(self) -> AsyncIterator[StreamEvent]:
+        """Stream tool loop with completion verification wrapper."""
+        continuation = 0
+
+        while True:
+            # Run the core tool loop
+            async for event in self._run_tool_loop():
+                yield event
+
+            # Decide whether to verify completion
+            should_verify = (
+                self._classification is not None
+                and self._classification.is_multi_step
+                and self._last_tool_round > 0
+                and continuation < MAX_VERIFICATION_CONTINUATIONS
+            )
+
+            if not should_verify:
+                break
+
+            # Build classification context for the verifier
+            cls = self._classification
+            classification_context = (
+                f"TASK CLASSIFICATION:\n"
+                f"- Summary: {cls.task_summary}\n"
+                f"- Success criteria: {', '.join(cls.success_criteria)}\n"
+                f"- Expected artifacts: {', '.join(cls.expected_artifacts)}\n"
+                f"- Requires data query: {cls.requires_data_query}\n"
+            )
+
+            try:
+                verification = await verify_task(
+                    llm_provider=self._llm.coding_provider,
+                    model=self._llm.coding_model,
+                    classification_context=classification_context,
+                    history=self._history,
+                )
+            except Exception:
+                logger.warning("Task verification failed — treating as complete", exc_info=True)
+                break
+
+            if verification.status == "complete":
+                break
+
+            if verification.status == "stuck":
+                self._history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System: Task verification detected a blocker: {verification.blocker or 'unknown'}. "
+                            f"Reason: {verification.reason}. "
+                            f"Explain to the user what went wrong and suggest specific next steps they can take.]"
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(phase="verification", message="Diagnosing blocked task...")
+                system = self._build_system_prompt()
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        resp = event.response
+                        self._history.append({"role": "assistant", "content": resp.content or ""})
+                break
+
+            # status == "incomplete"
+            continuation += 1
+            if continuation >= MAX_VERIFICATION_CONTINUATIONS:
+                self._history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[System: After {continuation} continuation attempts, the task is still incomplete. "
+                            f"Remaining: {', '.join(verification.remaining_work)}. "
+                            f"Provide your best answer with what you have and explain what could not be completed.]"
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(phase="verification", message="Task incomplete — providing best answer...")
+                system = self._build_system_prompt()
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        resp = event.response
+                        self._history.append({"role": "assistant", "content": resp.content or ""})
+                break
+
+            # Continue working
+            self._history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[System: Task verification found this incomplete "
+                        f"(attempt {continuation}/{MAX_VERIFICATION_CONTINUATIONS}). "
+                        f"Remaining work: {', '.join(verification.remaining_work)}. "
+                        f"Reason: {verification.reason}. "
+                        f"Continue working on the remaining items. Do not repeat work already done.]"
+                    ),
+                }
+            )
+            yield StreamTaskProgress(
+                phase="verification",
+                message=f"Task incomplete — continuing ({continuation}/{MAX_VERIFICATION_CONTINUATIONS})...",
+            )
+            # Loop back to _run_tool_loop
+
+        # Consolidation: replay scratchpad sessions to extract lessons
+        if self._cortex is not None and self._cortex.mode != "off":
+            self._maybe_consolidate_scratchpads()
+
+    async def _run_tool_loop(self) -> AsyncIterator[StreamEvent]:
         """Stream one LLM call, handle tool loops, yield all events."""
         system = self._build_system_prompt()
         tools = self._build_tools()
 
         response: StreamComplete | None = None
+        _compacted_this_turn = False
 
         try:
             async for event in self._llm.plan_stream(
@@ -299,6 +445,7 @@ class ChatSession:
         except ContextOverflowError:
             await self._summarize_history()
             self._compact_scratchpads()
+            _compacted_this_turn = True
             yield StreamContextCompacted(message="Context was getting long — older history has been summarized.")
             async for event in self._llm.plan_stream(
                 system=system,
@@ -310,13 +457,15 @@ class ChatSession:
                     response = event
 
         if response is None:
+            self._last_tool_round = 0
             return
 
         llm_response = response.response
 
-        if llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
+        if not _compacted_this_turn and llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
             await self._summarize_history()
             self._compact_scratchpads()
+            _compacted_this_turn = True
             yield StreamContextCompacted(message="Context was getting long — older history has been summarized.")
 
         # Tool-call loop with circuit breaker
@@ -339,6 +488,7 @@ class ChatSession:
                     messages=self._history,
                 ):
                     yield event
+                self._last_tool_round = tool_round
                 return
 
             # Build assistant message with content blocks
@@ -402,12 +552,11 @@ class ChatSession:
                     else:
                         result_text = await dispatch_tool(self, tc.name, tc.input)
                         if tc.name == "scratchpad" and tc.input.get("action") == "dump":
-                            # yield StreamToolResult(content=result_text)
-                            # result_text = (
-                            #     "The full notebook has been displayed to the user above. "
-                            #     "Do not repeat it. Here is the content for your reference:\n\n" + result_text
-                            # )
-                            result_text = "Here is the full notebook content for your reference:\n\n" + result_text
+                            yield StreamToolResult(content=result_text)
+                            result_text = (
+                                "The full notebook has been displayed to the user above. "
+                                "Do not repeat it. Here is the content for your reference:\n\n" + result_text
+                            )
                 except Exception as exc:
                     result_text = f"Tool '{tc.name}' failed: {exc}"
 
@@ -448,8 +597,10 @@ class ChatSession:
                     if isinstance(event, StreamComplete):
                         response = event
             except ContextOverflowError:
-                await self._summarize_history()
-                self._compact_scratchpads()
+                if not _compacted_this_turn:
+                    await self._summarize_history()
+                    self._compact_scratchpads()
+                    _compacted_this_turn = True
                 yield StreamContextCompacted(message="Context history has been summarized to free up space.")
                 async for event in self._llm.plan_stream(
                     system=system,
@@ -461,21 +612,21 @@ class ChatSession:
                         response = event
 
             if response is None:
+                self._last_tool_round = tool_round
                 return
             llm_response = response.response
 
-            if llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
+            if not _compacted_this_turn and llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
                 await self._summarize_history()
                 self._compact_scratchpads()
+                _compacted_this_turn = True
                 yield StreamContextCompacted(message="Context was getting long — older history has been summarized.")
+
+        self._last_tool_round = tool_round
 
         # Text-only final response — append to history
         reply = llm_response.content or ""
         self._history.append({"role": "assistant", "content": reply})
-
-        # Consolidation: replay scratchpad sessions to extract lessons
-        if self._cortex is not None and self._cortex.mode != "off":
-            self._maybe_consolidate_scratchpads()
 
     def _maybe_consolidate_scratchpads(self) -> None:
         """Check if any scratchpad sessions warrant consolidation and fire it off."""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from .constants import _DEFAULT_MAX_TOKENS
 from .provider import LLMProvider, LLMResponse, StreamEvent
 
 
@@ -13,7 +14,7 @@ class LLMClient:
         planning_model: str,
         coding_provider: LLMProvider,
         coding_model: str,
-        max_tokens: int = 8192,
+        max_tokens: int = _DEFAULT_MAX_TOKENS,
     ) -> None:
         self._planning_provider = planning_provider
         self._planning_model = planning_model

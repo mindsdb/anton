@@ -49,25 +49,42 @@ class MemoryService:
         self.token_budget = token_budget
         self.max_topics = max_topics
 
+    def load_raw(self) -> tuple[list[MemoryRule], list[MemoryTopic]]:
+        """
+        Fetch all active rules and topics from the DB.
+
+        Callers should cache this result and pass it to select_for_query()
+        on each turn to avoid repeated DB round-trips.
+        """
+        return self.repo.get_active_rules(), self.repo.get_active_topics()
+
+    def select_for_query(
+        self,
+        rules: list[MemoryRule],
+        topics: list[MemoryTopic],
+        query: str,
+    ) -> MemoryBlock:
+        """
+        Score pre-loaded topics against a query and apply budget/count caps.
+
+        No DB call — pass the output of load_raw() here.
+        """
+        remaining_budget = self.token_budget - sum(_token_count(r.content) for r in rules)
+        scored_topics = self._score_topics(topics, query)
+        selected_topics = self._apply_caps(scored_topics, remaining_budget)
+        return MemoryBlock(rules=rules, topics=selected_topics)
+
     def load_for_session(self, query: str) -> MemoryBlock:
         """
         Load and select memory relevant to query.
 
-        Rules: all active rules are always included. Their token cost is
-        deducted before topic selection.
-
-        Topics: scored by keyword match against title/tags/description,
-        capped at max_topics and the remaining token budget.
+        Convenience wrapper around load_raw() + select_for_query() for
+        callers that only need a single-shot load. For per-turn re-scoring
+        without repeated DB calls, use load_raw() once and call
+        select_for_query() on each turn.
         """
-        rules = self.repo.get_active_rules()
-        topics = self.repo.get_active_topics()
-
-        remaining_budget = self.token_budget - sum(_token_count(r.content) for r in rules)
-
-        scored_topics = self._score_topics(topics, query)
-        selected_topics = self._apply_caps(scored_topics, remaining_budget)
-
-        return MemoryBlock(rules=rules, topics=selected_topics)
+        rules, topics = self.load_raw()
+        return self.select_for_query(rules, topics, query)
 
     def _score_topics(self, topics: list[MemoryTopic], query: str) -> list[MemoryTopic]:
         """
@@ -105,6 +122,43 @@ class MemoryService:
         return selected
 
     @staticmethod
+    def _sanitize_rule_content(content: str) -> str:
+        """Collapse rule content into a single line safe for a markdown bullet."""
+        lines = [line.strip() for line in content.splitlines()]
+        return " ".join(line for line in lines if line)
+
+    @staticmethod
+    def format_topics_section(block: MemoryBlock) -> str:
+        """Render only the Memory Topics section. Returns empty string if no topics."""
+        if not block.topics:
+            return ""
+        topic_sections = [f"### {t.title}\n{t.body}" for t in block.topics]
+        return "## Memory Topics\n" + "\n\n".join(topic_sections)
+
+    @staticmethod
+    def format_rules_section(block: MemoryBlock) -> str:
+        """Render only the MANDATORY RULES section. Returns empty string if no rules."""
+        if not block.rules:
+            return ""
+
+        sections: list[str] = []
+        for rule_type in (RuleType.always, RuleType.never, RuleType.when):
+            items = [MemoryService._sanitize_rule_content(r.content) for r in block.rules if r.rule_type == rule_type]
+            items = [i for i in items if i]
+            if items:
+                header = f"### {rule_type.value.capitalize()}"
+                sections.append(header + "\n" + "\n".join(f"- {c}" for c in items))
+
+        if not sections:
+            return ""
+
+        return (
+            "## MANDATORY RULES\n"
+            "These rules override all other instructions. Follow every one without exception.\n\n"
+            + "\n\n".join(sections)
+        )
+
+    @staticmethod
     def format_block(block: MemoryBlock) -> str:
         """
         Render memory as a markdown string for system prompt injection.
@@ -115,17 +169,12 @@ class MemoryService:
 
         parts: list[str] = []
 
-        if block.rules:
-            sections: list[str] = []
-            for rule_type in (RuleType.always, RuleType.never, RuleType.when):
-                matching = [r.content for r in block.rules if r.rule_type == rule_type]
-                if matching:
-                    header = f"# {rule_type.value.capitalize()}"
-                    sections.append(header + "\n" + "\n".join(f"- {c}" for c in matching))
-            parts.append("## Memory Rules\n\n" + "\n\n".join(sections))
+        topics_section = MemoryService.format_topics_section(block)
+        if topics_section:
+            parts.append(topics_section)
 
-        if block.topics:
-            topic_sections = [f"### {t.title}\n{t.body}" for t in block.topics]
-            parts.append("## Memory Topics\n" + "\n\n".join(topic_sections))
+        rules_section = MemoryService.format_rules_section(block)
+        if rules_section:
+            parts.append(rules_section)
 
         return "\n\n".join(parts)

@@ -28,3 +28,9 @@ class AntonAgentSettings(BaseSettings):
     docker_image: str = Field(default="anton-scratchpad:py312")  # ANTON_AGENT__DOCKER_IMAGE
     docker_network: str | None = Field(default=None)  # ANTON_AGENT__DOCKER_NETWORK
     docker_api_version: str = Field(default="1.44")  # ANTON_AGENT__DOCKER_API_VERSION
+
+    # Scratchpad persistence settings
+    scratchpad_persist_session: bool = Field(default=True)  # ANTON_AGENT__SCRATCHPAD_PERSIST_SESSION
+    scratchpad_session_path: str = Field(
+        default="/anton_scratchpad_session.pkl"
+    )  # ANTON_AGENT__SCRATCHPAD_SESSION_PATH

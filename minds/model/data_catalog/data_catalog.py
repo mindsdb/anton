@@ -41,7 +41,7 @@ class DataCatalog(SQLModel, table=False):
         lines = []
 
         # Table header.
-        qualified_table_name = table.name
+        qualified_table_name = table.qualified_name
         if include_datasource_name:
             qualified_table_name = f"{self.mind_datasource.datasource.name}.{qualified_table_name}"
         table_header = f"Table: {qualified_table_name}"
@@ -62,7 +62,7 @@ class DataCatalog(SQLModel, table=False):
         """Format a single table's information without statistics (compact version)."""
         lines = []
 
-        qualified_table_name = table.name
+        qualified_table_name = table.qualified_name
         if include_datasource_name:
             qualified_table_name = f"{self.mind_datasource.datasource.name}.{qualified_table_name}"
         table_header = f"Table: {qualified_table_name}"
@@ -166,7 +166,7 @@ class DataCatalog(SQLModel, table=False):
 
                 fk_column_name = fk.column.name
                 ref_column_name = fk.referenced_column.name
-                qualified_fk_table = fk.referenced_table.name
+                qualified_fk_table = fk.referenced_table.qualified_name
                 if include_datasource_name:
                     qualified_fk_table = f"{self.mind_datasource.datasource.name}.{qualified_fk_table}"
                 fk_info = f"    - {fk_column_name} → {qualified_fk_table}({ref_column_name})"
@@ -191,10 +191,10 @@ class DataCatalog(SQLModel, table=False):
             if fk.referenced_table.name not in valid_tables:
                 continue
 
-            related_tables.append(fk.referenced_table.name)
+            related_tables.append(fk.referenced_table.qualified_name)
 
         if related_tables:
-            qualified_table_name = table.name
+            qualified_table_name = table.qualified_name
             if include_datasource_name:
                 qualified_table_name = f"{self.mind_datasource.datasource.name}.{qualified_table_name}"
             lines.append(f"{qualified_table_name} is related to: {', '.join(related_tables)}")
@@ -264,7 +264,7 @@ class DataCatalog(SQLModel, table=False):
 
     def _get_table_summary(self, table: "Table", include_datasource_name: bool = True) -> str:
         """Get a one-line summary of a table for compact overview."""
-        qualified_name = table.name
+        qualified_name = table.qualified_name
         if include_datasource_name:
             qualified_name = f"{self.mind_datasource.datasource.name}.{qualified_name}"
         col_count = len(table.columns)
