@@ -67,6 +67,12 @@ class AnthropicProvider(LLMProvider):
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
             ) from exc
+        except TypeError as exc:
+            if "authentication" in str(exc).lower():
+                raise ConnectionError(
+                    "No API key configured. Visit https://mdb.ai to get an API key or top up your tokens."
+                ) from exc
+            raise
 
         content_text = ""
         tool_calls: list[ToolCall] = []
@@ -177,6 +183,12 @@ class AnthropicProvider(LLMProvider):
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
             ) from exc
+        except TypeError as exc:
+            if "authentication" in str(exc).lower():
+                raise ConnectionError(
+                    "No API key configured. Visit https://mdb.ai to get an API key or top up your tokens."
+                ) from exc
+            raise
 
         yield StreamComplete(
             response=LLMResponse(

@@ -596,7 +596,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
             ws.set_secret("ANTON_MINDS_SSL_VERIFY", "false")
     elif rate_limited:
         console.print("[anton.error]Token limit exceeded. Visit https://mdb.ai to upgrade or to top up your tokens.[/]")
-        raise _SetupRetry()
+        # raise _SetupRetry()
     else:
         console.print("  [anton.error]Could not connect. Check your API key and URL.[/]")
         retry = Confirm.ask("  Try again?", default=True, console=console)

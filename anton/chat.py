@@ -3774,6 +3774,7 @@ async def _chat_loop(
 
     # Use a mutable container so closures always see the current client
     state: dict = {"llm_client": LLMClient.from_settings(settings)}
+    
 
     # Self-awareness context (legacy, kept for backward compatibility)
     self_awareness = SelfAwarenessContext(Path(settings.context_dir))
