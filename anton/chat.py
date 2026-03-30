@@ -1431,7 +1431,7 @@ async def _handle_resume(
 
     # Close old scratchpads
     if session._scratchpads.list_pads():
-        await session._scratchpads.cancel_all_running()
+        await session._scratchpads.close_all()
 
     # Build new session with restored history
     new_session = _rebuild_session(
