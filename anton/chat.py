@@ -1431,7 +1431,7 @@ async def _handle_resume(
 
     # Close old scratchpads
     if session._scratchpads.list_pads():
-        await session._scratchpads.cancel_all_running()
+        await session._scratchpads.close_all()
 
     # Build new session with restored history
     new_session = _rebuild_session(
@@ -3603,7 +3603,6 @@ def _print_slash_help(console: Console) -> None:
     console.print("  [bold]/test[/]      — Test a saved connection")
     
     console.print("\n[bold]Workspace[/]")
-    console.print("  [bold]/minds[/]     — Connect to an existing Mind")
     console.print("  [bold]/setup[/]     — Configure models and memory settings")
     console.print("  [bold]/memory[/]    — View memory status and usage")
     

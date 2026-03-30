@@ -134,6 +134,20 @@ class TestEncodeRule:
         assert "confidence:high" in content
         assert "source:user" in content
 
+    def test_allows_superstring_of_existing(self, hc, mem_dir):
+        """A longer, more specific rule should NOT be blocked by a shorter one."""
+        hc.encode_rule("Use httpx", kind="always")
+        hc.encode_rule("Use httpx with timeout=15", kind="always")
+        content = (mem_dir / "rules.md").read_text()
+        assert "Use httpx with timeout=15" in content
+
+    def test_allows_substring_of_existing(self, hc, mem_dir):
+        """A shorter rule should NOT be blocked by a longer one containing it."""
+        hc.encode_rule("Use httpx with timeout=15", kind="always")
+        hc.encode_rule("Use httpx", kind="always")
+        content = (mem_dir / "rules.md").read_text()
+        assert content.count("Use httpx") == 2  # both present
+
 
 class TestEncodeLesson:
     def test_creates_lessons_file(self, hc, mem_dir):
@@ -157,6 +171,20 @@ class TestEncodeLesson:
     def test_no_topic_no_topic_file(self, hc, mem_dir):
         hc.encode_lesson("Simple fact")
         assert not (mem_dir / "topics").exists() or not any((mem_dir / "topics").iterdir())
+
+    def test_allows_superstring_of_existing_lesson(self, hc, mem_dir):
+        """A more detailed lesson should NOT be blocked by a shorter one."""
+        hc.encode_lesson("CoinGecko limits at 50/min")
+        hc.encode_lesson("CoinGecko limits at 50/min for free tier accounts")
+        content = (mem_dir / "lessons.md").read_text()
+        assert "for free tier accounts" in content
+
+    def test_skips_exact_duplicate_with_metadata(self, hc, mem_dir):
+        """Exact same text should be blocked even when metadata differs."""
+        hc.encode_lesson("Fact one", topic="api")
+        hc.encode_lesson("Fact one", topic="other")
+        content = (mem_dir / "lessons.md").read_text()
+        assert content.count("Fact one") == 1
 
 
 class TestRewriteIdentity:

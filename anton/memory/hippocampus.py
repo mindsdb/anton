@@ -233,8 +233,8 @@ class Hippocampus:
         else:
             content = "# Rules\n\n## Always\n\n## Never\n\n## When\n"
 
-        # Check for duplicate (same text, ignoring metadata)
-        if text in content:
+        # Check for duplicate (exact entry match, ignoring metadata)
+        if text in self._extract_entry_texts(content):
             return
 
         # Find the section and append
@@ -296,9 +296,9 @@ class Hippocampus:
                 mode="write",
             )
         else:
-            # Check for duplicate
+            # Check for duplicate (exact entry match, ignoring metadata)
             existing = self._lessons_path.read_text(encoding="utf-8")
-            if text in existing:
+            if text in self._extract_entry_texts(existing):
                 return
             self._encode_with_lock(self._lessons_path, entry, mode="append")
 
@@ -315,7 +315,7 @@ class Hippocampus:
                 )
             else:
                 existing = topic_path.read_text(encoding="utf-8")
-                if text not in existing:
+                if text not in self._extract_entry_texts(existing):
                     self._encode_with_lock(topic_path, entry, mode="append")
 
     def rewrite_identity(self, entries: list[str]) -> None:
@@ -380,6 +380,27 @@ class Hippocampus:
                     if sys.platform != "win32":
                         import fcntl
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _extract_entry_texts(content: str) -> set[str]:
+        """Extract the set of normalized entry texts from a markdown memory file.
+
+        Strips the leading ``- ``, trailing metadata comments, and whitespace
+        so that dedup comparisons are exact-match on the *meaning* line only.
+        """
+        texts: set[str] = set()
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                continue
+            # Remove leading "- "
+            entry = stripped[2:]
+            # Remove trailing <!-- ... --> metadata
+            entry = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", entry)
+            entry = entry.strip()
+            if entry:
+                texts.add(entry)
+        return texts
 
     @staticmethod
     def _sanitize_slug(name: str) -> str:

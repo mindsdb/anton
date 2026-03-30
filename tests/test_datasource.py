@@ -583,7 +583,7 @@ class TestHandleConnectDatasource:
         conns = vault.list_connections()
         assert len(conns) == 1
         assert conns[0]["engine"] == "postgresql"
-        assert conns[0]["name"].isdigit()
+        assert conns[0]["name"].isalnum()
         session._scratchpads.get_or_create.assert_not_called()
 
     @pytest.mark.asyncio

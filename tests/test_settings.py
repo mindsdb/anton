@@ -8,21 +8,37 @@ import pytest
 from anton.config.settings import AntonSettings
 
 
+_ANTON_MODEL_KEYS = [
+    "ANTON_PLANNING_PROVIDER",
+    "ANTON_PLANNING_MODEL",
+    "ANTON_CODING_PROVIDER",
+    "ANTON_CODING_MODEL",
+]
+
+
 class TestAntonSettingsDefaults:
-    def test_default_planning_provider(self):
-        s = AntonSettings(anthropic_api_key="test")
+    def test_default_planning_provider(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.planning_provider == "anthropic"
 
-    def test_default_planning_model(self):
-        s = AntonSettings(anthropic_api_key="test")
+    def test_default_planning_model(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.planning_model == "claude-sonnet-4-6"
 
-    def test_default_coding_provider(self):
-        s = AntonSettings(anthropic_api_key="test")
+    def test_default_coding_provider(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.coding_provider == "anthropic"
 
-    def test_default_coding_model(self):
-        s = AntonSettings(anthropic_api_key="test")
+    def test_default_coding_model(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(anthropic_api_key="test", _env_file=None)
         assert s.coding_model == "claude-haiku-4-5-20251001"
 
     def test_default_memory_dir(self):
