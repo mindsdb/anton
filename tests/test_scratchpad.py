@@ -198,6 +198,21 @@ class TestScratchpadManager:
         await mgr.close_all()
         assert len(mgr.list_pads()) == 0
 
+    async def test_close_all_does_not_restart_processes(self):
+        """close_all() kills worker processes without restarting them.
+
+        cancel_all_running() would leave _proc pointing to a new (orphan-prone)
+        process. close_all() must leave _proc as None.
+        """
+        mgr = ScratchpadManager()
+        pad = await mgr.get_or_create("test")
+        try:
+            await pad.execute("x = 1")
+            assert pad._proc is not None, "process should be alive after execution"
+        finally:
+            await mgr.close_all()
+        assert pad._proc is None, "close_all() must not restart the worker process"
+
 
 class TestScratchpadRenderNotebook:
     async def test_render_notebook_basic(self):

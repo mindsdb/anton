@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from anton.chat import SCRATCHPAD_TOOL, ChatSession
+from anton.chat import SCRATCHPAD_TOOL, ChatSession, _handle_resume
 from anton.llm.provider import LLMResponse, StreamComplete, StreamToolResult, ToolCall, Usage
 
 
@@ -341,3 +341,48 @@ class TestScratchpadInstallViaChat:
             assert "no packages" in result_content.lower()
         finally:
             await session.close()
+
+
+class TestResumeSessionScratchpadCleanup:
+    async def test_resume_calls_close_all_not_cancel_all_running(self):
+        """On /resume with active pads, close_all() must be called — not cancel_all_running().
+
+        cancel_all_running() kills then *restarts* each worker, which orphans the new
+        processes when the old session is discarded. close_all() kills without restart.
+        """
+        mock_mgr = MagicMock()
+        mock_mgr.list_pads.return_value = ["hello"]
+        mock_mgr.close_all = AsyncMock()
+        mock_mgr.cancel_all_running = AsyncMock()
+
+        session = MagicMock()
+        session._scratchpads = mock_mgr
+
+        history_store = MagicMock()
+        history_store.list_sessions.return_value = [
+            {"session_id": "s1", "date": "2026-03-30 12:00", "turns": 3, "preview": "hello"}
+        ]
+        history_store.load.return_value = []
+
+        new_session = MagicMock()
+        new_session._history = []
+        new_session._turn_count = 0
+
+        with (
+            patch("rich.prompt.Prompt.ask", return_value="1"),
+            patch("anton.chat._rebuild_session", return_value=new_session),
+        ):
+            await _handle_resume(
+                console=MagicMock(),
+                settings=MagicMock(),
+                state={},
+                self_awareness=MagicMock(),
+                cortex=MagicMock(),
+                workspace=MagicMock(),
+                session=session,
+                episodic=None,
+                history_store=history_store,
+            )
+
+        mock_mgr.close_all.assert_awaited_once()
+        mock_mgr.cancel_all_running.assert_not_awaited()
