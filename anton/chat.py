@@ -1888,6 +1888,34 @@ def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[
     return data.get("minds", data if isinstance(data, list) else [])
 
 
+def _check_minds_limits(base_url: str, api_key: str, verify: bool = True) -> bool:
+    """Return True if token usage has reached 80% of any configured limit.
+
+    Returns False if the endpoint is unreachable, limits are unlimited (-1),
+    or usage is below the threshold.
+    """
+    import json as _json
+
+    url = f"{base_url}/api/v1/limits/"
+    try:
+        raw = _minds_request(url, api_key, verify=verify, timeout=5)
+        data = _json.loads(raw.decode())
+    except Exception:
+        return False
+
+    tokens = data.get("tokens", {})
+    limits = tokens.get("limit", {})
+    usage = tokens.get("usage", {})
+
+    for period in ("lifetime", "monthly"):
+        lim = limits.get(period, -1)
+        used = usage.get("billing_cycle" if period == "monthly" else period, 0)
+        if lim != -1 and lim > 0 and used / lim >= 0.8:
+            return True
+
+    return False
+
+
 def _minds_get_mind(
     base_url: str, api_key: str, mind_name: str, verify: bool = True
 ) -> dict | None:
@@ -4104,6 +4132,17 @@ async def _chat_loop(
             # Use multimodal content if set, otherwise the text string
             if message_content is None:
                 message_content = stripped
+
+            if settings.minds_api_key and settings.minds_url:
+                _minds_base = settings.minds_url.rstrip("/")
+                if _check_minds_limits(
+                    _minds_base, settings.minds_api_key, verify=settings.minds_ssl_verify
+                ):
+                    console.print(
+                        "[anton.error]You've reached 80% of your token limit. "
+                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
+                    )
+                    console.print()
 
             display.start()
             t0 = time.monotonic()
