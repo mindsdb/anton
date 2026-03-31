@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import enum
 import json as _json
-import ssl
-import urllib.request
 from dataclasses import dataclass
+
+from anton.minds_http import _minds_request
 
 
 class TokenLimitStatus(enum.Enum):
@@ -20,40 +20,11 @@ class TokenLimitInfo:
     status: TokenLimitStatus
     used: int = 0
     limit: int = 0
-    period: str = ""  
+    period: str = ""
     lifetime_used: int = 0
     lifetime_limit: int = -1
     billing_cycle_used: int = 0
     billing_cycle_limit: int = -1
-
-
-def _fetch_limits_raw(
-    url: str,
-    api_key: str,
-    *,
-    verify: bool = True,
-    timeout: int = 5,
-) -> bytes:
-    req = urllib.request.Request(url, method="GET")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    req.add_header(
-        "User-Agent",
-        "Mozilla/5.0 (compatible; Anton/1.0; +https://github.com/mindsdb/anton)",
-    )
-    req.add_header("Accept-Language", "en-US,en;q=0.9")
-    req.add_header("Accept-Encoding", "identity")
-    req.add_header("Connection", "keep-alive")
-
-    ctx = None
-    if not verify:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-        return resp.read()
 
 
 def check_minds_token_limits(
@@ -81,7 +52,7 @@ def check_minds_token_limits(
     """
     url = f"{base_url}/api/v1/limits/"
     try:
-        raw = _fetch_limits_raw(url, api_key, verify=verify)
+        raw = _minds_request(url, api_key, verify=verify, timeout=5)
         data = _json.loads(raw.decode())
     except Exception:
         return TokenLimitInfo(status=TokenLimitStatus.OK)

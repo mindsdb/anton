@@ -46,6 +46,7 @@ from anton.tools import (
     prepare_scratchpad_exec,
 )
 from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_limits
+from anton.minds_http import _minds_request
 from anton.data_vault import DataVault, _slug_env_prefix
 from anton.datasource_registry import (
     DatasourceEngine,
@@ -1859,45 +1860,6 @@ def _describe_minds_connection_error(err: Exception) -> tuple[str, str]:
         f"Connection failed ({err}).",
         "Common reasons: network connectivity problems, authentication issues, or a server-side failure.",
     )
-
-
-def _minds_request(
-    url: str,
-    api_key: str,
-    *,
-    method: str = "GET",
-    payload: bytes | None = None,
-    verify: bool = True,
-    timeout: int = 30,
-) -> bytes:
-    """Shared HTTP helper for all Minds API calls.
-
-    Sets headers that pass through Cloudflare bot detection.
-    """
-    import ssl
-    import urllib.request
-
-    req = urllib.request.Request(url, data=payload, method=method)
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    # Browser-like headers to avoid Cloudflare bot detection
-    req.add_header(
-        "User-Agent",
-        "Mozilla/5.0 (compatible; Anton/1.0; +https://github.com/mindsdb/anton)",
-    )
-    req.add_header("Accept-Language", "en-US,en;q=0.9")
-    req.add_header("Accept-Encoding", "identity")
-    req.add_header("Connection", "keep-alive")
-
-    ctx = None
-    if not verify:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-        return resp.read()
 
 
 def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
@@ -4109,6 +4071,7 @@ async def _chat_loop(
 
     toolbar = {"stats": "", "status": ""}
     display = StreamDisplay(console, toolbar=toolbar)
+    _last_token_status: TokenLimitInfo | None = None
 
     def _bottom_toolbar():
         stats = toolbar["stats"]
@@ -4348,26 +4311,14 @@ async def _chat_loop(
             if message_content is None:
                 message_content = stripped
 
-            if settings.minds_api_key and settings.minds_url:
-                minds_base = settings.minds_url.rstrip("/")
-                token_status = check_minds_token_limits(
-                    minds_base, settings.minds_api_key, verify=settings.minds_ssl_verify
+            if _last_token_status is not None and _last_token_status.status is TokenLimitStatus.EXCEEDED:
+                pct = int(_last_token_status.used / _last_token_status.limit * 100) if _last_token_status.limit else 100
+                console.print(
+                    f"[anton.error]Token limit reached: {_last_token_status.used:,} / {_last_token_status.limit:,} tokens used ({pct}%). "
+                    "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
                 )
-                if token_status.status is TokenLimitStatus.EXCEEDED:
-                    pct = int(token_status.used / token_status.limit * 100) if token_status.limit else 100
-                    console.print(
-                        f"[anton.error]Token limit reached: {_token_status.used:,} / {_token_status.limit:,} tokens used ({pct}%). "
-                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
-                    )
-                    console.print()
-                    continue
-                elif token_status.status is TokenLimitStatus.WARNING:
-                    pct = int(token_status.used / token_status.limit * 100) if token_status.limit else 80
-                    console.print(
-                        f"[anton.warning]Approaching token limit: {token_status.used:,} / {token_status.limit:,} tokens used ({pct}%). "
-                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
-                    )
-                    console.print()
+                console.print()
+                continue
 
             display.start()
             t0 = time.monotonic()
@@ -4408,14 +4359,14 @@ async def _chat_loop(
                 parts = []
 
                 if settings.minds_api_key and settings.minds_url:
-                    usage = check_minds_token_limits(
+                    _last_token_status = check_minds_token_limits(
                         settings.minds_url.rstrip("/"),
                         settings.minds_api_key,
                         verify=settings.minds_ssl_verify,
                     )
-                    if usage.billing_cycle_limit > 0:
-                        _pct = usage.billing_cycle_used * 100 // usage.billing_cycle_limit
-                        parts.append(f"{usage.billing_cycle_used:,} / {usage.billing_cycle_limit:,} ({_pct}%)")
+                    if _last_token_status.billing_cycle_limit > 0:
+                        _pct = _last_token_status.billing_cycle_used * 100 // _last_token_status.billing_cycle_limit
+                        parts.append(f"{_last_token_status.billing_cycle_used:,} / {_last_token_status.billing_cycle_limit:,} ({_pct}%)")
 
                 parts.append(f"{elapsed:.1f}s")
                 parts.append(f"{total_input} in / {total_output} out")
@@ -4424,6 +4375,13 @@ async def _chat_loop(
                 toolbar["stats"] = "  ".join(parts)
                 toolbar["status"] = ""
                 display.finish()
+                if _last_token_status is not None and _last_token_status.status is TokenLimitStatus.WARNING:
+                    pct = int(_last_token_status.used / _last_token_status.limit * 100) if _last_token_status.limit else 80
+                    console.print(
+                        f"[anton.warning]Approaching token limit: {_last_token_status.used:,} / {_last_token_status.limit:,} tokens used ({pct}%). "
+                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
+                    )
+                    console.print()
             except anthropic.AuthenticationError:
                 display.abort()
                 console.print()

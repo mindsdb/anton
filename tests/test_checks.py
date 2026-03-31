@@ -17,7 +17,7 @@ def _make_raw(lifetime_lim=-1, lifetime_used=0, monthly_lim=-1, monthly_used=0) 
 
 
 def _patch_fetch(raw: bytes):
-    return patch("anton.checks._fetch_limits_raw", return_value=raw)
+    return patch("anton.checks._minds_request", return_value=raw)
 
 
 class TestCheckMindsTokenLimits:
@@ -104,7 +104,7 @@ class TestCheckMindsTokenLimits:
 
     def test_network_error_returns_ok(self):
         with patch(
-            "anton.checks._fetch_limits_raw", side_effect=OSError("timeout")
+            "anton.checks._minds_request", side_effect=OSError("timeout")
         ):
             result = check_minds_token_limits("http://x", "key")
         assert result.status is TokenLimitStatus.OK
@@ -114,11 +114,11 @@ class TestCheckMindsTokenLimits:
         assert result.lifetime_limit == -1
 
     def test_malformed_json_returns_ok(self):
-        with patch("anton.checks._fetch_limits_raw", return_value=b"not json"):
+        with patch("anton.checks._minds_request", return_value=b"not json"):
             result = check_minds_token_limits("http://x", "key")
         assert result.status is TokenLimitStatus.OK
 
     def test_empty_tokens_returns_ok(self):
-        with patch("anton.checks._fetch_limits_raw", return_value=b"{}"):
+        with patch("anton.checks._minds_request", return_value=b"{}"):
             result = check_minds_token_limits("http://x", "key")
         assert result.status is TokenLimitStatus.OK
