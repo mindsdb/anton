@@ -1762,7 +1762,7 @@ async def _prompt_or_cancel(
 
     if label.startswith("(anton) "):
         body = label[len("(anton) "):]
-        message = HTML(f"<style fg='{_prompt_color}' bold='true'>(anton)</style> {body}{suffix}")
+        message = HTML(f"<b><style fg='{_prompt_color}'>(anton)</style></b> {body}{suffix}")
     else:
         message = HTML(f"{label}{suffix}")
 
@@ -4183,7 +4183,7 @@ async def _chat_loop(
 
             try:
                 from anton.channel.theme import get_palette as _gp
-                _you_color = _gp().prompt
+                _you_color = _gp().user_prompt
                 user_input = await prompt_session.prompt_async(
                     [(f"bold fg:{_you_color}", "you>"), ("", " ")]
                 )

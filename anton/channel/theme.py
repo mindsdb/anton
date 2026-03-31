@@ -13,6 +13,7 @@ class Palette:
     cyan: str
     cyan_dim: str
     prompt: str
+    user_prompt: str
     success: str
     error: str
     warning: str
@@ -23,6 +24,7 @@ DARK_PALETTE = Palette(
     cyan="#22d3ee",
     cyan_dim="#0891b2",
     prompt="#22d3ee",
+    user_prompt="#00ff9f",
     success="#2FBF71",
     error="#FF6B6B",
     warning="#FFB020",
@@ -33,6 +35,7 @@ LIGHT_PALETTE = Palette(
     cyan="#006B6B",
     cyan_dim="#004D4D",
     prompt="#005F5F",
+    user_prompt="#1A7F42",
     success="#1A7F42",
     error="#DC2626",
     warning="#D97706",
