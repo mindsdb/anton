@@ -3184,9 +3184,9 @@ async def _handle_connect_datasource(
             console.print()
         if saved_entries:
             start = len(popular_engines) + 1
-            console.print("       [bold]  Your connections")
+            console.print("       [bold]  Recent connections")
             for i, (slug, label) in enumerate(saved_entries, start):
-                console.print(f"          [bold]{i:>2}.[/bold] {label} [dim]({slug})[/]")
+                console.print(f"          [bold]{i:>2}.[/bold] {label}")
             console.print()
 
     def _print_all() -> None:
@@ -3270,34 +3270,12 @@ async def _handle_connect_datasource(
         elif 1 <= pick_num <= len(popular_engines):
             engine_def = popular_engines[pick_num - 1]
         elif saved_entries and saved_start <= pick_num <= max_num:
-            # User picked a saved connection — reconnect directly
-            picked_slug = saved_entries[pick_num - saved_start][0]
-            conn = {
-                f"{c['engine']}-{c['name']}": c for c in saved_connections
-            }[picked_slug]
-            _restore_namespaced_env(vault)
-            session._active_datasource = picked_slug
-            recon_engine_def = registry.get(conn["engine"])
-            if recon_engine_def:
-                _register_secret_vars(recon_engine_def, engine=conn["engine"], name=conn["name"])
-                engine_label = recon_engine_def.display_name
-            else:
-                engine_label = conn["engine"]
-            console.print()
-            console.print(
-                f'[anton.success]        \u2713 Reconnected to [bold]"{picked_slug}"[/bold].[/]'
-            )
-            console.print()
-            session._history.append(
-                {
-                    "role": "assistant",
-                    "content": (
-                        f'I\'ve reconnected to the {engine_label} connection "{picked_slug}" '
-                        f"in the Local Vault. I can now query this data source when needed."
-                    ),
-                }
-            )
-            return session
+            # User picked a recent connection type — start a new connection of that engine
+            picked_slug, picked_label = saved_entries[pick_num - saved_start]
+            picked_engine = picked_slug.split("-", 1)[0]
+            engine_def = registry.get(picked_engine)
+            if engine_def is None:
+                custom_source = True
         else:
             console.print(
                 f"[anton.warning](anton)[/] '{stripped_answer}' is out of range. "
