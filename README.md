@@ -177,6 +177,24 @@ We really enjoyed the show *Silicon Valley*. Gilfoyle's AI — Son of Anton — 
 
 ---
 
+## Analytics
+
+Anton collects anonymous usage events (e.g. session started, first query) to help us understand how the product is used. No personal data or query content is sent.
+
+To disable analytics, set the environment variable:
+
+```bash
+export ANTON_ANALYTICS_ENABLED=false
+```
+
+Or add it to your workspace config (`.anton/.env`):
+
+```
+ANTON_ANALYTICS_ENABLED=false
+```
+
+---
+
 ## License
 
 AGPL-3.0 license

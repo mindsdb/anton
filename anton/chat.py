@@ -4129,6 +4129,9 @@ async def _chat_loop(
     console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
     console.print()
 
+    from anton.analytics import send_event
+    _query_count = 0
+
     from anton.chat_ui import StreamDisplay
 
     toolbar = {"stats": "", "status": ""}
@@ -4383,6 +4386,12 @@ async def _chat_loop(
                     )
                     console.print()
 
+            _query_count += 1
+            if _query_count == 1:
+                send_event(settings, "anton_first_query")
+            else:
+                send_event(settings, "anton_query")
+
             display.start()
             t0 = time.monotonic()
             ttft: float | None = None
@@ -4425,6 +4434,8 @@ async def _chat_loop(
                 toolbar["stats"] = "  ".join(parts)
                 toolbar["status"] = ""
                 display.finish()
+                if _query_count == 1:
+                    send_event(settings, "anton_first_answer")
             except anthropic.AuthenticationError:
                 display.abort()
                 console.print()

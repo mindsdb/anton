@@ -229,6 +229,9 @@ def main(
     ctx.ensure_object(dict)
     ctx.obj["settings"] = settings
 
+    from anton.analytics import send_event
+    send_event(settings, "anton_started")
+
     if ctx.invoked_subcommand is None:
         from anton.chat import run_chat
 

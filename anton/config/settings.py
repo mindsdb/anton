@@ -50,6 +50,10 @@ class AntonSettings(BaseSettings):
 
     disable_autoupdates: bool = False
 
+    # Analytics — anonymous usage events (set ANTON_ANALYTICS_ENABLED=false to opt out)
+    analytics_enabled: bool = True
+    analytics_url: str = "https://x6nik28qi6.execute-api.us-east-2.amazonaws.com/default/zoomInfoCollector"
+
     # Minds datasource integration
     minds_enabled: bool = True  # use Minds server as LLM provider
     minds_api_key: str | None = None
