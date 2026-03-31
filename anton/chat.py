@@ -45,6 +45,7 @@ from anton.tools import (
     format_cell_result,
     prepare_scratchpad_exec,
 )
+from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_limits
 from anton.data_vault import DataVault, _slug_env_prefix
 from anton.datasource_registry import (
     DatasourceEngine,
@@ -1912,32 +1913,6 @@ def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[
     return data.get("minds", data if isinstance(data, list) else [])
 
 
-def _check_minds_limits(base_url: str, api_key: str, verify: bool = True) -> bool:
-    """Return True if token usage has reached 80% of any configured limit.
-
-    Returns False if the endpoint is unreachable, limits are unlimited (-1),
-    or usage is below the threshold.
-    """
-    import json as _json
-
-    url = f"{base_url}/api/v1/limits/"
-    try:
-        raw = _minds_request(url, api_key, verify=verify, timeout=5)
-        data = _json.loads(raw.decode())
-    except Exception:
-        return False
-
-    tokens = data.get("tokens", {})
-    limits = tokens.get("limit", {})
-    usage = tokens.get("usage", {})
-
-    for period in ("lifetime", "monthly"):
-        lim = limits.get(period, -1)
-        used = usage.get("billing_cycle" if period == "monthly" else period, 0)
-        if lim != -1 and lim > 0 and used / lim >= 0.8:
-            return True
-
-    return False
 
 
 def _minds_get_mind(
@@ -4375,11 +4350,21 @@ async def _chat_loop(
 
             if settings.minds_api_key and settings.minds_url:
                 _minds_base = settings.minds_url.rstrip("/")
-                if _check_minds_limits(
+                _token_status = check_minds_token_limits(
                     _minds_base, settings.minds_api_key, verify=settings.minds_ssl_verify
-                ):
+                )
+                if _token_status.status is TokenLimitStatus.EXCEEDED:
+                    pct = int(_token_status.used / _token_status.limit * 100) if _token_status.limit else 100
                     console.print(
-                        "[anton.error]You've reached 80% of your token limit. "
+                        f"[anton.error]Token limit reached: {_token_status.used:,} / {_token_status.limit:,} tokens used ({pct}%). "
+                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
+                    )
+                    console.print()
+                    continue
+                elif _token_status.status is TokenLimitStatus.WARNING:
+                    pct = int(_token_status.used / _token_status.limit * 100) if _token_status.limit else 80
+                    console.print(
+                        f"[anton.warning]Approaching token limit: {_token_status.used:,} / {_token_status.limit:,} tokens used ({pct}%). "
                         "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
                     )
                     console.print()
@@ -4420,7 +4405,20 @@ async def _chat_loop(
                             total_output += event.response.usage.output_tokens
 
                 elapsed = time.monotonic() - t0
-                parts = [f"{elapsed:.1f}s", f"{total_input} in / {total_output} out"]
+                parts = []
+
+                if settings.minds_api_key and settings.minds_url:
+                    usage = check_minds_token_limits(
+                        settings.minds_url.rstrip("/"),
+                        settings.minds_api_key,
+                        verify=settings.minds_ssl_verify,
+                    )
+                    if usage.billing_cycle_limit > 0:
+                        _pct = usage.billing_cycle_used * 100 // usage.billing_cycle_limit
+                        parts.append(f"{usage.billing_cycle_used:,} / {usage.billing_cycle_limit:,} ({_pct}%)")
+
+                parts.append(f"{elapsed:.1f}s")
+                parts.append(f"{total_input} in / {total_output} out")
                 if ttft is not None:
                     parts.append(f"TTFT {int(ttft * 1000)}ms")
                 toolbar["stats"] = "  ".join(parts)
