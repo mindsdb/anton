@@ -3118,11 +3118,12 @@ async def _handle_connect_datasource(
     else:
         _print_sections()
         console.print(
-            "       [anton.muted]Type 'all' to see every datasource.[/]"
+            "       [anton.muted]Don't see yours? Type a datasource name (e.g., GitHub, Gmail, Jira, ...)"
+            " — we'll work out the details together.[/]"
         )
         console.print()
         answer = await _prompt_or_cancel(
-            "(anton) Enter a number or type a name",
+            "(anton) Enter a number or type a datasource name",
         )
         if answer is None:
             return session
