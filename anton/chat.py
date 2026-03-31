@@ -1574,7 +1574,8 @@ async def _handle_setup_models(
 
     def _print_choices():
         console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
-        console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
+        console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]")
+        console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
         console.print("  [bold]q[/]  [anton.muted]Back[/]")
         console.print()
 
@@ -1582,7 +1583,7 @@ async def _handle_setup_models(
 
     while True:
         choice = await _prompt_or_cancel("(anton) Choose LLM Provider",
-                                         choices=["1", "2", "q"],
+                                         choices=["1", "2", "3", "q"],
                                          default="1")
         if choice is None or choice == "q":
             return session
@@ -1591,9 +1592,9 @@ async def _handle_setup_models(
             if choice == "1":
                 _setup_minds(settings, global_ws)
             elif choice == "2":
-                _setup_other_provider(settings, global_ws)
-            elif choice == "3":
                 _setup_minds(settings, global_ws, default_url=None)
+            elif choice == "3":
+                _setup_other_provider(settings, global_ws)
             break
         except _SetupRetry:
             console.print()

@@ -384,27 +384,22 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
     console.print(f"[anton.glow] {'━' * 40}[/]")
     console.print()
     console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
-    console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
+    console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]")
+    console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
     console.print()
 
     while True:
-        # choice = Prompt.ask(
-        #     "Choose LLM Provider",
-        #     choices=["1", "2", "3"],
-        #     default="1",
-        #     console=console,
-        # )
         choice = await _prompt_or_cancel("(anton) Choose LLM Provider",
-                                   choices=["1", "2", "q"],
+                                   choices=["1", "2", "3", "q"],
                                    default="1")
 
         try:
             if choice == "1":
                 _setup_minds(settings, ws)
             elif choice == "2":
-                _setup_other_provider(settings, ws)
-            elif choice == "3":
                 _setup_minds(settings, ws, default_url=None)
+            elif choice == "3":
+                _setup_other_provider(settings, ws)
             break  # success
         except _SetupRetry:
             console.print()
