@@ -31,6 +31,12 @@ clipboard = [
 [project.scripts]
 anton = "anton.cli:app"
 
+[tool.hatch.build.targets.wheel]
+packages = ["anton"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"anton/templates/dashboard_base.html" = "anton/templates/dashboard_base.html"
+
 [tool.hatch.version]
 source = "regex"
 path = "anton/__init__.py"

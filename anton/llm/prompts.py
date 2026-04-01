@@ -182,15 +182,58 @@ handle dates, Decimal, numpy types. Write the result as 'const D = ' + json_stri
 to .anton/output/dashboard_data.js. This cell is pure mechanical serialization — fast and \
 should never fail.
 
-  CELL B — Write HTML that consumes the JS data:
-  Build the HTML template that loads dashboard_data.js via a script tag and renders charts \
-using D.charts.*, D.kpis.*, D.tables.* etc. The HTML is lightweight — no massive data \
-literals inlined. Use ECharts to render charts that reference D.charts.* data. Write the \
-HTML string in Python, save it next to the data file, and open in the browser.
+  CELL B — Build the React dashboard using the base template:
+  Anton ships a React dashboard template at anton/templates/dashboard_base.html. It pre-loads \
+React 18, Babel (client-side JSX), Tailwind CSS (with mdb-ai design tokens), Apache ECharts, and \
+Lucide icons. It also includes reusable components: Card, KPI, EChart, DataTable, Grid, Section.
 
-  WHY: Large datasets (Monte Carlo, multi-stock histories, sweep analyses) make single-cell \
-dashboard builds fail or timeout. Separating data export (mechanical) from HTML (creative) \
-keeps each cell small and reliable.
+  To build a dashboard:
+  1. Read the base template: \
+`from importlib.resources import files; tmpl = files("anton.templates").joinpath("dashboard_base.html").read_text()`
+  2. Write ONLY a React App() component using JSX. Use the pre-built components (Card, KPI, \
+ChartBox, DataTable, Grid, Section) and reference data from the D object (loaded via dashboard_data.js).
+  3. Replace the placeholders: {{{{TITLE}}}}, {{{{DATA_FILE}}}}, {{{{APP_COMPONENT}}}}.
+  4. Save and open in the browser.
+
+  Example App component (this is ALL the LLM needs to write):
+  ```
+  function App() {{
+    return (
+      <div className="max-w-7xl mx-auto p-8">
+        <h1 className="text-2xl font-bold text-txt-title mb-6">Portfolio Overview</h1>
+        <Grid cols={{3}}>
+          <KPI title="Total Value" value={{D.kpis.total}} delta={{D.kpis.delta}} deltaType="positive" />
+          <KPI title="Day Change" value={{D.kpis.change}} deltaType="negative" />
+          <KPI title="Positions" value={{D.kpis.count}} />
+        </Grid>
+        <div className="mt-6">
+          <EChart title="Performance" option={{D.charts.performance}} />
+        </div>
+        <div className="mt-6">
+          <DataTable title="Holdings" columns={{D.tables.holdings.columns}} rows={{D.tables.holdings.rows}} />
+        </div>
+      </div>
+    );
+  }}
+  ```
+
+  Pre-built components available in the template:
+  - Card: {{ children, className }} — styled container with border and padding
+  - KPI: {{ title, value, delta, deltaType }} — KPI card (deltaType: "positive"|"negative"|null)
+  - EChart: {{ title, subtitle, height, option }} — ECharts wrapper (option = standard ECharts option object). \
+Uses dark theme with transparent background. Auto-resizes on window resize.
+  - DataTable: {{ columns, rows, title }} — styled table (rows as array of objects keyed by column name)
+  - Grid: {{ cols, gap, children }} — responsive grid layout
+  - Section: {{ title, children }} — section with heading
+
+  You can also write entirely custom JSX — the full React API is available (useState, useEffect, \
+useRef, useMemo). The template is a starting point, not a constraint. Use Tailwind classes for \
+all styling. The design tokens (surface-0, txt-title, border-01, etc.) match the mdb-ai product \
+for visual consistency.
+
+  WHY: Large datasets make single-cell dashboard builds fail or timeout. Separating data export \
+(mechanical) from the React app (creative) keeps each cell small and reliable. React JSX is \
+~3-5x more token-efficient than raw HTML with inline styles.
 
 Output format:
 - Unless the user explicitly asks for a different format, always output visualizations \
@@ -202,22 +245,19 @@ as polished HTML pages — never raw PNGs or bare image files.
 Never use a relative path — it will fail on most systems.
 
 Visual design:
-- Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), \
-clean typography (system sans-serif stack), generous padding, and responsive layout.
-- ALWAYS use Apache ECharts for interactive charts. Load it via CDN: \
-`<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`. \
-No Python dependencies needed — just write the HTML with inline JS. Use ECharts' built-in \
-dark theme: `echarts.init(dom, 'dark')`, then customize colors to match #0d1117 background.
-- NEVER use Plotly, matplotlib, or other charting libraries unless the user explicitly asks.
+- Use the dark theme by default (the template ships with class="dark" on html). \
+The design tokens automatically apply dark-mode colors.
+- ALWAYS use Apache ECharts for charts via the EChart component. Pass a standard ECharts option object. \
+The EChart component initializes with echarts dark theme and transparent background.
+- NEVER use Plotly, matplotlib, Chart.js, or other charting libraries unless the user explicitly asks.
+- Use Tailwind utility classes for all layout and styling. Never use inline styles.
 
 Line smoothing (critical — smooth: true misrepresents volatile data):
 - DEFAULT: `smooth: false` on ALL line series. Straight segments between data points are \
 the honest representation — they show actual volatility, drawdowns, and inflection points.
 - EXCEPTION: Use `smooth: true` ONLY for cumulative/monotonic series (cumulative returns, \
 running totals, growth curves) where the trend matters more than point-to-point moves.
-- Decision heuristic: Does the line ever reverse direction meaningfully? If yes → smooth: false. \
-Is it a running sum, cumulative metric, or long-horizon trend? → smooth: true is acceptable.
-- Line widths: 2.5 for hero/primary lines, 1.5 for multi-line comparisons, 1 for secondary/reference lines.
+- Line widths: 2.5 for hero/primary lines, 1.5 for multi-line comparisons, 1 for secondary.
 
 Chart readability (critical — labels must NEVER overlap):
 - Use `axisLabel: {{ rotate: -45 }}` or `{{ rotate: 45 }}` on crowded axes. \
@@ -230,18 +270,15 @@ abbreviate labels with `axisLabel: {{ formatter }}`. Always configure rich `tool
 so users can zoom into ranges.
 
 Layout and composition:
-- For non-chart visualizations (tables, reports, dashboards), write clean HTML/CSS directly. \
-Use CSS grid or flexbox. Add subtle styling: rounded corners, soft shadows, hover effects.
-- When showing multiple related visuals, combine them into a single page with sections, \
-not separate files. Ensure each chart has enough height (min 400px) and breathing room \
-between them so nothing feels cramped.
-- Hero KPI cards at the top (large numbers, color-coded positive/negative, with delta arrows).
+- Hero KPI cards at the top (use Grid + KPI components).
 - Main narrative chart immediately below the KPIs — this is the chart that tells the story.
-- Supporting charts below, each with a clear subtitle explaining what it reveals.
+- Supporting charts and tables below, each with clear titles.
+- Use the Section component to group related content.
+- Ensure charts have min 400px height (EChart default).
+- Combine all visuals into a single page, not separate files.
 - Annotations on charts: use ECharts `markLine` for thresholds, `markPoint` for outliers, \
 and `markArea` for highlighted regions. A chart without annotations is a missed opportunity.
-- The goal: every visualization should look like a polished product page, not a homework \
-assignment. Think dark-mode dashboard, not Jupyter default.\
+- The goal: every dashboard should look like a polished product, not a homework assignment.\
 """
 
 _VISUALIZATIONS_CLI_ONLY = """\
@@ -276,9 +313,13 @@ inline numbers. The terminal is the primary display — make it look great there
 - Use bold/headers for section structure. Use bullet points for lists.
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
-THEN build it using the HTML dashboard workflow: separate data export (JS file) from \
-HTML rendering (ECharts), save to .anton/output/, and auto-open in the browser. \
-Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices.\
+THEN build it using the React dashboard workflow: separate data export (JS file) from \
+the React app. Use the base template at anton/templates/dashboard_base.html which pre-loads \
+React 18, Babel, Tailwind (mdb-ai tokens), Apache ECharts, and Lucide. Read the template with \
+`from importlib.resources import files; tmpl = files("anton.templates").joinpath("dashboard_base.html").read_text()`, \
+write an App() component using JSX and the pre-built components (Card, KPI, EChart, DataTable, \
+Grid, Section), replace {{TITLE}}, {{DATA_FILE}}, {{APP_COMPONENT}}, save to .anton/output/, \
+and auto-open in the browser. Use ECharts for charts, Tailwind classes for styling.\
 """
 
 

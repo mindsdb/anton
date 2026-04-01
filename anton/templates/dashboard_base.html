@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>{{TITLE}}</title>
+
+<!-- Tailwind CSS (play CDN — no build needed) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        surface: {
+          0: 'var(--surface-0)',
+          '0h': 'var(--surface-0-hover)',
+          '0a': 'var(--surface-0-active)',
+          '01': 'var(--surface-01)',
+          '01h': 'var(--surface-01-hover)',
+          '01a': 'var(--surface-01-active)',
+          '02': 'var(--surface-02)',
+          '02h': 'var(--surface-02-hover)',
+          '02a': 'var(--surface-02-active)',
+          '03': 'var(--surface-03)',
+        },
+        border: {
+          0: 'var(--border-0)',
+          '01': 'var(--border-01)',
+          '02': 'var(--border-02)',
+          '03': 'var(--border-03)',
+          '04': 'var(--border-04)',
+        },
+        txt: {
+          title: 'var(--text-title)',
+          primary: 'var(--text-primary)',
+          strong: 'var(--text-strong)',
+          faint: 'var(--text-faint)',
+          disabled: 'var(--text-disabled)',
+        },
+        error: 'rgb(var(--error-0))',
+        success: 'rgb(var(--success-0))',
+        warning: 'rgb(var(--warning-0))',
+      },
+    },
+  },
+}
+</script>
+
+<!-- Design tokens (from mdb-ai) -->
+<style>
+:root {
+  --surface-0: #ffffff;
+  --surface-0-hover: #f5f5f4;
+  --surface-0-active: #f0f0ef;
+  --surface-01: #f5f5f4;
+  --surface-01-hover: #f0f0ef;
+  --surface-01-active: #e7e5e4;
+  --surface-02: #f0f0ef;
+  --surface-02-hover: #e7e5e4;
+  --surface-02-active: #d6d3d1;
+  --surface-03: #dde9ee;
+  --border-0: #f0f0ef;
+  --border-01: #e7e5e4;
+  --border-02: #d6d3d1;
+  --border-03: #ada7a4;
+  --border-04: #78716c;
+  --text-title: #0b363f;
+  --text-faint: #55666d;
+  --text-primary: #3a464b;
+  --text-strong: #080b0c;
+  --text-disabled: #7d95a1;
+  --error-0: 185 28 28;
+  --success-0: 4 120 87;
+  --warning-0: 194 65 12;
+}
+.dark {
+  --surface-0: #0f1416;
+  --surface-0-hover: #1a2023;
+  --surface-0-active: #293236;
+  --surface-01: #1a2023;
+  --surface-01-hover: #293236;
+  --surface-01-active: #3a464b;
+  --surface-02: #293236;
+  --surface-02-hover: #3a464b;
+  --surface-02-active: #55666d;
+  --surface-03: #3a464b;
+  --border-0: #1a2023;
+  --border-01: #3a464b;
+  --border-02: #55666d;
+  --border-03: #64777e;
+  --border-04: #7d95a1;
+  --text-title: #ffffff;
+  --text-faint: #a0beca;
+  --text-primary: #dde9ee;
+  --text-strong: #ffffff;
+  --text-disabled: #3f3f46;
+  --error-0: 248 113 113;
+  --success-0: 52 211 153;
+  --warning-0: 251 146 60;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+</style>
+
+<!-- React + Babel (client-side JSX compilation) -->
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+
+<!-- Apache ECharts -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+
+<!-- Lucide Icons -->
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+</head>
+<body class="bg-surface-0 text-txt-primary min-h-screen">
+
+<div id="root"></div>
+
+<!-- Dashboard data (injected by Anton scratchpad) -->
+<script src="{{DATA_FILE}}"></script>
+
+<!-- Dashboard app (injected by Anton scratchpad) -->
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+// --- Reusable components matching mdb-ai design ---
+
+function Card({ children, className = '' }) {
+  return (
+    <div className={`bg-surface-01 border border-border-01 rounded-lg p-6 ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+function KPI({ title, value, delta, deltaType }) {
+  const color = deltaType === 'positive' ? 'text-success' :
+                deltaType === 'negative' ? 'text-error' : 'text-txt-faint';
+  const arrow = deltaType === 'positive' ? '\u2191' :
+                deltaType === 'negative' ? '\u2193' : '';
+  return (
+    <Card>
+      <p className="text-sm text-txt-faint mb-1">{title}</p>
+      <p className="text-3xl font-bold text-txt-title">{value}</p>
+      {delta && <p className={`text-sm mt-1 ${color}`}>{arrow} {delta}</p>}
+    </Card>
+  );
+}
+
+function EChart({ id, title, subtitle, height = 400, option }) {
+  const containerRef = useRef(null);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!containerRef.current || !option) return;
+    if (chartRef.current) chartRef.current.dispose();
+
+    const chart = echarts.init(containerRef.current, 'dark');
+
+    // Apply default dark background to match our design tokens
+    const mergedOption = {
+      backgroundColor: 'transparent',
+      ...option,
+    };
+
+    chart.setOption(mergedOption);
+    chartRef.current = chart;
+
+    const handleResize = () => chart.resize();
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      chart.dispose();
+    };
+  }, [option]);
+
+  return (
+    <Card>
+      {title && <h3 className="text-lg font-semibold text-txt-title mb-1">{title}</h3>}
+      {subtitle && <p className="text-sm text-txt-faint mb-4">{subtitle}</p>}
+      <div ref={containerRef} style={{ height, width: '100%' }} />
+    </Card>
+  );
+}
+
+function DataTable({ columns, rows, title }) {
+  return (
+    <Card>
+      {title && <h3 className="text-lg font-semibold text-txt-title mb-4">{title}</h3>}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border-02">
+              {columns.map((col, i) => (
+                <th key={i} className="text-left py-2 px-3 text-txt-faint font-medium">{col}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} className="border-b border-border-0 hover:bg-surface-0h">
+                {columns.map((col, j) => (
+                  <td key={j} className="py-2 px-3 text-txt-primary">{row[col] ?? row[j] ?? ''}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function Grid({ cols = 2, gap = 6, children }) {
+  return (
+    <div className={`grid grid-cols-1 md:grid-cols-${cols} gap-${gap}`}>
+      {children}
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div className="mb-8">
+      {title && <h2 className="text-xl font-bold text-txt-title mb-4">{title}</h2>}
+      {children}
+    </div>
+  );
+}
+
+// --- Mount point: LLM writes App() below this line ---
+{{APP_COMPONENT}}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
