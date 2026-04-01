@@ -3864,7 +3864,10 @@ def _print_slash_help(console: Console) -> None:
     console.print()
 
     console.print("[anton.cyan]Available commands:[/]")
-    
+
+    console.print("\n[bold]LLM Provider[/]")
+    console.print("  [bold]/llm[/]      — Change LLM provider or API key")
+
     console.print("\n[bold]Data Connections[/]")
     console.print("  [bold]/connect[/]   — Connect a database or API to your Local Vault")
     console.print("  [bold]/list[/]      — List all saved connections")
@@ -4254,7 +4257,21 @@ async def _chat_loop(
             if message_content is None and stripped.startswith("/"):
                 parts = stripped.split(maxsplit=1)
                 cmd = parts[0].lower()
-                if cmd == "/minds":
+                if cmd == "/llm":
+                    session = await _handle_setup(
+                        console,
+                        settings,
+                        workspace,
+                        state,
+                        self_awareness,
+                        cortex,
+                        session,
+                        episodic=episodic,
+                        history_store=history_store,
+                        session_id=current_session_id,
+                    )
+                    continue
+                elif cmd == "/minds":
                     session = await _handle_connect(
                         console,
                         settings,
@@ -4480,6 +4497,26 @@ async def _chat_loop(
                 display.abort()
                 console.print(f"[anton.error]Error: {exc}[/]")
                 console.print()
+                err_msg = str(exc)
+                if "401" in err_msg or "403" in err_msg or "Authentication" in err_msg:
+                    if Confirm.ask(
+                        "  Would you like to set up new LLM credentials?",
+                        default=True,
+                        console=console,
+                    ):
+                        session = await _handle_setup(
+                            console,
+                            settings,
+                            workspace,
+                            state,
+                            self_awareness,
+                            cortex,
+                            session,
+                            episodic=episodic,
+                            history_store=history_store,
+                            session_id=current_session_id,
+                        )
+                    console.print()
     except KeyboardInterrupt:
         pass
 
