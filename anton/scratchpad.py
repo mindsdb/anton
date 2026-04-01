@@ -479,6 +479,21 @@ class Scratchpad:
             self.cells.append(cell)
             yield cell
             return
+        except Exception as exc:
+            # Catch-all for unexpected errors (e.g. JSON parse failures).
+            # The subprocess may still be alive and usable — don't kill it.
+            # Return the error as a Cell so the LLM can see it and recover.
+            cell = Cell(
+                code=code,
+                stdout="",
+                stderr="",
+                error=f"Scratchpad result could not be read: {exc}. The scratchpad is still running — you can retry.",
+                description=description,
+                estimated_time=estimated_time,
+            )
+            self.cells.append(cell)
+            yield cell
+            return
 
         if result_data is None:
             result_data = {"stdout": "", "stderr": "", "error": "Process exited unexpectedly."}
