@@ -26,37 +26,13 @@ class TestDetectColorMode:
         with patch.dict("os.environ", {"ANTON_THEME": "LIGHT"}, clear=False):
             assert detect_color_mode() == "light"
 
-    def test_colorfgbg_dark(self):
-        env = {"COLORFGBG": "15;0"}
-        with patch.dict("os.environ", env, clear=False):
-            # Remove ANTON_THEME if present
-            with patch.dict("os.environ", {"ANTON_THEME": ""}, clear=False):
-                assert detect_color_mode() == "dark"
-
-    def test_colorfgbg_light(self):
-        env = {"COLORFGBG": "0;15"}
-        with patch.dict("os.environ", env, clear=False):
-            with patch.dict("os.environ", {"ANTON_THEME": ""}, clear=False):
-                assert detect_color_mode() == "light"
-
     def test_default_is_dark(self):
-        with patch.dict("os.environ", {"ANTON_THEME": "", "COLORFGBG": ""}, clear=False):
-            with patch("anton.channel.theme.sys.platform", "linux"):
-                assert detect_color_mode() == "dark"
+        with patch.dict("os.environ", {"ANTON_THEME": ""}, clear=False):
+            assert detect_color_mode() == "dark"
 
-    def test_macos_dark_mode(self):
-        with patch.dict("os.environ", {"ANTON_THEME": "", "COLORFGBG": ""}, clear=False):
-            with patch("anton.channel.theme.sys.platform", "darwin"):
-                with patch("anton.channel.theme.subprocess.run") as mock_run:
-                    mock_run.return_value.returncode = 0
-                    assert detect_color_mode() == "dark"
-
-    def test_macos_light_mode(self):
-        with patch.dict("os.environ", {"ANTON_THEME": "", "COLORFGBG": ""}, clear=False):
-            with patch("anton.channel.theme.sys.platform", "darwin"):
-                with patch("anton.channel.theme.subprocess.run") as mock_run:
-                    mock_run.return_value.returncode = 1
-                    assert detect_color_mode() == "light"
+    def test_unrecognised_value_falls_back_to_dark(self):
+        with patch.dict("os.environ", {"ANTON_THEME": "solarized"}, clear=False):
+            assert detect_color_mode() == "dark"
 
 
 class TestPalettes:
