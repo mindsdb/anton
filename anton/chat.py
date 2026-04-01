@@ -4102,7 +4102,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     import time as _time
 
     console.print()
-    _msg = "LLM is ready! Let's take it for a spin — I'll build you a sample dashboard to make sure everything works. Ok?"
+    _msg = "LLM is ready! Let's take it for a spin — I'll build an interactive NVIDIA vs Bitcoin investment dashboard to make sure everything works. Ok?"
     console.print("[anton.prompt]anton>[/] ", end="")
     for ch in _msg:
         console.file.write(ch)
