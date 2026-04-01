@@ -4077,6 +4077,12 @@ async def _chat_loop(
     toolbar = {"stats": "", "status": ""}
     display = StreamDisplay(console, toolbar=toolbar)
     last_token_status: TokenLimitInfo | None = None
+    if settings.minds_api_key and settings.minds_url:
+        last_token_status = check_minds_token_limits(
+            settings.minds_url.rstrip("/"),
+            settings.minds_api_key,
+            verify=settings.minds_ssl_verify,
+        )
 
     def _bottom_toolbar():
         stats = toolbar["stats"]
@@ -4400,6 +4406,14 @@ async def _chat_loop(
                 toolbar["stats"] = "  ".join(parts)
                 toolbar["status"] = ""
                 display.finish()
+                if last_token_status is not None and last_token_status.status is TokenLimitStatus.WARNING:
+                    pct = int(last_token_status.used / last_token_status.limit * 100) if last_token_status.limit else 80
+                    console.print(
+                        f"[anton.warning]Approaching token limit: {last_token_status.used:,} / "
+                        f"{last_token_status.limit:,} tokens used ({pct}%). "
+                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
+                    )
+                    console.print()
                 if _query_count == 1:
                     send_event(settings, "anton_first_answer")
             except anthropic.AuthenticationError:
