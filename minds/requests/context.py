@@ -10,6 +10,7 @@ from minds.common.constants import (
     CONTEXT_FIELD_ORGANIZATION_ID,
     CONTEXT_FIELD_REQUEST_ID,
     CONTEXT_FIELD_USER_ID,
+    HEADER_BILLING_PERIOD_END,
     HEADER_BILLING_PERIOD_START,
     HEADER_ORGANIZATION_ID,
     HEADER_USER_EMAIL,
@@ -36,8 +37,11 @@ class Context(BaseModel):
     )
     user_email: str = Field(default="", description="The user email")
     user_roles: list[str] = Field(default=[], description="The user roles")
-    billing_period_start: datetime | None = Field(
+    billing_cycle_start: datetime | None = Field(
         default=None, description="Start of the current billing period for monthly usage calculations"
+    )
+    billing_cycle_end: datetime | None = Field(
+        default=None, description="End of the current billing period for monthly usage calculations"
     )
 
 
@@ -49,6 +53,8 @@ def extract_context_from_request(request: Request) -> Context:
     if request.headers.get(HEADER_USER_ID) is None or request.headers.get(HEADER_ORGANIZATION_ID) is None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    logger.debug(f"Request headers: {request.headers}")
+
     x_user_id = str(request.headers.get(HEADER_USER_ID))
     x_organization_id = str(request.headers.get(HEADER_ORGANIZATION_ID))
     x_user_email = str(request.headers.get(HEADER_USER_EMAIL))
@@ -59,23 +65,34 @@ def extract_context_from_request(request: Request) -> Context:
     user_email = x_user_email
     user_roles = x_user_roles.split(",") if x_user_roles else []
 
-    billing_period_start: datetime | None = None
-    x_billing_period_start = request.headers.get(HEADER_BILLING_PERIOD_START)
+    billing_cycle_start: datetime | None = None
+    billing_cycle_end: datetime | None = None
+    x_billing_period_start = str(request.headers.get(HEADER_BILLING_PERIOD_START))
+    x_billing_period_end = str(request.headers.get(HEADER_BILLING_PERIOD_END))
+
+    logger.debug(f"Billing period start: {x_billing_period_start}")
+    logger.debug(f"Billing period end: {x_billing_period_end}")
+
     if x_billing_period_start:
         try:
-            # Python 3.10's fromisoformat() does not accept the "Z" suffix;
-            # normalize to "+00:00" so all supported versions parse correctly.
-            normalized = x_billing_period_start.replace("Z", "+00:00")
-            billing_period_start = datetime.fromisoformat(normalized)
+            billing_cycle_start = datetime.fromisoformat(x_billing_period_start.strip())
+            logger.debug(f"Billing cycle start: {billing_cycle_start}")
         except (ValueError, TypeError):
-            logger.warning(f"Invalid {HEADER_BILLING_PERIOD_START} header value: {x_billing_period_start}")
+            logger.warning(f"Invalid {HEADER_BILLING_PERIOD_START} header value: {x_billing_period_start!r}")
+
+    if x_billing_period_end:
+        try:
+            billing_cycle_end = datetime.fromisoformat(x_billing_period_end.strip())
+            logger.debug(f"Billing cycle end: {billing_cycle_end}")
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid {HEADER_BILLING_PERIOD_END} header value: {x_billing_period_end!r}")
 
     request_id = uuid.uuid4()
 
     logger.debug(
         f"Extracted context from request: request_id={request_id}, user_id={user_id}, "
         f"organization_id={organization_id}, user_email={user_email}, user_roles={user_roles}, "
-        f"billing_period_start={billing_period_start}"
+        f"billing_cycle_start={billing_cycle_start}, billing_cycle_end={billing_cycle_end}"
     )
 
     return Context(
@@ -84,7 +101,8 @@ def extract_context_from_request(request: Request) -> Context:
         request_id=request_id,
         user_email=user_email,
         user_roles=user_roles,
-        billing_period_start=billing_period_start,
+        billing_cycle_start=billing_cycle_start,
+        billing_cycle_end=billing_cycle_end,
     )
 
 

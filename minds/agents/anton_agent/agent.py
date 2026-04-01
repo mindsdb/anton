@@ -24,6 +24,7 @@ from minds.common.settings.app_settings import get_app_settings
 from minds.common.utilities import safe_parse
 from minds.db.pg_session import get_engine, get_session_factory
 from minds.model.mind import Mind
+from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
 from minds.services.conversations import ConversationsService
@@ -93,8 +94,17 @@ class AntonAgent(BaseAgent):
     The Anton agent is a general-purpose agent that can be used to answer questions about the data.
     """
 
-    def __init__(self, mind: Mind, mindsdb_client: Server):
-        super().__init__(mind=mind, mindsdb_client=mindsdb_client)
+    def __init__(
+        self,
+        mind: Mind,
+        mindsdb_client: Server,
+        context: Context | None = None,
+    ):
+        super().__init__(
+            mind=mind,
+            mindsdb_client=mindsdb_client,
+            context=context,
+        )
 
         # Create a unique workspace directory per org/user
         self.workspace_dir = Path(agent_settings.root_workspace_dir) / str(mind.organization_id) / str(mind.user_id)

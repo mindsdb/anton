@@ -8,6 +8,7 @@ from mindsdb_sdk.server import Server
 from minds.agents.base import BaseAgent
 from minds.common.logger import get_logger
 from minds.model.mind import Mind
+from minds.requests.context import Context
 
 logger = get_logger(__name__)
 
@@ -21,7 +22,13 @@ class AgentController:
         self.agents = {}
         self._discover_agents()
 
-    def get_agent(self, agent_name: str, mind: Mind, mindsdb_client: Server) -> BaseAgent:
+    def get_agent(
+        self,
+        agent_name: str,
+        mind: Mind,
+        mindsdb_client: Server,
+        context: Context | None = None,
+    ) -> BaseAgent:
         """
         Get the agent instance for the given agent name.
 
@@ -29,6 +36,7 @@ class AgentController:
             agent_name: The name of the agent.
             mind: The mind to use for the agent.
             mindsdb_client: The MindsDB client to use for the agent.
+            context: The request context.
 
         Returns:
             The agent instance.
@@ -37,7 +45,11 @@ class AgentController:
         agent_class = self.agents[agent_name]
         logger.debug(f"Found agent class: {agent_class}")
 
-        return agent_class(mind, mindsdb_client)
+        return agent_class(
+            mind=mind,
+            mindsdb_client=mindsdb_client,
+            context=context,
+        )
 
     def _discover_agents(self):
         """
@@ -52,6 +64,9 @@ class AgentController:
                 if agent_name.startswith("_"):
                     continue
                 if not agent_dir.name.endswith("_agent"):
+                    continue
+                # passthrough_agent is not a standard BaseAgent — skip it
+                if agent_name == "passthrough_agent":
                     continue
 
                 agent_module = importlib.import_module(f"minds.agents.{agent_name}.agent")

@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 from minds.common.constants import (
+    HEADER_BILLING_PERIOD_END,
     HEADER_BILLING_PERIOD_START,
     HEADER_ORGANIZATION_ID,
     HEADER_USER_EMAIL,
@@ -33,7 +34,8 @@ class TestContext:
         assert context.organization_id == UUID("00000000-0000-0000-0000-000000000000")
         assert context.user_email == ""
         assert context.user_roles == []
-        assert context.billing_period_start is None
+        assert context.billing_cycle_start is None
+        assert context.billing_cycle_end is None
 
     def test_context_initialization_with_values(self):
         """Test Context initialization with provided values."""
@@ -203,7 +205,22 @@ class TestExtractContextFromRequest:
 
         context = extract_context_from_request(mock_request)
 
-        assert context.billing_period_start == datetime(2026, 2, 1, tzinfo=timezone.utc)
+        assert context.billing_cycle_start == datetime(2026, 2, 1, tzinfo=timezone.utc)
+
+    def test_extract_context_with_billing_period_start_naive(self):
+        """Test extracting billing_period_start without timezone info (as sent by the gateway)."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_START: "2026-04-01T17:25:59",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_start == datetime(2026, 4, 1, 17, 25, 59)
 
     def test_extract_context_with_billing_period_start_z_suffix(self):
         """Test extracting billing_period_start with trailing Z (as sent by the gateway)."""
@@ -218,7 +235,22 @@ class TestExtractContextFromRequest:
 
         context = extract_context_from_request(mock_request)
 
-        assert context.billing_period_start == datetime(2026, 2, 17, tzinfo=timezone.utc)
+        assert context.billing_cycle_start == datetime(2026, 2, 17, tzinfo=timezone.utc)
+
+    def test_extract_context_with_billing_period_start_whitespace(self):
+        """Test that leading/trailing whitespace in billing period header is handled."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_START: " 2026-04-01T17:25:59 ",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_start == datetime(2026, 4, 1, 17, 25, 59)
 
     def test_extract_context_without_billing_period_start(self):
         """Test that missing billing period header defaults to None."""
@@ -232,7 +264,7 @@ class TestExtractContextFromRequest:
 
         context = extract_context_from_request(mock_request)
 
-        assert context.billing_period_start is None
+        assert context.billing_cycle_start is None
 
     def test_extract_context_with_invalid_billing_period_start(self):
         """Test that an invalid billing period header is handled gracefully."""
@@ -247,7 +279,130 @@ class TestExtractContextFromRequest:
 
         context = extract_context_from_request(mock_request)
 
-        assert context.billing_period_start is None
+        assert context.billing_cycle_start is None
+
+    def test_extract_context_with_billing_period_end(self):
+        """Test extracting billing_period_end from header."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_END: "2026-03-01T00:00:00+00:00",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_end == datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+    def test_extract_context_with_billing_period_end_naive(self):
+        """Test extracting billing_period_end without timezone info (as sent by the gateway)."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_END: "2026-05-01T17:25:59",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_end == datetime(2026, 5, 1, 17, 25, 59)
+
+    def test_extract_context_with_billing_period_end_z_suffix(self):
+        """Test extracting billing_period_end with trailing Z."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_END: "2026-03-17T00:00:00Z",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_end == datetime(2026, 3, 17, tzinfo=timezone.utc)
+
+    def test_extract_context_with_billing_period_end_whitespace(self):
+        """Test that leading/trailing whitespace in billing period end header is handled."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_END: " 2026-05-01T17:25:59 ",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_end == datetime(2026, 5, 1, 17, 25, 59)
+
+    def test_extract_context_without_billing_period_end(self):
+        """Test that missing billing period end header defaults to None."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_end is None
+
+    def test_extract_context_with_invalid_billing_period_end(self):
+        """Test that an invalid billing period end header is handled gracefully."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_END: "not-a-date",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_end is None
+
+    def test_extract_context_with_both_billing_period_headers(self):
+        """Test extracting both billing period start and end from headers."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_START: "2026-02-01T00:00:00+00:00",
+            HEADER_BILLING_PERIOD_END: "2026-03-01T00:00:00+00:00",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_start == datetime(2026, 2, 1, tzinfo=timezone.utc)
+        assert context.billing_cycle_end == datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+    def test_extract_context_with_both_billing_period_headers_naive(self):
+        """Test extracting both billing periods as naive datetimes matching real gateway format."""
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {
+            HEADER_USER_ID: "00000000-0000-0000-0000-000000000001",
+            HEADER_ORGANIZATION_ID: "00000000-0000-0000-0000-000000000002",
+            HEADER_USER_EMAIL: "user@example.com",
+            HEADER_USER_ROLES: "",
+            HEADER_BILLING_PERIOD_START: "2026-04-01T17:25:59",
+            HEADER_BILLING_PERIOD_END: "2026-05-01T17:25:59",
+        }
+
+        context = extract_context_from_request(mock_request)
+
+        assert context.billing_cycle_start == datetime(2026, 4, 1, 17, 25, 59)
+        assert context.billing_cycle_end == datetime(2026, 5, 1, 17, 25, 59)
 
 
 class TestLangfuseContextMetadata:

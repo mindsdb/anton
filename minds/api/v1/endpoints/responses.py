@@ -82,7 +82,7 @@ async def responses(
     logger.debug(f"🔄 Context: {context.model_dump()}")
 
     # Check usage limits before processing
-    await require_usage_available(limits_service, ResourceType.QUESTIONS)
+    await require_usage_available(limits_service, ResourceType.TOKENS)
 
     langfuse_enabled = is_langfuse_enabled(context=context)
     logger.debug(f"🔄 [{context.request_id}] Langfuse is enabled: {langfuse_enabled}")
@@ -104,6 +104,7 @@ async def responses(
             responses_request=responses_request,
             conversation_service=conversations_service,
             instrument=instrument,
+            limits_service=limits_service,
         )
 
         return response

@@ -42,7 +42,6 @@ class TestLimitsService:
         """Mock UsageService instance."""
         service = Mock(spec=UsageService)
         service.count_tokens = AsyncMock(return_value=10000)
-        service.count_questions = AsyncMock(return_value=50)
         return service
 
     @pytest.fixture
@@ -53,7 +52,8 @@ class TestLimitsService:
             organization_id=uuid4(),
             user_email="test@test.com",
             user_roles=["user"],
-            billing_period_start=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            billing_cycle_start=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            billing_cycle_end=datetime(2026, 3, 1, tzinfo=timezone.utc),
         )
 
     @pytest.fixture
@@ -117,9 +117,6 @@ class TestLimitsService:
             datasources=ResourceUsageConfig(
                 limit=LimitsConfig(lifetime=20, monthly=-1),
             ),
-            questions=ResourceUsageConfig(
-                limit=LimitsConfig(lifetime=-1, monthly=1000),
-            ),
         )
 
         with patch("minds.services.limits.get_mind_limits_config", return_value=mock_limits):
@@ -130,20 +127,17 @@ class TestLimitsService:
         assert result.minds.usage.lifetime == 5
         assert result.datasources.usage.lifetime == 3
         assert result.tokens.usage.lifetime == 10000
-        assert result.questions.usage.lifetime == 50
 
         # Verify billing_cycle usage counts were populated
         assert result.minds.usage.billing_cycle == 5
         assert result.datasources.usage.billing_cycle == 3
         assert result.tokens.usage.billing_cycle == 10000
-        assert result.questions.usage.billing_cycle == 50
 
         # Verify the limit thresholds were preserved
         assert result.tokens.limit.lifetime == 100000
         assert result.tokens.limit.monthly == 50000
         assert result.minds.limit.lifetime == 10
         assert result.datasources.limit.lifetime == 20
-        assert result.questions.limit.monthly == 1000
 
     @pytest.mark.asyncio
     async def test_get_mind_limits_default_unlimited(self, limits_service):
@@ -158,7 +152,6 @@ class TestLimitsService:
         assert result.minds.usage.lifetime == 5
         assert result.datasources.usage.lifetime == 3
         assert result.tokens.usage.lifetime == 10000
-        assert result.questions.usage.lifetime == 50
         # Limits should be unlimited (default -1)
         assert result.tokens.limit.lifetime == -1
         assert result.minds.limit.lifetime == -1
@@ -177,15 +170,21 @@ class TestLimitsService:
         with patch("minds.services.limits.get_mind_limits_config", return_value=default_limits):
             await limits_service.get_mind_limits()
 
-        # Called twice: once for lifetime (since=None), once for billing cycle (since=billing_period_start)
+        # Called twice: once for lifetime (since=None, until=None), once for billing cycle
         assert mock_minds_service.count_minds.call_count == 2
         mock_minds_service.count_minds.assert_any_call(is_sample=False)
-        mock_minds_service.count_minds.assert_any_call(is_sample=False, since=mock_context.billing_period_start)
+        mock_minds_service.count_minds.assert_any_call(
+            is_sample=False,
+            since=mock_context.billing_cycle_start,
+            until=mock_context.billing_cycle_end,
+        )
 
         assert mock_datasources_service.count_datasources.call_count == 2
         mock_datasources_service.count_datasources.assert_any_call(is_sample=False)
         mock_datasources_service.count_datasources.assert_any_call(
-            is_sample=False, since=mock_context.billing_period_start
+            is_sample=False,
+            since=mock_context.billing_cycle_start,
+            until=mock_context.billing_cycle_end,
         )
 
     @pytest.mark.asyncio
@@ -204,11 +203,10 @@ class TestLimitsService:
         # Called twice: once for lifetime, once for billing cycle
         assert mock_usage_service.count_tokens.call_count == 2
         mock_usage_service.count_tokens.assert_any_call()
-        mock_usage_service.count_tokens.assert_any_call(since=mock_context.billing_period_start)
-
-        assert mock_usage_service.count_questions.call_count == 2
-        mock_usage_service.count_questions.assert_any_call()
-        mock_usage_service.count_questions.assert_any_call(since=mock_context.billing_period_start)
+        mock_usage_service.count_tokens.assert_any_call(
+            since=mock_context.billing_cycle_start,
+            until=mock_context.billing_cycle_end,
+        )
 
     @pytest.mark.asyncio
     async def test_get_mind_limits_zero_usage(
@@ -223,7 +221,6 @@ class TestLimitsService:
         mock_minds_service.count_minds = AsyncMock(return_value=0)
         mock_datasources_service.count_datasources = AsyncMock(return_value=0)
         mock_usage_service.count_tokens = AsyncMock(return_value=0)
-        mock_usage_service.count_questions = AsyncMock(return_value=0)
 
         service = LimitsService(
             minds_service=mock_minds_service,
@@ -244,8 +241,6 @@ class TestLimitsService:
         assert result.datasources.usage.billing_cycle == 0
         assert result.tokens.usage.lifetime == 0
         assert result.tokens.usage.billing_cycle == 0
-        assert result.questions.usage.lifetime == 0
-        assert result.questions.usage.billing_cycle == 0
 
     @pytest.mark.asyncio
     async def test_get_mind_limits_no_billing_period(
@@ -255,13 +250,14 @@ class TestLimitsService:
         mock_usage_service,
         mock_settings,
     ):
-        """Test mind limits when billing_period_start is None (no header)."""
+        """Test mind limits when billing_cycle_start and billing_cycle_end are None."""
         context_no_billing = Context(
             user_id=uuid4(),
             organization_id=uuid4(),
             user_email="test@test.com",
             user_roles=["user"],
-            billing_period_start=None,
+            billing_cycle_start=None,
+            billing_cycle_end=None,
         )
 
         service = LimitsService(
@@ -277,10 +273,10 @@ class TestLimitsService:
         with patch("minds.services.limits.get_mind_limits_config", return_value=default_limits):
             result = await service.get_mind_limits()
 
-        # Both lifetime and billing_cycle should be populated (billing cycle uses since=None)
+        # Both lifetime and billing_cycle should be populated (billing cycle uses since=None, until=None)
         assert result.minds.usage.lifetime == 5
         assert result.minds.usage.billing_cycle == 5
-        mock_minds_service.count_minds.assert_any_call(is_sample=False, since=None)
+        mock_minds_service.count_minds.assert_any_call(is_sample=False, since=None, until=None)
 
     @pytest.mark.asyncio
     async def test_get_mind_limits_different_lifetime_and_cycle(
@@ -350,3 +346,46 @@ class TestLimitsService:
             pytest.raises(Exception, match="Statsig error"),
         ):
             await limits_service.get_mind_limits()
+
+    @pytest.mark.asyncio
+    async def test_get_mind_limits_only_billing_start_no_end(
+        self,
+        mock_minds_service,
+        mock_datasources_service,
+        mock_usage_service,
+        mock_settings,
+    ):
+        """Test mind limits when only billing_cycle_start is set (no end)."""
+        context = Context(
+            user_id=uuid4(),
+            organization_id=uuid4(),
+            user_email="test@test.com",
+            user_roles=["user"],
+            billing_cycle_start=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            billing_cycle_end=None,
+        )
+
+        service = LimitsService(
+            minds_service=mock_minds_service,
+            datasources_service=mock_datasources_service,
+            usage_service=mock_usage_service,
+            context=context,
+            settings=mock_settings,
+        )
+
+        default_limits = MindLimitsConfig()
+
+        with patch("minds.services.limits.get_mind_limits_config", return_value=default_limits):
+            result = await service.get_mind_limits()
+
+        assert result.minds.usage.lifetime == 5
+        assert result.minds.usage.billing_cycle == 5
+        mock_minds_service.count_minds.assert_any_call(
+            is_sample=False,
+            since=context.billing_cycle_start,
+            until=None,
+        )
+        mock_usage_service.count_tokens.assert_any_call(
+            since=context.billing_cycle_start,
+            until=None,
+        )

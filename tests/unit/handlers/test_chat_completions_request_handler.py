@@ -99,9 +99,11 @@ class TestChatCompletionsRequestHandler:
         with (
             patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
             patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
+            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
         ):
             # Setup mocks
-            mock_handler_instance = Mock()
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.is_passthrough = False
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_streaming.return_value = mock_streaming_response
 
@@ -151,9 +153,11 @@ class TestChatCompletionsRequestHandler:
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
+            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
         ):
             # Setup mocks
-            mock_handler_instance = Mock()
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.is_passthrough = False
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
@@ -211,9 +215,11 @@ class TestChatCompletionsRequestHandler:
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
+            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
         ):
             # Setup mocks
-            mock_handler_instance = Mock()
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.is_passthrough = False
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
@@ -258,9 +264,11 @@ class TestChatCompletionsRequestHandler:
             ) as mock_process_non_streaming,
             patch.object(handler_mod, "get_langfuse_trace_id", return_value=None),
             patch.object(handler_mod, "logger") as mock_logger,
+            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
         ):
             # Setup mocks
-            mock_handler_instance = Mock()
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.is_passthrough = False
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 
@@ -305,9 +313,11 @@ class TestChatCompletionsRequestHandler:
             patch.object(
                 handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
             ) as mock_process_non_streaming,
+            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
         ):
             # Setup mocks
-            mock_handler_instance = Mock()
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.is_passthrough = False
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
             mock_process_non_streaming.return_value = mock_json_response
 

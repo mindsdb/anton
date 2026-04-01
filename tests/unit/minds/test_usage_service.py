@@ -1,10 +1,11 @@
 """
 Unit tests for UsageService.
 
-Tests the aggregation queries for token and question counting across
+Tests the aggregation queries for token counting across
 both the Responses API (messages) and Chat Completions API (chat_completions).
 """
 
+from datetime import datetime, timezone
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -96,47 +97,46 @@ class TestUsageService:
             await usage_service.count_tokens()
 
     @pytest.mark.asyncio
-    async def test_count_questions_success(self, usage_service, mock_session):
-        """Test successful question counting across both API surfaces."""
-        # First call returns messages user count, second returns chat_completions count
-        mock_session.exec.return_value.one.side_effect = [10, 5]
+    async def test_count_tokens_with_since(self, usage_service, mock_session):
+        """Test token counting with since parameter for billing cycle."""
+        mock_session.exec.return_value.one.side_effect = [800, 200]
 
-        result = await usage_service.count_questions()
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        result = await usage_service.count_tokens(since=since)
 
-        assert result == 15
+        assert result == 1000
         assert mock_session.exec.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_count_questions_zero(self, usage_service, mock_session):
-        """Test question counting when no questions have been asked."""
+    async def test_count_tokens_with_until(self, usage_service, mock_session):
+        """Test token counting with until parameter for billing cycle."""
+        mock_session.exec.return_value.one.side_effect = [600, 400]
+
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await usage_service.count_tokens(until=until)
+
+        assert result == 1000
+        assert mock_session.exec.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_count_tokens_with_since_and_until(self, usage_service, mock_session):
+        """Test token counting with both since and until for a bounded billing cycle."""
+        mock_session.exec.return_value.one.side_effect = [300, 150]
+
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await usage_service.count_tokens(since=since, until=until)
+
+        assert result == 450
+        assert mock_session.exec.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_count_tokens_with_since_and_until_zero(self, usage_service, mock_session):
+        """Test token counting returns zero for bounded period with no usage."""
         mock_session.exec.return_value.one.side_effect = [0, 0]
 
-        result = await usage_service.count_questions()
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await usage_service.count_tokens(since=since, until=until)
 
         assert result == 0
-
-    @pytest.mark.asyncio
-    async def test_count_questions_only_messages(self, usage_service, mock_session):
-        """Test question counting when only Responses API has usage."""
-        mock_session.exec.return_value.one.side_effect = [25, 0]
-
-        result = await usage_service.count_questions()
-
-        assert result == 25
-
-    @pytest.mark.asyncio
-    async def test_count_questions_only_chat_completions(self, usage_service, mock_session):
-        """Test question counting when only Chat Completions API has usage."""
-        mock_session.exec.return_value.one.side_effect = [0, 12]
-
-        result = await usage_service.count_questions()
-
-        assert result == 12
-
-    @pytest.mark.asyncio
-    async def test_count_questions_database_error(self, usage_service, mock_session):
-        """Test question counting with database error."""
-        mock_session.exec.side_effect = Exception("Database error")
-
-        with pytest.raises(UsageServiceError, match="Failed to count questions"):
-            await usage_service.count_questions()

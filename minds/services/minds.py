@@ -571,6 +571,7 @@ class MindsService:
         self,
         is_sample: bool | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
     ) -> int:
         """
         Count non-deleted minds for the current organization.
@@ -584,6 +585,8 @@ class MindsService:
                        Pass False to exclude sample/template minds from the count.
             since: When provided, only count minds created on or after this datetime.
                    Used for billing-cycle-scoped counts.
+            until: When provided, only count minds created before this datetime.
+                   Used for billing-cycle-scoped counts.
 
         Returns:
             int: Number of minds matching the filters.
@@ -591,7 +594,7 @@ class MindsService:
         try:
             logger.debug(
                 f"Counting minds for organization {self.organization_id} "
-                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since}, until={until})"
             )
 
             # Always scope to the current organization and exclude soft-deleted records
@@ -608,18 +611,21 @@ class MindsService:
             if since is not None:
                 conditions.append(Mind.created_at >= since)
 
+            if until is not None:
+                conditions.append(Mind.created_at <= until)
+
             stmt = select(func.count(Mind.id)).where(and_(*conditions))
             count = self.session.exec(stmt).one()
 
             logger.debug(
                 f"Counted {count} minds for organization {self.organization_id} "
-                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since}, until={until})"
             )
             return count
         except Exception as e:
             logger.error(
                 f"Error counting minds for organization {self.organization_id} "
-                f"(user_id={self.user_id}, is_sample={is_sample}): {str(e)}"
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since}, until={until}): {str(e)}"
             )
             raise MindsServiceError(f"Failed to count minds: {str(e)}") from None
 

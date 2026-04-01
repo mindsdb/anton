@@ -80,29 +80,32 @@ class LimitsService:
                 f"Fetching usage counts for user {self.context.user_id} in organization {self.context.organization_id}"
             )
 
-            billing_start = self.context.billing_period_start
+            billing_cycle_start = self.context.billing_cycle_start
+            billing_cycle_end = self.context.billing_cycle_end
+            logger.debug(f"Billing cycle start: {billing_cycle_start}, billing cycle end: {billing_cycle_end}")
 
             # Lifetime counts (no date filter)
             minds_lifetime = await self.minds_service.count_minds(is_sample=False)
             datasources_lifetime = await self.datasources_service.count_datasources(is_sample=False)
             tokens_lifetime = await self.usage_service.count_tokens()
-            questions_lifetime = await self.usage_service.count_questions()
 
             # Billing-cycle counts (filtered by billing_period_start when available)
-            minds_cycle = await self.minds_service.count_minds(is_sample=False, since=billing_start)
-            datasources_cycle = await self.datasources_service.count_datasources(is_sample=False, since=billing_start)
-            tokens_cycle = await self.usage_service.count_tokens(since=billing_start)
-            questions_cycle = await self.usage_service.count_questions(since=billing_start)
+            minds_cycle = await self.minds_service.count_minds(
+                is_sample=False, since=billing_cycle_start, until=billing_cycle_end
+            )
+            datasources_cycle = await self.datasources_service.count_datasources(
+                is_sample=False, since=billing_cycle_start, until=billing_cycle_end
+            )
+            tokens_cycle = await self.usage_service.count_tokens(since=billing_cycle_start, until=billing_cycle_end)
 
             limits.minds.usage = UsageConfig(lifetime=minds_lifetime, billing_cycle=minds_cycle)
             limits.datasources.usage = UsageConfig(lifetime=datasources_lifetime, billing_cycle=datasources_cycle)
             limits.tokens.usage = UsageConfig(lifetime=tokens_lifetime, billing_cycle=tokens_cycle)
-            limits.questions.usage = UsageConfig(lifetime=questions_lifetime, billing_cycle=questions_cycle)
 
             logger.debug(
                 f"Usage counts for user {self.context.user_id} in organization {self.context.organization_id}: "
                 f"minds={limits.minds.usage}, datasources={limits.datasources.usage}, "
-                f"tokens={limits.tokens.usage}, questions={limits.questions.usage}"
+                f"tokens={limits.tokens.usage}"
             )
 
             return limits

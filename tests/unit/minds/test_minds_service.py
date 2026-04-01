@@ -438,6 +438,52 @@ class TestMindsService:
             await minds_service.count_minds()
 
     @pytest.mark.asyncio
+    async def test_count_minds_with_since(self, minds_service, mock_session):
+        """Test count minds with since parameter for billing cycle."""
+        mock_session.exec.return_value.one.return_value = 2
+
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        result = await minds_service.count_minds(since=since)
+
+        assert result == 2
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_minds_with_until(self, minds_service, mock_session):
+        """Test count minds with until parameter for billing cycle."""
+        mock_session.exec.return_value.one.return_value = 4
+
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await minds_service.count_minds(until=until)
+
+        assert result == 4
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_minds_with_since_and_until(self, minds_service, mock_session):
+        """Test count minds with both since and until for a bounded billing cycle."""
+        mock_session.exec.return_value.one.return_value = 1
+
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await minds_service.count_minds(since=since, until=until)
+
+        assert result == 1
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_minds_with_all_filters(self, minds_service, mock_session):
+        """Test count minds with is_sample, since, and until combined."""
+        mock_session.exec.return_value.one.return_value = 3
+
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await minds_service.count_minds(is_sample=False, since=since, until=until)
+
+        assert result == 3
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_get_mind_with_datasources_eager_loaded_builds_expected_query(self, minds_service, mock_session):
         mock_mind = Mind(
             name="test-mind",

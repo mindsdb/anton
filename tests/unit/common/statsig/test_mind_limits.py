@@ -51,7 +51,6 @@ STATSIG_PAYLOAD = {
     "tokens": {"limit": {"lifetime": "-1", "monthly": "1000000"}},
     "minds": {"limit": {"lifetime": "1", "monthly": "1"}},
     "datasources": {"limit": {"lifetime": "3", "monthly": "3"}},
-    "questions": {"limit": {"lifetime": "-1", "monthly": "250"}},
 }
 
 
@@ -124,12 +123,6 @@ class TestCloudMode:
         )
         assert config.datasources.limit.monthly == 3, (
             f"datasources.limit.monthly should be 3, got {config.datasources.limit.monthly}"
-        )
-        assert config.questions.limit.lifetime == -1, (
-            f"questions.limit.lifetime should be -1, got {config.questions.limit.lifetime}"
-        )
-        assert config.questions.limit.monthly == 250, (
-            f"questions.limit.monthly should be 250, got {config.questions.limit.monthly}"
         )
 
     @patch("minds.common.statsig.dynamic_config.mind_limits.build_statsig_user")

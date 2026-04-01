@@ -24,6 +24,7 @@ from minds.agents.candidate_sql_agent.text_to_sql_agents.agents import TextToSQL
 from minds.agents.helpers import is_native_query_mode_enabled, model_for
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
+from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
 
@@ -32,8 +33,17 @@ agent_settings = CandidateSQLAgentSettings()
 
 
 class CandidateSQLAgent(BaseAgent):
-    def __init__(self, mind: Mind, mindsdb_client: Server):
-        super().__init__(mind=mind, mindsdb_client=mindsdb_client)
+    def __init__(
+        self,
+        mind: Mind,
+        mindsdb_client: Server,
+        context: Context | None = None,
+    ):
+        super().__init__(
+            mind=mind,
+            mindsdb_client=mindsdb_client,
+            context=context,
+        )
 
     async def _run(
         self,

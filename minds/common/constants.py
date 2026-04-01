@@ -11,6 +11,7 @@ HEADER_USER_EMAIL = "X-User-Email"
 HEADER_ORGANIZATION_ID = "X-Organization-Id"
 HEADER_USER_ROLES = "X-User-Roles"
 HEADER_BILLING_PERIOD_START = "X-Billing-Period-Start"
+HEADER_BILLING_PERIOD_END = "X-Billing-Period-End"
 
 # =============================================================================
 # Dynamic Configs

@@ -39,6 +39,3 @@ class MindLimitsConfig(BaseModel):
     datasources: ResourceUsageConfig = Field(
         default_factory=ResourceUsageConfig, description="Limits and usage for datasources"
     )
-    questions: ResourceUsageConfig = Field(
-        default_factory=ResourceUsageConfig, description="Limits and usage for questions"
-    )

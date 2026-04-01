@@ -16,9 +16,11 @@ def test_agent_controller_get_agent_instantiates_agent():
     controller.agents = {}
 
     class DummyAgent:
-        def __init__(self, mind, mindsdb_client):
+        def __init__(self, mind, mindsdb_client, limits_service=None, context=None):
             self.mind = mind
             self.mindsdb_client = mindsdb_client
+            self.limits_service = limits_service
+            self.context = context
 
     controller.agents = {"dummy_agent": DummyAgent}
 

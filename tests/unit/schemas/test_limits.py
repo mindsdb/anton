@@ -164,7 +164,7 @@ def _resource_fields() -> list[str]:
 
 # Known resource types — if a new one is added to the model but not here, the
 # test_no_unexpected_resource_fields / test_expected_resource_fields tests will fail.
-EXPECTED_RESOURCE_FIELDS = {"tokens", "minds", "datasources", "questions"}
+EXPECTED_RESOURCE_FIELDS = {"tokens", "minds", "datasources"}
 
 
 class TestMindLimitsConfig:
@@ -201,7 +201,6 @@ class TestMindLimitsConfig:
             "tokens": {"limit": {"lifetime": "-1", "monthly": "1000000"}},
             "minds": {"limit": {"lifetime": "1", "monthly": "1"}},
             "datasources": {"limit": {"lifetime": "3", "monthly": "3"}},
-            "questions": {"limit": {"lifetime": "-1", "monthly": "250"}},
         }
         config = MindLimitsConfig(**statsig_value)
 
@@ -218,12 +217,6 @@ class TestMindLimitsConfig:
         )
         assert config.datasources.limit.monthly == 3, (
             f"datasources.limit.monthly should be 3, got {config.datasources.limit.monthly}"
-        )
-        assert config.questions.limit.lifetime == -1, (
-            f"questions.limit.lifetime should be -1, got {config.questions.limit.lifetime}"
-        )
-        assert config.questions.limit.monthly == 250, (
-            f"questions.limit.monthly should be 250, got {config.questions.limit.monthly}"
         )
 
         # Usage defaults to zero when not in payload

@@ -36,7 +36,6 @@ class ResourceType(str, Enum):
     MINDS = "minds"
     DATASOURCES = "datasources"
     TOKENS = "tokens"
-    QUESTIONS = "questions"
 
 
 class UsageLimitExceededError(HTTPException):

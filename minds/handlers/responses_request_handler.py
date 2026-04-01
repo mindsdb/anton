@@ -20,6 +20,7 @@ from minds.requests.stream import (
 from minds.schemas.chat import Message, Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem, ConversationMetadata
 from minds.services.conversations import ConversationsService
+from minds.services.limits import LimitsService
 from minds.services.minds import MindsService
 
 logger = setup_logging()
@@ -39,6 +40,7 @@ async def responses_request_handler(
     responses_request: ResponsesRequest,
     conversation_service: ConversationsService,
     instrument: bool = True,
+    limits_service: LimitsService | None = None,
 ) -> StreamingResponse | JSONResponse:
     """
     Handle OpenAI-compatible Responses API requests.
@@ -181,6 +183,7 @@ async def responses_request_handler(
             stream=stream,
             metadata=metadata,
             instrument=instrument,
+            limits_service=limits_service,
         )
 
         # Create a message placeholder for the assistant response

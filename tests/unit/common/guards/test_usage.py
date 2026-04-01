@@ -86,7 +86,6 @@ class TestResourceType:
         assert ResourceType.MINDS.value == "minds"
         assert ResourceType.DATASOURCES.value == "datasources"
         assert ResourceType.TOKENS.value == "tokens"
-        assert ResourceType.QUESTIONS.value == "questions"
 
     def test_is_str_enum(self):
         assert isinstance(ResourceType.MINDS, str)
@@ -148,19 +147,6 @@ class TestRequireUsageAvailableAllowed:
         await require_usage_available(service, ResourceType.DATASOURCES)
 
     @pytest.mark.asyncio
-    async def test_zero_usage(self):
-        limits = MindLimitsConfig(
-            questions=_resource_config(
-                lifetime_limit=100,
-                monthly_limit=50,
-                lifetime_usage=0,
-                billing_cycle_usage=0,
-            ),
-        )
-        service = _make_limits_service(limits)
-        await require_usage_available(service, ResourceType.QUESTIONS)
-
-    @pytest.mark.asyncio
     async def test_lifetime_unlimited_monthly_under(self):
         limits = MindLimitsConfig(
             tokens=_resource_config(
@@ -181,22 +167,6 @@ class TestRequireUsageAvailableAllowed:
 
 class TestRequireUsageAvailableRejected:
     """Cases where the guard should raise UsageLimitExceededError (429)."""
-
-    @pytest.mark.asyncio
-    async def test_monthly_limit_exceeded(self):
-        limits = MindLimitsConfig(
-            questions=_resource_config(
-                lifetime_limit=UNLIMITED,
-                monthly_limit=100,
-                lifetime_usage=50,
-                billing_cycle_usage=100,
-            ),
-        )
-        service = _make_limits_service(limits)
-        with pytest.raises(UsageLimitExceededError) as exc_info:
-            await require_usage_available(service, ResourceType.QUESTIONS)
-        assert exc_info.value.status_code == 429
-        assert "questions" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_lifetime_limit_exceeded(self):

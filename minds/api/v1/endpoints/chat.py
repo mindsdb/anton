@@ -79,8 +79,7 @@ async def chat_completions(
     logger.debug(f"🔄 Context: {context.model_dump()}")
 
     # Check usage limits before processing
-    await require_usage_available(limits_service, ResourceType.QUESTIONS)
-
+    await require_usage_available(limits_service, ResourceType.TOKENS)
     langfuse_enabled = is_langfuse_enabled(context=context)
     logger.debug(f"🔄 [{context.request_id}] Langfuse is enabled: {langfuse_enabled}")
 
@@ -100,6 +99,7 @@ async def chat_completions(
             mindsdb_client=mindsdb_client,
             chat_completions_request=chat_completions_request,
             instrument=instrument,
+            limits_service=limits_service,
         )
 
         return response

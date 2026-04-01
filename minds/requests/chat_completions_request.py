@@ -21,3 +21,23 @@ class ChatCompletionsRequest(BaseModel):
         default=False,
         description="Whether the chat completion request is streaming or not",
     )
+    tools: list[dict] | None = Field(
+        default=None,
+        description="List of tools available for the model to call",
+    )
+    tool_choice: str | dict | None = Field(
+        default=None,
+        description="Controls which tool the model calls",
+    )
+    temperature: float | None = Field(
+        default=None,
+        description="Sampling temperature",
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        description="Maximum number of tokens to generate",
+    )
+    max_completion_tokens: int | None = Field(
+        default=None,
+        description="Maximum number of completion tokens to generate (OpenAI alias)",
+    )

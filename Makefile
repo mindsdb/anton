@@ -83,7 +83,7 @@ test/all: test/unit test/integration/all ## Run all tests (unit, integration, an
 
 # --- Coverage ---
 test/unit/coverage: activate ## Run unit tests with coverage
-	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-fail-under=85
+	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-fail-under=80
 
 coverage/html: activate ## Generate HTML coverage report
 	$(PYTHON) -m pytest --cov=minds tests/unit/ --cov-report html

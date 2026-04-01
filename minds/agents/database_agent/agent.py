@@ -13,6 +13,7 @@ from minds.agents.database_agent.prompt_templates import CHART_GENERATION_INSTRU
 from minds.agents.llm import get_llm_config
 from minds.common.logger import setup_logging
 from minds.model.mind import Mind
+from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
 
@@ -39,15 +40,20 @@ class DatabaseAgent(BaseAgent):
         self,
         mind: Mind,
         mindsdb_client: Server,
+        context: Context | None = None,
     ):
         """Initialize the PydanticAgent.
 
         Args:
             mind: The database mind record.
-            database_toolkit: DatabaseToolkit instance for executing database operations.
-            config: Config for the database agent.
+            mindsdb_client: The MindsDB client.
+            context: The request context.
         """
-        super().__init__(mind=mind, mindsdb_client=mindsdb_client)
+        super().__init__(
+            mind=mind,
+            mindsdb_client=mindsdb_client,
+            context=context,
+        )
 
         database_toolkit = DatabaseToolkit(mind=mind, mindsdb_client=mindsdb_client)
         self.deps = DatabaseDeps(toolkit=database_toolkit)

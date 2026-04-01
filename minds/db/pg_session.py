@@ -25,9 +25,7 @@ def _create_engine(db_uri: str):
         SQLAlchemy engine instance
     """
 
-    # Log connection string with a hidden password
-    hidden_uri = db_uri.replace(":", ":*****@", 1) if "@" in db_uri else db_uri
-    logger.debug(f"Creating PostgreSQL engine with: {hidden_uri}")
+    logger.debug("Creating PostgreSQL engine")
 
     try:
         # Create a regular SQLAlchemy engine

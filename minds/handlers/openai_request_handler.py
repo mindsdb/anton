@@ -1,10 +1,13 @@
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
+from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.agents.agent_controller import AgentController
 from minds.agents.base import AgentRunContext
 from minds.agents.helpers import get_agent
+from minds.agents.passthrough_agent.agent import PassthroughAgent
 from minds.common.logger import setup_logging
+from minds.common.passthrough_config import is_passthrough_model, resolve_passthrough_model
 from minds.common.settings.app_settings import get_app_settings
 from minds.model.chat_completion import ChatCompletion
 from minds.model.mind_datasource import DataCatalogStatus
@@ -13,6 +16,7 @@ from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
 from minds.services.conversations import ConversationsService
+from minds.services.limits import LimitsService
 from minds.services.minds import MindsService
 
 logger = setup_logging()
@@ -32,6 +36,11 @@ class OpenAIRequestHandler:
         instrument: bool = True,
         request_id: str | None = None,
         langfuse_trace_id: str | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        limits_service: LimitsService | None = None,
     ):
         """
         Initialize the ChatCompletionsHandler with a list of messages.
@@ -45,6 +54,10 @@ class OpenAIRequestHandler:
                 instrument (bool): Whether to instrument the PydanticAIAgent.
                 request_id: The request ID.
                 langfuse_trace_id: The Langfuse trace ID.
+                tools: List of tool definitions for function calling.
+                tool_choice: Controls which tool the model calls.
+                temperature: Sampling temperature.
+                max_tokens: Maximum number of tokens to generate.
         """
         self.session = session
         self.context = context
@@ -56,9 +69,15 @@ class OpenAIRequestHandler:
         self.instrument = instrument
         self.request_id = request_id
         self.langfuse_trace_id = langfuse_trace_id
+        self.tools = tools
+        self.tool_choice = tool_choice
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.limits_service = limits_service
 
         self.mind_ready = True
         self.agent = None
+        self.is_passthrough = False
 
     @classmethod
     async def create(
@@ -73,6 +92,11 @@ class OpenAIRequestHandler:
         instrument: bool = True,
         request_id: str | None = None,
         langfuse_trace_id: str | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        limits_service: LimitsService | None = None,
     ) -> "OpenAIRequestHandler":
         """
         Async factory method to create a OpenAIRequestHandler instance.
@@ -88,6 +112,11 @@ class OpenAIRequestHandler:
             instrument (bool): Whether to instrument the PydanticAIAgent.
             request_id: The request ID.
             langfuse_trace_id: The Langfuse trace ID.
+            tools: List of tool definitions for function calling.
+            tool_choice: Controls which tool the model calls.
+            temperature: Sampling temperature.
+            max_tokens: Maximum number of tokens to generate.
+            limits_service: The limits service for usage checking.
         """
         handler = cls(
             session=session,
@@ -100,7 +129,20 @@ class OpenAIRequestHandler:
             instrument=instrument,
             request_id=request_id,
             langfuse_trace_id=langfuse_trace_id,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            limits_service=limits_service,
         )
+
+        # Passthrough models bypass Mind lookup entirely
+        if is_passthrough_model(model):
+            config = resolve_passthrough_model(model)
+            handler.agent = PassthroughAgent(config=config, instrument=instrument)
+            handler.is_passthrough = True
+            logger.debug(f"[{request_id}] Passthrough model {model!r} → {config.provider}:{config.model_name}")
+            return handler
 
         minds_service = MindsService(
             session=session,
@@ -125,10 +167,29 @@ class OpenAIRequestHandler:
             agent_name=get_agent(mind).value,
             mind=mind,
             mindsdb_client=mindsdb_client,
+            context=context,
         )
         handler.agent = agent
 
         return handler
+
+    def _save_usage(self, usage: tuple[int, int] | None) -> None:
+        """Persist token usage to the database."""
+        chat_completion = ChatCompletion(
+            organization_id=self.context.organization_id,
+            user_id=self.context.user_id,
+            model_name=self.model,
+            request_id=self.request_id,
+            langfuse_trace_id=self.langfuse_trace_id,
+            input_tokens=usage[0] if usage else 0,
+            output_tokens=usage[1] if usage else 0,
+        )
+        self.session.add(chat_completion)
+        self.session.commit()
+        logger.debug(
+            f"[{self.request_id}] Saved ChatCompletion usage: "
+            f"{usage[0] if usage else 0} in / {usage[1] if usage else 0} out"
+        )
 
     async def chat_completions(self, streamer: MessageStreamer):
         """
@@ -152,22 +213,41 @@ class OpenAIRequestHandler:
         )
 
         usage = await self.agent.get_last_run_usage()
+        self._save_usage(usage)
 
-        chat_completion = ChatCompletion(
-            organization_id=self.context.organization_id,
-            user_id=self.context.user_id,
-            model_name=self.model,
-            request_id=self.request_id,
-            langfuse_trace_id=self.langfuse_trace_id,
-            input_tokens=usage[0] if usage else 0,
-            output_tokens=usage[1] if usage else 0,
+    async def proxy_chat_completions(self) -> StreamingResponse | JSONResponse:
+        """Passthrough proxy — returns the upstream response directly."""
+        agent: PassthroughAgent = self.agent
+        response = await agent.proxy(
+            messages=self.messages,
+            stream=self.stream,
+            request_id=self.request_id or "",
+            tools=self.tools,
+            tool_choice=self.tool_choice,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
         )
-        self.session.add(chat_completion)
-        self.session.commit()
-        logger.debug(
-            f"🔄[{self.request_id}] Saved ChatCompletion usage: "
-            f"{usage[0] if usage else 0} in / {usage[1] if usage else 0} out"
-        )
+
+        if isinstance(response, StreamingResponse):
+            # Wrap the streaming body to save usage after the last chunk
+            original_body = response.body_iterator
+
+            async def _wrapped_body():
+                async for chunk in original_body:
+                    yield chunk
+                # After stream completes, save usage
+                usage = await agent.get_last_run_usage()
+                self._save_usage(usage)
+
+            return StreamingResponse(
+                _wrapped_body(),
+                media_type="text/event-stream",
+            )
+        else:
+            # Non-streaming: usage is already set on the agent
+            usage = await agent.get_last_run_usage()
+            self._save_usage(usage)
+            return response
 
     async def responses(self, streamer: MessageStreamer, message: Message):
         """

@@ -131,6 +131,7 @@ class DatasourcesService:
         self,
         is_sample: bool | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
     ) -> int:
         """
         Count non-deleted datasources for the current organization.
@@ -144,6 +145,8 @@ class DatasourcesService:
                        Pass False to exclude sample/template datasources from the count.
             since: When provided, only count datasources created on or after this datetime.
                    Used for billing-cycle-scoped counts.
+            until: When provided, only count datasources created before this datetime.
+                   Used for billing-cycle-scoped counts.
 
         Returns:
             int: Number of datasources matching the filters.
@@ -151,7 +154,7 @@ class DatasourcesService:
         try:
             logger.debug(
                 f"Counting datasources for organization {self.organization_id} "
-                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since}, until={until})"
             )
 
             # Always scope to the current organization and exclude soft-deleted records
@@ -168,18 +171,21 @@ class DatasourcesService:
             if since is not None:
                 conditions.append(Datasource.created_at >= since)
 
+            if until is not None:
+                conditions.append(Datasource.created_at <= until)
+
             stmt = select(func.count(Datasource.id)).where(and_(*conditions))
             count = self.session.exec(stmt).one()
 
             logger.debug(
                 f"Counted {count} datasources for organization {self.organization_id} "
-                f"(user_id={self.user_id}, is_sample={is_sample}, since={since})"
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since}, until={until})"
             )
             return count
         except Exception as e:
             logger.error(
                 f"Error counting datasources for organization {self.organization_id} "
-                f"(user_id={self.user_id}, is_sample={is_sample}): {str(e)}"
+                f"(user_id={self.user_id}, is_sample={is_sample}, since={since}, until={until}): {str(e)}"
             )
             raise DatasourceServiceError(f"Failed to count datasources: {str(e)}") from None
 

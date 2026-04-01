@@ -40,7 +40,7 @@ jobs:
 
   build:
     runs-on: mdb-dev
-    needs: [run-unit-tests, get-deploy-labels]
+    needs: [get-deploy-labels, run-unit-tests]
     if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
     env:
       AWS_REGION: us-east-1
@@ -60,7 +60,7 @@ jobs:
 
   build-anton-scratchpad:
     runs-on: mdb-dev
-    needs: [run-unit-tests, get-deploy-labels]
+    needs: [get-deploy-labels, run-unit-tests]
     if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
     env:
       AWS_REGION: us-east-1

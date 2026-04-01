@@ -840,6 +840,52 @@ class TestDatasourcesService:
         with pytest.raises(DatasourceServiceError, match="Failed to count datasources"):
             await service.count_datasources()
 
+    @pytest.mark.asyncio
+    async def test_count_datasources_with_since(self, service, mock_session):
+        """Test count datasources with since parameter for billing cycle."""
+        mock_session.exec.return_value.one.return_value = 2
+
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        result = await service.count_datasources(since=since)
+
+        assert result == 2
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_datasources_with_until(self, service, mock_session):
+        """Test count datasources with until parameter for billing cycle."""
+        mock_session.exec.return_value.one.return_value = 5
+
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await service.count_datasources(until=until)
+
+        assert result == 5
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_datasources_with_since_and_until(self, service, mock_session):
+        """Test count datasources with both since and until for a bounded billing cycle."""
+        mock_session.exec.return_value.one.return_value = 1
+
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await service.count_datasources(since=since, until=until)
+
+        assert result == 1
+        mock_session.exec.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_count_datasources_with_all_filters(self, service, mock_session):
+        """Test count datasources with is_sample, since, and until combined."""
+        mock_session.exec.return_value.one.return_value = 2
+
+        since = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        result = await service.count_datasources(is_sample=False, since=since, until=until)
+
+        assert result == 2
+        mock_session.exec.assert_called_once()
+
     def test_validate_native_query_allows_simple_select(self, service):
         service._validate_native_query("SELECT 1", "postgres")
 

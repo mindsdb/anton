@@ -200,6 +200,7 @@ class TestResponsesRequestHandler:
                 stream=True,
                 metadata=None,
                 instrument=True,
+                limits_service=None,
             )
 
             # Verify message placeholder was created
@@ -353,6 +354,7 @@ class TestResponsesRequestHandler:
                 stream=False,
                 metadata=None,
                 instrument=True,
+                limits_service=None,
             )
 
             # Verify message placeholder was created
@@ -436,6 +438,7 @@ class TestResponsesRequestHandler:
                 stream=False,  # Should default to False when None
                 metadata=None,
                 instrument=True,
+                limits_service=None,
             )
 
             # Verify non-streaming producer was called (not streaming)
@@ -778,6 +781,7 @@ class TestResponsesRequestHandler:
                 stream=False,  # Explicit stream value
                 metadata=None,
                 instrument=True,
+                limits_service=None,
             )
 
             # Verify process_non_streaming_producer received correct parameters

@@ -14,6 +14,7 @@ from minds.requests.stream import (
     process_non_streaming_producer,
     process_streaming_producer,
 )
+from minds.services.limits import LimitsService
 
 # Set up logging
 logger = setup_logging()
@@ -26,6 +27,7 @@ async def chat_completions_request_handler(
     mindsdb_client: Server,
     chat_completions_request: ChatCompletionsRequest,
     instrument: bool = True,
+    limits_service: LimitsService | None = None,
 ) -> StreamingResponse | JSONResponse:
     """
     Handle chat completions requests.
@@ -59,6 +61,12 @@ async def chat_completions_request_handler(
     metadata = chat_completions_request.metadata
     logger.debug(f"🔄[{request_id}] Metadata: {metadata}")
 
+    tools = chat_completions_request.tools
+    tool_choice = chat_completions_request.tool_choice
+    temperature = chat_completions_request.temperature
+    # max_completion_tokens takes precedence over max_tokens (OpenAI convention)
+    max_tokens = chat_completions_request.max_completion_tokens or chat_completions_request.max_tokens
+
     chat_completions_handler = await OpenAIRequestHandler.create(
         session=session,
         context=context,
@@ -70,7 +78,17 @@ async def chat_completions_request_handler(
         instrument=instrument,
         request_id=request_id,
         langfuse_trace_id=get_langfuse_trace_id(),
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        limits_service=limits_service,
     )
+
+    # Passthrough models bypass the normal Mind pipeline
+    if chat_completions_handler.is_passthrough:
+        logger.debug(f"[{request_id}] Passthrough shortcut — proxying directly to upstream LLM.")
+        return await chat_completions_handler.proxy_chat_completions()
 
     if stream:
         logger.debug(f"🔄[{request_id}] Chat completions request is streaming.")
