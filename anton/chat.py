@@ -4318,15 +4318,6 @@ async def _chat_loop(
             if message_content is None:
                 message_content = stripped
 
-            # if settings.minds_enabled and last_token_status is not None and last_token_status.status is TokenLimitStatus.EXCEEDED:
-            #     pct = int(last_token_status.used / last_token_status.limit * 100) if last_token_status.limit else 100
-            #     console.print(
-            #         f"[anton.error]Token limit reached: {last_token_status.used:,} / {last_token_status.limit:,} tokens used ({pct}%). "
-            #         "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
-            #     )
-            #     console.print()
-            #     continue
-
             _query_count += 1
             if _query_count == 1:
                 send_event(settings, "anton_first_query")

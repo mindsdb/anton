@@ -90,8 +90,12 @@ def check_minds_token_limits(
     result = _make(TokenLimitStatus.OK)
     for period in ("lifetime", "monthly"):
         lim = limits.get(period, -1)
+        if not isinstance(lim, int):
+            lim = -1
         usage_key = "billing_cycle" if period == "monthly" else period
         used = usage.get(usage_key, 0)
+        if not isinstance(used, int):
+            used = 0
 
         if lim == -1 or lim <= 0:
             continue
