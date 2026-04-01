@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from dataclasses import dataclass
 
 from rich.theme import Theme
@@ -75,5 +73,19 @@ def build_rich_theme(mode: str) -> Theme:
             "phase.executing": f"bold {p.warning}",
             "phase.complete": f"bold {p.success}",
             "phase.failed": f"bold {p.error}",
+            # Rich Markdown styles
+            "markdown.h1": f"bold {p.cyan}",
+            "markdown.h2": f"bold {p.cyan}",
+            "markdown.h3": f"bold {p.cyan}",
+            "markdown.h4": f"bold {p.cyan_dim}",
+            "markdown.strong": "bold",
+            "markdown.emph": "italic",
+            "markdown.code": f"bold {p.warning}",
+            "markdown.link": f"underline {p.cyan}",
+            "markdown.link_url": p.cyan_dim,
+            "markdown.item.bullet": p.cyan,
+            "markdown.item.number": p.cyan,
+            "markdown.block_quote": f"italic {p.muted}",
+            "markdown.hr": p.muted,
         }
     )

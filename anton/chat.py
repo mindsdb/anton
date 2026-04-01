@@ -45,6 +45,8 @@ from anton.tools import (
     format_cell_result,
     prepare_scratchpad_exec,
 )
+from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_limits
+from anton.minds_http import minds_request
 from anton.data_vault import DataVault, _slug_env_prefix
 from anton.datasource_registry import (
     DatasourceEngine,
@@ -84,11 +86,10 @@ _RESILIENCE_NUDGE = (
     "Only involve the user if the problem truly requires something only they can provide."
 )
 
-# ── Interactive prompt copy ───────────────────────────────────────────────────
-_PROMPT_YN = "(y/n)"
+# TODO: Is this enough for now?
+TOKEN_STATUS_CACHE_TTL = 60.0
+
 _PROMPT_RECONNECT_CANCEL = "(reconnect/cancel)"
-_PROMPT_SELECT_Q = "(or q to cancel)"
-_PROMPT_MEMORY_SAVE = "(y/n/pick numbers)"
 
 
 class ChatSession:
@@ -129,7 +130,7 @@ class ChatSession:
         self._history_store = history_store
         self._session_id = session_id
         self._cancel_event = asyncio.Event()
-        self._active_datasource: str | None = None  # slug like "hubspot-2"
+        self._active_datasource: str | None = None
         self._scratchpads = ScratchpadManager(
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
@@ -456,8 +457,10 @@ class ChatSession:
                         "role": "user",
                         "content": (
                             f"SYSTEM: You have used {_MAX_TOOL_ROUNDS} tool-call rounds on this turn. "
-                            "Stop retrying. Summarize what you accomplished and what failed, "
-                            "then tell the user what they can do to unblock the issue."
+                            "Pause here. Summarize what you have accomplished so far and what remains. "
+                            "If you believe you are on a good track and can finish the task with more steps, "
+                            "tell the user and ask if they'd like you to continue. "
+                            "Do NOT retry automatically — wait for the user's response."
                         ),
                     }
                 )
@@ -554,10 +557,63 @@ class ChatSession:
 
         user_msg_str = user_input if isinstance(user_input, str) else ""
         assistant_text_parts: list[str] = []
-        async for event in self._stream_and_handle_tools(user_msg_str):
-            if isinstance(event, StreamTextDelta):
-                assistant_text_parts.append(event.text)
-            yield event
+        _max_auto_retries = 2
+        _retry_count = 0
+
+        while True:
+            try:
+                async for event in self._stream_and_handle_tools(user_msg_str):
+                    if isinstance(event, StreamTextDelta):
+                        assistant_text_parts.append(event.text)
+                    yield event
+                break  # completed successfully
+            except Exception as _agent_exc:
+                _retry_count += 1
+                if _retry_count <= _max_auto_retries:
+                    # Inject the error into history and let the LLM try to recover
+                    self._history.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                "If you can diagnose and fix the issue, continue working on the task. "
+                                "Adjust your approach to avoid the same error. "
+                                "If this is unrecoverable, summarize what you accomplished and suggest next steps."
+                            ),
+                        }
+                    )
+                    # Continue the while loop — _stream_and_handle_tools will be called
+                    # again with the error context now in history
+                    continue
+                else:
+                    # Exhausted retries — stop and summarize for the user
+                    self._history.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
+                                "Stop retrying. Please:\n"
+                                "1. Summarize what you accomplished so far.\n"
+                                "2. Explain what went wrong in plain language.\n"
+                                "3. Suggest next steps — what the user can try (e.g. rephrase, "
+                                "simplify the request, or ask you to continue from where you left off).\n"
+                                "Be concise and helpful."
+                            ),
+                        }
+                    )
+                    try:
+                        async for event in self._llm.plan_stream(
+                            system=await self._build_system_prompt(user_msg_str),
+                            messages=self._history,
+                        ):
+                            if isinstance(event, StreamTextDelta):
+                                assistant_text_parts.append(event.text)
+                            yield event
+                    except Exception:
+                        fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
+                        assistant_text_parts.append(fallback)
+                        yield StreamTextDelta(text=fallback)
+                    break
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:
@@ -620,6 +676,53 @@ class ChatSession:
 
         llm_response = response.response
 
+        # Detect max_tokens truncation — the LLM was cut off mid-response.
+        # Inject a continuation prompt so it can finish what it was doing.
+        if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+            self._history.append(
+                {"role": "assistant", "content": llm_response.content or ""}
+            )
+            self._history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "SYSTEM: Your response was truncated because it exceeded the output token limit. "
+                        "Continue exactly where you left off. If you were about to call a tool, "
+                        "call it now. If the code you were writing was too long, split it into smaller parts."
+                    ),
+                }
+            )
+            response = None
+            try:
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                    tools=tools,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        response = event
+            except ContextOverflowError:
+                if not _compacted_this_turn:
+                    await self._summarize_history()
+                    self._compact_scratchpads()
+                    _compacted_this_turn = True
+                yield StreamContextCompacted(
+                    message="Context was getting long — older history has been summarized."
+                )
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                    tools=tools,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        response = event
+
+            if response is None:
+                return
+            llm_response = response.response
+
         # Proactive compaction
         if (
             not _compacted_this_turn
@@ -655,8 +758,10 @@ class ChatSession:
                             "role": "user",
                             "content": (
                                 f"SYSTEM: You have used {_MAX_TOOL_ROUNDS} tool-call rounds on this turn. "
-                                "Stop retrying. Summarize what you accomplished and what failed, "
-                                "then tell the user what they can do to unblock the issue."
+                                "Pause here. Summarize what you have accomplished so far and what remains. "
+                                "If you believe you are on a good track and can finish the task with more steps, "
+                                "tell the user and ask if they'd like you to continue. "
+                                "Do NOT retry automatically — wait for the user's response."
                             ),
                         }
                     )
@@ -836,6 +941,52 @@ class ChatSession:
                 if response is None:
                     return
                 llm_response = response.response
+
+                # Detect max_tokens truncation inside tool loop
+                if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+                    self._history.append(
+                        {"role": "assistant", "content": llm_response.content or ""}
+                    )
+                    self._history.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "SYSTEM: Your response was truncated because it exceeded the output token limit. "
+                                "Continue exactly where you left off. If you were about to call a tool, "
+                                "call it now. If the code you were writing was too long, split it into smaller parts."
+                            ),
+                        }
+                    )
+                    response = None
+                    try:
+                        async for event in self._llm.plan_stream(
+                            system=system,
+                            messages=self._history,
+                            tools=tools,
+                        ):
+                            yield event
+                            if isinstance(event, StreamComplete):
+                                response = event
+                    except ContextOverflowError:
+                        if not _compacted_this_turn:
+                            await self._summarize_history()
+                            self._compact_scratchpads()
+                            _compacted_this_turn = True
+                        yield StreamContextCompacted(
+                            message="Context was getting long — older history has been summarized."
+                        )
+                        async for event in self._llm.plan_stream(
+                            system=system,
+                            messages=self._history,
+                            tools=tools,
+                        ):
+                            yield event
+                            if isinstance(event, StreamComplete):
+                                response = event
+
+                    if response is None:
+                        return
+                    llm_response = response.response
 
                 # Proactive compaction during tool loop
                 if (
@@ -1555,24 +1706,6 @@ async def _handle_setup_models(
         console.print(f"  Coding:   [bold]{coding_display}[/]")
     console.print()
 
-    # --- Provider ---
-    providers = {"1": "anthropic", "2": "openai", "3": "openai-compatible"}
-    current_num = {"anthropic": "1", "openai": "2", "openai-compatible": "3"}.get(
-        settings.planning_provider, "1"
-    )
-    console.print("[anton.cyan]Available providers:[/]")
-    console.print(
-        r"  [bold]1[/]  Anthropic (Claude)                    [dim]\[recommended][/]"
-    )
-    console.print(
-        r"  [bold]2[/]  OpenAI (GPT / o-series)               [dim]\[experimental][/]"
-    )
-    console.print(
-        r"  [bold]3[/]  OpenAI-compatible (custom endpoint)   [dim]\[experimental][/]"
-    )
-    console.print()
-    # Use the same onboarding flow from cli.py
-
     def _print_choices():
         console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
         console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]")
@@ -1861,51 +1994,12 @@ def _describe_minds_connection_error(err: Exception) -> tuple[str, str]:
     )
 
 
-def _minds_request(
-    url: str,
-    api_key: str,
-    *,
-    method: str = "GET",
-    payload: bytes | None = None,
-    verify: bool = True,
-    timeout: int = 30,
-) -> bytes:
-    """Shared HTTP helper for all Minds API calls.
-
-    Sets headers that pass through Cloudflare bot detection.
-    """
-    import ssl
-    import urllib.request
-
-    req = urllib.request.Request(url, data=payload, method=method)
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    # Browser-like headers to avoid Cloudflare bot detection
-    req.add_header(
-        "User-Agent",
-        "Mozilla/5.0 (compatible; Anton/1.0; +https://github.com/mindsdb/anton)",
-    )
-    req.add_header("Accept-Language", "en-US,en;q=0.9")
-    req.add_header("Accept-Encoding", "identity")
-    req.add_header("Connection", "keep-alive")
-
-    ctx = None
-    if not verify:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-        return resp.read()
-
-
 def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
     """Fetch minds list from a Minds server using stdlib urllib."""
     import json as _json
 
     url = f"{base_url}/api/v1/minds/"  # trailing slash required
-    raw = _minds_request(url, api_key, verify=verify)
+    raw = minds_request(url, api_key, verify=verify)
     data = _json.loads(raw.decode())
 
     if isinstance(data, list):
@@ -1913,32 +2007,6 @@ def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[
     return data.get("minds", data if isinstance(data, list) else [])
 
 
-def _check_minds_limits(base_url: str, api_key: str, verify: bool = True) -> bool:
-    """Return True if token usage has reached 80% of any configured limit.
-
-    Returns False if the endpoint is unreachable, limits are unlimited (-1),
-    or usage is below the threshold.
-    """
-    import json as _json
-
-    url = f"{base_url}/api/v1/limits/"
-    try:
-        raw = _minds_request(url, api_key, verify=verify, timeout=5)
-        data = _json.loads(raw.decode())
-    except Exception:
-        return False
-
-    tokens = data.get("tokens", {})
-    limits = tokens.get("limit", {})
-    usage = tokens.get("usage", {})
-
-    for period in ("lifetime", "monthly"):
-        lim = limits.get(period, -1)
-        used = usage.get("billing_cycle" if period == "monthly" else period, 0)
-        if lim != -1 and lim > 0 and used / lim >= 0.8:
-            return True
-
-    return False
 
 
 def _minds_get_mind(
@@ -1949,7 +2017,7 @@ def _minds_get_mind(
 
     url = f"{base_url}/api/v1/minds/{mind_name}"
     try:
-        raw = _minds_request(url, api_key, verify=verify, timeout=15)
+        raw = minds_request(url, api_key, verify=verify, timeout=15)
         return _json.loads(raw.decode())
     except Exception:
         return None
@@ -1993,7 +2061,7 @@ def _minds_list_datasources(
     import json as _json
 
     url = f"{base_url}/api/v1/datasources"
-    raw = _minds_request(url, api_key, verify=verify)
+    raw = minds_request(url, api_key, verify=verify)
     data = _json.loads(raw.decode())
 
     # Response may be a list or a dict with a "datasources" key
@@ -2014,7 +2082,7 @@ def _minds_test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
     )).encode()
 
     try:
-        _minds_request(url, api_key, method="POST", payload=payload, verify=verify)
+        minds_request(url, api_key, method="POST", payload=payload, verify=verify)
         return True
     except urllib.error.HTTPError as e:
         if e.code == 429:
@@ -3042,11 +3110,13 @@ async def _show_credential_help(
     except Exception:
         help_text = "Sorry, couldn't fetch help right now. Try checking the service's documentation."
 
+    from rich.markdown import Markdown as _Markdown
+    from rich.padding import Padding
+
     console.print()
     console.print(heading)
     console.print()
-    for line in help_text.splitlines():
-        console.print(f"        {line}")
+    console.print(Padding(_Markdown(help_text), (0, 0, 0, 8)))
     console.print()
 
 
@@ -4010,15 +4080,123 @@ class _ClosingSpinner:
             self._live = None
 
 
+async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
+    """First-run demo. Returns the hidden demo query to inject, or None if skipped."""
+    import os as _os
+    from importlib.resources import files as _pkg_files
+
+    # Verify demo data exists
+    try:
+        demo_dir = Path(__file__).resolve().parent / "demo_data" / "nvda_btc_data"
+        if not demo_dir.is_dir():
+            return None
+        expected = ["1_monthly_prices.csv", "2_risk_metrics.csv", "3_montecarlo_projections.csv", "4_annual_scorecard.csv"]
+        if not all((demo_dir / f).is_file() for f in expected):
+            return None
+    except Exception:
+        return None
+
+    # Clear screen for a clean start
+    _os.system("cls" if sys.platform == "win32" else "clear")
+
+    import time as _time
+
+    console.print()
+    _msg = "LLM is ready! Let's take it for a spin — I'll build an interactive NVIDIA vs Bitcoin investment dashboard to make sure everything works. Ok?"
+    console.print("[anton.prompt]anton>[/] ", end="")
+    for ch in _msg:
+        console.file.write(ch)
+        console.file.flush()
+        _time.sleep(0.02)
+    console.print()
+    console.print()
+
+    confirm = await _prompt_or_cancel(
+        "(anton) Ready? (y/n)",
+        choices=["y", "n"],
+        default="y",
+        allow_cancel=True,
+    )
+    if confirm is None or (confirm or "").strip().lower() != "y":
+        if confirm is None:
+            return None
+        console.print()
+        console.print("  [anton.muted]No worries! Just ask me anything when you're ready.[/]")
+        console.print()
+        return None
+
+    console.print()
+
+    demo_query = (
+        f"Build me a full interactive dashboard comparing NVIDIA stock vs Bitcoin "
+        f"over the past 5 years. All the data you need is already prepared in CSV files "
+        f"at: {demo_dir}\n\n"
+        f"Files available:\n"
+        f"- 1_monthly_prices.csv — columns: date, nvda_open/high/low/close/volume, btc_open/high/low/close/volume, "
+        f"nvda_monthly_return_pct, btc_monthly_return_pct, nvda_cum_return, btc_cum_return, "
+        f"nvda_monthly_range_pct, btc_monthly_range_pct (64 rows)\n"
+        f"- 2_risk_metrics.csv — columns: date, nvda_vol_12m_ann, btc_vol_12m_ann, nvda_return_12m_ann, "
+        f"btc_return_12m_ann, nvda_sharpe_12m, btc_sharpe_12m, rolling_12m_correlation, "
+        f"nvda_drawdown_pct, btc_drawdown_pct, nvda_vs_btc_beta_6m (64 rows)\n"
+        f"- 3_montecarlo_projections.csv — columns: month, nvda_p5/p10/p25/p50/p75/p90/p95, "
+        f"btc_p5/p10/p25/p50/p75/p90/p95, nvda_mean, btc_mean (24 rows)\n"
+        f"- 4_annual_scorecard.csv — TWO blocks separated by a blank line. Block 1: annual data "
+        f"(year, nvda/btc annual_return_pct, ann_volatility_pct, sharpe, max_drawdown_pct, "
+        f"winning_months, total_months, winner). Block 2: 5yr scorecard (metric, nvda, btc) "
+        f"with 15 summary stats including total return, CAGR, MC probabilities.\n\n"
+        f"IMPORTANT — How to load file 4 (it has two CSV blocks separated by a blank line):\n"
+        f"```python\n"
+        f"import io\n"
+        f"raw4 = open('{demo_dir}/4_annual_scorecard.csv').read()\n"
+        f"blocks = raw4.strip().split('\\n\\n')\n"
+        f"annual_df = pd.read_csv(io.StringIO(blocks[0]))\n"
+        f"scorecard_df = pd.read_csv(io.StringIO(blocks[1]))\n"
+        f"```\n\n"
+        f"Step-by-step approach (use separate scratchpad cells):\n"
+        f"1. Load all 4 CSVs with pandas, print shapes and columns to verify\n"
+        f"2. Serialize all dataframes to a single JS file as `const DATA = {{prices: [...], risk: [...], "
+        f"mc: [...], annual: [...], scorecard: [...]}};` — use df.where(pd.notnull(df), None).to_dict(orient='records') "
+        f"and json.dumps(). Save to .anton/output/nvda_btc_data.js\n"
+        f"3. Write HTML head — include ECharts CDN, reference nvda_btc_data.js, all CSS styles. "
+        f"Dark theme (#0d1117 bg). Use tabs for sections: Performance, Risk, Monte Carlo, Annual, Decision.\n"
+        f"4. Write HTML body — header with NVDA vs BTC branding, hero KPI row (6 stats from scorecard), "
+        f"tab navigation, panel containers with chart divs for each section.\n"
+        f"5. Write all JS chart rendering logic — helper functions, ECharts initialization for each chart, "
+        f"tab switching with lazy rendering, scorecard table, annual table with color coding.\n"
+        f"6. Assemble html_head + html_body + html_js, write to .anton/output/nvda_btc_dashboard.html, "
+        f"open in browser with webbrowser.open(f'file://{{os.path.abspath(path)}}')\n\n"
+        f"Do NOT fetch any external data — everything is in those files. "
+        f"Split the HTML generation across multiple cells to avoid token limits. "
+        f"Make it epic — tabs, KPIs, interactive ECharts, dark theme, responsive."
+    )
+
+    return demo_query
+
+
+def _persist_first_run_done(settings) -> None:
+    """Write ANTON_FIRST_RUN_DONE=true to ~/.anton/.env."""
+    from pathlib import Path
+
+    env_path = Path.home() / ".anton" / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = env_path.read_text() if env_path.is_file() else ""
+    if "ANTON_FIRST_RUN_DONE" not in existing:
+        with env_path.open("a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write("ANTON_FIRST_RUN_DONE=true\n")
+    settings.first_run_done = True
+
+
 def run_chat(
-    console: Console, settings: AntonSettings, *, resume: bool = False
+    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False
 ) -> None:
     """Launch the interactive chat REPL."""
-    asyncio.run(_chat_loop(console, settings, resume=resume))
+    asyncio.run(_chat_loop(console, settings, resume=resume, first_run=first_run))
 
 
 async def _chat_loop(
-    console: Console, settings: AntonSettings, *, resume: bool = False
+    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False
 ) -> None:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.llm.client import LLMClient
@@ -4128,17 +4306,30 @@ async def _chat_loop(
             current_session_id = resumed_id
 
 
-    console.print("[anton.muted] Chat with me, type '/help' for commands or 'exit' to quit.[/]")
-    console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
-    console.print()
+    # --- Agent Zero: first-run ice-breaker ---
+    _agent_zero_query: str | None = None
+    if first_run and not settings.first_run_done:
+        try:
+            _agent_zero_query = await _agent_zero(console, session, settings)
+        except Exception:
+            pass  # ice-breaker failed — just continue to normal chat
+        _persist_first_run_done(settings)
+
+    if not _agent_zero_query:
+        console.print("[anton.muted] Chat with me, type '/help' for commands or 'exit' to quit.[/]")
+        console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
+        console.print()
 
     from anton.analytics import send_event
     _query_count = 0
+    _total_questions = 0  # tracks first 10 questions for time estimates
 
     from anton.chat_ui import StreamDisplay
 
     toolbar = {"stats": "", "status": ""}
     display = StreamDisplay(console, toolbar=toolbar)
+    last_token_status: TokenLimitInfo | None = None
+    last_token_status_checked_at: float | None = None
 
     def _bottom_toolbar():
         stats = toolbar["stats"]
@@ -4210,14 +4401,19 @@ async def _chat_loop(
                 session._pending_memory_confirmations = []
                 console.print()
 
-            try:
-                from anton.channel.theme import get_palette as _gp
-                _you_color = _gp().user_prompt
-                user_input = await prompt_session.prompt_async(
-                    [(f"bold fg:{_you_color}", "you>"), ("", " ")]
-                )
-            except EOFError:
-                break
+            # Agent Zero: inject the demo query on the first iteration
+            if _agent_zero_query is not None:
+                user_input = _agent_zero_query
+                _agent_zero_query = None  # only once
+            else:
+                try:
+                    from anton.channel.theme import get_palette as _gp
+                    _you_color = _gp().user_prompt
+                    user_input = await prompt_session.prompt_async(
+                        [(f"bold fg:{_you_color}", "you>"), ("", " ")]
+                    )
+                except EOFError:
+                    break
 
             stripped = user_input.strip()
             # message_content holds what we send to the LLM — may be str or
@@ -4392,22 +4588,19 @@ async def _chat_loop(
             if message_content is None:
                 message_content = stripped
 
-            if settings.minds_api_key and settings.minds_url:
-                _minds_base = settings.minds_url.rstrip("/")
-                if _check_minds_limits(
-                    _minds_base, settings.minds_api_key, verify=settings.minds_ssl_verify
-                ):
-                    console.print(
-                        "[anton.error]You've reached 80% of your token limit. "
-                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
-                    )
-                    console.print()
-
             _query_count += 1
+            _total_questions += 1
             if _query_count == 1:
                 send_event(settings, "anton_first_query")
             else:
                 send_event(settings, "anton_query")
+
+            # Time estimate for the first question
+            if _total_questions == 1:
+                console.print(
+                    "[anton.muted]  This will take a couple of minutes — building your dashboard. Worth the wait![/]"
+                )
+                console.print()
 
             display.start()
             t0 = time.monotonic()
@@ -4445,12 +4638,38 @@ async def _chat_loop(
                             total_output += event.response.usage.output_tokens
 
                 elapsed = time.monotonic() - t0
-                parts = [f"{elapsed:.1f}s", f"{total_input} in / {total_output} out"]
+                parts = []
+
+                if settings.minds_api_key and settings.minds_url:
+                    #TODO: Lets check if this is best solution
+                    now = time.monotonic()
+                    if last_token_status_checked_at is None or (now - last_token_status_checked_at) >= TOKEN_STATUS_CACHE_TTL:
+                        last_token_status = check_minds_token_limits(
+                            settings.minds_url.rstrip("/"),
+                            settings.minds_api_key,
+                            verify=settings.minds_ssl_verify,
+                        )
+                        last_token_status_checked_at = now
+                    if last_token_status.billing_cycle_limit > 0:
+                        _pct = last_token_status.billing_cycle_used * 100 // last_token_status.billing_cycle_limit
+                        parts.append(f"{last_token_status.billing_cycle_used:,} / {last_token_status.billing_cycle_limit:,} ({_pct}%)")
+
+                parts.append(f"{elapsed:.1f}s")
+                if not settings.minds_api_key and not settings.minds_url:
+                    parts.append(f"{total_input} in / {total_output} out")
                 if ttft is not None:
                     parts.append(f"TTFT {int(ttft * 1000)}ms")
                 toolbar["stats"] = "  ".join(parts)
                 toolbar["status"] = ""
                 display.finish()
+                if settings.minds_api_key and settings.minds_url and last_token_status is not None and last_token_status.status is TokenLimitStatus.WARNING:
+                    pct = int(last_token_status.used / last_token_status.limit * 100) if last_token_status.limit else 80
+                    console.print(
+                        f"[anton.warning]Approaching token limit: {last_token_status.used:,} / "
+                        f"{last_token_status.limit:,} tokens used ({pct}%). "
+                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
+                    )
+                    console.print()
                 if _query_count == 1:
                     send_event(settings, "anton_first_answer")
             except anthropic.AuthenticationError:

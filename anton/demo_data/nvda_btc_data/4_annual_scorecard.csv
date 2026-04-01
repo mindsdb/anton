@@ -1,0 +1,24 @@
+year,nvda_annual_return_pct,btc_annual_return_pct,nvda_ann_volatility_pct,btc_ann_volatility_pct,nvda_sharpe,btc_sharpe,nvda_max_drawdown_pct,btc_max_drawdown_pct,nvda_winning_months,btc_winning_months,total_months,winner
+2020,121.17,210.16,35.83,81.81,3.256,2.514,-7.34,-25.13,8,7,11,BTC
+2021,125.52,59.67,44.16,79.81,2.74,0.691,-9.99,-40.53,7,6,12,NVDA
+2022,-50.26,-64.27,62.83,54.16,-0.872,-1.27,-55.49,-63.66,5,4,12,NVDA
+2023,238.99,155.42,50.11,52.55,4.679,2.872,-17.37,-14.92,9,9,12,NVDA
+2024,171.25,121.05,42.1,61.52,3.961,1.895,-5.27,-17.33,9,8,12,NVDA
+2025,-18.88,0.83,29.05,49.09,-0.805,-0.075,-13.24,-19.39,2,2,4,BTC
+
+metric,nvda,btc
+5yr Total Return %,1750.64,907.51
+5yr CAGR %,74.34,55.27
+Ann Volatility % (full 5yr),49.92,67.49
+Best Month %,36.34,47.77
+Worst Month %,-32.02,-37.77
+Monthly Win Rate %,63.5,57.1
+5yr Correlation,0.2871,0.2871
+MC Median 2yr Price,326.61,216760.0
+MC P(2x) in 2yr %,71.4,56.1
+MC P(loss) in 2yr %,6.0,19.3
+MC P(3x) in 2yr %,50.0,38.9
+MC Bear Case p25 2yr,201.93,112578.0
+MC Bull Case p75 2yr,522.12,406409.0
+MC Bear Case p5 2yr,71.44,25988.0
+MC Bull Case p95 2yr,1045.22,1025340.0

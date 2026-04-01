@@ -57,9 +57,10 @@ def _tool_display_text(name: str, input_json: str) -> str:
         desc = f"{len(entries)} entry/entries"
     if desc:
         if len(desc) > _MAX_DESC:
-            desc = desc[:_MAX_DESC - 1] + "\u2026"
+            desc = desc[: _MAX_DESC - 1] + "\u2026"
         return f"{label}({desc})"
     return label
+
 
 THINKING_MESSAGES = [
     "Consulting the sacred docs...",
@@ -158,16 +159,14 @@ class StreamDisplay:
         self._initial_printed = False
         self._active = False
         # 3-line footer state
-        self._line1_fun: str = ""       # Line 1: Esc to cancel — fun message
-        self._line2_status: str = ""    # Line 2: ⠸ what's happening now
-        self._line3_peek: str = ""      # Line 3: ↳ live peek at output
+        self._line1_fun: str = ""  # Line 1: Esc to cancel — fun message
+        self._line2_status: str = ""  # Line 2: ⠸ what's happening now
+        self._line3_peek: str = ""  # Line 3: ↳ live peek at output
         self._cancel_msg: str = ""
 
     def _set_status(self, text: str) -> None:
         if self._toolbar is not None:
             self._toolbar["status"] = text
-
-    # --- Tiny Live: just spinner + footer (1-2 lines) ---
 
     def _start_spinner(self, text: str | None = None) -> None:
         """Start or restart the tiny spinner Live."""
@@ -201,7 +200,9 @@ class StreamDisplay:
         from rich.console import Group
 
         # Line 1: spinner + status
-        spinner = Spinner("dots", text=Text(f" {self._line2_status}", style="anton.muted"))
+        spinner = Spinner(
+            "dots", text=Text(f" {self._line2_status}", style="anton.muted")
+        )
 
         # Line 2: peek (only if there's something to peek at)
         parts: list = [spinner]
@@ -216,12 +217,12 @@ class StreamDisplay:
         if self._cancel_msg:
             cancel_line.append(f"\u23f5\u23f5 {self._cancel_msg}", style="#ff69b4")
         else:
-            cancel_line.append(f"\u23f5\u23f5 Esc to cancel \u2014 {self._line1_fun}", style="#ff69b4")
+            cancel_line.append(
+                f"\u23f5\u23f5 Esc to cancel \u2014 {self._line1_fun}", style="#ff69b4"
+            )
         parts.append(cancel_line)
 
         return Group(*parts)
-
-    # --- Public API ---
 
     def start(self) -> None:
         self._line1_fun = random.choice(THINKING_MESSAGES)  # noqa: S311
@@ -296,7 +297,9 @@ class StreamDisplay:
                     self._start_spinner()
                 return
 
-    def update_progress(self, phase: str, message: str, eta: float | None = None) -> None:
+    def update_progress(
+        self, phase: str, message: str, eta: float | None = None
+    ) -> None:
         """Update progress — manages spinner and activity lines."""
         if not self._active:
             return
@@ -360,7 +363,9 @@ class StreamDisplay:
         # Print initial text as muted "inner speech" (if not already printed)
         if self._initial_text and not self._initial_printed:
             if self._activities:
-                self._console.print(Text(self._initial_text.rstrip(), style="anton.muted"))
+                self._console.print(
+                    Text(self._initial_text.rstrip(), style="anton.muted")
+                )
 
         # Print answer
         if self._activities:
@@ -395,8 +400,6 @@ class StreamDisplay:
         self._line3_peek = ""
         self._update_spinner()
 
-    # --- Private helpers ---
-
     def _extract_peek(self, text: str) -> str:
         """Extract the last meaningful line from streaming text for the peek line."""
         lines = text.rstrip().splitlines()
@@ -409,7 +412,7 @@ class StreamDisplay:
         for ch in ("#", "*", "-", ">", "`"):
             last = last.lstrip(ch).strip()
         if len(last) > _MAX_THOUGHT_LEN:
-            last = last[:_MAX_THOUGHT_LEN - 1] + "\u2026"
+            last = last[: _MAX_THOUGHT_LEN - 1] + "\u2026"
         return last
 
     def _print_activity_line(self, act: _ToolActivity) -> None:

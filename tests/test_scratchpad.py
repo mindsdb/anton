@@ -122,14 +122,13 @@ class TestScratchpadEdgeCases:
             await pad.close()
 
     async def test_output_truncation(self):
-        """Large output should be capped at 10KB when read through Cell."""
+        """stdout exceeding _MAX_OUTPUT is capped in the boot script."""
         pad = Scratchpad(name="test")
         await pad.start()
         try:
-            # The raw cell captures full stdout; truncation happens at the
-            # chat handler level. Here we just verify we get the full output.
             cell = await pad.execute("print('x' * 20000)")
-            assert len(cell.stdout) >= 20000
+            assert "truncated" in cell.stdout
+            assert len(cell.stdout) < 20000
             assert cell.error is None
         finally:
             await pad.close()

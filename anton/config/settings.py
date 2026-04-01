@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -51,6 +51,7 @@ class AntonSettings(BaseSettings):
     disable_autoupdates: bool = False
 
     terms_consent: bool = False
+    first_run_done: bool = False
 
     # Analytics — anonymous usage events (set ANTON_ANALYTICS_ENABLED=false to opt out)
     analytics_enabled: bool = True
@@ -64,6 +65,13 @@ class AntonSettings(BaseSettings):
     minds_datasource: str | None = None
     minds_datasource_engine: str | None = None
     minds_ssl_verify: bool = True
+
+    @field_validator("minds_ssl_verify", mode="before")
+    @classmethod
+    def _parse_minds_ssl_verify(cls, v):
+        if isinstance(v, str) and v.strip() == "":
+            return True
+        return v
 
     _workspace: Path = PrivateAttr(default=None)
 

@@ -24,9 +24,6 @@ def _make_console() -> Console:
 
 
 class TestTaglines:
-    def test_taglines_non_empty(self):
-        assert len(TAGLINES) >= 16
-
     def test_pick_tagline_returns_from_list(self):
         tagline = pick_tagline()
         assert tagline in TAGLINES

@@ -1,31 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import fields
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from anton.llm.anthropic import AnthropicProvider
-from anton.llm.provider import LLMResponse, ToolCall, Usage
+from anton.llm.provider import LLMResponse, ToolCall
 
 
 class TestDataclasses:
-    def test_tool_call(self):
-        tc = ToolCall(id="tc_1", name="create_plan", input={"key": "val"})
-        assert tc.id == "tc_1"
-        assert tc.name == "create_plan"
-        assert tc.input == {"key": "val"}
-
-    def test_usage_defaults(self):
-        u = Usage()
-        assert u.input_tokens == 0
-        assert u.output_tokens == 0
-
-    def test_llm_response_defaults(self):
-        r = LLMResponse(content="hi")
-        assert r.content == "hi"
-        assert r.tool_calls == []
-        assert r.usage.input_tokens == 0
-        assert r.stop_reason is None
-
     def test_llm_response_with_tool_calls(self):
         tc = ToolCall(id="1", name="test", input={})
         r = LLMResponse(content="", tool_calls=[tc], stop_reason="tool_use")

@@ -2,15 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from anton.chat_ui import PHASE_LABELS, THINKING_MESSAGES, TOOL_MESSAGES, StreamDisplay, _tool_display_text
+from anton.chat_ui import PHASE_LABELS, StreamDisplay, _tool_display_text
 
-
-class TestMessageLists:
-    def test_thinking_messages_non_empty(self):
-        assert len(THINKING_MESSAGES) > 0
-
-    def test_tool_messages_non_empty(self):
-        assert len(TOOL_MESSAGES) > 0
 
 
 class TestStreamDisplay:

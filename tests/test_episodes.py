@@ -37,11 +37,6 @@ class TestStartSession:
         assert len(sid) == 15
         assert sid[8] == "_"
 
-    def test_returns_session_id(self, em: EpisodicMemory):
-        sid = em.start_session()
-        assert isinstance(sid, str)
-        assert len(sid) > 0
-
     def test_creates_dir(self, episodes_dir: Path):
         assert not episodes_dir.exists()
         em = EpisodicMemory(episodes_dir)

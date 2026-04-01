@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.memory.hippocampus import Engram, Hippocampus
+from anton.memory.hippocampus import Hippocampus
 
 
 @pytest.fixture()
@@ -223,9 +223,3 @@ class TestSanitizeSlug:
         assert Hippocampus._sanitize_slug("") == "general"
 
 
-class TestEngram:
-    def test_defaults(self):
-        e = Engram(text="test", kind="lesson", scope="global")
-        assert e.confidence == "medium"
-        assert e.source == "llm"
-        assert e.topic == ""

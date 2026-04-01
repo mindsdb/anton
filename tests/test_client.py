@@ -75,11 +75,19 @@ class TestLLMClient:
 
 class TestLLMClientFromSettings:
     def test_from_settings_creates_client(self):
-        with patch("anton.llm.anthropic.AnthropicProvider") as MockProvider:
-            MockProvider.return_value = AsyncMock(spec=LLMProvider)
-            settings = AntonSettings(anthropic_api_key="test-key", _env_file=None)
+        from anton.llm.anthropic import AnthropicProvider
+
+        with patch("anthropic.AsyncAnthropic"):
+            settings = AntonSettings(
+                planning_provider="anthropic",
+                coding_provider="anthropic",
+                anthropic_api_key="test-key",
+                _env_file=None,
+            )
             client = LLMClient.from_settings(settings)
             assert isinstance(client, LLMClient)
+            assert isinstance(client._planning_provider, AnthropicProvider)
+            assert isinstance(client._coding_provider, AnthropicProvider)
 
     def test_unknown_planning_provider_raises(self):
         settings = AntonSettings(

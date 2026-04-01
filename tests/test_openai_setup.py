@@ -21,7 +21,7 @@ def test_minds_test_llm_uses_modern_openai_token_parameter(monkeypatch):
         captured["verify"] = verify
         return b"{}"
 
-    monkeypatch.setattr("anton.chat._minds_request", fake_minds_request)
+    monkeypatch.setattr("anton.chat.minds_request", fake_minds_request)
 
     assert _minds_test_llm("https://example.com", "test-key") is True
 

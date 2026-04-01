@@ -292,6 +292,7 @@ _real_stdout = sys.stdout
 _real_stdin = sys.stdin
 
 _PROGRESS_MARKER = "__ANTON_PROGRESS__"
+_MAX_OUTPUT = 10_000
 
 def progress(message=""):
     """Signal that long-running work is still active. Resets the inactivity timer."""
@@ -299,8 +300,6 @@ def progress(message=""):
     _real_stdout.flush()
 
 namespace["progress"] = progress
-
-# --- Variable inspector ---
 
 def sample(var, mode="preview", _name=None):
     """Inspect a variable with type-aware formatting.
@@ -322,7 +321,6 @@ def sample(var, mode="preview", _name=None):
 
     lines = [header]
 
-    # --- pandas DataFrame ---
     try:
         import pandas as _pd
         if isinstance(var, _pd.DataFrame):
@@ -361,7 +359,6 @@ def sample(var, mode="preview", _name=None):
     except ImportError:
         pass
 
-    # --- numpy array ---
     try:
         import numpy as _np
         if isinstance(var, _np.ndarray):
@@ -381,7 +378,6 @@ def sample(var, mode="preview", _name=None):
     except ImportError:
         pass
 
-    # --- dict ---
     if isinstance(var, dict):
         lines.append(f"Keys ({len(var)}): {list(var.keys())[:20]}")
         if len(var) > 20:
@@ -404,7 +400,6 @@ def sample(var, mode="preview", _name=None):
         print(_truncate_sample("\n".join(lines), limit))
         return
 
-    # --- list / tuple ---
     if isinstance(var, (list, tuple)):
         kind = type(var).__name__
         lines.append(f"Length: {len(var)}")
@@ -433,7 +428,6 @@ def sample(var, mode="preview", _name=None):
         print(_truncate_sample("\n".join(lines), limit))
         return
 
-    # --- set / frozenset ---
     if isinstance(var, (set, frozenset)):
         lines.append(f"Length: {len(var)}")
         items = sorted(var, key=repr)
@@ -448,7 +442,6 @@ def sample(var, mode="preview", _name=None):
         print(_truncate_sample("\n".join(lines), limit))
         return
 
-    # --- str ---
     if isinstance(var, str):
         lines.append(f"Length: {len(var)}")
         if mode == "preview":
@@ -461,7 +454,6 @@ def sample(var, mode="preview", _name=None):
         print(_truncate_sample("\n".join(lines), limit))
         return
 
-    # --- bytes ---
     if isinstance(var, bytes):
         lines.append(f"Length: {len(var)} bytes")
         if mode == "preview":
@@ -473,7 +465,6 @@ def sample(var, mode="preview", _name=None):
         print(_truncate_sample("\n".join(lines), limit))
         return
 
-    # --- fallback: any object ---
     lines.append(f"Type: {type(var).__module__}.{type(var).__qualname__}")
     # Show public attributes
     attrs = [a for a in dir(var) if not a.startswith("_")]
@@ -614,8 +605,11 @@ while True:
         sys.stderr = sys.__stderr__
         _cell_log_handler.buf = None
 
+    stdout_val = out_buf.getvalue()
+    if len(stdout_val) > _MAX_OUTPUT:
+        stdout_val = stdout_val[:_MAX_OUTPUT] + f"\n\n... (truncated, {len(stdout_val)} chars total)"
     result = {
-        "stdout": out_buf.getvalue(),
+        "stdout": stdout_val,
         "stderr": err_buf.getvalue(),
         "logs": log_buf.getvalue(),
         "error": error,
