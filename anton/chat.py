@@ -4080,211 +4080,37 @@ class _ClosingSpinner:
             self._live = None
 
 
-_AGENT_ZERO_QUERIES = {
-    "finance": (
-        "I hold 50 AAPL, 200 NVDA, and 10 AMZN. Get today's prices, calculate my "
-        "total portfolio value, show me the 30-day performance of each stock, and "
-        "any other information that might be useful. Give me a complete dashboard."
-    ),
-    "crypto": (
-        "Compare Bitcoin vs NVIDIA stock performance over the past 5 years, month by month. "
-        "Include key milestones, correlation analysis, and volatility comparison. "
-        "Give me a complete interactive dashboard."
-    ),
-    "basketball_marchmadness": (
-        "Give me a full interactive dashboard to determine best odds for the March Madness "
-        "championship from data here: https://docs.google.com/spreadsheets/d/"
-        "1YkcFBG5E2vmnZNxzSngn11W51N_PF7PHLNzVFeU18Jo/edit?usp=sharing"
-    ),
-    "basketball": (
-        "Pull current NBA standings, top scorers, and team stats for this season. "
-        "Build an interactive dashboard with rankings, performance trends, and key matchups."
-    ),
-    "football": (
-        "Pull current NFL team standings, offensive and defensive rankings, and key player stats. "
-        "Build a complete interactive dashboard."
-    ),
-    "soccer": (
-        "Pull current Premier League standings, top scorers, goal difference, and form "
-        "over last 10 matches. Build a complete interactive dashboard."
-    ),
-    "baseball": (
-        "Pull current MLB standings, team batting and pitching stats, and top performers. "
-        "Build a complete interactive dashboard."
-    ),
-    "general": (
-        "Analyze the top 10 tech companies by market cap. Pull current stock prices, "
-        "YTD performance, P/E ratios, and revenue growth. Build a complete interactive "
-        "dashboard comparing them."
-    ),
-}
-
-
 async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
-    """First-run ice-breaker. Returns the hidden demo query to inject, or None if skipped."""
-    from pathlib import Path
-    import datetime
-
+    """First-run demo. Returns the hidden demo query to inject, or None if skipped."""
     import os as _os
+    from importlib.resources import files as _pkg_files
+
+    # Verify demo data exists
+    try:
+        demo_dir = Path(__file__).resolve().parent / "demo_data" / "nvda_btc_data"
+        if not demo_dir.is_dir():
+            return None
+        expected = ["1_monthly_prices.csv", "2_risk_metrics.csv", "3_montecarlo_projections.csv", "4_annual_scorecard.csv"]
+        if not all((demo_dir / f).is_file() for f in expected):
+            return None
+    except Exception:
+        return None
 
     # Clear screen for a clean start
     _os.system("cls" if sys.platform == "win32" else "clear")
 
-    g = "anton.glow"
+    import time as _time
 
     console.print()
-    console.print(f"[anton.prompt]anton>[/] LLM is ready! Let's take it for a spin — I'll build you a sample dashboard to make sure everything works. What are you into?")
+    _msg = "LLM is ready! Let's take it for a spin — I'll build you a sample dashboard to make sure everything works. Ok?"
+    console.print("[anton.prompt]anton>[/] ", end="")
+    for ch in _msg:
+        console.file.write(ch)
+        console.file.flush()
+        _time.sleep(0.02)
     console.print()
-    console.print("    [bold]1[/]  Stocks & Finance")
-    console.print("    [bold]2[/]  Crypto")
-    console.print("    [bold]3[/]  Sports")
-    console.print("    [bold]4[/]  Surprise me")
     console.print()
 
-    # Phase 1: Pick a category
-    answer = await _prompt_or_cancel(
-        "(anton) Enter a number or tell me what you're into",
-        allow_cancel=True,
-    )
-    if answer is None:
-        return None  # Esc pressed
-
-    answer = (answer or "").strip()
-    if not answer:
-        return None
-
-    # Quick-map numbered choices; fall back to LLM for free-text
-    _quick_map = {"1": "finance", "2": "crypto", "3": "sports", "4": "general"}
-    category = _quick_map.get(answer)
-    sport = None
-
-    if category is None:
-        # Free-text — classify using LLM
-        try:
-            resp = await session._llm.plan(
-                system="You classify user interests into categories. Reply with ONLY valid JSON.",
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"The user said: {answer!r}\n\n"
-                        "Classify into one of these categories:\n"
-                        '- finance (stocks, trading, investing, portfolio)\n'
-                        '- crypto (bitcoin, ethereum, web3, blockchain)\n'
-                        '- sports (any sport)\n'
-                        '- data (analytics, BI, dashboards, data science)\n'
-                        '- general (anything else)\n\n'
-                        'If sports, also identify which sport if mentioned.\n\n'
-                        'Reply with ONLY JSON like: {"category": "sports", "sport": "basketball"}\n'
-                        'or {"category": "finance", "sport": null}'
-                    ),
-                }],
-                max_tokens=64,
-            )
-            import json as _json
-            raw = (resp.content or "").strip()
-            if "```" in raw:
-                raw = raw.split("```")[1].strip()
-                if raw.startswith("json"):
-                    raw = raw[4:].strip()
-            classification = _json.loads(raw)
-            category = classification.get("category", "general")
-            sport = classification.get("sport")
-        except Exception:
-            category = "general"
-
-    # Phase 2: Tailored follow-up
-    demo_key = category
-
-    if category == "sports":
-        # Sport picker
-        if sport and sport.lower() in ("basketball", "hoops", "nba", "march madness"):
-            sport_choice = "basketball"
-        elif sport and sport.lower() in ("football", "nfl"):
-            sport_choice = "football"
-        elif sport and sport.lower() in ("soccer", "football (soccer)", "premier league", "futbol"):
-            sport_choice = "soccer"
-        elif sport and sport.lower() in ("baseball", "mlb"):
-            sport_choice = "baseball"
-        else:
-            console.print()
-            console.print("  [anton.cyan]Nice![/] Which sport are you most into?")
-            console.print()
-            console.print("    [bold]1[/]  Basketball")
-            console.print("    [bold]2[/]  Football (NFL)")
-            console.print("    [bold]3[/]  Soccer")
-            console.print("    [bold]4[/]  Baseball")
-            console.print("    [bold]5[/]  Other — tell me which")
-            console.print()
-
-            pick = await _prompt_or_cancel(
-                "(anton) Enter a number",
-                allow_cancel=True,
-            )
-            if pick is None:
-                return None
-
-            pick = (pick or "").strip()
-            sport_map = {"1": "basketball", "2": "football", "3": "soccer", "4": "baseball"}
-            sport_choice = sport_map.get(pick)
-
-            if sport_choice is None:
-                # "Other" or unrecognized — ask what sport
-                if pick == "5" or pick not in sport_map:
-                    console.print()
-                    other_sport = await _prompt_or_cancel(
-                        "(anton) What sport?",
-                        allow_cancel=True,
-                    )
-                    if other_sport is None:
-                        return None
-                    # Generate a custom query via LLM
-                    try:
-                        qresp = await session._llm.plan(
-                            system=(
-                                "Generate a single question asking for a complete interactive dashboard "
-                                "about the given sport using publicly available data. The question should "
-                                "ask for current standings, stats, and interesting analysis. "
-                                "Reply with ONLY the question text, nothing else."
-                            ),
-                            messages=[{
-                                "role": "user",
-                                "content": f"Sport: {other_sport}",
-                            }],
-                            max_tokens=150,
-                        )
-                        return (qresp.content or "").strip() or None
-                    except Exception:
-                        return _AGENT_ZERO_QUERIES["general"]
-
-        # Date check for March Madness
-        now = datetime.date.today()
-        is_march_madness = sport_choice == "basketball" and now <= datetime.date(now.year, 4, 7)
-
-        _sport_prompts = {
-            "basketball": ("It's March Madness!" if is_march_madness else "NBA it is!",
-                           "basketball_marchmadness" if is_march_madness else "basketball"),
-            "football": ("NFL!", "football"),
-            "soccer": ("Premier League!", "soccer"),
-            "baseball": ("MLB!", "baseball"),
-        }
-        prompt_text, demo_key = _sport_prompts.get(sport_choice, ("Let's go!", "general"))
-        console.print()
-        console.print(f"  [anton.cyan]{prompt_text}[/] I'll build you a full interactive dashboard.")
-
-    elif category == "finance":
-        console.print()
-        console.print("  [anton.cyan]Stocks![/] I'll analyze a portfolio and build you a dashboard.")
-    elif category == "crypto":
-        console.print()
-        console.print("  [anton.cyan]Crypto![/] I'll compare Bitcoin vs NVIDIA over 5 years — full dashboard.")
-    elif category == "data":
-        console.print()
-        console.print("  [anton.cyan]Data nerd![/] I'll build a top tech companies dashboard for you.")
-    else:
-        console.print()
-        console.print("  [anton.cyan]Got it![/] I'll build you a full interactive dashboard to show what I can do.")
-
-    console.print()
     confirm = await _prompt_or_cancel(
         "(anton) Ready? (y/n)",
         choices=["y", "n"],
@@ -4300,13 +4126,51 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         return None
 
     console.print()
-    console.print(
-        "  [anton.glow]On it![/] This takes a couple of minutes — I need to fetch live data,\n"
-        "  crunch the numbers, and build the dashboard from scratch. Worth the wait."
-    )
-    console.print()
 
-    return _AGENT_ZERO_QUERIES.get(demo_key, _AGENT_ZERO_QUERIES["general"])
+    demo_query = (
+        f"Build me a full interactive dashboard comparing NVIDIA stock vs Bitcoin "
+        f"over the past 5 years. All the data you need is already prepared in CSV files "
+        f"at: {demo_dir}\n\n"
+        f"Files available:\n"
+        f"- 1_monthly_prices.csv — columns: date, nvda_open/high/low/close/volume, btc_open/high/low/close/volume, "
+        f"nvda_monthly_return_pct, btc_monthly_return_pct, nvda_cum_return, btc_cum_return, "
+        f"nvda_monthly_range_pct, btc_monthly_range_pct (64 rows)\n"
+        f"- 2_risk_metrics.csv — columns: date, nvda_vol_12m_ann, btc_vol_12m_ann, nvda_return_12m_ann, "
+        f"btc_return_12m_ann, nvda_sharpe_12m, btc_sharpe_12m, rolling_12m_correlation, "
+        f"nvda_drawdown_pct, btc_drawdown_pct, nvda_vs_btc_beta_6m (64 rows)\n"
+        f"- 3_montecarlo_projections.csv — columns: month, nvda_p5/p10/p25/p50/p75/p90/p95, "
+        f"btc_p5/p10/p25/p50/p75/p90/p95, nvda_mean, btc_mean (24 rows)\n"
+        f"- 4_annual_scorecard.csv — TWO blocks separated by a blank line. Block 1: annual data "
+        f"(year, nvda/btc annual_return_pct, ann_volatility_pct, sharpe, max_drawdown_pct, "
+        f"winning_months, total_months, winner). Block 2: 5yr scorecard (metric, nvda, btc) "
+        f"with 15 summary stats including total return, CAGR, MC probabilities.\n\n"
+        f"IMPORTANT — How to load file 4 (it has two CSV blocks separated by a blank line):\n"
+        f"```python\n"
+        f"import io\n"
+        f"raw4 = open('{demo_dir}/4_annual_scorecard.csv').read()\n"
+        f"blocks = raw4.strip().split('\\n\\n')\n"
+        f"annual_df = pd.read_csv(io.StringIO(blocks[0]))\n"
+        f"scorecard_df = pd.read_csv(io.StringIO(blocks[1]))\n"
+        f"```\n\n"
+        f"Step-by-step approach (use separate scratchpad cells):\n"
+        f"1. Load all 4 CSVs with pandas, print shapes and columns to verify\n"
+        f"2. Serialize all dataframes to a single JS file as `const DATA = {{prices: [...], risk: [...], "
+        f"mc: [...], annual: [...], scorecard: [...]}};` — use df.where(pd.notnull(df), None).to_dict(orient='records') "
+        f"and json.dumps(). Save to .anton/output/nvda_btc_data.js\n"
+        f"3. Write HTML head — include ECharts CDN, reference nvda_btc_data.js, all CSS styles. "
+        f"Dark theme (#0d1117 bg). Use tabs for sections: Performance, Risk, Monte Carlo, Annual, Decision.\n"
+        f"4. Write HTML body — header with NVDA vs BTC branding, hero KPI row (6 stats from scorecard), "
+        f"tab navigation, panel containers with chart divs for each section.\n"
+        f"5. Write all JS chart rendering logic — helper functions, ECharts initialization for each chart, "
+        f"tab switching with lazy rendering, scorecard table, annual table with color coding.\n"
+        f"6. Assemble html_head + html_body + html_js, write to .anton/output/nvda_btc_dashboard.html, "
+        f"open in browser with webbrowser.open(f'file://{{os.path.abspath(path)}}')\n\n"
+        f"Do NOT fetch any external data — everything is in those files. "
+        f"Split the HTML generation across multiple cells to avoid token limits. "
+        f"Make it epic — tabs, KPIs, interactive ECharts, dark theme, responsive."
+    )
+
+    return demo_query
 
 
 def _persist_first_run_done(settings) -> None:
@@ -4731,21 +4595,11 @@ async def _chat_loop(
             else:
                 send_event(settings, "anton_query")
 
-            # Time estimate for the first 10 questions
-            if _total_questions <= 10:
-                _input_lower = (stripped or "").lower() if isinstance(message_content, str) else str(message_content).lower()
-                _is_dashboard = any(
-                    kw in _input_lower
-                    for kw in ("dashboard", "chart", "visualize", "plot", "graph", "interactive")
+            # Time estimate for the first question
+            if _total_questions == 1:
+                console.print(
+                    "[anton.muted]  This will take a couple of minutes — building your dashboard. Worth the wait![/]"
                 )
-                if _is_dashboard:
-                    console.print(
-                        "[anton.muted]  This will take a couple of minutes — building your dashboard. Worth the wait![/]"
-                    )
-                else:
-                    console.print(
-                        "[anton.muted]  Working on it — should be ready shortly.[/]"
-                    )
                 console.print()
 
             display.start()
