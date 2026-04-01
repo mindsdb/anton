@@ -676,6 +676,53 @@ class ChatSession:
 
         llm_response = response.response
 
+        # Detect max_tokens truncation — the LLM was cut off mid-response.
+        # Inject a continuation prompt so it can finish what it was doing.
+        if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+            self._history.append(
+                {"role": "assistant", "content": llm_response.content or ""}
+            )
+            self._history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "SYSTEM: Your response was truncated because it exceeded the output token limit. "
+                        "Continue exactly where you left off. If you were about to call a tool, "
+                        "call it now. If the code you were writing was too long, split it into smaller parts."
+                    ),
+                }
+            )
+            response = None
+            try:
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                    tools=tools,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        response = event
+            except ContextOverflowError:
+                if not _compacted_this_turn:
+                    await self._summarize_history()
+                    self._compact_scratchpads()
+                    _compacted_this_turn = True
+                yield StreamContextCompacted(
+                    message="Context was getting long — older history has been summarized."
+                )
+                async for event in self._llm.plan_stream(
+                    system=system,
+                    messages=self._history,
+                    tools=tools,
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        response = event
+
+            if response is None:
+                return
+            llm_response = response.response
+
         # Proactive compaction
         if (
             not _compacted_this_turn
@@ -894,6 +941,52 @@ class ChatSession:
                 if response is None:
                     return
                 llm_response = response.response
+
+                # Detect max_tokens truncation inside tool loop
+                if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+                    self._history.append(
+                        {"role": "assistant", "content": llm_response.content or ""}
+                    )
+                    self._history.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "SYSTEM: Your response was truncated because it exceeded the output token limit. "
+                                "Continue exactly where you left off. If you were about to call a tool, "
+                                "call it now. If the code you were writing was too long, split it into smaller parts."
+                            ),
+                        }
+                    )
+                    response = None
+                    try:
+                        async for event in self._llm.plan_stream(
+                            system=system,
+                            messages=self._history,
+                            tools=tools,
+                        ):
+                            yield event
+                            if isinstance(event, StreamComplete):
+                                response = event
+                    except ContextOverflowError:
+                        if not _compacted_this_turn:
+                            await self._summarize_history()
+                            self._compact_scratchpads()
+                            _compacted_this_turn = True
+                        yield StreamContextCompacted(
+                            message="Context was getting long — older history has been summarized."
+                        )
+                        async for event in self._llm.plan_stream(
+                            system=system,
+                            messages=self._history,
+                            tools=tools,
+                        ):
+                            yield event
+                            if isinstance(event, StreamComplete):
+                                response = event
+
+                    if response is None:
+                        return
+                    llm_response = response.response
 
                 # Proactive compaction during tool loop
                 if (
