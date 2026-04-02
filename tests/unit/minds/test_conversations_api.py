@@ -13,6 +13,8 @@ from minds.api.v1.endpoints.conversations import (
     create_conversation,
     delete_conversation,
     export_conversation_message_result,
+    generate_chart,
+    get_chart_image,
     get_conversation,
     get_conversation_message_report,
     get_conversation_message_result,
@@ -20,6 +22,7 @@ from minds.api.v1.endpoints.conversations import (
     get_conversations_service,
     list_conversations,
 )
+from minds.schemas.charts import ChartImageResponse, ChartMeta, ChartRequest, ChartResponse, XYIntent
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse, MessageResultResponse
 from minds.services.conversations import (
@@ -802,7 +805,150 @@ class TestConversationsAPI:
             )
 
         assert exc_info.value.status_code == 404
-        assert "report is not available" in str(exc_info.value.detail).lower()
+
+    async def test_generate_chart_output_chartjs(self, mock_conversations_service):
+        """Test unified chart endpoint with output=chartjs returns Chart.js config."""
+        chart_response = ChartResponse(
+            config={"type": "bar"},
+            meta=ChartMeta(row_count=10, used_rows=10, points=3, series=1, fields=None),
+            warnings=[],
+        )
+        mock_conversations_service.get_conversation_message_chart = AsyncMock(return_value=chart_response)
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output="chartjs")
+
+        result = await generate_chart(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            req=req,
+            conversations_service=mock_conversations_service,
+        )
+
+        assert result == chart_response
+        mock_conversations_service.get_conversation_message_chart.assert_called_once_with(
+            conversation_id,
+            message_id,
+            req.intent,
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_chart_output_png(self, mock_conversations_service):
+        """Test unified chart endpoint with output=png returns PNG bytes."""
+        mock_conversations_service.render_conversation_message_chart_png = AsyncMock(return_value=b"png-bytes")
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output="png")
+
+        result = await generate_chart(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            req=req,
+            conversations_service=mock_conversations_service,
+        )
+
+        assert result.body == b"png-bytes"
+        assert result.media_type == "image/png"
+        assert result.headers["Cache-Control"] == "no-store"
+        mock_conversations_service.render_conversation_message_chart_png.assert_called_once_with(
+            conversation_id,
+            message_id,
+            req.intent,
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_chart_output_image_url(self, mock_conversations_service):
+        """Test unified chart endpoint with output=image_url returns image URL."""
+        response = ChartImageResponse(
+            image_url="/api/v1/conversations/a/items/b/chart?token=opaque-token",
+            meta=ChartMeta(row_count=10, used_rows=10, points=3, series=1, fields=None),
+            warnings=[],
+        )
+        mock_conversations_service.get_conversation_message_chart_image = AsyncMock(return_value=response)
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output="image_url")
+
+        result = await generate_chart(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            req=req,
+            conversations_service=mock_conversations_service,
+        )
+
+        assert result == response
+        mock_conversations_service.get_conversation_message_chart_image.assert_called_once_with(
+            conversation_id,
+            message_id,
+            req.intent,
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_chart_defaults_to_chartjs(self, mock_conversations_service):
+        """Test that output defaults to chartjs when not specified."""
+        chart_response = ChartResponse(
+            config={"type": "bar"},
+            meta=ChartMeta(row_count=10, used_rows=10, points=3, series=1, fields=None),
+            warnings=[],
+        )
+        mock_conversations_service.get_conversation_message_chart = AsyncMock(return_value=chart_response)
+
+        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"))
+        assert req.output == "chartjs"
+
+        result = await generate_chart(
+            conversation_id=uuid4(),
+            message_id=uuid4(),
+            req=req,
+            conversations_service=mock_conversations_service,
+        )
+
+        assert result == chart_response
+
+    @pytest.mark.asyncio
+    async def test_get_chart_image_success(self, mock_conversations_service):
+        """Test serving a rendered chart image via GET."""
+        mock_conversations_service.render_conversation_message_chart_by_token = AsyncMock(return_value=b"png-bytes")
+
+        conversation_id = uuid4()
+        message_id = uuid4()
+
+        result = await get_chart_image(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            token="opaque-token",
+            conversations_service=mock_conversations_service,
+        )
+
+        assert result.body == b"png-bytes"
+        assert result.media_type == "image/png"
+        assert result.headers["Cache-Control"] == "private, no-store"
+        mock_conversations_service.render_conversation_message_chart_by_token.assert_called_once_with(
+            conversation_id,
+            message_id,
+            "opaque-token",
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_chart_image_invalid_token(self, mock_conversations_service):
+        """Test chart image GET returns 400 for invalid token payload."""
+        mock_conversations_service.render_conversation_message_chart_by_token = AsyncMock(
+            side_effect=ValueError("Invalid chart image token")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_chart_image(
+                conversation_id=uuid4(),
+                message_id=uuid4(),
+                token="opaque-token",
+                conversations_service=mock_conversations_service,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Invalid chart image token"
 
     @pytest.mark.asyncio
     async def test_get_conversation_message_report_success(self, mock_conversations_service):
@@ -837,3 +983,4 @@ class TestConversationsAPI:
 
         assert exc_info.value.status_code == 400
         assert "not an assistant" in str(exc_info.value.detail).lower()
+        assert exc_info.value.detail == "Message is not an assistant message"

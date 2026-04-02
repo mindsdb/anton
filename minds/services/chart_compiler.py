@@ -10,7 +10,16 @@ import pandas as pd
 
 from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
-from minds.schemas.charts import ChartMeta, ChartWarning, PieIntent, ScatterIntent, XYIntent
+from minds.schemas.charts import (
+    AxisSpec,
+    ChartMeta,
+    ChartWarning,
+    PieIntent,
+    RenderPlan,
+    ScatterIntent,
+    SeriesSpec,
+    XYIntent,
+)
 
 logger = get_logger(__name__)
 
@@ -324,36 +333,15 @@ def _compile_xy_chart(
     # Y-axis label: use single column name, or generic label for multiple
     y_axis_label = ycols[0] if len(ycols) == 1 else "Value"
 
-    # Build Chart.js config
-    config = {
-        "type": intent.type,
-        "data": {"labels": labels, "datasets": datasets},
-        "options": {
-            "responsive": True,
-            "maintainAspectRatio": False,
-            "plugins": {
-                "legend": {"display": show_legend},
-                "title": {"display": bool(intent.title), "text": intent.title or ""},
-                "tooltip": {"enabled": True},
-            },
-            "scales": {
-                "x": {
-                    "type": "timeseries" if is_time else "category",
-                    "title": {
-                        "display": True,
-                        "text": xcol,
-                    },
-                },
-                "y": {
-                    "title": {
-                        "display": True,
-                        "text": y_axis_label,
-                    },
-                    "beginAtZero": True,
-                },
-            },
-        },
-    }
+    plan = RenderPlan(
+        chart_type=intent.type,
+        title=intent.title,
+        show_legend=show_legend,
+        labels=labels,
+        series=[SeriesSpec(label=d["label"], values=d["data"]) for d in datasets],
+        x_axis=AxisSpec(title=xcol, scale_type="timeseries" if is_time else "category"),
+        y_axis=AxisSpec(title=y_axis_label, scale_type="linear"),
+    )
 
     meta = ChartMeta(
         row_count=len(df),
@@ -363,7 +351,7 @@ def _compile_xy_chart(
         fields=fields,
     )
 
-    return config, meta
+    return plan, meta
 
 
 def _compile_pie_chart(
@@ -427,20 +415,15 @@ def _compile_pie_chart(
     labels = [str(k) for k in g.index.tolist()]
     data = [float(v) for v in g.values.tolist()]
 
-    # Build Chart.js config
-    config = {
-        "type": "pie",
-        "data": {"labels": labels, "datasets": [{"data": data}]},
-        "options": {
-            "responsive": True,
-            "maintainAspectRatio": False,
-            "plugins": {
-                "legend": {"display": True},
-                "title": {"display": bool(intent.title), "text": intent.title or ""},
-                "tooltip": {"enabled": True},
-            },
-        },
-    }
+    plan = RenderPlan(
+        chart_type="pie",
+        title=intent.title,
+        show_legend=True,
+        labels=labels,
+        series=[SeriesSpec(label="", values=data)],
+        x_axis=AxisSpec(title=None, scale_type="category"),
+        y_axis=AxisSpec(title=None, scale_type="linear"),
+    )
 
     meta = ChartMeta(
         row_count=len(df),
@@ -450,7 +433,7 @@ def _compile_pie_chart(
         fields=fields,
     )
 
-    return config, meta
+    return plan, meta
 
 
 def _compile_scatter_chart(
@@ -552,36 +535,21 @@ def _compile_scatter_chart(
     # Determine if legend should be shown (multiple series)
     show_legend = bool(scol)
 
-    # Build Chart.js config
-    config = {
-        "type": "scatter",
-        "data": {"datasets": datasets},
-        "options": {
-            "responsive": True,
-            "maintainAspectRatio": False,
-            "plugins": {
-                "legend": {"display": show_legend},
-                "title": {"display": bool(intent.title), "text": intent.title or ""},
-                "tooltip": {"enabled": True},
-            },
-            "scales": {
-                "x": {
-                    "type": "linear",
-                    "title": {
-                        "display": True,
-                        "text": xcol,
-                    },
-                },
-                "y": {
-                    "type": "linear",
-                    "title": {
-                        "display": True,
-                        "text": ycol,
-                    },
-                },
-            },
-        },
-    }
+    plan = RenderPlan(
+        chart_type="scatter",
+        title=intent.title,
+        show_legend=show_legend,
+        labels=[],
+        series=[
+            SeriesSpec(
+                label=d["label"],
+                points=[(p["x"], p["y"]) for p in d["data"]],
+            )
+            for d in datasets
+        ],
+        x_axis=AxisSpec(title=xcol, scale_type="linear"),
+        y_axis=AxisSpec(title=ycol, scale_type="linear"),
+    )
 
     meta = ChartMeta(
         row_count=len(df),
@@ -591,15 +559,91 @@ def _compile_scatter_chart(
         fields=fields,
     )
 
-    return config, meta
+    return plan, meta
 
 
-def compile_chartjs(
+def render_plan_to_chartjs(plan: RenderPlan) -> dict:
+    """Serialize a RenderPlan into a Chart.js configuration dict for frontend rendering."""
+    plugins = {
+        "legend": {"display": plan.show_legend},
+        "title": {"display": bool(plan.title), "text": plan.title or ""},
+        "tooltip": {"enabled": True},
+    }
+
+    if plan.chart_type == "pie":
+        return {
+            "type": "pie",
+            "data": {
+                "labels": plan.labels,
+                "datasets": [{"data": plan.series[0].values or []}] if plan.series else [{"data": []}],
+            },
+            "options": {
+                "responsive": True,
+                "maintainAspectRatio": False,
+                "plugins": plugins,
+            },
+        }
+
+    if plan.chart_type == "scatter":
+        return {
+            "type": "scatter",
+            "data": {
+                "datasets": [
+                    {
+                        "label": s.label,
+                        "data": [{"x": p[0], "y": p[1]} for p in (s.points or [])],
+                    }
+                    for s in plan.series
+                ],
+            },
+            "options": {
+                "responsive": True,
+                "maintainAspectRatio": False,
+                "plugins": plugins,
+                "scales": {
+                    "x": {
+                        "type": plan.x_axis.scale_type,
+                        "title": {"display": True, "text": plan.x_axis.title},
+                    },
+                    "y": {
+                        "type": plan.y_axis.scale_type,
+                        "title": {"display": True, "text": plan.y_axis.title},
+                    },
+                },
+            },
+        }
+
+    # bar / line
+    return {
+        "type": plan.chart_type,
+        "data": {
+            "labels": plan.labels,
+            "datasets": [{"label": s.label, "data": s.values or []} for s in plan.series],
+        },
+        "options": {
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "plugins": plugins,
+            "scales": {
+                "x": {
+                    "type": plan.x_axis.scale_type,
+                    "title": {"display": True, "text": plan.x_axis.title},
+                },
+                "y": {
+                    "title": {"display": True, "text": plan.y_axis.title},
+                    "beginAtZero": True,
+                },
+            },
+        },
+    }
+
+
+def compile_chart(
     df: pd.DataFrame,
     intent: XYIntent | PieIntent | ScatterIntent,
-) -> tuple[dict, list[ChartWarning], ChartMeta]:
+) -> tuple[RenderPlan, list[ChartWarning], ChartMeta]:
     """
-    Compile a Chart.js configuration from a DataFrame and chart intent.
+    Compile a RenderPlan from a DataFrame and chart intent.
 
     This is the main entry point for chart compilation. It handles row limiting,
     dispatches to the appropriate chart-type compiler, and formats the response.
@@ -609,7 +653,7 @@ def compile_chartjs(
         intent: Chart intent specification (XYIntent, PieIntent, or ScatterIntent).
 
     Returns:
-        Tuple of (Chart.js config dict, list of warnings, metadata).
+        Tuple of (RenderPlan, list of warnings, metadata).
 
     Raises:
         ValueError: If required columns are missing from the DataFrame.
@@ -617,7 +661,6 @@ def compile_chartjs(
     warnings: list[dict] = []
     original_row_count = len(df)
 
-    # Apply row limit if needed
     if len(df) > MAX_ROWS_TO_PROCESS:
         df = df.head(MAX_ROWS_TO_PROCESS)
         warnings.append(
@@ -627,7 +670,6 @@ def compile_chartjs(
             }
         )
     elif len(df) == MAX_ROWS_TO_PROCESS:
-        # This commonly happens when the upstream query is already limited.
         warnings.append(
             {
                 "code": "ROW_LIMIT",
@@ -638,25 +680,27 @@ def compile_chartjs(
             }
         )
 
-    # Lowercase the column names of the DataFrame
-    # This is done to ensure that the column names are consistent with the intent
-    # The column names related to the intent are also converted in the individual models
     df.columns = df.columns.str.lower()
 
-    # Dispatch to appropriate compiler
     if isinstance(intent, XYIntent):
-        config, meta = _compile_xy_chart(df, intent, warnings)
+        plan, meta = _compile_xy_chart(df, intent, warnings)
     elif isinstance(intent, PieIntent):
-        config, meta = _compile_pie_chart(df, intent, warnings)
+        plan, meta = _compile_pie_chart(df, intent, warnings)
     elif isinstance(intent, ScatterIntent):
-        config, meta = _compile_scatter_chart(df, intent, warnings)
+        plan, meta = _compile_scatter_chart(df, intent, warnings)
     else:
         raise ValueError(f"Unknown intent type: {type(intent)}")
 
-    # Update meta with original row count (before truncation)
     meta.row_count = original_row_count
-
-    # Convert warning dicts to ChartWarning objects
     warning_objects = [ChartWarning(**w) for w in warnings]
 
-    return config, warning_objects, meta
+    return plan, warning_objects, meta
+
+
+def compile_chartjs(
+    df: pd.DataFrame,
+    intent: XYIntent | PieIntent | ScatterIntent,
+) -> tuple[dict, list[ChartWarning], ChartMeta]:
+    """Convenience wrapper: compile intent to a Chart.js config dict."""
+    plan, warnings, meta = compile_chart(df, intent)
+    return render_plan_to_chartjs(plan), warnings, meta

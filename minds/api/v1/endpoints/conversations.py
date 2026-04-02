@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from minds.api.v1.deps import get_conversations_service, get_minds_service
 from minds.common.logger import setup_logging
-from minds.schemas.charts import ChartRequest, ChartResponse
+from minds.schemas.charts import ChartImageResponse, ChartRequest, ChartResponse
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.schemas.messages import MessageResponse, MessageResultResponse
 from minds.services.conversations import (
@@ -30,6 +30,8 @@ from minds.services.minds import MindNotFoundError, MindsService
 logger = setup_logging()
 
 router = APIRouter()
+DIRECT_CHART_HEADERS = {"Cache-Control": "no-store"}
+IMAGE_URL_CHART_HEADERS = {"Cache-Control": "private, no-store"}
 
 
 @router.get("/")
@@ -404,79 +406,155 @@ async def export_conversation_message_result(
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
-@router.post("/{conversation_id}/items/{message_id}/chart", response_model=ChartResponse)
-async def get_chart_for_message(
+@router.post(
+    "/{conversation_id}/items/{message_id}/chart",
+    response_model=None,
+    responses={
+        200: {
+            "description": "Chart output whose shape depends on the `output` field in the request body.",
+            "content": {
+                "application/json": {
+                    "description": "ChartResponse (output=chartjs) or ChartImageResponse (output=image_url)",
+                },
+                "image/png": {"description": "PNG bytes (output=png)"},
+            },
+        },
+    },
+)
+async def generate_chart(
     conversation_id: UUID,
     message_id: UUID,
     req: ChartRequest,
     conversations_service: ConversationsService = Depends(get_conversations_service),
-) -> ChartResponse:
+) -> ChartResponse | ChartImageResponse | Response:
     """
-    Generate a Chart.js configuration from a message's SQL query results.
+    Generate a chart from a message's SQL query results.
 
-    This endpoint takes a chart intent specification and compiles it into
-    a complete Chart.js configuration using the SQL query results from the
-    specified message.
+    The ``output`` field in the request body controls the response format:
 
-    Args:
-        conversation_id: ID of the conversation.
-        message_id: ID of the message with the SQL query.
-        req: Chart request containing the intent specification.
-
-    Returns:
-        ChartResponse: Complete Chart.js configuration with metadata and warnings.
+    - **chartjs** *(default)* — Returns a complete Chart.js configuration
+      for frontend rendering.
+    - **png** — Compiles and server-renders the chart, returning PNG bytes
+      directly.  Intended for immediate consumers (e.g. Slack upload).
+    - **image_url** — Returns an authenticated URL that can be used to fetch
+      a server-rendered image later via ``GET .../chart``. The URL renders
+      the chart on demand when fetched.
     """
+    user_id = conversations_service.user_id
+    org_id = conversations_service.organization_id
     logger.debug(
-        f"Get chart for message requested "
-        f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}"
+        f"Chart requested (output={req.output}) for user {user_id} in organization {org_id}"
     )
 
     try:
-        result = await conversations_service.get_conversation_message_chart(
+        if req.output == "chartjs":
+            return await conversations_service.get_conversation_message_chart(
+                conversation_id,
+                message_id,
+                req.intent,
+            )
+
+        if req.output == "png":
+            image_bytes = (
+                await conversations_service.render_conversation_message_chart_png(
+                    conversation_id,
+                    message_id,
+                    req.intent,
+                )
+            )
+            return Response(
+                content=image_bytes,
+                media_type="image/png",
+                headers=DIRECT_CHART_HEADERS,
+            )
+
+        return await conversations_service.get_conversation_message_chart_image(
             conversation_id,
             message_id,
             req.intent,
         )
-        return result
+
     except ConversationNotFoundError as e:
         logger.warning(
-            f"Conversation not found "
-            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+            f"Conversation not found for user {user_id} in organization {org_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotFoundError as e:
         logger.warning(
-            f"Message not found "
-            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+            f"Message not found for user {user_id} in organization {org_id}: {e}"
         )
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotAssistantError as e:
         logger.warning(
-            f"Message is not an assistant message "
-            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+            f"Message is not an assistant message for user {user_id} in organization {org_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except MessageNoSQLQueryError as e:
         logger.warning(
-            f"Message does not have a SQL query "
-            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+            f"Message does not have a SQL query for user {user_id} in organization {org_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except InvalidSQLQueryError as e:
         logger.warning(
-            f"Invalid SQL query "
-            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+            f"Invalid SQL query for user {user_id} in organization {org_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except ValueError as e:
         logger.warning(
-            f"Invalid chart intent "
-            f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
+            f"Invalid chart request for user {user_id} in organization {org_id}: {e}"
         )
         raise HTTPException(status_code=400, detail=str(e)) from None
     except ConversationsServiceError as e:
         logger.error(
-            f"Service error in get_chart_for_message "
+            f"Service error in generate_chart for user {user_id} in organization {org_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e)) from None
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in generate_chart for user {user_id} in organization {org_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+@router.get("/{conversation_id}/items/{message_id}/chart")
+async def get_chart_image(
+    conversation_id: UUID,
+    message_id: UUID,
+    token: str = Query(
+        ...,
+        description="Opaque chart token returned by the chart generation endpoint.",
+    ),
+    conversations_service: ConversationsService = Depends(get_conversations_service),
+) -> Response:
+    """
+    Serve a server-rendered chart image for a message.
+
+    This is the URL returned by ``POST .../chart`` when ``output`` is
+    ``image_url``. The URL is authenticated and renders the chart on demand.
+    """
+    try:
+        image_bytes = await conversations_service.render_conversation_message_chart_by_token(
+            conversation_id,
+            message_id,
+            token,
+        )
+        return Response(
+            content=image_bytes,
+            media_type="image/png",
+            headers=IMAGE_URL_CHART_HEADERS,
+        )
+    except (ConversationNotFoundError, MessageNotFoundError) as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except (
+        MessageNotAssistantError,
+        MessageNoSQLQueryError,
+        InvalidSQLQueryError,
+        ValueError,
+    ) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except ConversationsServiceError as e:
+        logger.error(
+            f"Service error in get_chart_image "
             f"for user {conversations_service.user_id} in organization {conversations_service.organization_id}: {e}"
         )
         raise HTTPException(status_code=500, detail=str(e)) from None

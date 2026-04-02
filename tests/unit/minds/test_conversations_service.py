@@ -4,7 +4,7 @@ Unit tests for ConversationsService.
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 import pandas as pd
@@ -15,6 +15,15 @@ from sqlmodel import Session
 from minds.model.conversation import Conversation
 from minds.model.message import Message
 from minds.model.mind import Mind
+from minds.schemas.charts import (
+    AxisSpec,
+    ChartImageResponse,
+    ChartMeta,
+    ChartResponse,
+    RenderPlan,
+    SeriesSpec,
+    XYIntent,
+)
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContentType, MessageResponse, MessageResultResponse
@@ -415,16 +424,30 @@ class TestConversationsService:
 
         called = {}
 
-        def _fake_compile_chartjs(result, intent):
+        def _fake_compile_chart(result, intent):
             called["rows"] = len(result)
             called["intent"] = intent
             return (
-                {"type": "bar"},
+                RenderPlan(
+                    chart_type="bar",
+                    title=None,
+                    show_legend=False,
+                    labels=["1"],
+                    series=[SeriesSpec(label="a", values=[1])],
+                    x_axis=AxisSpec(title="a", scale_type="category"),
+                    y_axis=AxisSpec(title="a", scale_type="linear"),
+                ),
                 [],
-                {"row_count": len(result), "used_rows": len(result), "points": len(result), "series": 1},
+                ChartMeta(
+                    row_count=len(result),
+                    used_rows=len(result),
+                    points=len(result),
+                    series=1,
+                    fields=None,
+                ),
             )
 
-        monkeypatch.setattr(chart_compiler_mod, "compile_chartjs", _fake_compile_chartjs)
+        monkeypatch.setattr(chart_compiler_mod, "compile_chart", _fake_compile_chart)
         monkeypatch.setattr(chart_compiler_mod, "MAX_ROWS_TO_PROCESS", 10)
 
         out = await service.get_conversation_message_chart(uuid4(), uuid4(), XYIntent(type="bar", x="a", y="a"))
@@ -1167,6 +1190,254 @@ class TestConversationsService:
 
         with pytest.raises(MessageNotAssistantError):
             await service.export_conversation_message_result(sample_conversation.id, sample_message.id)
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_chart_chartjs_success(
+        self, service, mock_session, mock_mindsdb_client, sample_conversation
+    ):
+        """Test chart generation in chartjs mode."""
+        assistant_message = Message(
+            id=uuid4(),
+            conversation_id=sample_conversation.id,
+            organization_id=UUID(service.organization_id),
+            role=Role.assistant,
+            content="Chart result",
+            sql_query="SELECT * FROM sales",
+            request_id="test-request-id",
+            created_at=datetime.now(timezone.utc),
+            modified_at=datetime.now(timezone.utc),
+        )
+
+        mock_conv_result = Mock()
+        mock_conv_result.first.return_value = sample_conversation
+        mock_msg_result = Mock()
+        mock_msg_result.first.return_value = assistant_message
+        mock_session.exec.side_effect = [mock_conv_result, mock_msg_result]
+
+        data_df = pd.DataFrame({"month": ["jan", "feb"], "revenue": [100, 150]})
+        mock_query = Mock()
+        mock_query.fetch.return_value = data_df
+        mock_mindsdb_client.query.return_value = mock_query
+        mock_database = Mock()
+        mock_database.engine = "postgresql"
+        mock_mindsdb_client.databases = Mock()
+        mock_mindsdb_client.databases.get.return_value = mock_database
+
+        intent = XYIntent(type="bar", x="month", y="revenue")
+
+        with patch("minds.services.chart_compiler.compile_chart") as mock_compile:
+            mock_compile.return_value = (
+                RenderPlan(
+                    chart_type="bar",
+                    title=None,
+                    show_legend=False,
+                    labels=["jan"],
+                    series=[SeriesSpec(label="revenue", values=[100])],
+                    x_axis=AxisSpec(title="month", scale_type="category"),
+                    y_axis=AxisSpec(title="revenue", scale_type="linear"),
+                ),
+                [],
+                {"row_count": 2, "used_rows": 2, "points": 1, "series": 1, "fields": None},
+            )
+
+            result = await service.get_conversation_message_chart(
+                sample_conversation.id,
+                assistant_message.id,
+                intent,
+            )
+
+        assert isinstance(result, ChartResponse)
+        assert result.config is not None
+        assert result.meta.row_count == 2
+
+    @pytest.mark.asyncio
+    async def test_render_conversation_message_chart_png_success(
+        self, service, mock_session, mock_mindsdb_client, sample_conversation
+    ):
+        """Test direct chart PNG rendering."""
+        assistant_message = Message(
+            id=uuid4(),
+            conversation_id=sample_conversation.id,
+            organization_id=UUID(service.organization_id),
+            role=Role.assistant,
+            content="Chart result",
+            sql_query="SELECT * FROM sales",
+            request_id="test-request-id",
+            created_at=datetime.now(timezone.utc),
+            modified_at=datetime.now(timezone.utc),
+        )
+
+        mock_conv_result = Mock()
+        mock_conv_result.first.return_value = sample_conversation
+        mock_msg_result = Mock()
+        mock_msg_result.first.return_value = assistant_message
+        mock_session.exec.side_effect = [mock_conv_result, mock_msg_result]
+
+        data_df = pd.DataFrame({"month": ["jan", "feb"], "revenue": [100, 150]})
+        mock_query = Mock()
+        mock_query.fetch.return_value = data_df
+        mock_mindsdb_client.query.return_value = mock_query
+        mock_database = Mock()
+        mock_database.engine = "postgresql"
+        mock_mindsdb_client.databases = Mock()
+        mock_mindsdb_client.databases.get.return_value = mock_database
+
+        intent = XYIntent(type="bar", x="month", y="revenue")
+
+        with (
+            patch("minds.services.chart_compiler.compile_chart") as mock_compile,
+            patch("minds.services.chart_renderer.render_chart_image", return_value=b"png-bytes") as mock_render,
+        ):
+            mock_compile.return_value = (
+                RenderPlan(
+                    chart_type="bar",
+                    title=None,
+                    show_legend=False,
+                    labels=["jan"],
+                    series=[SeriesSpec(label="revenue", values=[100])],
+                    x_axis=AxisSpec(title="month", scale_type="category"),
+                    y_axis=AxisSpec(title="revenue", scale_type="linear"),
+                ),
+                [],
+                {"row_count": 2, "used_rows": 2, "points": 1, "series": 1, "fields": None},
+            )
+
+            result = await service.render_conversation_message_chart_png(
+                sample_conversation.id,
+                assistant_message.id,
+                intent,
+            )
+
+        assert result == b"png-bytes"
+        mock_render.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_message_chart_image_success(
+        self, service, mock_session, mock_mindsdb_client, sample_conversation
+    ):
+        """Test image_url generation returns an opaque tokenized URL."""
+        assistant_message = Message(
+            id=uuid4(),
+            conversation_id=sample_conversation.id,
+            organization_id=UUID(service.organization_id),
+            role=Role.assistant,
+            content="Chart result",
+            sql_query="SELECT * FROM sales",
+            request_id="test-request-id",
+            created_at=datetime.now(timezone.utc),
+            modified_at=datetime.now(timezone.utc),
+        )
+
+        mock_conv_result = Mock()
+        mock_conv_result.first.return_value = sample_conversation
+        mock_msg_result = Mock()
+        mock_msg_result.first.return_value = assistant_message
+        mock_session.exec.side_effect = [mock_conv_result, mock_msg_result]
+
+        data_df = pd.DataFrame({"month": ["jan", "feb"], "revenue": [100, 150]})
+        mock_query = Mock()
+        mock_query.fetch.return_value = data_df
+        mock_mindsdb_client.query.return_value = mock_query
+        mock_database = Mock()
+        mock_database.engine = "postgresql"
+        mock_mindsdb_client.databases = Mock()
+        mock_mindsdb_client.databases.get.return_value = mock_database
+
+        intent = XYIntent(type="bar", x="month", y="revenue")
+
+        with patch("minds.services.chart_compiler.compile_chart") as mock_compile:
+            mock_compile.return_value = (
+                RenderPlan(
+                    chart_type="bar",
+                    title=None,
+                    show_legend=False,
+                    labels=["jan"],
+                    series=[SeriesSpec(label="revenue", values=[100])],
+                    x_axis=AxisSpec(title="month", scale_type="category"),
+                    y_axis=AxisSpec(title="revenue", scale_type="linear"),
+                ),
+                [],
+                ChartMeta(row_count=2, used_rows=2, points=1, series=1, fields=None),
+            )
+
+            result = await service.get_conversation_message_chart_image(
+                sample_conversation.id,
+                assistant_message.id,
+                intent,
+            )
+
+        token = result.image_url.split("token=")[1]
+        assert isinstance(result, ChartImageResponse)
+        assert result.image_url.startswith(
+            f"/api/v1/conversations/{sample_conversation.id}/items/{assistant_message.id}/chart?token="
+        )
+        assert service._parse_chart_image_token(token) == intent
+
+    @pytest.mark.asyncio
+    async def test_render_conversation_message_chart_by_token_success(
+        self, service, mock_session, sample_conversation
+    ):
+        """Test token-backed image GET renders from the encoded intent."""
+        assistant_message = Message(
+            id=uuid4(),
+            conversation_id=sample_conversation.id,
+            organization_id=UUID(service.organization_id),
+            role=Role.assistant,
+            content="Chart result",
+            sql_query="SELECT * FROM sales",
+            request_id="test-request-id",
+            created_at=datetime.now(timezone.utc),
+            modified_at=datetime.now(timezone.utc),
+        )
+
+        mock_conv_result = Mock()
+        mock_conv_result.first.return_value = sample_conversation
+        mock_msg_result = Mock()
+        mock_msg_result.first.return_value = assistant_message
+        mock_session.exec.side_effect = [mock_conv_result, mock_msg_result]
+
+        token = service._build_chart_image_token(XYIntent(type="bar", x="month", y="revenue"))
+
+        with patch.object(
+            service,
+            "render_conversation_message_chart_png",
+            AsyncMock(return_value=b"png-bytes"),
+        ) as mock_render:
+            result = await service.render_conversation_message_chart_by_token(
+                sample_conversation.id,
+                assistant_message.id,
+                token,
+            )
+
+        assert result == b"png-bytes"
+        mock_render.assert_awaited_once_with(
+            conversation_id=sample_conversation.id,
+            message_id=assistant_message.id,
+            intent=XYIntent(type="bar", x="month", y="revenue"),
+        )
+
+    def test_build_chart_image_token_changes_with_intent(self, service):
+        """Test token changes when the chart intent changes."""
+        first_intent = XYIntent(type="bar", x="month", y="revenue")
+        second_intent = XYIntent(type="line", x="month", y="revenue")
+
+        first_key = service._build_chart_image_token(first_intent)
+        second_key = service._build_chart_image_token(second_intent)
+
+        assert first_key != second_key
+
+    def test_build_chart_image_token_round_trips_same_intent(self, service):
+        """Test token round-trips the same intent."""
+        intent = XYIntent(type="bar", x="month", y="revenue")
+
+        token = service._build_chart_image_token(intent)
+
+        assert service._parse_chart_image_token(token) == intent
+
+    def test_parse_chart_image_token_rejects_invalid_payload(self, service):
+        """Test invalid tokens are rejected."""
+        with pytest.raises(ValueError, match="Invalid chart image token"):
+            service._parse_chart_image_token("not-a-valid-token")
 
     @pytest.mark.asyncio
     async def test_conversation_to_response(self, service, sample_conversation):

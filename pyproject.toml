@@ -24,6 +24,7 @@ dependencies = [
     "pydantic-settings==2.10.1",
     "tabulate==0.9.0",
     "mind-castle==0.4.9",
+    "matplotlib",
     "statsig-python-core==0.15.1",
     "docker==7.1.0",
     "statsig-python-core==0.15.1",
