@@ -4193,14 +4193,10 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         console.file.flush()
         _time.sleep(0.02)
 
-    # Ellipsis animation for ~10 seconds
-    _full_line = f"{_prefix}{_typed_msg}"
-    for _ in range(10):
-        for dots in [".", "..", "...", ".. ", ".  ", "   "]:
-            console.file.write(f"\r{_full_line}{dots}")
-            console.file.flush()
-            await asyncio.sleep(0.17)
-    console.file.write(f"\r{_full_line}   \n")
+    # Static ellipsis + wait 10 seconds
+    console.file.write("...\n")
+    console.file.flush()
+    await asyncio.sleep(10)
     console.file.flush()
     console.print()
 
