@@ -37,9 +37,6 @@ class EpisodicMemory:
         self._session_id: str | None = None
         self._file: Path | None = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     @property
     def enabled(self) -> bool:

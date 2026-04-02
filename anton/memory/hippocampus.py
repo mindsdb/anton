@@ -64,7 +64,6 @@ class Hippocampus:
         self._lessons_path = base_dir / "lessons.md"
         self._topics_dir = base_dir / "topics"
 
-    # --- Retrieval (CA3 — pattern completion) ---
 
     def recall_identity(self) -> str:
         """Load the always-on self-model (profile.md).
@@ -204,8 +203,6 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    # --- Encoding (CA1 — pattern separation) ---
-
     def encode_rule(
         self,
         text: str,
@@ -340,8 +337,6 @@ class Hippocampus:
                 except (OSError, UnicodeDecodeError):
                     continue
         return count
-
-    # --- Infrastructure ---
 
     def _encode_with_lock(self, path: Path, text: str, mode: str = "append") -> None:
         """Write with file locking (fcntl.flock on Unix, no-op on Windows).

@@ -61,10 +61,6 @@ def build_tool_schemas(available: list[str]) -> list[dict]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Tool definitions + handlers (moved from chat.py)
-# ---------------------------------------------------------------------------
-
 MEMORIZE_TOOL = {
     "name": "memorize",
     "description": (
@@ -208,11 +204,6 @@ SCRATCHPAD_TOOL = {
         "required": ["action", "name"],
     },
 }
-
-
-# ---------------------------------------------------------------------------
-# Tool handlers
-# ---------------------------------------------------------------------------
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
     """Process a recall tool call — search episodic memory."""
