@@ -442,9 +442,7 @@ async def generate_chart(
     """
     user_id = conversations_service.user_id
     org_id = conversations_service.organization_id
-    logger.debug(
-        f"Chart requested (output={req.output}) for user {user_id} in organization {org_id}"
-    )
+    logger.debug(f"Chart requested (output={req.output}) for user {user_id} in organization {org_id}")
 
     try:
         if req.output == "chartjs":
@@ -455,12 +453,10 @@ async def generate_chart(
             )
 
         if req.output == "png":
-            image_bytes = (
-                await conversations_service.render_conversation_message_chart_png(
-                    conversation_id,
-                    message_id,
-                    req.intent,
-                )
+            image_bytes = await conversations_service.render_conversation_message_chart_png(
+                conversation_id,
+                message_id,
+                req.intent,
             )
             return Response(
                 content=image_bytes,
@@ -475,44 +471,28 @@ async def generate_chart(
         )
 
     except ConversationNotFoundError as e:
-        logger.warning(
-            f"Conversation not found for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.warning(f"Conversation not found for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotFoundError as e:
-        logger.warning(
-            f"Message not found for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.warning(f"Message not found for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=404, detail=str(e)) from None
     except MessageNotAssistantError as e:
-        logger.warning(
-            f"Message is not an assistant message for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.warning(f"Message is not an assistant message for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e)) from None
     except MessageNoSQLQueryError as e:
-        logger.warning(
-            f"Message does not have a SQL query for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.warning(f"Message does not have a SQL query for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e)) from None
     except InvalidSQLQueryError as e:
-        logger.warning(
-            f"Invalid SQL query for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.warning(f"Invalid SQL query for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e)) from None
     except ValueError as e:
-        logger.warning(
-            f"Invalid chart request for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.warning(f"Invalid chart request for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=400, detail=str(e)) from None
     except ConversationsServiceError as e:
-        logger.error(
-            f"Service error in generate_chart for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.error(f"Service error in generate_chart for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from None
     except Exception as e:
-        logger.error(
-            f"Unexpected error in generate_chart for user {user_id} in organization {org_id}: {e}"
-        )
+        logger.error(f"Unexpected error in generate_chart for user {user_id} in organization {org_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error") from None
 
 

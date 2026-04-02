@@ -1374,9 +1374,7 @@ class TestConversationsService:
         assert service._parse_chart_image_token(token) == intent
 
     @pytest.mark.asyncio
-    async def test_render_conversation_message_chart_by_token_success(
-        self, service, mock_session, sample_conversation
-    ):
+    async def test_render_conversation_message_chart_by_token_success(self, service, mock_session, sample_conversation):
         """Test token-backed image GET renders from the encoded intent."""
         assistant_message = Message(
             id=uuid4(),
