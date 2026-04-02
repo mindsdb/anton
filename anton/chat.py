@@ -4081,28 +4081,25 @@ class _ClosingSpinner:
 
 
 async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
-    """First-run demo. Returns the hidden demo query to inject, or None if skipped."""
+    """First-run staged demo. Runs the backup script in a real scratchpad cell.
+
+    Returns "_AGENT_ZERO_DONE" if demo ran, None if skipped/failed.
+    """
     import os as _os
-    from importlib.resources import files as _pkg_files
-
-    # Verify demo data exists
-    try:
-        demo_dir = Path(__file__).resolve().parent / "demo_data" / "nvda_btc_data"
-        if not demo_dir.is_dir():
-            return None
-        expected = ["1_monthly_prices.csv", "2_risk_metrics.csv", "3_montecarlo_projections.csv", "4_annual_scorecard.csv"]
-        if not all((demo_dir / f).is_file() for f in expected):
-            return None
-    except Exception:
-        return None
-
-    # Clear screen for a clean start
-    _os.system("cls" if sys.platform == "win32" else "clear")
-
     import time as _time
 
+    script_path = Path(__file__).resolve().parent / "demo_data" / "nvda_btc_scratchpad_backup.py"
+    if not script_path.is_file():
+        return None
+
+    # Clear screen
+    _os.system("cls" if sys.platform == "win32" else "clear")
+
     console.print()
-    _msg = "LLM is ready! Let's take it for a spin — I'll build an interactive NVIDIA vs Bitcoin investment dashboard to make sure everything works. Ok?"
+    _msg = (
+        "LLM is ready! Let\u2019s take it for a spin \u2014 I\u2019ll build an interactive "
+        "NVIDIA vs Bitcoin investment dashboard to make sure everything works. Ok?"
+    )
     console.print("[anton.prompt]anton>[/] ", end="")
     for ch in _msg:
         console.file.write(ch)
@@ -4126,51 +4123,80 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         return None
 
     console.print()
-
-    demo_query = (
-        f"Build me a full interactive dashboard comparing NVIDIA stock vs Bitcoin "
-        f"over the past 5 years. All the data you need is already prepared in CSV files "
-        f"at: {demo_dir}\n\n"
-        f"Files available:\n"
-        f"- 1_monthly_prices.csv — columns: date, nvda_open/high/low/close/volume, btc_open/high/low/close/volume, "
-        f"nvda_monthly_return_pct, btc_monthly_return_pct, nvda_cum_return, btc_cum_return, "
-        f"nvda_monthly_range_pct, btc_monthly_range_pct (64 rows)\n"
-        f"- 2_risk_metrics.csv — columns: date, nvda_vol_12m_ann, btc_vol_12m_ann, nvda_return_12m_ann, "
-        f"btc_return_12m_ann, nvda_sharpe_12m, btc_sharpe_12m, rolling_12m_correlation, "
-        f"nvda_drawdown_pct, btc_drawdown_pct, nvda_vs_btc_beta_6m (64 rows)\n"
-        f"- 3_montecarlo_projections.csv — columns: month, nvda_p5/p10/p25/p50/p75/p90/p95, "
-        f"btc_p5/p10/p25/p50/p75/p90/p95, nvda_mean, btc_mean (24 rows)\n"
-        f"- 4_annual_scorecard.csv — TWO blocks separated by a blank line. Block 1: annual data "
-        f"(year, nvda/btc annual_return_pct, ann_volatility_pct, sharpe, max_drawdown_pct, "
-        f"winning_months, total_months, winner). Block 2: 5yr scorecard (metric, nvda, btc) "
-        f"with 15 summary stats including total return, CAGR, MC probabilities.\n\n"
-        f"IMPORTANT — How to load file 4 (it has two CSV blocks separated by a blank line):\n"
-        f"```python\n"
-        f"import io\n"
-        f"raw4 = open('{demo_dir}/4_annual_scorecard.csv').read()\n"
-        f"blocks = raw4.strip().split('\\n\\n')\n"
-        f"annual_df = pd.read_csv(io.StringIO(blocks[0]))\n"
-        f"scorecard_df = pd.read_csv(io.StringIO(blocks[1]))\n"
-        f"```\n\n"
-        f"Step-by-step approach (use separate scratchpad cells):\n"
-        f"1. Load all 4 CSVs with pandas, print shapes and columns to verify\n"
-        f"2. Serialize all dataframes to a single JS file as `const DATA = {{prices: [...], risk: [...], "
-        f"mc: [...], annual: [...], scorecard: [...]}};` — use df.where(pd.notnull(df), None).to_dict(orient='records') "
-        f"and json.dumps(). Save to .anton/output/nvda_btc_data.js\n"
-        f"3. Write HTML head — include ECharts CDN, reference nvda_btc_data.js, all CSS styles. "
-        f"Dark theme (#0d1117 bg). Use tabs for sections: Performance, Risk, Monte Carlo, Annual, Decision.\n"
-        f"4. Write HTML body — header with NVDA vs BTC branding, hero KPI row (6 stats from scorecard), "
-        f"tab navigation, panel containers with chart divs for each section.\n"
-        f"5. Write all JS chart rendering logic — helper functions, ECharts initialization for each chart, "
-        f"tab switching with lazy rendering, scorecard table, annual table with color coding.\n"
-        f"6. Assemble html_head + html_body + html_js, write to .anton/output/nvda_btc_dashboard.html, "
-        f"open in browser with webbrowser.open(f'file://{{os.path.abspath(path)}}')\n\n"
-        f"Do NOT fetch any external data — everything is in those files. "
-        f"Split the HTML generation across multiple cells to avoid token limits. "
-        f"Make it epic — tabs, KPIs, interactive ECharts, dark theme, responsive."
+    console.print(
+        "[anton.muted]  This will take a couple of minutes \u2014 fetching live data, crunching numbers,\n"
+        "  and building the dashboard from scratch. Worth the wait![/]"
     )
+    console.print()
 
-    return demo_query
+    # Read the script and execute it in a real scratchpad cell
+    code = script_path.read_text()
+
+    from anton.scratchpad import Cell
+    from rich.live import Live
+    from rich.spinner import Spinner
+    from rich.text import Text
+
+    pad = await session._scratchpads.get_or_create("demo")
+
+    # Pre-install dependencies so the main script doesn't fail mid-run
+    install_spinner = Text("  Installing dependencies (yfinance, pandas, numpy)...", style="anton.muted")
+    with Live(
+        Spinner("dots", text=install_spinner, style="anton.cyan"),
+        console=console,
+        refresh_per_second=10,
+        transient=True,
+    ):
+        await pad.install_packages(["yfinance", "pandas", "numpy"])
+    console.print(f"  [anton.success]\u2714[/] [anton.muted]Dependencies ready[/]")
+
+    spinner_text = Text("  Scratchpad(Building NVDA vs BTC dashboard...)", style="anton.muted")
+    cell = None
+    with Live(
+        Spinner("dots", text=spinner_text, style="anton.cyan"),
+        console=console,
+        refresh_per_second=10,
+        transient=True,
+    ):
+        async for item in pad.execute_streaming(
+            code,
+            description="Build NVDA vs BTC investment dashboard",
+            estimated_time="~2 min",
+            estimated_seconds=120,
+        ):
+            if isinstance(item, str):
+                # Progress message from the script — update spinner
+                spinner_text = Text(f"  Scratchpad({item})", style="anton.muted")
+            elif isinstance(item, Cell):
+                cell = item
+
+    if cell is None or cell.error:
+        err = cell.error if cell else "No result"
+        console.print()
+        console.print(f"[anton.error]  Demo encountered an issue: {err[:200]}[/]")
+        console.print("[anton.muted]  You can still use Anton normally.[/]")
+        console.print()
+        return None
+
+    console.print(f"  [anton.success]\u2714[/] [anton.muted]Dashboard built successfully[/]")
+
+    # Show findings
+    console.print()
+    console.print(f"[anton.glow] {'━' * 60}[/]")
+    console.print()
+    console.print("[anton.prompt]anton>[/] Dashboard is open in your browser!")
+    console.print()
+    console.print("  [bold]NVDA vs BTC \u2014 5-Year Investment Dashboard[/]")
+    console.print("  [anton.muted]Single self-contained HTML file \u00b7 6 interactive tabs[/]")
+    console.print()
+    console.print("  [bold]Tabs:[/] Performance \u00b7 Risk \u00b7 Monte Carlo \u00b7 Annual \u00b7 Scorecard \u00b7 Decision")
+    console.print()
+    console.print("  [anton.muted]This is what Anton can do. Now it\u2019s your turn \u2014 ask me anything![/]")
+    console.print()
+    console.print(f"[anton.glow] {'━' * 60}[/]")
+    console.print()
+
+    return "_AGENT_ZERO_DONE"
 
 
 def _persist_first_run_done(settings) -> None:
@@ -4306,19 +4332,22 @@ async def _chat_loop(
             current_session_id = resumed_id
 
 
-    # --- Agent Zero: first-run ice-breaker ---
+    # --- Agent Zero: first-run staged demo ---
     _agent_zero_query: str | None = None
     if first_run and not settings.first_run_done:
         try:
-            _agent_zero_query = await _agent_zero(console, session, settings)
+            _agent_zero_result = await _agent_zero(console, session, settings)
+            if _agent_zero_result == "_AGENT_ZERO_DONE":
+                _agent_zero_query = None  # demo ran directly, no query to inject
+            else:
+                _agent_zero_query = _agent_zero_result
         except Exception:
-            pass  # ice-breaker failed — just continue to normal chat
+            pass  # demo failed — just continue to normal chat
         _persist_first_run_done(settings)
 
-    if not _agent_zero_query:
-        console.print("[anton.muted] Chat with me, type '/help' for commands or 'exit' to quit.[/]")
-        console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
-        console.print()
+    console.print("[anton.muted] Chat with me, type '/help' for commands or 'exit' to quit.[/]")
+    console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
+    console.print()
 
     from anton.analytics import send_event
     _query_count = 0
@@ -4401,19 +4430,14 @@ async def _chat_loop(
                 session._pending_memory_confirmations = []
                 console.print()
 
-            # Agent Zero: inject the demo query on the first iteration
-            if _agent_zero_query is not None:
-                user_input = _agent_zero_query
-                _agent_zero_query = None  # only once
-            else:
-                try:
-                    from anton.channel.theme import get_palette as _gp
-                    _you_color = _gp().user_prompt
-                    user_input = await prompt_session.prompt_async(
-                        [(f"bold fg:{_you_color}", "you>"), ("", " ")]
-                    )
-                except EOFError:
-                    break
+            try:
+                from anton.channel.theme import get_palette as _gp
+                _you_color = _gp().user_prompt
+                user_input = await prompt_session.prompt_async(
+                    [(f"bold fg:{_you_color}", "you>"), ("", " ")]
+                )
+            except EOFError:
+                break
 
             stripped = user_input.strip()
             # message_content holds what we send to the LLM — may be str or
