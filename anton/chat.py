@@ -186,11 +186,16 @@ class ChatSession:
             self._history_store.save(self._session_id, self._history)
 
     async def _build_system_prompt(self, user_message: str = "") -> str:
+        import datetime as _dt
+        _now = _dt.datetime.now()
+        _current_datetime = _now.strftime("%A, %B %d, %Y at %I:%M %p")
+
         prompt = CHAT_SYSTEM_PROMPT.format(
             runtime_context=self._runtime_context,
             visualizations_section=build_visualizations_prompt(
                 self._proactive_dashboards
             ),
+            current_datetime=_current_datetime,
         )
         # Inject memory context (replaces old self_awareness)
         if self._cortex is not None:
