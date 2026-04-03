@@ -14,7 +14,6 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 LOCAL_BIN="$HOME/.local/bin"
-REPO_URL="git+https://github.com/mindsdb/anton.git"
 
 FORCE=0
 for arg in "$@"; do
@@ -69,7 +68,19 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 1
 fi
 
-# ── 3. Find or install uv ──────────────────────────────────────────
+# ── 3. Resolve latest release tag ─────────────────────────────────
+info "  Fetching latest release..."
+LATEST_TAG=$(curl -sSf "https://api.github.com/repos/mindsdb/anton/releases/latest" \
+    | grep '"tag_name"' | head -1 \
+    | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+if [ -z "$LATEST_TAG" ]; then
+    warn "Could not determine latest release tag. Falling back to main branch."
+    REPO_URL="git+https://github.com/mindsdb/anton.git"
+else
+    REPO_URL="git+https://github.com/mindsdb/anton.git@${LATEST_TAG}"
+fi
+
+# ── 4. Find or install uv ──────────────────────────────────────────
 NEED_UV=0
 
 if command -v uv >/dev/null 2>&1; then
@@ -103,7 +114,7 @@ if [ "$NEED_UV" -eq 1 ]; then
     fi
 fi
 
-# ── 4. Install anton via uv tool ───────────────────────────────────
+# ── 5. Install anton via uv tool ───────────────────────────────────
 info ""
 info "  This will install:"
 info "    - ${BOLD}anton${RESET} (from ${REPO_URL})"
@@ -120,7 +131,7 @@ else
     exit 0
 fi
 
-# ── 5. Verify the venv was created ─────────────────────────────────
+# ── 6. Verify the venv was created ─────────────────────────────────
 UV_TOOL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/anton"
 if [ -d "$UV_TOOL_DIR" ]; then
     info "  Venv: ${UV_TOOL_DIR}"
@@ -130,7 +141,7 @@ else
     info "  Anton may still work — uv manages the environment internally."
 fi
 
-# ── 6. Ensure ~/.local/bin is in PATH ──────────────────────────────
+# ── 7. Ensure ~/.local/bin is in PATH ──────────────────────────────
 ensure_path() {
     # Check if ~/.local/bin is already in PATH
     case ":$PATH:" in
@@ -168,7 +179,7 @@ ensure_path() {
 
 ensure_path
 
-# ── 7. Scratchpad health check ────────────────────────────────────
+# ── 8. Scratchpad health check ────────────────────────────────────
 # Verify that uv can create a venv — this is what the scratchpad uses at runtime.
 # Catches broken Python symlinks, missing venv module, etc. before the user hits it.
 info ""
@@ -190,7 +201,7 @@ else
 fi
 rm -rf "$HEALTH_DIR" 2>/dev/null
 
-# ── 8. Success message ──────────────────────────────────────────────
+# ── 9. Success message ──────────────────────────────────────────────
 info ""
 info "${GREEN}  ✓ anton installed successfully!${RESET}"
 info ""
