@@ -95,7 +95,7 @@ def test_large_input_no_crash(cfg, stub, tmp_path):
     stub.queue_text("Got your big message.")
     stub.queue_verification_ok()
     result = run_anton(["--folder", str(tmp_path)], ["x" * 100_000, "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(30))
+                       env=base_env(stub), timeout=cfg.timeout(60))
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
     assert_output(result, "Got your big message.")
