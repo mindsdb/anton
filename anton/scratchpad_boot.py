@@ -25,7 +25,16 @@ if _scratchpad_model:
 
         _llm_ssl_verify = os.environ.get("ANTON_MINDS_SSL_VERIFY", "true").lower() != "false"
         if _scratchpad_provider_name in ("openai", "openai-compatible"):
-            _llm_provider = _ProviderClass(ssl_verify=_llm_ssl_verify)
+            # Explicitly pass base_url so Minds/openai-compatible endpoints work.
+            # The OpenAI SDK may or may not pick up OPENAI_BASE_URL from env,
+            # so we pass it directly to be safe.
+            _llm_base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTON_OPENAI_BASE_URL")
+            _llm_api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTON_OPENAI_API_KEY")
+            _llm_provider = _ProviderClass(
+                api_key=_llm_api_key or None,
+                base_url=_llm_base_url or None,
+                ssl_verify=_llm_ssl_verify,
+            )
         else:
             _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
         _llm_model = _scratchpad_model
