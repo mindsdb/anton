@@ -499,11 +499,16 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
     provider_label = settings.planning_provider
     model_label = settings.planning_model
     if provider_label == "openai-compatible":
+        base = settings.openai_base_url or ""
         if settings.minds_url and "mdb.ai" in settings.minds_url:
             provider_label = "Minds-Enterprise-Cloud"
+            model_label = "smart_router"
+        elif "generativelanguage.googleapis.com" in base:
+            provider_label = "Google Gemini"
+        elif base:
+            provider_label = f"OpenAI-compatible ({base})"
         else:
-            provider_label = "Minds-Enterprise Server"
-        model_label = "smart_router"
+            provider_label = "OpenAI-compatible"
     console.print(f"  [anton.muted]Provider:[/] [anton.cyan]{provider_label}[/]")
     console.print(f"  [anton.muted]Model:[/]    [anton.cyan]{model_label}[/]")
     console.print()
@@ -687,11 +692,16 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
 
 
 def _setup_other_provider(settings, ws) -> None:
-    """Set up Anthropic, OpenAI, or Gemini as the LLM provider."""
+    """Set up Anthropic, OpenAI, Gemini, or custom OpenAI-compatible as the LLM provider."""
     from rich.text import Text
 
     console.print()
-    for label, idx in [("Anthropic", "1"), ("OpenAI", "2"), ("Google Gemini", "3")]:
+    for label, idx in [
+        ("Anthropic", "1"),
+        ("OpenAI", "2"),
+        ("Google Gemini", "3"),
+        ("OpenAI-compatible (custom endpoint)", "4"),
+    ]:
         line = Text()
         line.append(f"  {idx} ", style="bold")
         line.append(label, style="anton.cyan")
@@ -706,6 +716,8 @@ def _setup_other_provider(settings, ws) -> None:
         _setup_openai(settings, ws)
     elif choice in ("3", "gemini", "google"):
         _setup_gemini(settings, ws)
+    elif choice in ("4", "custom", "compatible"):
+        _setup_custom_openai(settings, ws)
     else:
         console.print(f"  [anton.warning]Unknown provider '{choice}', using Anthropic.[/]")
         _setup_anthropic(settings, ws)
@@ -889,6 +901,62 @@ def _setup_gemini(settings, ws) -> None:
     settings.coding_model = model
     ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
     ws.set_secret("ANTON_OPENAI_BASE_URL", _GEMINI_BASE_URL)
+    ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
+    ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
+    ws.set_secret("ANTON_PLANNING_MODEL", model)
+    ws.set_secret("ANTON_CODING_MODEL", model)
+
+
+def _setup_custom_openai(settings, ws) -> None:
+    """Set up a custom OpenAI-compatible endpoint (Ollama, vLLM, Together, Groq, LM Studio, etc.)."""
+    import openai
+
+    console.print()
+    console.print("  [anton.muted]Works with Ollama, vLLM, Together, Groq, LM Studio, or any OpenAI-compatible API.[/]")
+    console.print()
+
+    while True:
+        base_url = _setup_prompt("Base URL (e.g. http://localhost:11434/v1)").strip()
+        if base_url:
+            break
+        console.print("  [anton.warning]Base URL is required.[/]")
+    if not base_url.startswith("http://") and not base_url.startswith("https://"):
+        base_url = "http://" + base_url
+    base_url = base_url.rstrip("/")
+
+    api_key = _setup_prompt("API key (Enter to skip if not needed)", is_password=True).strip()
+    if not api_key:
+        api_key = "not-needed"  # OpenAI SDK requires a non-empty key
+
+    while True:
+        model = _setup_prompt("Model name").strip()
+        if model:
+            break
+        console.print("  [anton.warning]Model name is required.[/]")
+
+    try:
+        def _test():
+            client = openai.OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(**build_chat_completion_kwargs(
+                model=model,
+                messages=[{"role": "user", "content": "Reply with exactly: pong"}],
+                max_tokens=256,
+            ))
+            _validate_openai_probe_response(response)
+
+        _validate_with_spinner(console, f"{model} at {base_url}", _test)
+    except Exception as exc:
+        console.print(f"  [anton.error]Failed:[/] {exc}")
+        _handle_retry(settings, ws, console, retry_fn=_setup_custom_openai)
+
+    settings.openai_api_key = api_key
+    settings.openai_base_url = base_url
+    settings.planning_provider = "openai-compatible"
+    settings.coding_provider = "openai-compatible"
+    settings.planning_model = model
+    settings.coding_model = model
+    ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
+    ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
     ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
     ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
     ws.set_secret("ANTON_PLANNING_MODEL", model)

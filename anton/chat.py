@@ -1704,9 +1704,14 @@ async def _handle_setup_models(
 
     def _provider_label(provider: str) -> str:
         if provider == "openai-compatible":
+            base = settings.openai_base_url or ""
             if settings.minds_url and "mdb.ai" in settings.minds_url:
                 return "Minds-Enterprise-Cloud"
-            return "Minds-Enterprise"
+            elif "generativelanguage.googleapis.com" in base:
+                return "Google Gemini"
+            elif base:
+                return f"OpenAI-compatible ({base})"
+            return "OpenAI-compatible"
         return provider.capitalize()
 
     def _model_label(model: str, role: str) -> str:
