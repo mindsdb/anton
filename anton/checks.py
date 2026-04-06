@@ -4,7 +4,7 @@ import enum
 import json as _json
 from dataclasses import dataclass
 
-from anton.minds_http import minds_request
+from anton.minds_client import minds_request
 
 
 class TokenLimitStatus(enum.Enum):

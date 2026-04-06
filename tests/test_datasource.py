@@ -571,7 +571,7 @@ class TestHandleConnectDatasource:
         with (
             patch("anton.chat.DataVault", return_value=DataVault(vault_dir=vault_dir)),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", return_value="MySQL"),
+            patch("anton.chat.prompt_or_cancel", return_value="MySQL"),
         ):
             result = await _handle_connect_datasource(
                 console, session._scratchpads, session
@@ -592,7 +592,7 @@ class TestHandleConnectDatasource:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -637,7 +637,7 @@ class TestHandleConnectDatasource:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -691,7 +691,7 @@ class TestHandleConnectDatasource:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -734,7 +734,7 @@ class TestHandleConnectDatasource:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -775,7 +775,7 @@ class TestHandleConnectDatasource:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -802,7 +802,7 @@ class TestHandleConnectDatasource:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -844,7 +844,7 @@ class TestHandleConnectDatasource:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -936,7 +936,7 @@ class TestCredentialScrubbing:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -1311,7 +1311,7 @@ class TestEditDatasourceFlow:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_values)),
             ),
         ):
@@ -1366,7 +1366,7 @@ class TestEditDatasourceFlow:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_values)),
             ),
         ):
@@ -1415,7 +1415,7 @@ class TestRemoveDatasourceFlow:
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value="y")),
+            patch("anton.chat.prompt_or_cancel", new=AsyncMock(return_value="y")),
         ):
             await _handle_remove_data_source(console, "postgresql-prod_db")
 
@@ -1429,7 +1429,7 @@ class TestRemoveDatasourceFlow:
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value="n")),
+            patch("anton.chat.prompt_or_cancel", new=AsyncMock(return_value="n")),
         ):
             await _handle_remove_data_source(console, "postgresql-prod_db")
 
@@ -1493,7 +1493,7 @@ class TestEnvActivationCollisionFree:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -1577,7 +1577,7 @@ class TestDatasourceSlashCommandBehavior:
         with (
             patch("anton.chat.DataVault", return_value=DataVault(vault_dir=vault_dir)),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", return_value="UnknownEngine"),
+            patch("anton.chat.prompt_or_cancel", return_value="UnknownEngine"),
         ):
             updated = await _handle_connect_datasource(
                 console,
@@ -1928,7 +1928,7 @@ class TestAddCustomDatasourceFlow:
 
         with (
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
             patch("anton.chat.Path") as mock_path_cls,
@@ -1968,7 +1968,7 @@ class TestAddCustomDatasourceFlow:
 
         with (
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
             patch("anton.chat.Path") as mock_path_cls,
@@ -2013,7 +2013,7 @@ class TestAddCustomDatasourceFlow:
 
         with (
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
             patch("anton.chat.Path") as mock_path_cls,
@@ -2107,7 +2107,7 @@ class TestCustomDatasourceConnectFlow:
                 return_value=self._make_registry(tmp_path),
             ),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
             patch("anton.chat.Path") as mock_path_cls,
@@ -2163,7 +2163,7 @@ class TestCustomDatasourceConnectFlow:
                 return_value=self._make_registry(tmp_path),
             ),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
             patch("anton.chat.Path") as mock_path_cls,
@@ -2224,7 +2224,7 @@ class TestCustomDatasourceConnectFlow:
                 return_value=self._make_registry(tmp_path),
             ),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
             patch("anton.chat.Path") as mock_path_cls,
@@ -2276,7 +2276,7 @@ class TestCustomDatasourceConnectFlow:
                 return_value=self._make_registry(tmp_path),
             ),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
             patch("anton.chat.Path") as mock_path_cls,
@@ -2324,7 +2324,7 @@ class TestEditDatasourceWithTestSnippet:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
         ):
@@ -2368,7 +2368,7 @@ class TestEditDatasourceWithTestSnippet:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_responses)),
             ),
         ):
@@ -2419,7 +2419,7 @@ class TestEditDatasourceWithTestSnippet:
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value="n")),
+            patch("anton.chat.prompt_or_cancel", new=AsyncMock(return_value="n")),
         ):
             result = await _run_connection_test(
                 console,
@@ -2450,7 +2450,7 @@ class TestPromptCopyConsistency:
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value=None)),
+            patch("anton.chat.prompt_or_cancel", new=AsyncMock(return_value=None)),
         ):
             result = await _handle_connect_datasource(
                 console, session._scratchpads, session
@@ -2474,7 +2474,7 @@ class TestPromptCopyConsistency:
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value=None)),
+            patch("anton.chat.prompt_or_cancel", new=AsyncMock(return_value=None)),
         ):
             engine_def = registry.get("postgresql")
             credentials = {
@@ -2511,7 +2511,7 @@ class TestPromptCopyConsistency:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
             patch(
-                "anton.chat._prompt_or_cancel",
+                "anton.chat.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(poc_calls)),
             ),
         ):
@@ -2540,7 +2540,7 @@ class TestPromptCopyConsistency:
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("anton.chat._prompt_or_cancel", new=AsyncMock(side_effect=_capture)),
+            patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=_capture)),
         ):
             # "PostgreeSQL" triggers fuzzy match against "PostgreSQL"
             await _handle_connect_datasource(

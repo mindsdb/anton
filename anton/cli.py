@@ -10,7 +10,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from anton import __version__
-from anton.chat import _prompt_or_cancel
+from anton.prompt_utils import prompt_or_cancel
 from anton.llm.openai import build_chat_completion_kwargs
 
 
@@ -468,7 +468,7 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
     console.print()
 
     while True:
-        choice = await _prompt_or_cancel("(anton) Choose LLM Provider",
+        choice = await prompt_or_cancel("(anton) Choose LLM Provider",
                                    choices=["1", "2", "3"],
                                    default="1",
                                    allow_cancel=False)

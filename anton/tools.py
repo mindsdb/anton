@@ -443,7 +443,8 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         f"[anton.prompt]anton>[/] I can help with that \u2014 let's connect [bold]{engine}[/] to Anton."
     )
 
-    from anton.chat import _handle_connect_datasource, _prompt_or_cancel
+    from anton.chat import _handle_connect_datasource
+    from anton.prompt_utils import prompt_or_cancel
     from anton.data_vault import DataVault
 
     # Check which connections exist before
