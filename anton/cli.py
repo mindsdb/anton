@@ -733,10 +733,15 @@ def _normalize_probe_text(text: str | None) -> str:
     return text.strip().lower().rstrip(".!?")
 
 
-def _validate_openai_probe_response(response) -> None:
+def _validate_openai_probe_response(
+    response,
+    *,
+    provider_label: str = "OpenAI",
+    allow_empty_truncated: bool = False,
+) -> None:
     """Accept a short successful probe, including truncated completions."""
     if not getattr(response, "choices", None):
-        raise ValueError("OpenAI validation returned no choices.")
+        raise ValueError(f"{provider_label} validation returned no choices.")
 
     choice = response.choices[0]
     finish_reason = getattr(choice, "finish_reason", None)
@@ -746,7 +751,9 @@ def _validate_openai_probe_response(response) -> None:
     if finish_reason == "length":
         if content:
             return
-        raise ValueError("OpenAI validation response was truncated before any content was returned.")
+        if allow_empty_truncated:
+            return
+        raise ValueError(f"{provider_label} validation response was truncated before any content was returned.")
 
     if content == "pong":
         return
@@ -823,7 +830,7 @@ def _setup_openai(settings, ws) -> None:
                 messages=[{"role": "user", "content": "Reply with exactly: pong"}],
                 max_tokens=16,
             ))
-            _validate_openai_probe_response(response)
+            _validate_openai_probe_response(response, provider_label="OpenAI")
 
         _validate_with_spinner(console, model, _test)
     except openai.AuthenticationError:
@@ -871,7 +878,11 @@ def _setup_gemini(settings, ws) -> None:
                 messages=[{"role": "user", "content": "Reply with exactly: pong"}],
                 max_tokens=16,
             ))
-            _validate_openai_probe_response(response)
+            _validate_openai_probe_response(
+                response,
+                provider_label="Google Gemini",
+                allow_empty_truncated=True,
+            )
 
         _validate_with_spinner(console, model, _test)
     except openai.AuthenticationError:

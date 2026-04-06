@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
 import openai
 
 from anton.chat import _minds_test_llm
@@ -77,3 +78,28 @@ def test_validate_openai_probe_response_accepts_truncated_nonempty_output():
     )]
 
     _validate_openai_probe_response(response)
+
+
+def test_validate_openai_probe_response_rejects_truncated_empty_output_by_default():
+    response = MagicMock()
+    response.choices = [MagicMock(
+        finish_reason="length",
+        message=MagicMock(content=""),
+    )]
+
+    with pytest.raises(ValueError, match="OpenAI validation response was truncated before any content was returned\\."):
+        _validate_openai_probe_response(response)
+
+
+def test_validate_openai_probe_response_accepts_truncated_empty_output_when_allowed():
+    response = MagicMock()
+    response.choices = [MagicMock(
+        finish_reason="length",
+        message=MagicMock(content=""),
+    )]
+
+    _validate_openai_probe_response(
+        response,
+        provider_label="Google Gemini",
+        allow_empty_truncated=True,
+    )
