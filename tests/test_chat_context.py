@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from anton.chat import ChatSession, _describe_minds_connection_error, _handle_connect
+from anton.chat import ChatSession, _handle_connect
+from anton.minds_client import describe_minds_connection_error as _describe_minds_connection_error
 from anton.config.settings import AntonSettings
 from anton.tools import MEMORIZE_TOOL
 from anton.context.self_awareness import SelfAwarenessContext
@@ -343,8 +344,8 @@ class TestMindsSetupRecovery:
                 )
             return [{"name": "warehouse", "datasources": []}]
 
-        monkeypatch.setattr("anton.chat._minds_list_minds", fake_list_minds)
-        monkeypatch.setattr("anton.chat._minds_test_llm", lambda *args, **kwargs: True)
+        monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
+        monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
         rebuilt = object()
         monkeypatch.setattr("anton.chat._rebuild_session", lambda **kwargs: rebuilt)
 
@@ -402,8 +403,8 @@ class TestMindsSetupRecovery:
                 raise urllib.error.URLError(socket.timeout("timed out"))
             return [{"name": "warehouse", "datasources": []}]
 
-        monkeypatch.setattr("anton.chat._minds_list_minds", fake_list_minds)
-        monkeypatch.setattr("anton.chat._minds_test_llm", lambda *args, **kwargs: True)
+        monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
+        monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
         rebuilt = object()
         monkeypatch.setattr("anton.chat._rebuild_session", lambda **kwargs: rebuilt)
 
