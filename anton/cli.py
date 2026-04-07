@@ -1,31 +1,46 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import importlib
 import os
+import shutil
+import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.prompt import Confirm, Prompt
+from rich.live import Live
+from rich.prompt import Confirm
+from rich.spinner import Spinner
 from rich.table import Table
+from rich.text import Text
 
 from anton import __version__
+
 from anton.utils.prompt import prompt_or_cancel
 from anton.llm.openai import build_chat_completion_kwargs
+
+from anton.chat import ChatSession
+from anton.llm.client import LLMClient
+from anton.scratchpad import ScratchpadManager
+
+from anton.commands.datasource import (
+    handle_remove_data_source,
+    handle_connect_datasource,
+    handle_list_data_sources,
+    handle_test_datasource
+)
 
 
 def _reexec() -> None:
     """Re-execute the current process from scratch using the original binary."""
-    import shutil
-
     # Prefer the installed `anton` binary so the uv tool wrapper re-runs correctly.
     binary = shutil.which("anton") or sys.argv[0]
     os.execv(binary, [binary] + sys.argv[1:])
 
-
-# ---------------------------------------------------------------------------
-# Dependency checking — runs before anything that needs the heavy imports
-# ---------------------------------------------------------------------------
 
 # Core dependencies from pyproject.toml that anton needs at runtime
 _REQUIRED_PACKAGES: dict[str, str] = {
@@ -41,8 +56,6 @@ _REQUIRED_PACKAGES: dict[str, str] = {
 
 def _check_dependencies() -> list[str]:
     """Return list of missing package install specs."""
-    import importlib
-
     missing: list[str] = []
     for module_name, install_spec in _REQUIRED_PACKAGES.items():
         try:
@@ -54,8 +67,6 @@ def _check_dependencies() -> list[str]:
 
 def _find_uv() -> str | None:
     """Find the uv binary."""
-    import shutil
-
     uv = shutil.which("uv")
     if uv:
         return uv
@@ -103,8 +114,6 @@ def _ensure_dependencies(console: Console) -> None:
             default=True,
             console=console,
         ):
-            import subprocess
-
             console.print(
                 f"[anton.muted]  Running: uv pip install {' '.join(missing)}[/]"
             )
@@ -156,20 +165,8 @@ def _ensure_dependencies(console: Console) -> None:
 
 def _ensure_terms_consent(console: Console, settings) -> None:
     """Show terms acceptance screen on first run and persist the choice."""
-    import os
-    import webbrowser
-
-    from rich.prompt import Confirm
-    from rich.text import Text
-
     # Clear screen
     os.system("cls" if sys.platform == "win32" else "clear")
-
-    # Centered logo and welcome
-    try:
-        width = os.get_terminal_size().columns
-    except OSError:
-        width = 80
 
     logo = "A N T O N"
     welcome = "Welcome to MindsDB-Anton"
@@ -184,7 +181,9 @@ def _ensure_terms_consent(console: Console, settings) -> None:
     )
     console.print()
 
-    if Confirm.ask("  Would you like to read the policies?", default=True, console=console):
+    if Confirm.ask(
+        "  Would you like to read the policies?", default=True, console=console
+    ):
         webbrowser.open("https://mindsdb.com/terms")
         webbrowser.open("https://mindsdb.com/privacy-policy")
         console.print()
@@ -299,6 +298,7 @@ def main(
     ctx.obj["settings"] = settings
 
     from anton.analytics import send_event
+
     send_event(settings, "anton_started")
 
     if ctx.invoked_subcommand is None:
@@ -312,11 +312,18 @@ def main(
             first_run = not settings.first_run_done
         else:
             from anton.channel.branding import render_banner
+
             render_banner(console)
             # Desktop app: API key set by GUI but first_run_done never set
             if not settings.first_run_done:
                 desktop_first_run = True
-        run_chat(console, settings, resume=resume, first_run=first_run, desktop_first_run=desktop_first_run)
+        run_chat(
+            console,
+            settings,
+            resume=resume,
+            first_run=first_run,
+            desktop_first_run=desktop_first_run,
+        )
 
 
 def _has_api_key(settings) -> bool:
@@ -336,16 +343,9 @@ def _has_api_key(settings) -> bool:
 
 def _onboard(settings) -> None:
     """First-time onboarding: animated robot talking the intro + LLM provider selection."""
-    import sys
-    import time
-
-    from rich.prompt import Prompt
-
-    from anton import __version__
     from anton.workspace import Workspace
 
     ws = Workspace(Path.home())
-    g = "anton.glow"
 
     _INTRO_LINES = [
         "Hi Boss! I'm Anton, your AI coworker.",
@@ -359,8 +359,11 @@ def _onboard(settings) -> None:
     ]
 
     if sys.stdout.isatty():
-        import asyncio
-        asyncio.run(_animate_onboard(console, __version__, _INTRO_LINES, settings=settings, ws=ws))
+        asyncio.run(
+            _animate_onboard(
+                console, __version__, _INTRO_LINES, settings=settings, ws=ws
+            )
+        )
     else:
         # Static fallback for non-interactive terminals
         from anton.channel.branding import render_banner
@@ -375,14 +378,11 @@ def _ensure_api_key(settings) -> None:
     if not _has_api_key(settings):
         _onboard(settings)
 
-    
-async def _animate_onboard(console, version: str, intro_lines: list[str], *, settings, ws) -> None:
+
+async def _animate_onboard(
+    console, version: str, intro_lines: list[str], *, settings, ws
+) -> None:
     """Animate the robot talking while typing out the intro text below."""
-    import time
-
-    from rich.live import Live
-    from rich.text import Text
-
     from anton.channel.branding import (
         _MOUTH_SMILE,
         _MOUTH_TALK,
@@ -399,7 +399,7 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
         """Build robot + separator + typed text as a single renderable."""
         frame = _build_robot_text(mouth, "\u2661\u2661\u2661\u2661")
         frame.append(f" {'━' * 40}\n", style="bold cyan")
-        frame.append(f" v{version} \u2014 \"{tagline}\"\n", style="dim")
+        frame.append(f' v{version} \u2014 "{tagline}"\n', style="dim")
         frame.append("\n")
         frame.append("anton> ", style="anton.prompt")
         for line in typed_lines:
@@ -412,7 +412,7 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
         refresh_per_second=30,
         transient=True,
     ) as live:
-        time.sleep(0.4)
+        await asyncio.sleep(0.4)
 
         typed_so_far: list[str] = []
 
@@ -420,7 +420,7 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
             if line == "":
                 typed_so_far.append("\n")
                 live.update(_build_frame(_MOUTH_SMILE, typed_so_far))
-                time.sleep(line_pause)
+                await asyncio.sleep(line_pause)
                 continue
 
             # Type out each character
@@ -430,21 +430,21 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
                 char_count += 1
                 mouth = _MOUTH_TALK[char_count % 2]
                 live.update(_build_frame(mouth, typed_so_far + [current]))
-                time.sleep(char_delay)
+                await asyncio.sleep(char_delay)
 
             typed_so_far.append(current + "\n")
             live.update(_build_frame(_MOUTH_SMILE, typed_so_far))
-            time.sleep(line_pause)
+            await asyncio.sleep(line_pause)
 
         # Hold final frame briefly
-        time.sleep(0.3)
+        await asyncio.sleep(0.3)
 
     # Print the static final state
     from anton.channel.branding import _render_robot_static
 
     _render_robot_static(console, "\u2661\u2661\u2661\u2661")
     console.print(f"[anton.glow] {'━' * 40}[/]")
-    console.print(f" v{version} \u2014 [anton.muted]\"{tagline}\"[/]")
+    console.print(f' v{version} \u2014 [anton.muted]"{tagline}"[/]')
     console.print()
     console.print("[anton.prompt]anton>[/] ", end="")
     first_text = True
@@ -462,16 +462,24 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
     console.print()
     console.print(f"[anton.glow] {'━' * 40}[/]")
     console.print()
-    console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
-    console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]")
-    console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]")
+    console.print(
+        "  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]"
+    )
+    console.print(
+        "  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]"
+    )
+    console.print(
+        "  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]"
+    )
     console.print()
 
     while True:
-        choice = await prompt_or_cancel("(anton) Choose LLM Provider",
-                                   choices=["1", "2", "3"],
-                                   default="1",
-                                   allow_cancel=False)
+        choice = await prompt_or_cancel(
+            "(anton) Choose LLM Provider",
+            choices=["1", "2", "3"],
+            default="1",
+            allow_cancel=False,
+        )
 
         try:
             if choice == "1":
@@ -483,9 +491,15 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
             break  # success
         except _SetupRetry:
             console.print()
-            console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
-            console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]")
-            console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]")
+            console.print(
+                "  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]"
+            )
+            console.print(
+                "  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]"
+            )
+            console.print(
+                "  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]"
+            )
             console.print()
             continue
 
@@ -516,18 +530,19 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
 
 class _SetupRetry(Exception):
     """Raised by setup functions to go back to provider selection."""
+
     pass
 
 
-def _setup_prompt(label: str, default: str | None = None, is_password: bool = False) -> str:
+def _setup_prompt(
+    label: str, default: str | None = None, is_password: bool = False
+) -> str:
     """Prompt for input with ESC-to-go-back and a bottom toolbar hint.
 
     Returns the user's input string.
     Raises _SetupRetry if the user presses ESC.
     Works both from sync context (onboarding) and async context (/setup).
     """
-    import asyncio
-
     from prompt_toolkit import PromptSession
     from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.key_binding import KeyBindings
@@ -543,9 +558,11 @@ def _setup_prompt(label: str, default: str | None = None, is_password: bool = Fa
         _esc_pressed = True
         event.app.exit(result="")
 
-    pt_style = PTStyle.from_dict({
-        "bottom-toolbar": "noreverse nounderline bg:default",
-    })
+    pt_style = PTStyle.from_dict(
+        {
+            "bottom-toolbar": "noreverse nounderline bg:default",
+        }
+    )
 
     def _toolbar():
         return HTML("<style fg='#ff69b4'>\u23f5\u23f5 Esc to go back</style>")
@@ -569,7 +586,6 @@ def _setup_prompt(label: str, default: str | None = None, is_password: bool = Fa
     if in_async:
         # We're inside an async context (e.g. /setup from chat loop)
         # Run prompt_toolkit in a thread to avoid nested event loop conflict
-        import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(session.prompt, f"  {label}{suffix}")
             result = future.result()
@@ -587,10 +603,6 @@ def _setup_prompt(label: str, default: str | None = None, is_password: bool = Fa
 
 def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") -> None:
     """Set up Minds as the LLM provider (cloud or enterprise)."""
-    from rich.prompt import Confirm, Prompt
-
-    import webbrowser
-
     console.print()
 
     is_cloud = default_url == "https://mdb.ai"
@@ -604,7 +616,9 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
         minds_url = minds_url.rstrip("/")
 
     if is_cloud:
-        console.print("  [anton.muted]If you don't have an API key yet, we'll help you create one — it takes a few seconds.[/]")
+        console.print(
+            "  [anton.muted]If you don't have an API key yet, we'll help you create one — it takes a few seconds.[/]"
+        )
         console.print()
         has_key = Confirm.ask(
             "  Do you have an mdb.ai API key?",
@@ -612,7 +626,9 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
             console=console,
         )
         if not has_key:
-            webbrowser.open("https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations?client_id=public-client&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fmdb.ai")
+            webbrowser.open(
+                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations?client_id=public-client&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fmdb.ai"
+            )
             console.print()
 
     while True:
@@ -629,21 +645,22 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
     ws.set_secret("ANTON_MINDS_URL", minds_url)
 
     # Test connection with a spinner
-    from anton.chat import _minds_test_llm
-
-    from rich.live import Live
-    from rich.spinner import Spinner
+    from anton.minds_client import test_llm
 
     ssl_verify = True
     llm_ok = False
     rate_limited = False
 
-    with Live(Spinner("dots", text="  Connecting...", style="anton.cyan"), console=console, transient=True):
-        result = _minds_test_llm(minds_url, api_key, verify=True)
+    with Live(
+        Spinner("dots", text="  Connecting...", style="anton.cyan"),
+        console=console,
+        transient=True,
+    ):
+        result = test_llm(minds_url, api_key, verify=True)
         if result == "rate_limited":
             rate_limited = True
         elif not result:
-            result_no_ssl = _minds_test_llm(minds_url, api_key, verify=False)
+            result_no_ssl = test_llm(minds_url, api_key, verify=False)
             if result_no_ssl == "rate_limited":
                 rate_limited = True
             elif result_no_ssl:
@@ -678,10 +695,14 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
         ws.set_secret("ANTON_CODING_MODEL", "_code_")
         ws.set_secret("ANTON_MINDS_SSL_VERIFY", "true" if ssl_verify else "false")
     elif rate_limited:
-        console.print("[anton.error]Token limit exceeded. Visit https://mdb.ai to upgrade or to top up your tokens.[/]")
+        console.print(
+            "[anton.error]Token limit exceeded. Visit https://mdb.ai to upgrade or to top up your tokens.[/]"
+        )
         raise _SetupRetry()
     else:
-        console.print("  [anton.error]Could not connect. Check your API key and URL.[/]")
+        console.print(
+            "  [anton.error]Could not connect. Check your API key and URL.[/]"
+        )
         retry = Confirm.ask("  Try again?", default=True, console=console)
         if retry:
             _setup_minds(settings, ws, default_url=default_url)
@@ -691,8 +712,6 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
 
 def _setup_other_provider(settings, ws) -> None:
     """Set up Anthropic, OpenAI, Gemini, or custom OpenAI-compatible as the LLM provider."""
-    from rich.text import Text
-
     console.print()
     for label, idx in [
         ("Anthropic", "1"),
@@ -717,9 +736,11 @@ def _setup_other_provider(settings, ws) -> None:
     elif choice in ("4", "custom", "compatible"):
         _setup_custom_openai(settings, ws)
     else:
-        console.print(f"  [anton.warning]Unknown provider '{choice}', using Anthropic.[/]")
+        console.print(
+            f"  [anton.warning]Unknown provider '{choice}', using Anthropic.[/]"
+        )
         _setup_anthropic(settings, ws)
-    
+
     settings.minds_url = None
     settings.minds_api_key = None
     ws.set_secret("ANTON_MINDS_URL", "")
@@ -728,10 +749,11 @@ def _setup_other_provider(settings, ws) -> None:
 
 def _validate_with_spinner(console, label: str, fn) -> None:
     """Run a validation function with a spinner, print result."""
-    from rich.live import Live
-    from rich.spinner import Spinner
-
-    with Live(Spinner("dots", text=f"  Validating {label}...", style="anton.cyan"), console=console, transient=True):
+    with Live(
+        Spinner("dots", text=f"  Validating {label}...", style="anton.cyan"),
+        console=console,
+        transient=True,
+    ):
         fn()
     console.print(f"  [anton.success]Validated[/] [anton.muted]{label}[/]")
 
@@ -759,7 +781,9 @@ def _validate_openai_probe_response(response) -> None:
         return
 
     if finish_reason == "length":
-        raise ValueError("Validation response was truncated before any content was returned. The model may need a higher token limit.")
+        raise ValueError(
+            "Validation response was truncated before any content was returned. The model may need a higher token limit."
+        )
 
     raise ValueError(f"Unexpected validation response: {content or '<empty>'}")
 
@@ -776,6 +800,7 @@ def _setup_anthropic(settings, ws) -> None:
     """Set up Anthropic with a single model for both reasoning and coding."""
 
     import anthropic
+
     console.print()
     while True:
         api_key = _setup_prompt("API key", is_password=True)
@@ -787,17 +812,24 @@ def _setup_anthropic(settings, ws) -> None:
     model = _setup_prompt("Model", default="claude-sonnet-4-6").strip()
 
     try:
+
         def _test():
             client = anthropic.Anthropic(api_key=api_key)
-            client.messages.create(model=model, max_tokens=1, messages=[{"role": "user", "content": "ping"}])
+            client.messages.create(
+                model=model,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "ping"}],
+            )
 
         _validate_with_spinner(console, model, _test)
     except anthropic.AuthenticationError:
         console.print("  [anton.error]Authentication failed. Check your API key.[/]")
         _handle_retry(settings, ws, console, retry_fn=_setup_anthropic)
+        return
     except Exception as exc:
         console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_anthropic)
+        return
 
     settings.anthropic_api_key = api_key
     settings.planning_provider = "anthropic"
@@ -826,22 +858,27 @@ def _setup_openai(settings, ws) -> None:
     model = _setup_prompt("Model", default="gpt-5.4").strip()
 
     try:
+
         def _test():
             client = openai.OpenAI(api_key=api_key)
-            response = client.chat.completions.create(**build_chat_completion_kwargs(
-                model=model,
-                messages=[{"role": "user", "content": "Reply with exactly: pong"}],
-                max_tokens=16,
-            ))
+            response = client.chat.completions.create(
+                **build_chat_completion_kwargs(
+                    model=model,
+                    messages=[{"role": "user", "content": "Reply with exactly: pong"}],
+                    max_tokens=16,
+                )
+            )
             _validate_openai_probe_response(response)
 
         _validate_with_spinner(console, model, _test)
     except openai.AuthenticationError:
         console.print("  [anton.error]Authentication failed. Check your API key.[/]")
         _handle_retry(settings, ws, console, retry_fn=_setup_openai)
+        return
     except Exception as exc:
         console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_openai)
+        return
 
     settings.openai_api_key = api_key
     settings.planning_provider = "openai"
@@ -862,7 +899,9 @@ def _setup_gemini(settings, ws) -> None:
     _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     console.print()
-    console.print("  [anton.muted]Get an API key at[/] [link=https://aistudio.google.com/apikey][anton.cyan]aistudio.google.com/apikey[/][/link]")
+    console.print(
+        "  [anton.muted]Get an API key at[/] [link=https://aistudio.google.com/apikey][anton.cyan]aistudio.google.com/apikey[/][/link]"
+    )
     console.print()
     while True:
         api_key = _setup_prompt("API key", is_password=True)
@@ -874,22 +913,27 @@ def _setup_gemini(settings, ws) -> None:
     model = _setup_prompt("Model", default="gemini-3-flash-preview").strip()
 
     try:
+
         def _test():
             client = openai.OpenAI(api_key=api_key, base_url=_GEMINI_BASE_URL)
-            response = client.chat.completions.create(**build_chat_completion_kwargs(
-                model=model,
-                messages=[{"role": "user", "content": "Reply with exactly: pong"}],
-                max_tokens=256,
-            ))
+            response = client.chat.completions.create(
+                **build_chat_completion_kwargs(
+                    model=model,
+                    messages=[{"role": "user", "content": "Reply with exactly: pong"}],
+                    max_tokens=256,
+                )
+            )
             _validate_openai_probe_response(response)
 
         _validate_with_spinner(console, model, _test)
     except openai.AuthenticationError:
         console.print("  [anton.error]Authentication failed. Check your API key.[/]")
         _handle_retry(settings, ws, console, retry_fn=_setup_gemini)
+        return
     except Exception as exc:
         console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_gemini)
+        return
 
     settings.openai_api_key = api_key
     settings.openai_base_url = _GEMINI_BASE_URL
@@ -910,7 +954,9 @@ def _setup_custom_openai(settings, ws) -> None:
     import openai
 
     console.print()
-    console.print("  [anton.muted]Works with Ollama, vLLM, Together, Groq, LM Studio, or any OpenAI-compatible API.[/]")
+    console.print(
+        "  [anton.muted]Works with Ollama, vLLM, Together, Groq, LM Studio, or any OpenAI-compatible API.[/]"
+    )
     console.print()
 
     while True:
@@ -922,7 +968,9 @@ def _setup_custom_openai(settings, ws) -> None:
         base_url = "http://" + base_url
     base_url = base_url.rstrip("/")
 
-    api_key = _setup_prompt("API key (Enter to skip if not needed)", is_password=True).strip()
+    api_key = _setup_prompt(
+        "API key (Enter to skip if not needed)", is_password=True
+    ).strip()
     if not api_key:
         api_key = "not-needed"  # OpenAI SDK requires a non-empty key
 
@@ -933,19 +981,23 @@ def _setup_custom_openai(settings, ws) -> None:
         console.print("  [anton.warning]Model name is required.[/]")
 
     try:
+
         def _test():
             client = openai.OpenAI(api_key=api_key, base_url=base_url)
-            response = client.chat.completions.create(**build_chat_completion_kwargs(
-                model=model,
-                messages=[{"role": "user", "content": "Reply with exactly: pong"}],
-                max_tokens=256,
-            ))
+            response = client.chat.completions.create(
+                **build_chat_completion_kwargs(
+                    model=model,
+                    messages=[{"role": "user", "content": "Reply with exactly: pong"}],
+                    max_tokens=256,
+                )
+            )
             _validate_openai_probe_response(response)
 
         _validate_with_spinner(console, f"{model} at {base_url}", _test)
     except Exception as exc:
         console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_custom_openai)
+        return
 
     settings.openai_api_key = api_key
     settings.openai_base_url = base_url
@@ -1076,11 +1128,7 @@ def connect_data_source(
     stored credentials without re-entering them.  Use /edit to
     update credentials for an existing connection.
     """
-    import asyncio
 
-    from anton.chat import ChatSession, _handle_connect_datasource
-    from anton.llm.client import LLMClient
-    from anton.scratchpad import ScratchpadManager
 
     settings = _get_settings(ctx)
     _ensure_workspace(settings)
@@ -1100,7 +1148,7 @@ def connect_data_source(
     session = ChatSession(llm_client)
 
     async def _run() -> None:
-        await _handle_connect_datasource(
+        await handle_connect_datasource(
             console,
             scratchpads,
             session,
@@ -1114,22 +1162,17 @@ def connect_data_source(
 @app.command("list")
 def list_data_sources(ctx: typer.Context) -> None:
     """List all saved data source connections in the Local Vault."""
-    from anton.chat import _handle_list_data_sources
-
-    _handle_list_data_sources(console)
+    asyncio.run(handle_list_data_sources(console))
 
 
 @app.command("edit")
 def edit_data_source(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="Connection slug to edit (e.g. postgres-mydb)."),
+    name: str = typer.Argument(
+        ..., help="Connection slug to edit (e.g. postgres-mydb)."
+    ),
 ) -> None:
     """Edit credentials for an existing Local Vault connection."""
-    import asyncio
-
-    from anton.chat import ChatSession, _handle_connect_datasource
-    from anton.llm.client import LLMClient
-    from anton.scratchpad import ScratchpadManager
 
     settings = _get_settings(ctx)
     _ensure_workspace(settings)
@@ -1149,7 +1192,7 @@ def edit_data_source(
     session = ChatSession(llm_client)
 
     async def _run() -> None:
-        await _handle_connect_datasource(
+        await handle_connect_datasource(
             console,
             scratchpads,
             session,
@@ -1163,25 +1206,23 @@ def edit_data_source(
 @app.command("remove")
 def remove_data_source(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="Connection slug to remove (e.g. postgres-mydb)."),
+    name: str = typer.Argument(
+        ..., help="Connection slug to remove (e.g. postgres-mydb)."
+    ),
 ) -> None:
     """Remove a saved connection from the Local Vault."""
-    from anton.chat import _handle_remove_data_source
 
-    _handle_remove_data_source(console, name)
+    asyncio.run(handle_remove_data_source(console, name))
 
 
 @app.command("test")
 def test_data_source(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="Connection slug to test (e.g. postgres-mydb)."),
+    name: str = typer.Argument(
+        ..., help="Connection slug to test (e.g. postgres-mydb)."
+    ),
 ) -> None:
     """Test a saved Local Vault connection using its test snippet."""
-    import asyncio
-
-    from anton.chat import _handle_test_datasource
-    from anton.scratchpad import ScratchpadManager
-
     settings = _get_settings(ctx)
     _ensure_workspace(settings)
     _ensure_api_key(settings)
@@ -1198,7 +1239,7 @@ def test_data_source(
     )
 
     async def _run() -> None:
-        await _handle_test_datasource(console, scratchpads, name)
+        await handle_test_datasource(console, scratchpads, name)
         await scratchpads.close_all()
 
     asyncio.run(_run())
