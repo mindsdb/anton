@@ -20,6 +20,7 @@ from minds.schemas.charts import (
     ChartImageResponse,
     ChartMeta,
     ChartResponse,
+    RenderChartType,
     RenderPlan,
     SeriesSpec,
     XYIntent,
@@ -429,7 +430,7 @@ class TestConversationsService:
             called["intent"] = intent
             return (
                 RenderPlan(
-                    chart_type="bar",
+                    chart_type=RenderChartType.BAR,
                     title=None,
                     show_legend=False,
                     labels=["1"],
@@ -1228,7 +1229,7 @@ class TestConversationsService:
         with patch("minds.services.chart_compiler.compile_chart") as mock_compile:
             mock_compile.return_value = (
                 RenderPlan(
-                    chart_type="bar",
+                    chart_type=RenderChartType.BAR,
                     title=None,
                     show_legend=False,
                     labels=["jan"],
@@ -1290,7 +1291,7 @@ class TestConversationsService:
         ):
             mock_compile.return_value = (
                 RenderPlan(
-                    chart_type="bar",
+                    chart_type=RenderChartType.BAR,
                     title=None,
                     show_legend=False,
                     labels=["jan"],
@@ -1348,7 +1349,7 @@ class TestConversationsService:
         with patch("minds.services.chart_compiler.compile_chart") as mock_compile:
             mock_compile.return_value = (
                 RenderPlan(
-                    chart_type="bar",
+                    chart_type=RenderChartType.BAR,
                     title=None,
                     show_legend=False,
                     labels=["jan"],

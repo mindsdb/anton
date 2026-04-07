@@ -7,6 +7,7 @@ Chart.js configuration using the message's SQL query results.
 """
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -108,7 +109,20 @@ class ScatterIntent(BaseIntent):
 # Discriminated union for chart intent
 ChartIntent = XYIntent | PieIntent | ScatterIntent
 
-ChartOutputFormat = Literal["chartjs", "png", "image_url"]
+
+class RenderChartType(str, Enum):
+    """Compiled chart kind for RenderPlan (Chart.js `type` string values)."""
+
+    BAR = "bar"
+    LINE = "line"
+    PIE = "pie"
+    SCATTER = "scatter"
+
+
+class ChartOutputFormat(str, Enum):
+    CHARTJS = "chartjs"
+    PNG = "png"
+    IMAGE_URL = "image_url"
 
 
 class ChartRequest(BaseModel):
@@ -120,7 +134,7 @@ class ChartRequest(BaseModel):
         description="Chart intent specification",
     )
     output: ChartOutputFormat = Field(
-        default="chartjs",
+        default=ChartOutputFormat.CHARTJS,
         description=(
             "Desired output format. "
             "'chartjs' returns a Chart.js configuration for frontend rendering. "
@@ -145,7 +159,7 @@ class SeriesSpec:
 
 @dataclass(frozen=True)
 class RenderPlan:
-    chart_type: str
+    chart_type: RenderChartType
     title: str | None
     show_legend: bool
     labels: list[Any]

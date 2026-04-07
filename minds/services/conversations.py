@@ -681,7 +681,7 @@ class ConversationsService:
             if message.sql_query is None:
                 raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
 
-            sql_query = str(message.sql_query).strip().rstrip(";").strip()
+            sql_query = str(message.sql_query).strip()
 
             # Validate the SQL query to prevent SQL injection.
             parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
@@ -802,7 +802,7 @@ class ConversationsService:
             if message.sql_query is None:
                 raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
 
-            sql_query = str(message.sql_query).strip().rstrip(";").strip()
+            sql_query = str(message.sql_query).strip()
 
             # Validate the SQL query to prevent SQL injection.
             _ = self._validate_and_parse_sql_query(sql_query)
@@ -1167,7 +1167,7 @@ class ConversationsService:
         if message.sql_query is None:
             raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
 
-        sql_query = str(message.sql_query).strip().rstrip(";").strip()
+        sql_query = str(message.sql_query).strip()
         parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
         database_engines = extract_database_engines_from_select(
             parsed_sql_query,

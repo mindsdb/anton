@@ -1,6 +1,6 @@
 import pytest
 
-from minds.schemas.charts import AxisSpec, RenderPlan, SeriesSpec
+from minds.schemas.charts import AxisSpec, RenderChartType, RenderPlan, SeriesSpec
 from minds.services.chart_renderer import render_chart_image
 
 PNG_HEADER = b"\x89PNG\r\n\x1a\n"
@@ -10,7 +10,7 @@ PNG_HEADER = b"\x89PNG\r\n\x1a\n"
 class TestRenderChartImage:
     def test_returns_png_bytes_for_bar(self):
         plan = RenderPlan(
-            chart_type="bar",
+            chart_type=RenderChartType.BAR,
             title="Bar Chart",
             show_legend=False,
             labels=["a", "b"],
@@ -26,7 +26,7 @@ class TestRenderChartImage:
 
     def test_returns_png_bytes_for_pie(self):
         plan = RenderPlan(
-            chart_type="pie",
+            chart_type=RenderChartType.PIE,
             title="Regions",
             show_legend=True,
             labels=["North", "South", "East"],
@@ -42,7 +42,7 @@ class TestRenderChartImage:
 
     def test_returns_png_bytes_for_scatter(self):
         plan = RenderPlan(
-            chart_type="scatter",
+            chart_type=RenderChartType.SCATTER,
             title=None,
             show_legend=True,
             labels=[],
@@ -58,7 +58,7 @@ class TestRenderChartImage:
 
     def test_returns_png_bytes_for_line_with_string_labels(self):
         plan = RenderPlan(
-            chart_type="line",
+            chart_type=RenderChartType.LINE,
             title=None,
             show_legend=True,
             labels=["Jan", "Feb", "Mar"],
@@ -74,7 +74,7 @@ class TestRenderChartImage:
 
     def test_returns_png_bytes_for_timeseries_line(self):
         plan = RenderPlan(
-            chart_type="line",
+            chart_type=RenderChartType.LINE,
             title=None,
             show_legend=True,
             labels=["2024-01-01", "2024-01-02", "2024-01-03"],
@@ -90,7 +90,7 @@ class TestRenderChartImage:
 
     def test_returns_png_bytes_for_numeric_x_line(self):
         plan = RenderPlan(
-            chart_type="line",
+            chart_type=RenderChartType.LINE,
             title=None,
             show_legend=False,
             labels=[1, 2, 3, 4],

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from minds.api.v1.deps import get_conversations_service, get_minds_service
 from minds.common.logger import setup_logging
-from minds.schemas.charts import ChartImageResponse, ChartRequest, ChartResponse
+from minds.schemas.charts import ChartImageResponse, ChartOutputFormat, ChartRequest, ChartResponse
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.schemas.messages import MessageResponse, MessageResultResponse
 from minds.services.conversations import (
@@ -30,7 +30,11 @@ from minds.services.minds import MindNotFoundError, MindsService
 logger = setup_logging()
 
 router = APIRouter()
+
+# Fixed cache-control headers for chart image responses.
+# "no-store" prevents browsers/proxies from caching potentially sensitive query results.
 DIRECT_CHART_HEADERS = {"Cache-Control": "no-store"}
+# "private" ensures the response is not cached by shared caches (CDNs, proxies).
 IMAGE_URL_CHART_HEADERS = {"Cache-Control": "private, no-store"}
 
 
@@ -442,17 +446,17 @@ async def generate_chart(
     """
     user_id = conversations_service.user_id
     org_id = conversations_service.organization_id
-    logger.debug(f"Chart requested (output={req.output}) for user {user_id} in organization {org_id}")
+    logger.debug(f"Chart requested (output={req.output.value}) for user {user_id} in organization {org_id}")
 
     try:
-        if req.output == "chartjs":
+        if req.output is ChartOutputFormat.CHARTJS:
             return await conversations_service.get_conversation_message_chart(
                 conversation_id,
                 message_id,
                 req.intent,
             )
 
-        if req.output == "png":
+        if req.output is ChartOutputFormat.PNG:
             image_bytes = await conversations_service.render_conversation_message_chart_png(
                 conversation_id,
                 message_id,

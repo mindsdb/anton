@@ -10,13 +10,15 @@ from typing import Any
 import pandas as pd
 
 from minds.common.logger import get_logger
-from minds.schemas.charts import AxisSpec, RenderPlan, SeriesSpec
+from minds.common.settings.app_settings import get_app_settings
+from minds.schemas.charts import AxisSpec, RenderChartType, RenderPlan, SeriesSpec
 
 logger = get_logger(__name__)
 
-IMAGE_WIDTH = 1600
-IMAGE_HEIGHT = 800
-IMAGE_DPI = 100
+_settings = get_app_settings()
+IMAGE_WIDTH = _settings.chart_renderer.image_width
+IMAGE_HEIGHT = _settings.chart_renderer.image_height
+IMAGE_DPI = _settings.chart_renderer.image_dpi
 
 # Re-export for backward compatibility
 __all__ = ["AxisSpec", "RenderPlan", "SeriesSpec", "render_chart_image"]
@@ -54,9 +56,9 @@ def _render_plan_with_matplotlib(render_plan: RenderPlan, width: int, height: in
     axis = figure.add_subplot(111)
     figure.subplots_adjust(left=0.08, right=0.98, top=0.9 if render_plan.title else 0.96, bottom=0.18)
 
-    if render_plan.chart_type in {"bar", "line"}:
+    if render_plan.chart_type in (RenderChartType.BAR, RenderChartType.LINE):
         _draw_xy_matplotlib(axis, render_plan)
-    elif render_plan.chart_type == "pie":
+    elif render_plan.chart_type == RenderChartType.PIE:
         _draw_pie_matplotlib(axis, render_plan)
     else:
         _draw_scatter_matplotlib(axis, render_plan)
@@ -64,14 +66,14 @@ def _render_plan_with_matplotlib(render_plan: RenderPlan, width: int, height: in
     if render_plan.title:
         axis.set_title(render_plan.title)
 
-    if render_plan.chart_type != "pie":
+    if render_plan.chart_type != RenderChartType.PIE:
         if render_plan.x_axis.title:
             axis.set_xlabel(render_plan.x_axis.title)
         if render_plan.y_axis.title:
             axis.set_ylabel(render_plan.y_axis.title)
         axis.grid(axis="y", alpha=0.2)
 
-    if render_plan.show_legend and render_plan.chart_type != "pie":
+    if render_plan.show_legend and render_plan.chart_type != RenderChartType.PIE:
         labeled_series = [series for series in render_plan.series if series.label]
         if labeled_series:
             axis.legend()
@@ -88,7 +90,7 @@ def _draw_xy_matplotlib(axis: Any, render_plan: RenderPlan) -> None:
     labels = render_plan.labels
     x_values, is_date_axis = _resolve_xy_x_values(labels, render_plan.x_axis.scale_type)
 
-    if render_plan.chart_type == "bar":
+    if render_plan.chart_type == RenderChartType.BAR:
         positions = list(range(len(labels)))
         series_count = max(len(render_plan.series), 1)
         total_width = 0.8

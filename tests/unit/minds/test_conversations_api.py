@@ -22,7 +22,7 @@ from minds.api.v1.endpoints.conversations import (
     get_conversations_service,
     list_conversations,
 )
-from minds.schemas.charts import ChartImageResponse, ChartMeta, ChartRequest, ChartResponse, XYIntent
+from minds.schemas.charts import ChartImageResponse, ChartMeta, ChartOutputFormat, ChartRequest, ChartResponse, XYIntent
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse, MessageResultResponse
 from minds.services.conversations import (
@@ -817,7 +817,7 @@ class TestConversationsAPI:
 
         conversation_id = uuid4()
         message_id = uuid4()
-        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output="chartjs")
+        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output=ChartOutputFormat.CHARTJS)
 
         result = await generate_chart(
             conversation_id=conversation_id,
@@ -840,7 +840,7 @@ class TestConversationsAPI:
 
         conversation_id = uuid4()
         message_id = uuid4()
-        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output="png")
+        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output=ChartOutputFormat.PNG)
 
         result = await generate_chart(
             conversation_id=conversation_id,
@@ -870,7 +870,7 @@ class TestConversationsAPI:
 
         conversation_id = uuid4()
         message_id = uuid4()
-        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output="image_url")
+        req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"), output=ChartOutputFormat.IMAGE_URL)
 
         result = await generate_chart(
             conversation_id=conversation_id,
@@ -897,7 +897,7 @@ class TestConversationsAPI:
         mock_conversations_service.get_conversation_message_chart = AsyncMock(return_value=chart_response)
 
         req = ChartRequest(intent=XYIntent(type="bar", x="month", y="revenue"))
-        assert req.output == "chartjs"
+        assert req.output is ChartOutputFormat.CHARTJS
 
         result = await generate_chart(
             conversation_id=uuid4(),

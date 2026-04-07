@@ -15,6 +15,7 @@ from minds.schemas.charts import (
     ChartMeta,
     ChartWarning,
     PieIntent,
+    RenderChartType,
     RenderPlan,
     ScatterIntent,
     SeriesSpec,
@@ -334,7 +335,7 @@ def _compile_xy_chart(
     y_axis_label = ycols[0] if len(ycols) == 1 else "Value"
 
     plan = RenderPlan(
-        chart_type=intent.type,
+        chart_type=RenderChartType(intent.type),
         title=intent.title,
         show_legend=show_legend,
         labels=labels,
@@ -416,7 +417,7 @@ def _compile_pie_chart(
     data = [float(v) for v in g.values.tolist()]
 
     plan = RenderPlan(
-        chart_type="pie",
+        chart_type=RenderChartType.PIE,
         title=intent.title,
         show_legend=True,
         labels=labels,
@@ -536,7 +537,7 @@ def _compile_scatter_chart(
     show_legend = bool(scol)
 
     plan = RenderPlan(
-        chart_type="scatter",
+        chart_type=RenderChartType.SCATTER,
         title=intent.title,
         show_legend=show_legend,
         labels=[],
@@ -570,9 +571,9 @@ def render_plan_to_chartjs(plan: RenderPlan) -> dict:
         "tooltip": {"enabled": True},
     }
 
-    if plan.chart_type == "pie":
+    if plan.chart_type == RenderChartType.PIE:
         return {
-            "type": "pie",
+            "type": RenderChartType.PIE.value,
             "data": {
                 "labels": plan.labels,
                 "datasets": [{"data": plan.series[0].values or []}] if plan.series else [{"data": []}],
@@ -584,9 +585,9 @@ def render_plan_to_chartjs(plan: RenderPlan) -> dict:
             },
         }
 
-    if plan.chart_type == "scatter":
+    if plan.chart_type == RenderChartType.SCATTER:
         return {
-            "type": "scatter",
+            "type": RenderChartType.SCATTER.value,
             "data": {
                 "datasets": [
                     {
@@ -615,7 +616,7 @@ def render_plan_to_chartjs(plan: RenderPlan) -> dict:
 
     # bar / line
     return {
-        "type": plan.chart_type,
+        "type": plan.chart_type.value,
         "data": {
             "labels": plan.labels,
             "datasets": [{"label": s.label, "data": s.values or []} for s in plan.series],

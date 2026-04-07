@@ -162,6 +162,18 @@ class ChartCompilerSettings(Settings):
     )  # CHART_COMPILER__MAX_SERIES
 
 
+class ChartRendererSettings(Settings):
+    image_width: int = Field(
+        default=1600, ge=1, description="Default PNG width in pixels for server-rendered charts"
+    )  # CHART_RENDERER__IMAGE_WIDTH
+    image_height: int = Field(
+        default=800, ge=1, description="Default PNG height in pixels for server-rendered charts"
+    )  # CHART_RENDERER__IMAGE_HEIGHT
+    image_dpi: int = Field(
+        default=100, ge=1, description="DPI for Matplotlib figure when rendering chart PNGs"
+    )  # CHART_RENDERER__IMAGE_DPI
+
+
 class MindCastleSettings(Settings):
     encryption_type: str = Field(
         default="localencryption", description="The encryption type for MindCastle"
@@ -217,6 +229,7 @@ class AppSettings(Settings):
     redis: RedisSettings = Field(default_factory=RedisSettings)  # REDIS__*
     agents: AgentsSettings = Field(default_factory=AgentsSettings)  # AGENTS__*
     chart_compiler: ChartCompilerSettings = Field(default_factory=ChartCompilerSettings)  # CHART_COMPILER__*
+    chart_renderer: ChartRendererSettings = Field(default_factory=ChartRendererSettings)  # CHART_RENDERER__*
 
     statsig: StatsigSettings = Field(default_factory=StatsigSettings)  # STATSIG__*
 
