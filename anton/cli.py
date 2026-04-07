@@ -278,6 +278,15 @@ def main(
     resume: bool = typer.Option(
         False, "--resume", "-r", help="Resume a previous chat session"
     ),
+    prompt: str | None = typer.Option(
+        None, "--prompt", "-p", help="Run a single prompt in headless mode and exit"
+    ),
+    output_format: str = typer.Option(
+        "text", "--output-format", help="Output format: text or json (headless mode only)"
+    ),
+    stdin: bool = typer.Option(
+        False, "--stdin", help="Read prompt from stdin (headless mode)"
+    ),
 ) -> None:
     """Anton — a self-evolving autonomous system."""
     _ensure_dependencies(console)
@@ -286,6 +295,30 @@ def main(
 
     settings = AntonSettings()
     settings.resolve_workspace(folder)
+
+    # Headless mode: --prompt or --stdin
+    headless_prompt = prompt
+    if stdin:
+        import sys as _sys
+        headless_prompt = _sys.stdin.read().strip()
+        if not headless_prompt:
+            console.print("[red]Error: no input received from stdin[/]")
+            raise typer.Exit(1)
+
+    if headless_prompt:
+        # Headless mode — skip terms consent, banner, update check
+        if not _has_api_key(settings):
+            console.print("[red]Error: no API key configured. Run `anton setup` first.[/]")
+            raise typer.Exit(1)
+
+        ctx.ensure_object(dict)
+        ctx.obj["settings"] = settings
+
+        from anton.chat import run_headless
+
+        _ensure_workspace(settings)
+        run_headless(console, settings, prompt=headless_prompt, output_format=output_format)
+        raise typer.Exit(0)
 
     if not settings.terms_consent:
         _ensure_terms_consent(console, settings)
