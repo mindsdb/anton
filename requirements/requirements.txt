@@ -1,0 +1,13 @@
+# Core dependencies for anton
+anthropic>=0.42.0
+openai>=1.0
+pydantic>=2.0
+pydantic-settings>=2.0
+typer>=0.12.4
+rich>=13.0
+prompt-toolkit>=3.0
+packaging>=21.0
+pyyaml>=6.0
+
+# Optional clipboard support
+Pillow>=9.0
