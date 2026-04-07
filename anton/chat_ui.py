@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import random
+import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from rich.live import Live
 from rich.markdown import Markdown
@@ -438,3 +441,125 @@ class StreamDisplay:
         elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{int(elapsed * 1000)}ms"
         line.append(elapsed_str, style="anton.muted")
         self._console.print(line)
+
+
+class EscapeWatcher:
+    """Detect Escape keypress during streaming via cbreak terminal mode."""
+
+    def __init__(self, on_cancel: Callable[[], None] | None = None) -> None:
+        self.cancelled = asyncio.Event()
+        self._on_cancel = on_cancel
+        self._task: asyncio.Task | None = None
+        self._old_settings: list | None = None
+        self._stop = False
+        self._paused = False
+
+    async def __aenter__(self) -> EscapeWatcher:
+        if sys.platform != "win32" and sys.stdin.isatty():
+            self._task = asyncio.create_task(self._watch())
+        return self
+
+    def pause(self) -> None:
+        """Temporarily restore normal terminal mode for interactive prompts."""
+        if self._paused or self._old_settings is None:
+            return
+        import termios
+        fd = sys.stdin.fileno()
+        termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
+        self._paused = True
+
+    def resume(self) -> None:
+        """Re-enter cbreak mode after interactive prompts."""
+        if not self._paused:
+            return
+        import tty
+        fd = sys.stdin.fileno()
+        tty.setcbreak(fd)
+        self._paused = False
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._stop = True
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._drain_stdin()
+
+    @staticmethod
+    def _drain_stdin() -> None:
+        if sys.platform == "win32":
+            return
+        import fcntl
+
+        fd = sys.stdin.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            while True:
+                try:
+                    if not os.read(fd, 1024):
+                        break
+                except BlockingIOError:
+                    break
+        finally:
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+
+    async def _watch(self) -> None:
+        if sys.platform == "win32":
+            return
+        import select
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        self._old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            loop = asyncio.get_running_loop()
+            while not self._stop:
+                if self._paused:
+                    await asyncio.sleep(0.1)
+                    continue
+                ready = await loop.run_in_executor(
+                    None, lambda: select.select([fd], [], [], 0.1)[0]
+                )
+                if not ready:
+                    continue
+                ch = os.read(fd, 1)
+                if ch == b"\x1b":
+                    followup = await loop.run_in_executor(
+                        None, lambda: select.select([fd], [], [], 0.05)[0]
+                    )
+                    if followup:
+                        os.read(fd, 32)
+                        continue
+                    if self._on_cancel is not None:
+                        self._on_cancel()
+                    self.cancelled.set()
+                    return
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
+
+
+class ClosingSpinner:
+    """Animated spinner shown while scratchpad processes are being killed."""
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._live: object | None = None
+
+    def start(self) -> None:
+        spinner = Spinner(
+            "dots", text=Text(" Closing scratchpad processes…", style="anton.muted")
+        )
+        self._live = Live(
+            spinner, console=self._console, refresh_per_second=6, transient=True
+        )
+        self._live.start()
+
+    def stop(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
