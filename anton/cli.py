@@ -846,11 +846,13 @@ def _setup_openai(settings, ws) -> None:
         _handle_retry(settings, ws, console, retry_fn=_setup_openai)
 
     settings.openai_api_key = api_key
+    settings.openai_base_url = None
     settings.planning_provider = "openai"
     settings.coding_provider = "openai"
     settings.planning_model = model
     settings.coding_model = model
     ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
+    ws.set_secret("ANTON_OPENAI_BASE_URL", "")
     ws.set_secret("ANTON_PLANNING_PROVIDER", "openai")
     ws.set_secret("ANTON_CODING_PROVIDER", "openai")
     ws.set_secret("ANTON_PLANNING_MODEL", model)
