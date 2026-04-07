@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from rich.console import Console
 
@@ -199,10 +200,18 @@ async def handle_setup_models(
             base = settings.openai_base_url or ""
             if settings.minds_url and "mdb.ai" in settings.minds_url:
                 return "Minds-Enterprise-Cloud"
-            elif "generativelanguage.googleapis.com" in base:
-                return "Google Gemini"
-            elif base:
-                return f"OpenAI-compatible ({base})"
+            else:
+                hostname = None
+                if base:
+                    parsed = urlparse(base)
+                    hostname = parsed.hostname
+                if hostname and (
+                    hostname == "generativelanguage.googleapis.com"
+                    or hostname.endswith(".generativelanguage.googleapis.com")
+                ):
+                    return "Google Gemini"
+                elif base:
+                    return f"OpenAI-compatible ({base})"
             return "OpenAI-compatible"
         return provider.capitalize()
 
