@@ -889,7 +889,7 @@ class ChatSession:
                                         description=description,
                                     )
                         elif tc.name == "connect_new_datasource" or (
-                            tc.name == "publish_or_preview" and tc.input.get("action", "ask") == "ask"
+                            tc.name == "publish_or_preview" and tc.input.get("action") == "publish"
                         ):
                             # Interactive tool — pause spinner AND escape watcher
                             yield StreamTaskProgress(

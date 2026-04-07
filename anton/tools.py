@@ -545,55 +545,10 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         return f"File not found: {file_path}"
 
     # Direct preview — just open and return, no prompts
-    if action == "preview":
+    if action in ("preview", "ask"):
         abs_path = os.path.abspath(str(file_path))
         webbrowser.open(f"file://{abs_path}")
-        return f"Opened {title} in browser for preview."
-
-    # Direct publish — skip to publish flow
-    if action == "publish":
-        choice = "publish"
-    else:
-        # Interactive: ask the user
-        from anton.prompt_utils import prompt_or_cancel
-
-        console.print()
-        console.print(f"  [anton.success]Dashboard ready:[/] {title}")
-        console.print(f"  [anton.muted]{file_path.name}[/]")
-        console.print()
-
-        choice = await prompt_or_cancel(
-            "  (anton) Preview, publish, or skip?",
-            choices=["preview", "publish", "skip", "p", "s"],
-            choices_display="preview/publish/skip",
-            default="preview",
-        )
-
-        if choice is None or choice in ("skip", "s"):
-            console.print()
-            return "User skipped preview and publish."
-
-        if choice in ("preview", "p"):
-            abs_path = os.path.abspath(str(file_path))
-            webbrowser.open(f"file://{abs_path}")
-            console.print("  [anton.muted]Opened in browser.[/]")
-            console.print()
-
-            # After preview, offer to publish or keep chatting
-            pub_choice = await prompt_or_cancel(
-                "  (anton) Publish to the web, or keep chatting to make changes?",
-                choices=["publish", "chat", "p", "c"],
-                choices_display="publish/chat",
-                default="chat",
-            )
-            if pub_choice is None or pub_choice in ("chat", "c"):
-                console.print("  [anton.muted]Want to make changes? Just keep chatting.[/]")
-                console.print()
-                return (
-                    "User previewed the dashboard and wants to keep chatting. "
-                    "They may ask for changes — wait for their input."
-                )
-            choice = "publish"
+        return f"Opened {title} in browser. The user can ask for changes or say /publish to publish it to the web."
 
     # Publish flow
     from anton.config.settings import AntonSettings
