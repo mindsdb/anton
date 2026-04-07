@@ -1531,7 +1531,8 @@ async def _handle_publish(
             console.print()
             return
         if has_key.lower() == "n":
-            webbrowser.open(
+            from anton.tools import _safe_open_browser
+            _safe_open_browser(
                 "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
                 "&redirect_uri=https%3A%2F%2Fmdb.ai"
@@ -1634,7 +1635,8 @@ async def _handle_publish(
     console.print()
 
     if view_url:
-        webbrowser.open(view_url)
+        from anton.tools import _safe_open_browser
+        _safe_open_browser(view_url)
 
 
 

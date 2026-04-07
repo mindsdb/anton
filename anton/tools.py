@@ -526,10 +526,30 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         )
 
 
+def _safe_open_browser(url: str) -> None:
+    """Open URL in browser, silently ignoring failures on headless environments."""
+    import os
+    import subprocess
+    import webbrowser
+    # Suppress stderr (gio errors on WSL/headless) by redirecting it
+    devnull = open(os.devnull, "w")
+    try:
+        old_stderr = os.dup(2)
+        os.dup2(devnull.fileno(), 2)
+        try:
+            webbrowser.open(url)
+        finally:
+            os.dup2(old_stderr, 2)
+            os.close(old_stderr)
+    except Exception:
+        pass
+    finally:
+        devnull.close()
+
+
 async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str:
     """Interactive preview/publish flow after dashboard creation."""
     import os
-    import webbrowser
     from pathlib import Path
 
     console = session._console
@@ -547,7 +567,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # Direct preview — just open and return, no prompts
     if action in ("preview", "ask"):
         abs_path = os.path.abspath(str(file_path))
-        webbrowser.open(f"file://{abs_path}")
+        _safe_open_browser(f"file://{abs_path}")
         return f"Opened {title} in browser. The user can ask for changes or say /publish to publish it to the web."
 
     # Publish flow
@@ -569,7 +589,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
             console.print()
             return "User cancelled publish."
         if has_key == "n":
-            webbrowser.open(
+            _safe_open_browser(
                 "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
                 "&redirect_uri=https%3A%2F%2Fmdb.ai"
@@ -608,7 +628,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     console.print()
 
     if view_url:
-        webbrowser.open(view_url)
+        _safe_open_browser(view_url)
 
     return f"Published successfully!\nView URL: {view_url}"
 
