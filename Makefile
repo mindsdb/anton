@@ -52,15 +52,15 @@ reinstall: ## No-op inside container
 else
 # Outside container: use virtual environment
 .PHONY: $(VENV)/$(VENV_DIR)/activate
-$(VENV)/$(VENV_DIR)/activate: requirements/requirements-dev.txt ## Create virtualenv and install dependencies
+$(VENV)/$(VENV_DIR)/activate: pyproject.toml ## Create virtualenv and install dependencies
 	@echo "Creating virtual environment at $(VENV)..."
 	@if command -v uv >/dev/null 2>&1; then \
 		uv venv "$(VENV)" --clear || python3 -m venv "$(VENV)"; \
-		uv pip install --python "$(VENV)/$(VENV_DIR)/$(PYTHON_EXE)" -r requirements/requirements-dev.txt; \
+		uv pip install --python "$(VENV)/$(VENV_DIR)/$(PYTHON_EXE)" -e ".[dev,clipboard]"; \
 	else \
 		python3 -m venv "$(VENV)"; \
 		"$(VENV)/$(VENV_DIR)/pip" install -U pip; \
-		"$(VENV)/$(VENV_DIR)/pip" install -r requirements/requirements-dev.txt; \
+		"$(VENV)/$(VENV_DIR)/pip" install -e ".[dev,clipboard]"; \
 	fi
 	@echo "Virtual environment setup complete."
 
