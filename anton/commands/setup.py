@@ -190,7 +190,7 @@ async def handle_setup_models(
     from pathlib import Path
     from anton.workspace import Workspace as _Workspace
     from anton.cli import _SetupRetry, _setup_minds, _setup_other_provider
-    from anton.chat import _rebuild_session
+    from anton.chat_session import rebuild_session
 
     # Always persist API keys and model settings to global ~/.anton/.env
     global_ws = _Workspace(Path.home())
@@ -271,7 +271,7 @@ async def handle_setup_models(
     console.print("[anton.success]Configuration updated.[/]")
     console.print()
 
-    return _rebuild_session(
+    return rebuild_session(
         settings=settings,
         state=state,
         self_awareness=self_awareness,
