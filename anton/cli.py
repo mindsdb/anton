@@ -629,7 +629,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
     ws.set_secret("ANTON_MINDS_URL", minds_url)
 
     # Test connection with a spinner
-    from anton.chat import _minds_test_llm
+    from anton.minds_client import test_llm
 
     from rich.live import Live
     from rich.spinner import Spinner
@@ -639,11 +639,11 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
     rate_limited = False
 
     with Live(Spinner("dots", text="  Connecting...", style="anton.cyan"), console=console, transient=True):
-        result = _minds_test_llm(minds_url, api_key, verify=True)
+        result = test_llm(minds_url, api_key, verify=True)
         if result == "rate_limited":
             rate_limited = True
         elif not result:
-            result_no_ssl = _minds_test_llm(minds_url, api_key, verify=False)
+            result_no_ssl = test_llm(minds_url, api_key, verify=False)
             if result_no_ssl == "rate_limited":
                 rate_limited = True
             elif result_no_ssl:
@@ -1078,7 +1078,8 @@ def connect_data_source(
     """
     import asyncio
 
-    from anton.chat import ChatSession, _handle_connect_datasource
+    from anton.chat import ChatSession
+    from anton.commands.datasource import handle_connect_datasource
     from anton.llm.client import LLMClient
     from anton.scratchpad import ScratchpadManager
 
@@ -1100,7 +1101,7 @@ def connect_data_source(
     session = ChatSession(llm_client)
 
     async def _run() -> None:
-        await _handle_connect_datasource(
+        await handle_connect_datasource(
             console,
             scratchpads,
             session,
@@ -1114,9 +1115,9 @@ def connect_data_source(
 @app.command("list")
 def list_data_sources(ctx: typer.Context) -> None:
     """List all saved data source connections in the Local Vault."""
-    from anton.chat import _handle_list_data_sources
+    from anton.commands.datasource import handle_list_data_sources
 
-    _handle_list_data_sources(console)
+    handle_list_data_sources(console)
 
 
 @app.command("edit")
@@ -1127,7 +1128,8 @@ def edit_data_source(
     """Edit credentials for an existing Local Vault connection."""
     import asyncio
 
-    from anton.chat import ChatSession, _handle_connect_datasource
+    from anton.chat import ChatSession
+    from anton.commands.datasource import handle_connect_datasource
     from anton.llm.client import LLMClient
     from anton.scratchpad import ScratchpadManager
 
@@ -1149,7 +1151,7 @@ def edit_data_source(
     session = ChatSession(llm_client)
 
     async def _run() -> None:
-        await _handle_connect_datasource(
+        await handle_connect_datasource(
             console,
             scratchpads,
             session,
@@ -1166,9 +1168,9 @@ def remove_data_source(
     name: str = typer.Argument(..., help="Connection slug to remove (e.g. postgres-mydb)."),
 ) -> None:
     """Remove a saved connection from the Local Vault."""
-    from anton.chat import _handle_remove_data_source
+    from anton.commands.datasource import handle_remove_data_source
 
-    _handle_remove_data_source(console, name)
+    handle_remove_data_source(console, name)
 
 
 @app.command("test")
@@ -1179,7 +1181,7 @@ def test_data_source(
     """Test a saved Local Vault connection using its test snippet."""
     import asyncio
 
-    from anton.chat import _handle_test_datasource
+    from anton.commands.datasource import handle_test_datasource
     from anton.scratchpad import ScratchpadManager
 
     settings = _get_settings(ctx)
@@ -1198,7 +1200,7 @@ def test_data_source(
     )
 
     async def _run() -> None:
-        await _handle_test_datasource(console, scratchpads, name)
+        await handle_test_datasource(console, scratchpads, name)
         await scratchpads.close_all()
 
     asyncio.run(_run())
