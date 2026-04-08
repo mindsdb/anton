@@ -115,3 +115,35 @@ def publish(
     url = f"{publish_url.rstrip('/')}/upload"
     raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
     return json.loads(raw)
+
+
+def list_published(
+    *,
+    api_key: str,
+    publish_url: str = DEFAULT_PUBLISH_URL,
+    ssl_verify: bool = True,
+) -> list[dict]:
+    """List all published reports for the authenticated user.
+
+    Returns list of dicts with keys: md5, title, view_url, files, last_modified, uploaded_at
+    """
+    url = f"{publish_url.rstrip('/')}/list"
+    raw = minds_request(url, api_key, method="GET", verify=ssl_verify)
+    data = json.loads(raw)
+    return data.get("reports", [])
+
+
+def unpublish(
+    md5: str,
+    *,
+    api_key: str,
+    publish_url: str = DEFAULT_PUBLISH_URL,
+    ssl_verify: bool = True,
+) -> dict:
+    """Delete a published report by its md5 hash. User is derived from the token.
+
+    Returns dict with keys: deleted, md5, files_deleted
+    """
+    url = f"{publish_url.rstrip('/')}/delete/{md5}"
+    raw = minds_request(url, api_key, method="DELETE", verify=ssl_verify)
+    return json.loads(raw)

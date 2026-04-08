@@ -1639,6 +1639,115 @@ async def _handle_publish(
 
 
 
+async def _handle_unpublish(
+    console: Console,
+    settings,
+    workspace,
+) -> None:
+    """Handle /unpublish command — list published reports and delete one."""
+    from anton.publisher import list_published, unpublish
+
+    console.print()
+
+    # 1. Ensure Minds API key is available
+    if not settings.minds_api_key:
+        console.print("  [anton.warning]No Minds API key configured. Run /publish first.[/]")
+        console.print()
+        return
+
+    # 2. Fetch published reports
+    from rich.live import Live
+    from rich.spinner import Spinner
+
+    reports = []
+    with Live(Spinner("dots", text="  Loading published reports...", style="anton.cyan"), console=console, transient=True):
+        try:
+            reports = list_published(
+                api_key=settings.minds_api_key,
+                publish_url=settings.publish_url,
+                ssl_verify=settings.minds_ssl_verify,
+            )
+        except Exception as e:
+            console.print(f"  [anton.error]Failed to list reports: {e}[/]")
+            console.print()
+            return
+
+    if not reports:
+        console.print("  [anton.muted]No published reports found.[/]")
+        console.print()
+        return
+
+    # 3. Display paginated list
+    PAGE_SIZE = 10
+    offset = 0
+
+    while True:
+        page = reports[offset:offset + PAGE_SIZE]
+        has_more = offset + PAGE_SIZE < len(reports)
+
+        console.print("  [anton.cyan]Published reports:[/]")
+        console.print()
+        for i, r in enumerate(page, offset + 1):
+            title = r.get("title", "Untitled")
+            url = r.get("view_url", "")
+            console.print(f"  [bold]{i}[/]  {title}  [anton.muted]{url}[/]")
+
+        if has_more:
+            console.print(f"\n  [anton.muted]m  Show more ({len(reports) - offset - PAGE_SIZE} remaining)[/]")
+
+        console.print()
+        choice = await prompt_or_cancel("  Select report to unpublish")
+        if choice is None:
+            console.print()
+            return
+
+        if choice.strip().lower() == "m" and has_more:
+            offset += PAGE_SIZE
+            console.print()
+            continue
+
+        try:
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(reports):
+                raise ValueError
+            selected = reports[idx]
+            break
+        except (ValueError, IndexError):
+            console.print("  [anton.warning]Invalid choice.[/]")
+            console.print()
+            return
+
+    # 4. Confirm
+    title = selected.get("title", "Untitled")
+    console.print(f"  [anton.warning]This will remove:[/] {title}")
+    confirm = await prompt_or_cancel(
+        "  Are you sure?",
+        choices=["y", "n"],
+        choices_display="y/n",
+        default="n",
+    )
+    if confirm is None or confirm != "y":
+        console.print()
+        return
+
+    # 5. Delete
+    with Live(Spinner("dots", text="  Removing...", style="anton.cyan"), console=console, transient=True):
+        try:
+            unpublish(
+                selected["md5"],
+                api_key=settings.minds_api_key,
+                publish_url=settings.publish_url,
+                ssl_verify=settings.minds_ssl_verify,
+            )
+        except Exception as e:
+            console.print(f"  [anton.error]Failed to remove: {e}[/]")
+            console.print()
+            return
+
+    console.print(f"  [anton.success]Removed:[/] {title}")
+    console.print()
+
+
 async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
     """First-run staged demo. Runs the backup script in a real scratchpad cell.
 
@@ -2341,6 +2450,9 @@ async def _chat_loop(
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     await _handle_publish(console, settings, workspace, arg)
+                    continue
+                elif cmd == "/unpublish":
+                    await _handle_unpublish(console, settings, workspace)
                     continue
                 elif cmd == "/help":
                     print_slash_help(console)

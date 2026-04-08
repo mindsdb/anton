@@ -101,5 +101,25 @@ def _check_and_update(result: dict, settings) -> None:
         messages.append("  [dim]Update failed, continuing...[/]")
         return
 
+    # Verify the upgrade actually installed the newer version by checking
+    # what uv reports. If PyPI hasn't published the version yet, uv will
+    # reinstall the old one and we'd loop forever on restart.
+    try:
+        verify = subprocess.run(
+            ["uv", "tool", "list"],
+            capture_output=True,
+            timeout=5,
+        )
+        tool_list = verify.stdout.decode()
+        # Look for "anton X.Y.Z" in the output
+        installed_match = re.search(r"anton\s+(\S+)", tool_list)
+        if installed_match:
+            installed_ver = Version(installed_match.group(1))
+            if installed_ver < remote_ver:
+                # Upgrade didn't actually install the new version — skip restart
+                return
+    except Exception:
+        pass
+
     messages.append("  \u2713 Updated!")
     result["new_version"] = remote_version_str
