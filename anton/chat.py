@@ -2624,7 +2624,7 @@ async def _chat_loop(
                     default="setup",
                 )
                 if choice in ("setup", "s"):
-                    session = await _handle_setup_models(
+                    session = await handle_setup_models(
                         console,
                         settings,
                         workspace,
