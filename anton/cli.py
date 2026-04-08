@@ -795,6 +795,12 @@ def _handle_retry(settings, ws, console, retry_fn) -> None:
         raise _SetupRetry()
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    """Check if an exception is a transient server error (overloaded, 502, 529, timeout)."""
+    msg = str(exc).lower()
+    return any(k in msg for k in ("overloaded", "529", "502", "503", "timeout", "temporarily unavailable"))
+
+
 def _setup_anthropic(settings, ws) -> None:
     """Set up Anthropic with a single model for both reasoning and coding."""
 
@@ -826,7 +832,10 @@ def _setup_anthropic(settings, ws) -> None:
         _handle_retry(settings, ws, console, retry_fn=_setup_anthropic)
         return
     except Exception as exc:
-        console.print(f"  [anton.error]Failed:[/] {exc}")
+        if _is_transient_error(exc):
+            console.print("  [anton.warning]The server is temporarily overloaded. This usually resolves in a few seconds.[/]")
+        else:
+            console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_anthropic)
         return
 
@@ -875,7 +884,10 @@ def _setup_openai(settings, ws) -> None:
         _handle_retry(settings, ws, console, retry_fn=_setup_openai)
         return
     except Exception as exc:
-        console.print(f"  [anton.error]Failed:[/] {exc}")
+        if _is_transient_error(exc):
+            console.print("  [anton.warning]The server is temporarily overloaded. This usually resolves in a few seconds.[/]")
+        else:
+            console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_openai)
         return
 
@@ -932,7 +944,10 @@ def _setup_gemini(settings, ws) -> None:
         _handle_retry(settings, ws, console, retry_fn=_setup_gemini)
         return
     except Exception as exc:
-        console.print(f"  [anton.error]Failed:[/] {exc}")
+        if _is_transient_error(exc):
+            console.print("  [anton.warning]The server is temporarily overloaded. This usually resolves in a few seconds.[/]")
+        else:
+            console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_gemini)
         return
 
@@ -996,7 +1011,10 @@ def _setup_custom_openai(settings, ws) -> None:
 
         _validate_with_spinner(console, f"{model} at {base_url}", _test)
     except Exception as exc:
-        console.print(f"  [anton.error]Failed:[/] {exc}")
+        if _is_transient_error(exc):
+            console.print("  [anton.warning]The server is temporarily overloaded. This usually resolves in a few seconds.[/]")
+        else:
+            console.print(f"  [anton.error]Failed:[/] {exc}")
         _handle_retry(settings, ws, console, retry_fn=_setup_custom_openai)
         return
 
