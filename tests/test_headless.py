@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from anton.chat import _headless
+from anton.commands.headless import _headless
 from anton.llm.provider import (
     LLMResponse,
     StreamComplete,
