@@ -11,6 +11,8 @@ from rich.console import Console
 from anton.diagnostics import collect_diagnostics, save_diagnostics_file
 from anton.utils.prompt import prompt_or_cancel
 
+from anton.publisher import publish_bug_report
+
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.config.settings import AntonSettings
@@ -39,7 +41,9 @@ async def handle_report_bug(
     console.print("  • Connected datasource names (no credentials)")
     console.print("  • Recent logs and memory state")
     console.print()
-    console.print("  [bold]Our dev team will be able to see all of this information.[/]")
+    console.print(
+        "  [bold]Our dev team will be able to see all of this information.[/]"
+    )
     console.print()
 
     consent = await prompt_or_cancel(
@@ -68,7 +72,9 @@ async def handle_report_bug(
     bug_description = None
     if add_description and add_description.lower() == "y":
         console.print()
-        console.print("  [anton.muted]Please describe the bug (press Enter when done):[/]")
+        console.print(
+            "  [anton.muted]Please describe the bug (press Enter when done):[/]"
+        )
         bug_description = await prompt_or_cancel("  ")
         if bug_description is None:
             bug_description = ""
@@ -80,7 +86,9 @@ async def handle_report_bug(
     from rich.spinner import Spinner
 
     with Live(
-        Spinner("dots", text="  Collecting diagnostic information...", style="anton.cyan"),
+        Spinner(
+            "dots", text="  Collecting diagnostic information...", style="anton.cyan"
+        ),
         console=console,
         transient=True,
     ):
@@ -102,7 +110,9 @@ async def handle_report_bug(
 
     # Ensure Minds API key is available
     if not settings.minds_api_key:
-        console.print("  [anton.muted]To submit bug reports you need a free Minds account.[/]")
+        console.print(
+            "  [anton.muted]To submit bug reports you need a free Minds account.[/]"
+        )
         console.print()
         has_key = await prompt_or_cancel(
             "  Do you have an mdb.ai API key?",
@@ -114,11 +124,7 @@ async def handle_report_bug(
             console.print()
             return
         if has_key.lower() == "n":
-            webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
-                "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
-            )
+            webbrowser.open("https://mdb.ai/")
             console.print()
 
         api_key = await prompt_or_cancel("  API key", password=True)
@@ -138,8 +144,6 @@ async def handle_report_bug(
         transient=True,
     ):
         try:
-            from anton.publisher import publish_bug_report
-
             publish_bug_report(
                 diagnostics_file,
                 api_key=settings.minds_api_key,
