@@ -112,7 +112,7 @@ class ChatSession:
         self._episodic = episodic
         self._runtime_context = runtime_context
         self._proactive_dashboards = proactive_dashboards
-        self._extra_tools = tools
+        self._extra_tools = tools or []
         self._workspace = workspace
         self._console = console
         self._history: list[dict] = list(initial_history) if initial_history else []
@@ -493,7 +493,9 @@ class ChatSession:
             tool_results: list[dict] = []
             for tc in response.tool_calls:
                 try:
-                    result_text = await self.tool_registry.dispatch_tool(tc.name, tc.input)
+                    result_text = await self.tool_registry.dispatch_tool(
+                        self, tc.name, tc.input
+                    )
                 except Exception as exc:
                     result_text = f"Tool '{tc.name}' failed: {exc}"
 
@@ -875,7 +877,9 @@ class ChatSession:
                             )
                             if self._escape_watcher:
                                 self._escape_watcher.pause()
-                            result_text = await self.tool_registry.dispatch_tool(tc.name, tc.input)
+                            result_text = await self.tool_registry.dispatch_tool(
+                                self, tc.name, tc.input
+                            )
                             if self._escape_watcher:
                                 self._escape_watcher.resume()
                             yield StreamTaskProgress(
@@ -883,7 +887,9 @@ class ChatSession:
                                 message="Analyzing results...",
                             )
                         else:
-                            result_text = await self.tool_registry.dispatch_tool(tc.name, tc.input)
+                            result_text = await self.tool_registry.dispatch_tool(
+                                self, tc.name, tc.input
+                            )
                             if (
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"

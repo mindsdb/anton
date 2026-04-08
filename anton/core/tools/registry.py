@@ -3,6 +3,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from anton.core.session import ChatSession
     from anton.core.tools.tool_defs import ToolDef
 
 
@@ -26,14 +27,16 @@ class ToolRegistry:
         """
         self._tools.append(tool_def)
 
-    async def dispatch_tool(self, tool_name: str, tc_input: dict) -> str:
+    async def dispatch_tool(
+        self, session: "ChatSession", tool_name: str, tc_input: dict
+    ) -> str:
         """
         Dispatch a tool call by name. Returns result text.
         """
         tool_def = next((tool for tool in self._tools if tool.name == tool_name), None)
         if tool_def is None:
             raise ValueError(f"Tool {tool_name} not found")
-        return await tool_def.handler(tc_input)
+        return await tool_def.handler(session, tc_input)
 
     def dump(self) -> list[dict]:
         """
