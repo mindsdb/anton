@@ -1,6 +1,20 @@
-SCRATCHPAD_TOOL = {
-    "name": "scratchpad",
-    "description": (
+from anton.core.tools.tool_handlers import handle_scratchpad, handle_memorize, handle_recall
+
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass
+class ToolDef:
+    name: str
+    description: str
+    input_schema: dict
+    handler: Callable  # async (session, tc_input) -> str
+
+
+SCRATCHPAD_TOOL = ToolDef(
+    name = "scratchpad",
+    description = (
         "Run Python code in a persistent scratchpad. Use this whenever you need to "
         "count characters, do math, parse data, transform text, or any task that "
         "benefits from precise computation rather than guessing. Variables, imports, "
@@ -36,7 +50,7 @@ SCRATCHPAD_TOOL = {
         "for every exec call. For very long operations, provide a realistic estimate "
         "and use progress() to keep the cell alive."
     ),
-    "input_schema": {
+        input_schema = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["exec", "view", "reset", "remove", "dump", "install"]},
@@ -63,12 +77,13 @@ SCRATCHPAD_TOOL = {
         },
         "required": ["action", "name"],
     },
-}
+    handler = handle_scratchpad,
+)
 
 
-MEMORIZE_TOOL = {
-    "name": "memorize",
-    "description": (
+MEMORIZE_TOOL = ToolDef(
+    name = "memorize",
+    description = (
         "Encode a rule or lesson into long-term memory for future sessions. "
         "Use this when you learn something important, discover a useful pattern, "
         "or the user asks you to remember something.\n\n"
@@ -79,7 +94,7 @@ MEMORIZE_TOOL = {
         "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
         "- profile: Fact about the user ('Name: Jorge', 'Prefers dark mode')"
     ),
-    "input_schema": {
+    input_schema = {
         "type": "object",
         "properties": {
             "entries": {
@@ -110,12 +125,13 @@ MEMORIZE_TOOL = {
         },
         "required": ["entries"],
     },
-}
+    handler = handle_memorize,
+)
 
 
-RECALL_TOOL = {
-    "name": "recall",
-    "description": (
+RECALL_TOOL = ToolDef(
+    name = "recall",
+    description = (
         "Search your episodic memory — an archive of past conversations. "
         "ONLY use this when the user explicitly asks about a previous conversation "
         "or session (e.g. 'what did we talk about last time?', 'remember when we...', "
@@ -124,7 +140,7 @@ RECALL_TOOL = {
         "Returns timestamped episodes matching the query (newest first). "
         "A single call is enough — do not call multiple times with different queries."
     ),
-    "input_schema": {
+    input_schema = {
         "type": "object",
         "properties": {
             "query": {
@@ -142,4 +158,5 @@ RECALL_TOOL = {
         },
         "required": ["query"],
     },
-}
+    handler = handle_recall,
+)
