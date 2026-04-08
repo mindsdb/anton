@@ -41,6 +41,22 @@ _CELL_DELIM = "__ANTON_CELL_END__"
 _RESULT_START = "__ANTON_RESULT__"
 _RESULT_END = "__ANTON_RESULT_END__"
 
+# Only pass what's needed: runtime essentials, paths, locale, and
+# the specific API keys the scratchpad requires.
+# If you need a custom env var in the scratchpad (e.g. MY_SERVICE_TOKEN),
+# add it to ~/.anton/.env prefixed with ANTON_ and it will pass through.
+_SCRATCHPAD_ENV_ALLOWLIST_PREFIXES = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM",
+    "LANG", "LC_", "TZ",
+    "TMPDIR", "TEMP", "TMP",
+    "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED",
+    "VIRTUAL_ENV",
+    "DS_",
+    "ANTON_",
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+    "GOOGLE_API_KEY",
+)
+
 
 @dataclass
 class Cell:
@@ -323,6 +339,17 @@ class Scratchpad:
             # No version file — treat as mismatch so it gets recreated with one.
             return False
 
+    def _build_scratchpad_env(self) -> dict[str, str]:
+        """Build a minimal environment for the scratchpad subprocess."""
+        env: dict[str, str] = {}
+        for key, value in os.environ.items():
+            if any(
+                key == prefix or key.startswith(prefix)
+                for prefix in _SCRATCHPAD_ENV_ALLOWLIST_PREFIXES
+            ):
+                env[key] = value
+        return env
+
     async def start(self) -> None:
         """Write the boot script to a temp file and launch the subprocess."""
         self._ensure_venv()
@@ -333,7 +360,7 @@ class Scratchpad:
         os.close(fd)
         self._boot_path = path
 
-        env = os.environ.copy()
+        env = self._build_scratchpad_env()
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:

@@ -10,6 +10,28 @@ from rich.console import Console
 
 from anton.clipboard import clipboard_unavailable_reason
 
+_SENSITIVE_PATTERNS = (
+    ".ssh/",
+    ".aws/",
+    ".gnupg/",
+    ".anton/.env",
+    ".anton/data_vault/",
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".docker/config.json",
+    "credentials.json",
+    ".git/config",
+    ".kube/config",
+)
+
+
+def _is_sensitive_path(p: Path) -> bool:
+    """Check if a path matches known sensitive file patterns."""
+    s = str(p)
+    return any(pattern in s for pattern in _SENSITIVE_PATTERNS)
+
 
 def human_size(nbytes: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
@@ -39,6 +61,19 @@ def format_file_message(text: str, paths: list[Path], console: Console) -> str:
             parts.append(f"Analyze these files: {names}")
 
     for p in paths:
+        if _is_sensitive_path(p):
+            console.print(
+                f"  [anton.warning]⚠ Skipped {p.name} — this looks like a "
+                f"sensitive file (credentials, keys). Use the scratchpad "
+                f"to read it locally if needed.[/]"
+            )
+            parts.append(
+                f'\n<file path="{p}">\n'
+                f"(Sensitive file — not sent to the LLM. "
+                f"If you need to process it, use the scratchpad.)\n</file>"
+            )
+            continue
+
         suffix = p.suffix.lower()
         size = p.stat().st_size
 
