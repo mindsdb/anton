@@ -1,4 +1,7 @@
-from anton.core.session import ChatSession
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from anton.chat_session import ChatSession
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
