@@ -74,8 +74,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         else:
             self._venvs_base = Path("~/.anton/scratchpad-venvs").expanduser()
 
-    # ── venv management ────────────────────────────────────────────────────
-
     def _ensure_venv(self) -> None:
         if self._venv_dir is not None and self._verify_venv_python():
             return
@@ -138,9 +136,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             _sp.run(
                 [
-                    uv, "venv", self._venv_dir,
-                    "--python", sys.executable,
-                    "--system-site-packages", "--seed", "--quiet",
+                    uv,
+                    "venv",
+                    self._venv_dir,
+                    "--python",
+                    sys.executable,
+                    "--system-site-packages",
+                    "--seed",
+                    "--quiet",
                 ],
                 check=True,
                 capture_output=True,
@@ -169,6 +172,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return False
         try:
             import subprocess
+
             result = subprocess.run(
                 [self._venv_python, "-c", "print('ok')"],
                 capture_output=True,
@@ -191,12 +195,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if self._venv_python is None or not os.path.isfile(self._venv_python):
             return
         import subprocess as _sp
+
         rule_name = f"Anton Scratchpad - {self.name}"
         try:
             _sp.run(
                 [
-                    "netsh", "advfirewall", "firewall", "add", "rule",
-                    f"name={rule_name}", "dir=out", "action=allow",
+                    "netsh",
+                    "advfirewall",
+                    "firewall",
+                    "add",
+                    "rule",
+                    f"name={rule_name}",
+                    "dir=out",
+                    "action=allow",
                     f"program={self._venv_python}",
                 ],
                 capture_output=True,
@@ -209,6 +220,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     def _setup_parent_site_packages(self) -> None:
         if sys.prefix != sys.base_prefix:
             import site as _site
+
             parent_site = _site.getsitepackages()
             child_site = None
             for dirpath, dirnames, _ in os.walk(self._venv_dir):
@@ -287,8 +299,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         except FileNotFoundError:
             return False
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────
-
     async def start(self) -> None:
         """Write the boot script to a temp file and launch the subprocess."""
         self._ensure_venv()
@@ -347,8 +357,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         _anton_root = str(Path(__file__).resolve().parent.parent.parent.parent)
         python_path = env.get("PYTHONPATH", "")
         if _anton_root not in python_path:
-            env["PYTHONPATH"] = (
-                _anton_root + (os.pathsep + python_path if python_path else "")
+            env["PYTHONPATH"] = _anton_root + (
+                os.pathsep + python_path if python_path else ""
             )
 
         try:
@@ -409,8 +419,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Kill process and delete the venv entirely."""
         await self._stop_process()
         self._nuke_venv()
-
-    # ── Execution ──────────────────────────────────────────────────────────
 
     async def execute_streaming(
         self,
@@ -558,7 +566,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 ) from None
 
             if not raw:
-                yield {"stdout": "", "stderr": "", "error": "Process exited unexpectedly."}
+                yield {
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "Process exited unexpectedly.",
+                }
                 return
 
             line = raw.decode().rstrip("\r\n")
@@ -567,7 +579,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 current_inactivity = max(
                     current_inactivity, float(s.cell_inactivity_after_progress)
                 )
-                message = line[len(PROGRESS_MARKER):].strip()
+                message = line[len(PROGRESS_MARKER) :].strip()
                 yield message
                 continue
 
@@ -631,8 +643,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             self._installed_packages.add(p.lower())
         return output
 
-    # ── Internal helpers ───────────────────────────────────────────────────
-
     async def _stop_process(self) -> None:
         if self._proc is not None and self._proc.returncode is None:
             try:
@@ -662,6 +672,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         pid = self._proc.pid
         if sys.platform != "win32":
             import signal
+
             try:
                 os.killpg(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
