@@ -1,9 +1,3 @@
-<div align="center">
-<a href="https://www.producthunt.com/products/mindsdb?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-mindsdb-anton-2" target="_blank" rel="noopener noreferrer"><img alt="MindsDB Anton - Business intelligence that doesn't just answer — it acts. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1115197&amp;theme=light&amp;t=1775607473112"></a>
-</div>
-
-<br>
-
 ```
         ▐
    ▄█▀██▀█▄   ♡♡♡♡
