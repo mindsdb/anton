@@ -515,6 +515,40 @@ async def handle_add_custom_datasource(
     return engine_def, credentials
 
 
+async def _reconnect_to_saved(
+    console: Console,
+    session: "ChatSession",
+    vault: "DataVault",
+    registry: "DatasourceRegistry",
+    slug: str,
+    conn: dict,
+) -> "ChatSession":
+    """Inject env for a saved connection and mark it as the active datasource."""
+    restore_namespaced_env(vault)
+    session._active_datasource = slug
+    recon_engine_def = registry.get(conn["engine"])
+    if recon_engine_def:
+        register_secret_vars(recon_engine_def, engine=conn["engine"], name=conn["name"])
+        engine_label = recon_engine_def.display_name
+    else:
+        engine_label = conn["engine"]
+    console.print()
+    console.print(
+        f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
+    )
+    console.print()
+    session._history.append(
+        {
+            "role": "assistant",
+            "content": (
+                f'I\'ve reconnected to the {engine_label} connection "{slug}" '
+                f"in the Local Vault. I can now query this data source when needed."
+            ),
+        }
+    )
+    return session
+
+
 async def handle_connect_datasource(
     console: Console,
     scratchpads: ScratchpadManager,
@@ -654,17 +688,19 @@ async def handle_connect_datasource(
     display_engines = popular_engines + other_engines + custom_engines
 
     saved_connections = vault.list_connections()
-    # Build deduplicated list of saved connection display entries
-    saved_entries: list[tuple[str, str]] = []  # (slug, display_name)
+    # Build deduplicated list of engine types from saved connections (one per engine)
+    seen_engines: set[str] = set()
+    recent_engine_entries: list[tuple[str, str]] = []  # (engine_slug, display_name)
     for c in saved_connections:
-        slug = f"{c['engine']}-{c['name']}"
-        engine = registry.get(c["engine"])
-        label = engine.display_name if engine else c["engine"]
-        saved_entries.append((slug, label))
+        if c["engine"] not in seen_engines:
+            seen_engines.add(c["engine"])
+            engine_obj = registry.get(c["engine"])
+            label = engine_obj.display_name if engine_obj else c["engine"]
+            recent_engine_entries.append((c["engine"], label))
 
     def print_sections() -> None:
         console.print(
-            "[anton.cyan](anton)[/] Choose a data source:\n"
+            "[anton.cyan](anton)[/] Select a data source to create a new connection:\n"
         )
         console.print("       [bold]  Primary")
         console.print(
@@ -676,10 +712,10 @@ async def handle_connect_datasource(
             for i, e in enumerate(popular_engines, 1):
                 console.print(f"          [bold]{i:>2}.[/bold] {e.display_name}")
             console.print()
-        if saved_entries:
+        if recent_engine_entries:
             start = len(popular_engines) + 1
-            console.print("       [bold]  Recent connections")
-            for i, (slug, label) in enumerate(saved_entries, start):
+            console.print("       [bold]  Recently used data sources")
+            for i, (_, label) in enumerate(recent_engine_entries, start):
                 console.print(f"          [bold]{i:>2}.[/bold] {label}")
             console.print()
 
@@ -697,28 +733,72 @@ async def handle_connect_datasource(
             console.print(f"          [bold]{i:>2}.[/bold] {e.display_name}{star}")
         console.print()
 
-    if prefill:
-        answer = prefill
-    else:
+    async def get_create_new_answer() -> str | None:
         print_sections()
         console.print(
             "       [anton.muted]Don't see yours? Type a datasource name (e.g., GitHub, Gmail, Jira, ...)\n"
             "       It can be virtually any datasource — we'll figure out the details together.[/]"
         )
         console.print()
-        answer = await prompt_or_cancel(
+        ans = await prompt_or_cancel(
             "(anton) Enter a number or type a datasource name",
         )
-        if answer is None:
-            return session
-        if answer.strip().lower() == "all":
+        if ans is None:
+            return None
+        if ans.strip().lower() == "all":
             console.print()
             print_all()
-            answer = await prompt_or_cancel(
+            ans = await prompt_or_cancel(
                 "(anton) Enter a number or type a name",
             )
-            if answer is None:
+        return ans
+
+    if prefill:
+        answer = prefill
+    elif saved_connections:
+        console.print()
+        console.print("[anton.cyan](anton)[/] What would you like to do?\n")
+        console.print("          [bold]  1.[/bold] Use an existing connection")
+        console.print("          [bold]  2.[/bold] Create a new connection")
+        console.print()
+        top_choice = await prompt_or_cancel(
+            "(anton) Enter a number", choices=["1", "2"]
+        )
+        if top_choice is None:
+            return session
+
+        if top_choice == "1":
+            console.print()
+            console.print("[anton.cyan](anton)[/] Your saved connections:\n")
+            for i, c in enumerate(saved_connections, 1):
+                conn_slug = f"{c['engine']}-{c['name']}"
+                engine_obj = registry.get(c["engine"])
+                engine_label = engine_obj.display_name if engine_obj else c["engine"]
+                console.print(
+                    f"          [bold]{i:>2}.[/bold] {conn_slug}"
+                    f" [dim]— {engine_label}[/]"
+                )
+            console.print()
+            pick = await prompt_or_cancel(
+                "(anton) Enter a number",
+                choices=[str(i) for i in range(1, len(saved_connections) + 1)],
+            )
+            if pick is None:
                 return session
+            picked_conn = saved_connections[int(pick) - 1]
+            picked_slug = f"{picked_conn['engine']}-{picked_conn['name']}"
+            return await _reconnect_to_saved(
+                console, session, vault, registry, picked_slug, picked_conn
+            )
+
+        # top_choice == "2": create new connection
+        answer = await get_create_new_answer()
+        if answer is None:
+            return session
+    else:
+        answer = await get_create_new_answer()
+        if answer is None:
+            return session
 
     stripped_answer = answer.strip()
     known_slugs = {
@@ -726,36 +806,16 @@ async def handle_connect_datasource(
     }
     if stripped_answer in known_slugs:
         conn = known_slugs[stripped_answer]
-        restore_namespaced_env(vault)
-        session._active_datasource = stripped_answer
-        recon_engine_def = registry.get(conn["engine"])
-        if recon_engine_def:
-            register_secret_vars(recon_engine_def, engine=conn["engine"], name=conn["name"])
-            engine_label = recon_engine_def.display_name
-        else:
-            engine_label = conn["engine"]
-        console.print()
-        console.print(
-            f'[anton.success]        ✓ Reconnected to [bold]"{stripped_answer}"[/bold].[/]'
+        return await _reconnect_to_saved(
+            console, session, vault, registry, stripped_answer, conn
         )
-        console.print()
-        session._history.append(
-            {
-                "role": "assistant",
-                "content": (
-                    f'I\'ve reconnected to the {engine_label} connection "{stripped_answer}" '
-                    f"in the Local Vault. I can now query this data source when needed."
-                ),
-            }
-        )
-        return session
 
     engine_def: DatasourceEngine | None = None
     custom_source = False
     llm_recognised = False
-    # Saved connections are numbered after popular engines
+    # Recently used data sources are numbered after popular engines
     saved_start = len(popular_engines) + 1
-    max_num = len(popular_engines) + len(saved_entries)
+    max_num = len(popular_engines) + len(recent_engine_entries)
 
     if stripped_answer.isdigit() or (stripped_answer.lstrip("-").isdigit()):
         pick_num = int(stripped_answer)
@@ -763,11 +823,10 @@ async def handle_connect_datasource(
             custom_source = True
         elif 1 <= pick_num <= len(popular_engines):
             engine_def = popular_engines[pick_num - 1]
-        elif saved_entries and saved_start <= pick_num <= max_num:
-            # User picked a recent connection type — start a new connection of that engine
-            picked_slug, picked_label = saved_entries[pick_num - saved_start]
-            picked_engine = picked_slug.split("-", 1)[0]
-            engine_def = registry.get(picked_engine)
+        elif recent_engine_entries and saved_start <= pick_num <= max_num:
+            # User picked a recently used data source — start a new connection of that engine
+            picked_engine_slug, _ = recent_engine_entries[pick_num - saved_start]
+            engine_def = registry.get(picked_engine_slug)
             if engine_def is None:
                 custom_source = True
         else:
