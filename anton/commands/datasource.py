@@ -1116,23 +1116,10 @@ async def handle_connect_datasource(
             console.print("[anton.muted]Cancelled.[/]")
             console.print()
             return session
-        restore_namespaced_env(vault)
-        register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
-        console.print()
-        console.print(
-            f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
+        conn = {"engine": engine_def.engine, "name": conn_name}
+        return await _reconnect_to_saved(
+            console, session, vault, registry, slug, conn
         )
-        console.print()
-        session._history.append(
-            {
-                "role": "assistant",
-                "content": (
-                    f'I\'ve reconnected to the {engine_def.display_name} connection "{slug}" '
-                    f"in the Local Vault. I can now query this data source when needed."
-                ),
-            }
-        )
-        return session
 
     vault.save(engine_def.engine, conn_name, credentials)
     restore_namespaced_env(vault)
