@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
@@ -14,11 +15,16 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
-    TokenLimitExceeded
+    TokenLimitExceeded,
 )
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
-from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, MEMORIZE_TOOL, RECALL_TOOL, ToolDef
+from anton.core.tools.tool_defs import (
+    SCRATCHPAD_TOOL,
+    MEMORIZE_TOOL,
+    RECALL_TOOL,
+    ToolDef,
+)
 from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
 
 from anton.utils.datasources import (
@@ -39,67 +45,75 @@ if TYPE_CHECKING:
     from anton.workspace import Workspace
 
 
+@dataclass
+class ChatSessionConfig:
+    """All construction parameters for a ChatSession.
+
+    Separates configuration assembly (the host app's job) from session
+    orchestration (the core's job). Hosts build this object and pass it
+    to ChatSession — the session never needs to know where values came from.
+    """
+
+    llm_client: LLMClient
+    settings: CoreSettings | None = None
+    self_awareness: SelfAwarenessContext | None = None
+    cortex: Cortex | None = None
+    episodic: EpisodicMemory | None = None
+    runtime_context: str = ""
+    workspace: Workspace | None = None
+    console: Console | None = None
+    coding_provider: str = "anthropic"
+    coding_api_key: str = ""
+    coding_base_url: str = ""
+    initial_history: list[dict] | None = None
+    history_store: HistoryStore | None = None
+    session_id: str | None = None
+    proactive_dashboards: bool = False
+    output_dir: str = ""
+    tools: list[ToolDef] = field(default_factory=list)
 
 
 class ChatSession:
     """Manages a multi-turn conversation with tool-call delegation."""
 
-    def __init__(
-        self,
-        llm_client: LLMClient,
-        *,
-        settings: CoreSettings | None = None,
-        self_awareness: SelfAwarenessContext | None = None,
-        cortex: Cortex | None = None,
-        episodic: EpisodicMemory | None = None,
-        runtime_context: str = "",
-        workspace: Workspace | None = None,
-        console: Console | None = None,
-        coding_provider: str = "anthropic",
-        coding_api_key: str = "",
-        coding_base_url: str = "",
-        initial_history: list[dict] | None = None,
-        history_store: HistoryStore | None = None,
-        session_id: str | None = None,
-        proactive_dashboards: bool = False,
-        output_dir: str = "",
-        tools: list[ToolDef] | None = None,
-    ) -> None:
-        s = settings or CoreSettings()
+    def __init__(self, config: ChatSessionConfig) -> None:
+        s = config.settings or CoreSettings()
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._token_status_cache_ttl = s.token_status_cache_ttl
-        self._llm = llm_client
-        self._self_awareness = self_awareness
-        self._cortex = cortex
-        self._episodic = episodic
-        self._runtime_context = runtime_context
-        self._proactive_dashboards = proactive_dashboards
-        self._extra_tools = tools or []
-        self._output_dir = output_dir
-        self._workspace = workspace
-        self._console = console
-        self._history: list[dict] = list(initial_history) if initial_history else []
+        self._llm = config.llm_client
+        self._self_awareness = config.self_awareness
+        self._cortex = config.cortex
+        self._episodic = config.episodic
+        self._runtime_context = config.runtime_context
+        self._proactive_dashboards = config.proactive_dashboards
+        self._extra_tools = config.tools
+        self._output_dir = config.output_dir
+        self._workspace = config.workspace
+        self._console = config.console
+        self._history: list[dict] = (
+            list(config.initial_history) if config.initial_history else []
+        )
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if m.get("role") == "user")
-            if initial_history
+            if config.initial_history
             else 0
         )
-        self._history_store = history_store
-        self._session_id = session_id
+        self._history_store = config.history_store
+        self._session_id = config.session_id
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
         self._scratchpads = ScratchpadManager(
-            coding_provider=coding_provider,
-            coding_model=getattr(llm_client, "coding_model", ""),
-            coding_api_key=coding_api_key,
-            coding_base_url=coding_base_url,
-            workspace_path=workspace.base if workspace else None,
+            coding_provider=config.coding_provider,
+            coding_model=getattr(config.llm_client, "coding_model", ""),
+            coding_api_key=config.coding_api_key,
+            coding_base_url=config.coding_base_url,
+            workspace_path=config.workspace.base if config.workspace else None,
         )
         self.tool_registry = ToolRegistry()
 
@@ -117,7 +131,13 @@ class ChatSession:
         """Track consecutive errors per tool and append nudge/circuit-breaker messages."""
         is_error = any(
             marker in result_text
-            for marker in ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
+            for marker in (
+                "[error]",
+                "Task failed:",
+                "failed",
+                "timed out",
+                "Rejected:",
+            )
         )
         if is_error:
             error_streak[tool_name] = error_streak.get(tool_name, 0) + 1
@@ -184,6 +204,7 @@ class ChatSession:
 
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
+
         _now = _dt.datetime.now()
         _current_datetime = _now.strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -297,7 +318,9 @@ class ChatSession:
         if self._cortex is not None:
             wisdom = self._cortex.get_scratchpad_context()
             if wisdom:
-                scratchpad_tool.description += f"\n\nLessons from past sessions:\n{wisdom}"
+                scratchpad_tool.description += (
+                    f"\n\nLessons from past sessions:\n{wisdom}"
+                )
 
         self.tool_registry.register_tool(scratchpad_tool)
 
@@ -694,7 +717,10 @@ class ChatSession:
 
         # Detect max_tokens truncation — the LLM was cut off mid-response.
         # Inject a continuation prompt so it can finish what it was doing.
-        if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+        if (
+            llm_response.stop_reason in ("max_tokens", "length")
+            and not llm_response.tool_calls
+        ):
             self._history.append(
                 {"role": "assistant", "content": llm_response.content or ""}
             )
@@ -877,7 +903,8 @@ class ChatSession:
                                         description=description,
                                     )
                         elif tc.name == "connect_new_datasource" or (
-                            tc.name == "publish_or_preview" and tc.input.get("action") == "publish"
+                            tc.name == "publish_or_preview"
+                            and tc.input.get("action") == "publish"
                         ):
                             # Interactive tool — pause spinner AND escape watcher
                             yield StreamTaskProgress(
@@ -971,7 +998,10 @@ class ChatSession:
                 llm_response = response.response
 
                 # Detect max_tokens truncation inside tool loop
-                if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+                if (
+                    llm_response.stop_reason in ("max_tokens", "length")
+                    and not llm_response.tool_calls
+                ):
                     self._history.append(
                         {"role": "assistant", "content": llm_response.content or ""}
                     )
