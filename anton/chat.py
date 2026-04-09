@@ -979,11 +979,6 @@ async def _chat_loop(
     # Build runtime context so the LLM knows what it's running on
     runtime_context = build_runtime_context(settings)
 
-    coding_api_key = (
-        settings.anthropic_api_key
-        if settings.coding_provider == "anthropic"
-        else settings.openai_api_key
-    ) or ""
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
         self_awareness=self_awareness,
