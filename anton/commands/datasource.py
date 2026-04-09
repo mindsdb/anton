@@ -22,7 +22,7 @@ from anton.utils.datasources import (
     parse_connection_slug,
 )
 from anton.utils.prompt import prompt_or_cancel
-from anton.scratchpad import ScratchpadManager
+from anton.core.backends.manager import ScratchpadManager
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession

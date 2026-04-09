@@ -25,7 +25,7 @@ from anton.core.llm.openai import build_chat_completion_kwargs
 
 from anton.chat import ChatSession
 from anton.core.llm.client import LLMClient
-from anton.scratchpad import ScratchpadManager
+from anton.core.backends.manager import ScratchpadManager
 
 from anton.commands.datasource import (
     handle_remove_data_source,

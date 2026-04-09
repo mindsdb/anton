@@ -685,7 +685,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         f'OUTPUT_PATH = {output_html!r}',
     )
 
-    from anton.scratchpad import Cell
+    from anton.core.backends.base import Cell
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
