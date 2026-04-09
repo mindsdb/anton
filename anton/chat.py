@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from anton.config.settings import AntonSettings
-    from anton.memory.episodes import EpisodicMemory
+    from anton.core.memory.episodes import EpisodicMemory
     from anton.workspace import Workspace
 
 
@@ -960,7 +960,7 @@ async def _chat_loop(
     if cortex.needs_compaction():
         asyncio.create_task(cortex.compact_all())
 
-    from anton.memory.episodes import EpisodicMemory
+    from anton.core.memory.episodes import EpisodicMemory
 
     episodes_dir = settings.workspace_path / ".anton" / "episodes"
     episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
