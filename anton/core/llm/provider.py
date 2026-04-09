@@ -134,7 +134,23 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+@dataclass
+class ProviderConnectionInfo:
+    """Serializable provider connection details.
+
+    `api_key` is marked repr=False to reduce accidental leakage via logs/debugging.
+    """
+
+    provider: str
+    api_key: str | None = field(default=None, repr=False)
+    base_url: str | None = None
+    ssl_verify: bool | None = None
+
+
 class LLMProvider(ABC):
+    # Human-readable provider id (e.g. "anthropic", "openai-compatible").
+    name: str = ""
+
     @abstractmethod
     async def complete(
         self,
@@ -146,6 +162,14 @@ class LLMProvider(ABC):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
     ) -> LLMResponse: ...
+
+    def export_connection_info(self) -> ProviderConnectionInfo:
+        """Return provider connection details for other runtimes (e.g. scratchpad).
+
+        Providers should override this to expose the minimal needed configuration
+        without relying on SDK client internals.
+        """
+        return ProviderConnectionInfo(provider=self.name)
 
     async def stream(
         self,
