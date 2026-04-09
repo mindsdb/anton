@@ -4,9 +4,11 @@ import os
 import sys
 import traceback
 
-_CELL_DELIM = "__ANTON_CELL_END__"
-_RESULT_START = "__ANTON_RESULT__"
-_RESULT_END = "__ANTON_RESULT_END__"
+from anton.core.backends.wire import (
+    CELL_DELIM,
+    RESULT_START,
+    RESULT_END,
+)
 
 # Persistent namespace across cells
 namespace = {"__builtins__": __builtins__}
@@ -54,7 +56,7 @@ if _scratchpad_model:
                     await _llm_asyncio.sleep(_LLM_HEARTBEAT_INTERVAL)
                     elapsed += _LLM_HEARTBEAT_INTERVAL
                     _real_stdout.write(
-                        _PROGRESS_MARKER + f" Waiting for LLM… ({elapsed}s)\n"
+                        PROGRESS_MARKER + f" Waiting for LLM… ({elapsed}s)\n"
                     )
                     _real_stdout.flush()
 
@@ -300,12 +302,13 @@ if _minds_datasource and _minds_api_key and _minds_url:
 _real_stdout = sys.stdout
 _real_stdin = sys.stdin
 
-_PROGRESS_MARKER = "__ANTON_PROGRESS__"
+from anton.core.backends.wire import PROGRESS_MARKER
+
 _MAX_OUTPUT = 10_000
 
 def progress(message=""):
     """Signal that long-running work is still active. Resets the inactivity timer."""
-    _real_stdout.write(_PROGRESS_MARKER + " " + str(message) + "\n")
+    _real_stdout.write(PROGRESS_MARKER + " " + str(message) + "\n")
     _real_stdout.flush()
 
 namespace["progress"] = progress
@@ -537,7 +540,7 @@ while True:
                 eof = True
                 break
             stripped = line.rstrip("\r\n")
-            if stripped == _CELL_DELIM:
+            if stripped == CELL_DELIM:
                 break
             lines.append(line)
     except EOFError:
@@ -548,9 +551,9 @@ while True:
     code = "".join(lines)
     if not code.strip():
         result = {"stdout": "", "stderr": "", "logs": "", "error": None}
-        _real_stdout.write(_RESULT_START + "\n")
+        _real_stdout.write(RESULT_START + "\n")
         _real_stdout.write(json.dumps(result) + "\n")
-        _real_stdout.write(_RESULT_END + "\n")
+        _real_stdout.write(RESULT_END + "\n")
         _real_stdout.flush()
         continue
 
@@ -573,7 +576,7 @@ while True:
             sys.stdout = _real_stdout
             sys.stderr = sys.__stderr__
             _cell_log_handler.buf = None
-            _real_stdout.write(_PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n")
+            _real_stdout.write(PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n")
             _real_stdout.flush()
             import subprocess as _sp
             _uv_path = os.environ.get("ANTON_UV_PATH", "")
@@ -625,7 +628,7 @@ while True:
     }
     if _auto_installed:
         result["auto_installed"] = _auto_installed
-    _real_stdout.write(_RESULT_START + "\n")
+    _real_stdout.write(RESULT_START + "\n")
     _real_stdout.write(json.dumps(result) + "\n")
-    _real_stdout.write(_RESULT_END + "\n")
+    _real_stdout.write(RESULT_END + "\n")
     _real_stdout.flush()
