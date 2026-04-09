@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 import threading
@@ -53,22 +52,24 @@ def _check_and_update(result: dict, settings) -> None:
     if shutil.which("uv") is None:
         return
 
-    # Fetch remote __init__.py to get __version__
+    # Fetch latest release tag from GitHub API
+    import json
     import urllib.request
 
-    url = "https://raw.githubusercontent.com/mindsdb/anton/main/anton/__init__.py"
+    url = "https://api.github.com/repos/mindsdb/anton/releases/latest"
     try:
-        req = urllib.request.Request(url)
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=2) as resp:
-            content = resp.read().decode("utf-8")
+            data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return
 
-    # Parse remote version
-    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
-    if not match:
+    latest_tag = data.get("tag_name", "")
+    if not latest_tag:
         return
-    remote_version_str = match.group(1)
+
+    # Strip leading 'v' for version comparison (e.g. "v0.3.1" -> "0.3.1")
+    remote_version_str = latest_tag.lstrip("v")
 
     # Compare versions
     from packaging.version import InvalidVersion, Version
@@ -84,12 +85,12 @@ def _check_and_update(result: dict, settings) -> None:
     if remote_ver <= local_ver:
         return
 
-    # Newer version available — upgrade
+    # Newer version available — reinstall from the specific release tag
     messages.append(f"  Updating anton {local_ver} \u2192 {remote_ver}...")
 
     try:
         proc = subprocess.run(
-            ["uv", "tool", "upgrade", "anton"],
+            ["uv", "tool", "install", f"git+https://github.com/mindsdb/anton.git@{latest_tag}", "--force"],
             capture_output=True,
             timeout=_TOTAL_TIMEOUT,
         )
