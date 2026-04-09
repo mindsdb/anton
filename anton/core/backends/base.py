@@ -11,16 +11,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_CELL_TIMEOUT_DEFAULT = 120        # Default total timeout when no estimate given
-_CELL_INACTIVITY_TIMEOUT = 30      # Max silence between output lines before killing
-_CELL_INACTIVITY_AFTER_PROGRESS = 60  # Grace window after a progress() call
-_KEEP_RECENT = 5                   # Number of recent cells to keep during compaction
-_INSTALL_TIMEOUT = 120
-
-_CELL_DELIM = "__ANTON_CELL_END__"
-_RESULT_START = "__ANTON_RESULT__"
-_RESULT_END = "__ANTON_RESULT_END__"
-_PROGRESS_MARKER = "__ANTON_PROGRESS__"
 
 
 @dataclass
@@ -33,20 +23,6 @@ class Cell:
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
-
-
-def _compute_timeouts(estimated_seconds: int) -> tuple[float, float]:
-    """Compute (total_timeout, inactivity_timeout) from an estimated run time.
-
-    - estimate == 0: use defaults (120s total, 30s inactivity).
-    - Otherwise: total = max(estimate * 2, estimate + 30), no hard cap.
-      inactivity = max(estimate * 0.5, 30), scales with estimate.
-    """
-    if estimated_seconds <= 0:
-        return float(_CELL_TIMEOUT_DEFAULT), float(_CELL_INACTIVITY_TIMEOUT)
-    total = max(estimated_seconds * 2, estimated_seconds + 30)
-    inactivity = max(estimated_seconds * 0.5, 30)
-    return float(total), float(inactivity)
 
 
 class ScratchpadRuntime(ABC):
@@ -223,14 +199,16 @@ class ScratchpadRuntime(ABC):
     def _compact_cells(self) -> bool:
         """Collapse old cells into a summary cell to reduce context size.
 
-        Keeps the most recent _KEEP_RECENT cells intact. Returns True if
-        compaction actually happened.
+        Keeps the most recent settings.cell_keep_recent cells intact. Returns
+        True if compaction actually happened.
         """
-        if len(self.cells) <= _KEEP_RECENT + 1:
+        from anton.core.settings import CoreSettings
+        keep = CoreSettings().cell_keep_recent
+        if len(self.cells) <= keep + 1:
             return False
 
-        to_compact = self.cells[:-_KEEP_RECENT]
-        recent = self.cells[-_KEEP_RECENT:]
+        to_compact = self.cells[:-keep]
+        recent = self.cells[-keep:]
 
         summary_lines: list[str] = []
         for i, cell in enumerate(to_compact, 1):
@@ -251,7 +229,7 @@ class ScratchpadRuntime(ABC):
             stdout=summary_text,
             stderr="",
             error=None,
-            description=f"Summary of cells 1\u2013{len(to_compact)}",
+            description=f"Summary of cells 1–{len(to_compact)}",
         )
         self.cells = [summary_cell] + recent
         return True

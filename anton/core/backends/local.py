@@ -11,22 +11,30 @@ import tempfile
 import venv
 from pathlib import Path
 
-from anton.core.backends.base import (
-    Cell,
-    ScratchpadRuntime,
-    _CELL_DELIM,
-    _CELL_INACTIVITY_AFTER_PROGRESS,
-    _CELL_TIMEOUT_DEFAULT,
-    _CELL_INACTIVITY_TIMEOUT,
-    _INSTALL_TIMEOUT,
-    _PROGRESS_MARKER,
-    _RESULT_END,
-    _RESULT_START,
-    _compute_timeouts,
+from anton.core.backends.base import Cell, ScratchpadRuntime
+from anton.core.backends.wire import (
+    CELL_DELIM,
+    PROGRESS_MARKER,
+    RESULT_END,
+    RESULT_START,
 )
+from anton.core.settings import CoreSettings
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 _MAX_OUTPUT = 10_000
+
+
+def _compute_timeouts(estimated_seconds: int) -> tuple[float, float]:
+    """Compute (total_timeout, inactivity_timeout) from an estimated run time.
+
+    Reads defaults from CoreSettings so they're tunable via env vars.
+    """
+    s = CoreSettings()
+    if estimated_seconds <= 0:
+        return float(s.cell_timeout_default), float(s.cell_inactivity_timeout)
+    total = max(estimated_seconds * 2, estimated_seconds + 30)
+    inactivity = max(estimated_seconds * 0.5, 30)
+    return float(total), float(inactivity)
 
 
 class LocalScratchpadRuntime(ScratchpadRuntime):
@@ -424,7 +432,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             )
             return
 
-        payload = code + "\n" + _CELL_DELIM + "\n"
+        payload = code + "\n" + CELL_DELIM + "\n"
         self._proc.stdin.write(payload.encode())  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
@@ -507,11 +515,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     async def _read_result(
         self,
         *,
-        total_timeout: float = _CELL_TIMEOUT_DEFAULT,
-        inactivity_timeout: float = _CELL_INACTIVITY_TIMEOUT,
+        total_timeout: float | None = None,
+        inactivity_timeout: float | None = None,
     ):
         """Read stdout until result delimiters; yield progress strings then dict."""
         import time as _time
+
+        s = CoreSettings()
+        if total_timeout is None:
+            total_timeout = float(s.cell_timeout_default)
+        if inactivity_timeout is None:
+            inactivity_timeout = float(s.cell_inactivity_timeout)
 
         lines: list[str] = []
         in_result = False
@@ -549,18 +563,18 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             line = raw.decode().rstrip("\r\n")
 
-            if line.startswith(_PROGRESS_MARKER):
+            if line.startswith(PROGRESS_MARKER):
                 current_inactivity = max(
-                    current_inactivity, _CELL_INACTIVITY_AFTER_PROGRESS
+                    current_inactivity, float(s.cell_inactivity_after_progress)
                 )
-                message = line[len(_PROGRESS_MARKER):].strip()
+                message = line[len(PROGRESS_MARKER):].strip()
                 yield message
                 continue
 
-            if line == _RESULT_START:
+            if line == RESULT_START:
                 in_result = True
                 continue
-            if line == _RESULT_END:
+            if line == RESULT_END:
                 break
             if in_result:
                 lines.append(line)
@@ -596,6 +610,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         else:
             cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *needed]
 
+        _install_timeout = CoreSettings().cell_install_timeout
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -603,12 +618,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         )
         try:
             stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=_INSTALL_TIMEOUT
+                proc.communicate(), timeout=_install_timeout
             )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return f"Install timed out after {_INSTALL_TIMEOUT}s."
+            return f"Install timed out after {_install_timeout}s."
         output = stdout.decode()
         if proc.returncode != 0:
             return f"Install failed (exit {proc.returncode}):\n{output}"
