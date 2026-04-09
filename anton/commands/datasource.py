@@ -528,6 +528,8 @@ async def _reconnect_to_saved(
     registry: "DatasourceRegistry",
     slug: str,
     conn: dict,
+    *,
+    from_tool_call: bool = False,
 ) -> "ChatSession":
     """Inject env for a saved connection and mark it as the active datasource."""
     restore_namespaced_env(vault)
@@ -543,30 +545,34 @@ async def _reconnect_to_saved(
         f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
     )
     console.print()
-    session._history.append(
-        {
-            "role": "assistant",
-            "content": (
-                f'I\'ve reconnected to the {engine_label} connection "{slug}" '
-                f"in the Local Vault. I can now query this data source when needed."
-            ),
-        }
-    )
+    if not from_tool_call:
+        # When invoked via the LLM tool call, we must not append to
+        # session._history here — it would land between a tool_use and
+        # its tool_result. The tool wrapper returns a fresh message.
+        session._history.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f'I\'ve reconnected to the {engine_label} connection "{slug}" '
+                    f"in the Local Vault. I can now query this data source when needed."
+                ),
+            }
+        )
     return session
 
 
-def _record_redirect(
-    session: "ChatSession",
+def _build_redirect_message(
     collector: ConnectionCollector,
     user_message: str,
     target_engine: str | None = None,
-) -> None:
-    """Record a mid-flow redirect so the main agent can pick up where we left off.
+) -> str:
+    """Build a structured REDIRECT message for the main agent.
 
-    Appends a structured assistant message to history with the variables
-    collected so far and the user's last message, so the LLM can decide
-    whether to re-call connect_new_datasource with the new engine and
-    pre-fill the already-known variables.
+    Returns a string describing what was collected so far, what's still
+    missing, and what the user said. The caller decides where to put it
+    (session history for slash-command path, or tool-result return for
+    the LLM tool-call path — never both, to keep tool_use/tool_result
+    ordering intact).
     """
     collector.redirect_message = user_message.strip()
     payload = collector.to_redirect_result()
@@ -586,9 +592,7 @@ def _record_redirect(
         "again with the correct engine and pass known_variables to "
         "pre-fill what's already collected."
     )
-    session._history.append(
-        {"role": "assistant", "content": " ".join(parts)}
-    )
+    return " ".join(parts)
 
 
 async def handle_connect_datasource(
@@ -598,6 +602,7 @@ async def handle_connect_datasource(
     datasource_name: str | None = None,
     prefill: str | None = None,
     known_variables: dict[str, str] | None = None,
+    from_tool_call: bool = False,
 ) -> "ChatSession":
     """
     Connect a data source by entering credentials, either for a new name or re-entering for an existing one.
@@ -605,6 +610,13 @@ async def handle_connect_datasource(
     `known_variables` may pre-fill credential fields (e.g. when called as a
     tool by the LLM, which may have already extracted host/port/etc. from
     the conversation).
+
+    `from_tool_call=True` when invoked via the LLM `connect_new_datasource`
+    tool. In that case we must NOT append assistant messages to
+    `session._history` — we are sitting between a `tool_use` block and its
+    `tool_result` block, and appending messages there violates the
+    Anthropic API invariant. The tool wrapper builds its own return
+    message from the vault diff instead.
     """
 
     vault = DataVault()
@@ -716,15 +728,16 @@ async def handle_connect_datasource(
             "[anton.muted]        You can now ask me questions about your data.[/]"
         )
         console.print()
-        session._history.append(
-            {
-                "role": "assistant",
-                "content": (
-                    f"I've updated the credentials for the {engine_def.display_name} connection "
-                    f'"{datasource_name}" in the Local Vault.'
-                ),
-            }
-        )
+        if not from_tool_call:
+            session._history.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"I've updated the credentials for the {engine_def.display_name} connection "
+                        f'"{datasource_name}" in the Local Vault.'
+                    ),
+                }
+            )
         return session
 
     console.print()
@@ -835,7 +848,8 @@ async def handle_connect_datasource(
             picked_conn = saved_connections[int(pick) - 1]
             picked_slug = f"{picked_conn['engine']}-{picked_conn['name']}"
             return await _reconnect_to_saved(
-                console, session, vault, registry, picked_slug, picked_conn
+                console, session, vault, registry, picked_slug, picked_conn,
+                from_tool_call=from_tool_call,
             )
 
         # top_choice == "2": create new connection
@@ -854,7 +868,8 @@ async def handle_connect_datasource(
     if stripped_answer in known_slugs:
         conn = known_slugs[stripped_answer]
         return await _reconnect_to_saved(
-            console, session, vault, registry, stripped_answer, conn
+            console, session, vault, registry, stripped_answer, conn,
+            from_tool_call=from_tool_call,
         )
 
     engine_def: DatasourceEngine | None = None
@@ -993,15 +1008,16 @@ async def handle_connect_datasource(
             "[anton.muted]        You can now ask me questions about your data.[/]"
         )
         console.print()
-        session._history.append(
-            {
-                "role": "assistant",
-                "content": (
-                    f'I\'ve saved a {engine_def.display_name} connection named "{slug}" '
-                    f"to the Local Vault. I can now query this data source when needed."
-                ),
-            }
-        )
+        if not from_tool_call:
+            session._history.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f'I\'ve saved a {engine_def.display_name} connection named "{slug}" '
+                        f"to the Local Vault. I can now query this data source when needed."
+                    ),
+                }
+            )
         return session
 
     assert engine_def is not None  # custom_source path always returns before this line
@@ -1057,17 +1073,6 @@ async def handle_connect_datasource(
 
     console.print()
 
-    help_answer = await prompt_or_cancel(
-        "(anton) Do you need instructions on how to obtain these credentials?",
-        choices=["y", "n"], default="n",
-    )
-    if help_answer is None:
-        return session
-    if help_answer.strip().lower() == "y":
-        await show_credential_help(
-            console, session, engine_def.display_name, None, active_fields,
-        )
-
     # ── Smart credential collection ────────────────────────────────────
     # Track filled vs. missing fields as a puzzle. Each user response is
     # parsed via the LLM to extract any variables mentioned, so users can
@@ -1088,6 +1093,48 @@ async def handle_connect_datasource(
 
     known_engine_slugs = [e.engine for e in registry.all_engines()]
     partial = False
+
+    # Offer instructions — but if the user answers by pasting credentials
+    # instead of "y"/"n", extract them straight into the collector rather
+    # than forcing a re-prompt.
+    help_answer = await prompt_or_cancel(
+        "(anton) Do you need instructions on how to obtain these credentials?",
+        choices_display="y/n", default="n",
+    )
+    if help_answer is None:
+        return session
+    normalized = help_answer.strip().lower()
+    if normalized == "y":
+        await show_credential_help(
+            console, session, engine_def.display_name, None, active_fields,
+        )
+    elif normalized and normalized != "n":
+        # Non-y/n answer — maybe the user pasted credentials here.
+        extracted = await extract_variables(
+            help_answer,
+            expected_fields=collector.active_fields,
+            current_engine=engine_def.engine,
+            current_engine_display=engine_def.display_name,
+            known_engine_slugs=known_engine_slugs,
+            session=session,
+        )
+        if extracted.is_redirect:
+            redirect_text = _build_redirect_message(
+                collector, help_answer, extracted.redirect_engine
+            )
+            session._pending_connect_redirect = redirect_text
+            if not from_tool_call:
+                session._history.append(
+                    {"role": "assistant", "content": redirect_text}
+                )
+            return session
+        if extracted.variables:
+            filled = collector.fill_many(extracted.variables)
+            if filled:
+                console.print(
+                    f"[anton.muted]        Got: {', '.join(filled)}[/]"
+                )
+                console.print()
 
     while not collector.is_complete:
         collector.format_status(console)
@@ -1146,9 +1193,16 @@ async def handle_connect_datasource(
         )
 
         if extracted.is_redirect:
-            _record_redirect(
-                session, collector, value, extracted.redirect_engine
+            redirect_text = _build_redirect_message(
+                collector, value, extracted.redirect_engine
             )
+            # Stash for the tool wrapper; also mirror to history only if
+            # we're NOT inside a tool_use/tool_result pair.
+            session._pending_connect_redirect = redirect_text
+            if not from_tool_call:
+                session._history.append(
+                    {"role": "assistant", "content": redirect_text}
+                )
             return session
 
         if extracted.variables:
@@ -1218,15 +1272,16 @@ async def handle_connect_datasource(
             f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
         )
         console.print()
-        session._history.append(
-            {
-                "role": "assistant",
-                "content": (
-                    f'I\'ve reconnected to the {engine_def.display_name} connection "{slug}" '
-                    f"in the Local Vault. I can now query this data source when needed."
-                ),
-            }
-        )
+        if not from_tool_call:
+            session._history.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f'I\'ve reconnected to the {engine_def.display_name} connection "{slug}" '
+                        f"in the Local Vault. I can now query this data source when needed."
+                    ),
+                }
+            )
         return session
 
     vault.save(engine_def.engine, conn_name, credentials)
@@ -1241,16 +1296,20 @@ async def handle_connect_datasource(
     )
     console.print()
 
-    # Inject a brief assistant message so the LLM is aware of the new connection
-    session._history.append(
-        {
-            "role": "assistant",
-            "content": (
-                f'I\'ve saved a {engine_def.display_name} connection named "{slug}" '
-                f"to the Local Vault. I can now query this data source when needed."
-            ),
-        }
-    )
+    # Inject a brief assistant message so the LLM is aware of the new
+    # connection — but only when NOT in a tool call (in that case the
+    # tool wrapper constructs its own return message; appending here
+    # would break tool_use/tool_result pairing).
+    if not from_tool_call:
+        session._history.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f'I\'ve saved a {engine_def.display_name} connection named "{slug}" '
+                    f"to the Local Vault. I can now query this data source when needed."
+                ),
+            }
+        )
     return session
 
 

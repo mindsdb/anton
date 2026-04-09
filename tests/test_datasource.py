@@ -659,6 +659,135 @@ class TestHandleConnectDatasource:
         assert "postgresql" in last["content"].lower()
 
     @pytest.mark.asyncio
+    async def test_credentials_pasted_at_help_prompt(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """Pasting credentials at the 'Do you need instructions?' prompt
+        should extract them instead of forcing a re-prompt or re-asking
+        for every field.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        # Mock the LLM to return a structured extraction for the paste
+        extract_response = MagicMock()
+        extract_response.content = (
+            '{"variables": {"host": "db.example.com", "port": "5432", '
+            '"database": "prod_db", "user": "alice", "password": "s3cr3t"}, '
+            '"is_redirect": false, "redirect_engine": "", "redirect_reason": ""}'
+        )
+        session._llm.plan = AsyncMock(return_value=extract_response)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        pasted = (
+            "host: db.example.com\n"
+            "port: 5432\n"
+            "database: prod_db\n"
+            "user: alice\n"
+            "password: s3cr3t"
+        )
+        # Only two user inputs needed: the engine pick, then the paste
+        # at the help prompt. The collector becomes complete immediately
+        # after extraction, so no further prompts are issued.
+        responses = iter(["PostgreSQL", pasted])
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+        assert saved["port"] == "5432"
+        assert saved["database"] == "prod_db"
+        assert saved["user"] == "alice"
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_from_tool_call_does_not_append_to_history(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """With from_tool_call=True the handler must NOT mutate session._history.
+
+        If it did, the appended assistant message would land between the
+        surrounding tool_use and tool_result blocks, violating the
+        Anthropic API invariant and producing a 400 error on the next
+        LLM call ("tool_use ids were found without tool_result blocks").
+        """
+        session = make_session()
+        # Simulate being mid-tool-call: history already contains an
+        # assistant message with a tool_use that needs a tool_result next.
+        session._history = [
+            {"role": "user", "content": "connect to postgres"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me connect you."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_test_123",
+                        "name": "connect_new_datasource",
+                        "input": {"engine": "postgres"},
+                    },
+                ],
+            },
+        ]
+        history_len_before = len(session._history)
+
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "n",
+                "db.example.com",
+                "5432",
+                "prod_db",
+                "alice",
+                "s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                from_tool_call=True,
+            )
+
+        # Connection saved successfully...
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        # ...but history MUST be untouched (the tool wrapper appends
+        # the tool_result separately after this returns).
+        assert len(session._history) == history_len_before
+        assert session._history[-1]["role"] == "assistant"
+        assert isinstance(session._history[-1]["content"], list)
+        assert session._history[-1]["content"][-1]["type"] == "tool_use"
+
+    @pytest.mark.asyncio
     async def test_failed_test_offers_retry(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):

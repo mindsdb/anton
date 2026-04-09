@@ -37,12 +37,16 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     vault = DataVault()
     before = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
 
+    # Clear any stale redirect marker before running
+    setattr(session, "_pending_connect_redirect", None)
+
     await handle_connect_datasource(
         console,
         session._scratchpads,
         session,
         prefill=engine,
         known_variables=known_variables or None,
+        from_tool_call=True,
     )
 
     # Check if a new connection was actually added
@@ -56,17 +60,16 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
             f"Continue helping the user with their original request using this data source."
         )
 
-    # Did the flow record a mid-flow redirect? If so, the last history
-    # entry starts with "REDIRECT" — pass it through instead of treating
-    # it as a cancellation.
-    if session._history and isinstance(session._history[-1], dict):
-        last = session._history[-1]
-        if (
-            last.get("role") == "assistant"
-            and isinstance(last.get("content"), str)
-            and last["content"].startswith("REDIRECT")
-        ):
-            return last["content"]
+    # Did the flow record a mid-flow redirect? Read it from the session
+    # attribute stashed by _build_redirect_message. We CANNOT append to
+    # session._history from within the handler — we're between the
+    # tool_use and tool_result blocks and doing so breaks the Anthropic
+    # API invariant that every tool_use must be immediately followed by
+    # its tool_result.
+    redirect_text = getattr(session, "_pending_connect_redirect", None)
+    if redirect_text:
+        setattr(session, "_pending_connect_redirect", None)
+        return redirect_text
 
     # User cancelled or connection failed — show briefly with spinner
     # so user knows the agent is picking back up
