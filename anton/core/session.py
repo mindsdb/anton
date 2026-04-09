@@ -64,9 +64,6 @@ class ChatSessionConfig:
     runtime_context: str = ""
     workspace: Workspace | None = None
     console: Console | None = None
-    coding_provider: str = "anthropic"
-    coding_api_key: str = ""
-    coding_base_url: str = ""
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
@@ -110,13 +107,17 @@ class ChatSession:
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
+
+        coding_provider = config.llm_client.coding_provider
+        coding_conn = coding_provider.export_connection_info()
         self._scratchpads = ScratchpadManager(
-            coding_provider=config.coding_provider,
-            coding_model=getattr(config.llm_client, "coding_model", ""),
-            coding_api_key=config.coding_api_key,
-            coding_base_url=config.coding_base_url,
+            coding_provider=coding_conn.provider,
+            coding_model=config.llm_client.coding_model,
+            coding_api_key=coding_conn.api_key or "",
+            coding_base_url=coding_conn.base_url or "",
             workspace_path=config.workspace.base if config.workspace else None,
         )
+
         self.tool_registry = ToolRegistry()
         self._explainability_store = (
             ExplainabilityStore(config.workspace.base) if config.workspace is not None else None
