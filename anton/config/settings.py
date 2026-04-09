@@ -40,6 +40,8 @@ class AntonSettings(BaseSettings):
 
     context_dir: str = ".anton/context"
 
+    output_dir: str = ".anton/output"
+
     memory_mode: str = "autopilot"  # autopilot | copilot | off
 
     episodic_memory: bool = True  # episodic memory archive — on by default
@@ -110,3 +112,5 @@ class AntonSettings(BaseSettings):
             self.memory_dir = str(base / self.memory_dir)
         if not Path(self.context_dir).is_absolute():
             self.context_dir = str(base / self.context_dir)
+        if not Path(self.output_dir).is_absolute():
+            self.output_dir = str(base / self.output_dir)
