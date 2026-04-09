@@ -25,7 +25,7 @@ from anton.core.backends.base import (
     _compute_timeouts,
 )
 
-_BOOT_SCRIPT_PATH = Path(__file__).parent.parent.parent / "scratchpad_boot.py"
+_BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 _MAX_OUTPUT = 10_000
 
 
