@@ -12,10 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-
 @dataclass
 class Cell:
     """A single scratchpad execution unit — code in, outputs out."""
+
     code: str
     stdout: str
     stderr: str
@@ -203,6 +203,7 @@ class ScratchpadRuntime(ABC):
         True if compaction actually happened.
         """
         from anton.core.settings import CoreSettings
+
         keep = CoreSettings().cell_keep_recent
         if len(self.cells) <= keep + 1:
             return False
@@ -220,9 +221,8 @@ class ScratchpadRuntime(ABC):
                 first_line = output.strip().split("\n")[0][:120]
             summary_lines.append(f"  [{status}] {desc}: {first_line}")
 
-        summary_text = (
-            f"# Compacted {len(to_compact)} earlier cells:\n"
-            + "\n".join(summary_lines)
+        summary_text = f"# Compacted {len(to_compact)} earlier cells:\n" + "\n".join(
+            summary_lines
         )
         summary_cell = Cell(
             code="# (compacted — see summary above)",
