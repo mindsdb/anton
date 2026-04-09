@@ -80,9 +80,8 @@ def test_explainability_extracts_non_sql_sources_from_text(tmp_path):
 
     record = collector.finalize("Home roasting is much cheaper.")
 
-    source_names = [source["name"] for source in record.data_sources]
-    assert "happymugcoffee.com" in source_names
-    assert "burmancoffee.com" in source_names
+    source_names = {source["name"] for source in record.data_sources}
+    assert source_names == {"happymugcoffee.com", "burmancoffee.com"}
     assert "gathered information from" in record.summary.lower()
 
 
