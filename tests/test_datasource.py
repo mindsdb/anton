@@ -32,8 +32,8 @@ from anton.utils.datasources import (
     parse_connection_slug,
 )
 from anton.cli import app as cli_app
-from anton.data_vault import DataVault, _slug_env_prefix
-from anton.datasource_registry import (
+from anton.core.datasources.data_vault import DataVault, _slug_env_prefix
+from anton.core.datasources.datasource_registry import (
     DatasourceEngine,
     DatasourceRegistry,
     _parse_file,

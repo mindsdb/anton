@@ -63,11 +63,11 @@ from anton.minds_client import (
     list_datasources,
     test_llm,
 )
-from anton.data_vault import DataVault
+from anton.core.datasources.data_vault import DataVault
 from anton.utils.datasources import (
     register_secret_vars,
 )
-from anton.datasource_registry import (
+from anton.core.datasources.datasource_registry import (
     DatasourceRegistry,
 )
 

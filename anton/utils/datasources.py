@@ -5,11 +5,11 @@ import re
 import yaml
 from typing import TYPE_CHECKING
 
-from anton.data_vault import DataVault, _slug_env_prefix
-from anton.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
+from anton.core.datasources.data_vault import DataVault, _slug_env_prefix
+from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
 
 if TYPE_CHECKING:
-    from anton.datasource_registry import DatasourceEngine
+    from anton.core.datasources.datasource_registry import DatasourceEngine
 
 # DS_* var names whose values are known to be secret (passwords, tokens, keys).
 # Populated at startup and after each successful connect.
