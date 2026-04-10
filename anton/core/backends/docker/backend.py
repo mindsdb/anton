@@ -3,15 +3,14 @@ import contextlib
 import io
 import json
 import logging
-import socket
+from pathlib import Path
 import tarfile
-from dataclasses import dataclass, field
 
 import docker
 from docker.errors import APIError, NotFound
 
 from anton.core.backends.base import Cell, ScratchpadRuntime
-from anton.core.backends.constants import _BOOT_SCRIPT_PATH, _LLM_PROVIDER_PKG_PATH
+from anton.core.backends.constants import _ANTON_PKG_PATH, _BOOT_SCRIPT_PATH
 from anton.core.backends.utils import _compute_timeouts
 from anton.core.backends.wire import (
     CELL_DELIM,
@@ -33,10 +32,30 @@ def _make_docker_client() -> docker.DockerClient:
     return docker.from_env(version=backend_settings.docker_api_version)
 
 
-@dataclass
 class DockerScratchpadRuntime(ScratchpadRuntime):
-    client: docker.DockerClient = field(default_factory=_make_docker_client)
-    sock: socket.socket | None = None
+    def __init__(
+        self,
+        name: str,
+        *,
+        cells: list[Cell] | None = None,
+        coding_provider: str = "anthropic",
+        coding_model: str = "",
+        coding_api_key: str = "",
+        coding_base_url: str = "",
+        workspace_path: Path | None = None,
+    ) -> None:
+        super().__init__(
+            name,
+            cells=cells,
+            coding_provider=coding_provider,
+            coding_model=coding_model,
+            coding_api_key=coding_api_key,
+            workspace_path=workspace_path,
+        )
+        self.client = _make_docker_client()
+        self.sock = None
+        # TODO: Introduce to base abstraction? This is key for API keys and other environment variables.
+        self._extra_env = {}
 
     async def start(self) -> None:
         container = self._get_or_run_container()
@@ -130,17 +149,18 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
         container.put_archive("/", data.read())
         logger.info(f"Boot script copied to Docker scratchpad container '{self.name}'.")
 
-        # Copy the llm provider directory
-        # This is required for the get_llm() function to work
-        logger.info(f"Copying llm provider files to Docker scratchpad container '{self.name}'.")
+        # Copy the Anton package sources so scratchpad_boot.py can import `anton.*`.
+        # The scratchpad container image is intentionally minimal and does not include
+        # the Anton codebase by default.
+        logger.info(f"Copying Anton package sources to Docker scratchpad container '{self.name}'.")
         data = io.BytesIO()
 
         with tarfile.open(fileobj=data, mode="w") as tar:
-            tar.add(_LLM_PROVIDER_PKG_PATH, arcname="llm")
+            tar.add(_ANTON_PKG_PATH, arcname="anton")
         data.seek(0)
 
         container.put_archive("/", data.read())
-        logger.info(f"Llm provider files copied to Docker scratchpad container '{self.name}'.")
+        logger.info(f"Anton package sources copied to Docker scratchpad container '{self.name}'.")
 
     async def reset(self) -> None:
         logger.info(f"Resetting Docker scratchpad container '{self.name}'.")
@@ -185,7 +205,7 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
         self.sock._sock.setblocking(False)
         logger.info(f"Socket created for Docker scratchpad container '{self.name}'.")
 
-    async def close(self, cleanup: bool = False) -> None:
+    async def close(self) -> None:
         logger.info(f"Stopping Docker scratchpad container '{self.name}'.")
         # Drop any active exec session socket to avoid leaks and inconsistent state
         if self.sock is not None:
@@ -202,11 +222,30 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
         await asyncio.to_thread(container.stop)
         await asyncio.to_thread(container.reload)
         logger.info(f"Docker scratchpad container '{self.name}' stopped.")
-        # Cleanup is set to False by default to preserve the container for the next turn,
-        # of the same conversation.
-        if cleanup:
-            await asyncio.to_thread(container.remove)
-            logger.info(f"Docker scratchpad container '{self.name}' removed.")
+
+    async def cleanup(self) -> None:
+        # TODO: Deduplicate?
+        logger.info(f"Stopping Docker scratchpad container '{self.name}'.")
+        # Drop any active exec session socket to avoid leaks and inconsistent state
+        if self.sock is not None:
+            with contextlib.suppress(Exception):
+                self.sock.close()
+            self.sock = None
+
+        try:
+            container = self.client.containers.get(self.name)
+        except NotFound:
+            logger.info(f"Docker scratchpad container '{self.name}' not found, skipping stop.")
+            return
+
+        await asyncio.to_thread(container.stop)
+        await asyncio.to_thread(container.reload)
+        logger.info(f"Docker scratchpad container '{self.name}' stopped.")
+
+        logger.info(f"Cleaning up Docker scratchpad container '{self.name}'.")
+        await self.close()
+        await asyncio.to_thread(container.remove)
+        logger.info(f"Docker scratchpad container '{self.name}' removed.")
 
     async def cancel(self) -> None:
         logger.info(f"Cancelling the current execution for Docker scratchpad container '{self.name}'.")
