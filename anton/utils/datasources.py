@@ -125,7 +125,7 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         "Credentials are pre-injected as namespaced DS_<ENGINE_NAME>__<FIELD> "
         "environment variables. Use them directly in scratchpad code "
         "(e.g. DS_POSTGRES_PROD_DB__HOST). "
-        "Never read ~/.anton/data_vault/ files directly.\n"
+        f"Never read {str(vault.vault_dir)} files directly.\n"
     )
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"
