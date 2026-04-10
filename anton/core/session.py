@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
 from anton.core.llm.prompts import RESILIENCE_NUDGE
 from anton.core.llm.provider import (
@@ -63,6 +64,7 @@ class ChatSessionConfig:
     episodic: EpisodicMemory | None = None
     runtime_context: str = ""
     workspace: Workspace | None = None
+    data_vault: DataVault | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -92,6 +94,7 @@ class ChatSession:
         self._extra_tools = config.tools
         self._output_dir = config.output_dir
         self._workspace = config.workspace
+        self._data_vault = config.data_vault
         self._console = config.console
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
@@ -269,7 +272,7 @@ class ChatSession:
             md_context = self._workspace.build_anton_md_context()
 
         # Inject connected datasource context without credentials
-        ds_ctx = build_datasource_context(active_only=self._active_datasource)
+        ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()

@@ -105,7 +105,7 @@ def scrub_credentials(text: str) -> str:
     return text
 
 
-def build_datasource_context(active_only: str | None = None) -> str:
+def build_datasource_context(vault: DataVault, active_only: str | None = None) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
 
     Shows the LLM what data sources are connected and which environment
@@ -114,7 +114,7 @@ def build_datasource_context(active_only: str | None = None) -> str:
     If active_only is set, only the matching slug is included.
     """
     try:
-        vault = DataVault()
+        vault = vault or DataVault()
         conns = vault.list_connections()
     except Exception:
         return ""
