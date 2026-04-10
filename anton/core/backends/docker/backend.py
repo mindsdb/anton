@@ -12,6 +12,7 @@ from docker.errors import APIError, NotFound
 
 from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.constants import _BOOT_SCRIPT_PATH, _LLM_PROVIDER_PKG_PATH
+from anton.core.backends.utils import _compute_timeouts
 from anton.core.backends.wire import (
     CELL_DELIM,
     PROGRESS_MARKER,
@@ -303,7 +304,7 @@ class DockerScratchpadRuntime(ScratchpadRuntime):
         loop = asyncio.get_running_loop()
         await loop.sock_sendall(self.sock._sock, payload.encode())
 
-        total_timeout, inactivity_timeout = self._compute_timeouts(estimated_seconds)
+        total_timeout, inactivity_timeout = _compute_timeouts(core_settings, estimated_seconds)
 
         try:
             result_data: dict | None = None

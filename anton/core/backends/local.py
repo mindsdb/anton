@@ -12,6 +12,8 @@ import venv
 from pathlib import Path
 
 from anton.core.backends.base import Cell, ScratchpadRuntime
+from anton.core.backends.constants import _BOOT_SCRIPT_PATH
+from anton.core.backends.utils import _compute_timeouts
 from anton.core.backends.wire import (
     CELL_DELIM,
     PROGRESS_MARKER,
@@ -20,21 +22,9 @@ from anton.core.backends.wire import (
 )
 from anton.core.settings import CoreSettings
 
-_BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 _MAX_OUTPUT = 10_000
 
-
-def _compute_timeouts(estimated_seconds: int) -> tuple[float, float]:
-    """Compute (total_timeout, inactivity_timeout) from an estimated run time.
-
-    Reads defaults from CoreSettings so they're tunable via env vars.
-    """
-    s = CoreSettings()
-    if estimated_seconds <= 0:
-        return float(s.cell_timeout_default), float(s.cell_inactivity_timeout)
-    total = max(estimated_seconds * 2, estimated_seconds + 30)
-    inactivity = max(estimated_seconds * 0.5, 30)
-    return float(total), float(inactivity)
+core_settings = CoreSettings()
 
 
 class LocalScratchpadRuntime(ScratchpadRuntime):
@@ -444,7 +434,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._proc.stdin.write(payload.encode())  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
-        total_timeout, inactivity_timeout = _compute_timeouts(estimated_seconds)
+        total_timeout, inactivity_timeout = _compute_timeouts(core_settings, estimated_seconds)
 
         try:
             result_data: dict | None = None
@@ -529,11 +519,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Read stdout until result delimiters; yield progress strings then dict."""
         import time as _time
 
-        s = CoreSettings()
         if total_timeout is None:
-            total_timeout = float(s.cell_timeout_default)
+            total_timeout = float(core_settings.cell_timeout_default)
         if inactivity_timeout is None:
-            inactivity_timeout = float(s.cell_inactivity_timeout)
+            inactivity_timeout = float(core_settings.cell_inactivity_timeout)
 
         lines: list[str] = []
         in_result = False
@@ -577,7 +566,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             if line.startswith(PROGRESS_MARKER):
                 current_inactivity = max(
-                    current_inactivity, float(s.cell_inactivity_after_progress)
+                    current_inactivity, float(core_settings.cell_inactivity_after_progress)
                 )
                 message = line[len(PROGRESS_MARKER) :].strip()
                 yield message
@@ -622,7 +611,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         else:
             cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *needed]
 
-        _install_timeout = CoreSettings().cell_install_timeout
+        _install_timeout = core_settings.cell_install_timeout
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
