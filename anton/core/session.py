@@ -63,6 +63,7 @@ class ChatSessionConfig:
     cortex: Cortex | None = None
     episodic: EpisodicMemory | None = None
     runtime_context: str = ""
+    backend: str = "local"
     workspace: Workspace | None = None
     data_vault: DataVault | None = None
     console: Console | None = None
@@ -114,6 +115,7 @@ class ChatSession:
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
         self._scratchpads = ScratchpadManager(
+            backend=config.backend,
             coding_provider=coding_conn.provider,
             coding_model=config.llm_client.coding_model,
             coding_api_key=coding_conn.api_key or "",
