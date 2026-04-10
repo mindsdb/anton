@@ -6,9 +6,11 @@ our cloud ScratchpadRuntime (Enterprise).
 
 from __future__ import annotations
 
-import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+import importlib
+import inspect
+import pkgutil
 from pathlib import Path
 
 
@@ -233,3 +235,116 @@ class ScratchpadRuntime(ABC):
         )
         self.cells = [summary_cell] + recent
         return True
+
+
+class ScratchpadRuntimeFactory:
+    def __init__(self) -> None:
+        self._registry: dict[str, type[ScratchpadRuntime]] = {}
+
+    def discover(self) -> dict[str, type[ScratchpadRuntime]]:
+        """
+        Discover all available scratchpad runtimes.
+
+        Returns a mapping: backend_name -> runtime class
+        where backend_name defaults to the top-level backend module name
+        (e.g. "local" or "docker").
+
+        Notes for this codebase:
+        - Some backends live in submodules (e.g. `docker/backend.py`), so we
+          must walk the package tree instead of only scanning top-level files.
+        """
+        backends_dir = Path(__file__).resolve().parent
+        package_name = __name__.rsplit(".", 1)[0]
+
+        registry: dict[str, type[ScratchpadRuntime]] = {}
+
+        # Skip modules that are part of the runtime plumbing but not runtime
+        # implementations.
+        skip_backend_names = {
+            "__init__",
+            "base",
+            "constants",
+            "manager",
+            "scratchpad_boot",
+            "utils",
+            "wire",
+        }
+
+        prefix = f"{package_name}."
+        for modinfo in pkgutil.walk_packages([str(backends_dir)], prefix=prefix):
+            fullname = modinfo.name  # e.g. anton.core.backends.local or .docker.backend
+            relname = fullname[len(prefix) :] if fullname.startswith(prefix) else fullname
+            backend_name = relname.split(".", 1)[0] if relname else relname
+
+            # Skip non-implementations and private modules/packages.
+            if (
+                not backend_name
+                or backend_name.startswith("_")
+                or backend_name in skip_backend_names
+            ):
+                continue
+
+            try:
+                module = importlib.import_module(fullname)
+            except Exception:
+                # Backends may have optional dependencies (e.g. docker-py). If a
+                # module can't be imported, treat it as unavailable.
+                continue
+
+            candidates: list[type[ScratchpadRuntime]] = []
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if obj is ScratchpadRuntime:
+                    continue
+                if not issubclass(obj, ScratchpadRuntime):
+                    continue
+                # Only classes defined in this module (not imported)
+                if obj.__module__ != module.__name__:
+                    continue
+                # Skip abstract subclasses
+                if inspect.isabstract(obj):
+                    continue
+                candidates.append(obj)
+
+            if not candidates:
+                continue
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"Backend module '{module.__name__}' has multiple ScratchpadRuntime implementations: "
+                    f"{[c.__name__ for c in candidates]}. Keep one, or add a disambiguation mechanism."
+                )
+
+            candidate = candidates[0]
+            existing = registry.get(backend_name)
+            if existing is not None and existing is not candidate:
+                raise ValueError(
+                    f"Backend '{backend_name}' has multiple ScratchpadRuntime implementations: "
+                    f"{existing.__module__}.{existing.__name__} and {candidate.__module__}.{candidate.__name__}. "
+                    "Keep one, or add a disambiguation mechanism."
+                )
+
+            registry[backend_name] = candidate
+
+        self._registry = registry
+        return registry
+
+    def create(self, backend: str, name: str, *args, **kwargs) -> ScratchpadRuntime:
+        """Create a ScratchpadRuntime instance for the given backend.
+
+        This is a convenience wrapper around discover() + instantiation.
+
+        Args:
+            backend: Backend key (e.g. "local", "docker").
+            name: Scratchpad name.
+            *args, **kwargs: Passed through to the backend runtime constructor.
+        """
+        if not self._registry:
+            self.discover()
+
+        runtime_cls = self._registry.get(backend)
+        if runtime_cls is None:
+            available = ", ".join(sorted(self._registry.keys())) or "(none discovered)"
+            raise ValueError(
+                f"Unknown scratchpad backend '{backend}'. Available: {available}"
+            )
+
+        return runtime_cls(name, *args, **kwargs)

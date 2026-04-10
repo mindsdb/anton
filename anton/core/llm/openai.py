@@ -9,6 +9,7 @@ from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
+    ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
     StreamTextDelta,
@@ -194,12 +195,18 @@ def build_chat_completion_kwargs(
 
 
 class OpenAIProvider(LLMProvider):
+    name: str = "openai"
+
     def __init__(
         self,
         api_key: str | None = None,
         base_url: str | None = None,
         ssl_verify: bool = True,
     ) -> None:
+        self._api_key = api_key
+        self._base_url = base_url
+        self._ssl_verify = ssl_verify
+
         import httpx
 
         kwargs = {}
@@ -210,6 +217,14 @@ class OpenAIProvider(LLMProvider):
         if not ssl_verify:
             kwargs["http_client"] = httpx.AsyncClient(verify=False)
         self._client = openai.AsyncOpenAI(**kwargs)
+
+    def export_connection_info(self) -> ProviderConnectionInfo:
+        return ProviderConnectionInfo(
+            provider=self.name,
+            api_key=self._api_key,
+            base_url=self._base_url,
+            ssl_verify=self._ssl_verify,
+        )
 
     async def complete(
         self,

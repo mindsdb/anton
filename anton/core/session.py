@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
 from anton.core.llm.prompts import RESILIENCE_NUDGE
 from anton.core.llm.provider import (
@@ -62,11 +63,10 @@ class ChatSessionConfig:
     cortex: Cortex | None = None
     episodic: EpisodicMemory | None = None
     runtime_context: str = ""
+    backend: str = "local"
     workspace: Workspace | None = None
+    data_vault: DataVault | None = None
     console: Console | None = None
-    coding_provider: str = "anthropic"
-    coding_api_key: str = ""
-    coding_base_url: str = ""
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
@@ -95,6 +95,7 @@ class ChatSession:
         self._extra_tools = config.tools
         self._output_dir = config.output_dir
         self._workspace = config.workspace
+        self._data_vault = config.data_vault
         self._console = config.console
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
@@ -110,13 +111,18 @@ class ChatSession:
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
+
+        coding_provider = config.llm_client.coding_provider
+        coding_conn = coding_provider.export_connection_info()
         self._scratchpads = ScratchpadManager(
-            coding_provider=config.coding_provider,
-            coding_model=getattr(config.llm_client, "coding_model", ""),
-            coding_api_key=config.coding_api_key,
-            coding_base_url=config.coding_base_url,
+            backend=config.backend,
+            coding_provider=coding_conn.provider,
+            coding_model=config.llm_client.coding_model,
+            coding_api_key=coding_conn.api_key or "",
+            coding_base_url=coding_conn.base_url or "",
             workspace_path=config.workspace.base if config.workspace else None,
         )
+
         self.tool_registry = ToolRegistry()
         self._explainability_store = (
             ExplainabilityStore(config.workspace.base) if config.workspace is not None else None
@@ -268,7 +274,7 @@ class ChatSession:
             md_context = self._workspace.build_anton_md_context()
 
         # Inject connected datasource context without credentials
-        ds_ctx = build_datasource_context(active_only=self._active_datasource)
+        ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()

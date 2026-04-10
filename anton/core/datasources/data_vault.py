@@ -115,7 +115,7 @@ class DataVault:
             prefix = _slug_env_prefix(engine, name)
             for key, value in fields.items():
                 var = f"{prefix}__{key.upper()}"
-                os.environ[var] = value
+                os.environ[var] = value if isinstance(value, str) else str(value)
                 var_names.append(var)
         return var_names
 

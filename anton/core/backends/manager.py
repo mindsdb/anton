@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from anton.core.backends.base import ScratchpadRuntime
-from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.base import ScratchpadRuntime, ScratchpadRuntimeFactory
 
 
 class ScratchpadManager:
@@ -13,6 +12,7 @@ class ScratchpadManager:
 
     def __init__(
         self,
+        backend: str = "local",
         coding_provider: str = "anthropic",
         coding_model: str = "",
         coding_api_key: str = "",
@@ -20,6 +20,7 @@ class ScratchpadManager:
         workspace_path: Path | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
+        self._backend = backend
         self._coding_provider = coding_provider
         self._coding_model = coding_model
         self._coding_api_key = coding_api_key
@@ -47,7 +48,8 @@ class ScratchpadManager:
     async def get_or_create(self, name: str) -> ScratchpadRuntime:
         """Return existing pad or create + start a new one."""
         if name not in self._pads:
-            pad = LocalScratchpadRuntime(
+            pad = ScratchpadRuntimeFactory().create(
+                backend=self._backend,
                 name=name,
                 coding_provider=self._coding_provider,
                 coding_model=self._coding_model,
