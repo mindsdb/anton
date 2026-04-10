@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import os
 import urllib.error
 import re as _re
