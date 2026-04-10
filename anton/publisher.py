@@ -147,3 +147,34 @@ def unpublish(
     url = f"{publish_url.rstrip('/')}/delete/{md5}"
     raw = minds_request(url, api_key, method="DELETE", verify=ssl_verify)
     return json.loads(raw)
+
+
+def publish_bug_report(
+    file_path: Path,
+    *,
+    api_key: str,
+    bug_report_url: str = DEFAULT_PUBLISH_URL,
+    ssl_verify: bool = True,
+) -> dict:
+    """Upload a bug report JSON file to the bug report endpoint.
+
+    Response keys: status, message, report_id (if available)
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(f"Path not found: {file_path}")
+
+    # Read the JSON file and send it directly
+    with open(file_path, "rb") as f:
+        content = f.read()
+
+    payload = json.dumps(
+        {
+            "bug_report": True,
+            "file_content": base64.b64encode(content).decode(),
+            "filename": file_path.name,
+        }
+    ).encode()
+
+    url = f"{bug_report_url.rstrip('/')}/bug-report"
+    raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    return json.loads(raw)

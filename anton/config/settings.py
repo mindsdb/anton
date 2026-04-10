@@ -22,7 +22,12 @@ _ENV_FILES = _build_env_files()
 
 
 class AntonSettings(BaseSettings):
-    model_config = {"env_prefix": "ANTON_", "env_file": _ENV_FILES, "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_prefix": "ANTON_",
+        "env_file": _ENV_FILES,
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     planning_provider: str = "anthropic"
     planning_model: str = "claude-sonnet-4-6"
@@ -44,7 +49,9 @@ class AntonSettings(BaseSettings):
 
     episodic_memory: bool = True  # episodic memory archive — on by default
 
-    proactive_dashboards: bool = False  # when True, build HTML dashboards; when False, CLI output only
+    proactive_dashboards: bool = (
+        False  # when True, build HTML dashboards; when False, CLI output only
+    )
 
     theme: str = "auto"
 
@@ -68,6 +75,7 @@ class AntonSettings(BaseSettings):
 
     # Publish service (anton-services API Gateway)
     publish_url: str = "https://4nton.ai"
+    bug_report_url: str | None = None  # Defaults to publish_url if not set
 
     @field_validator("minds_ssl_verify", mode="before")
     @classmethod
@@ -81,7 +89,10 @@ class AntonSettings(BaseSettings):
         if (
             self.minds_api_key
             and not self.openai_api_key
-            and (self.planning_provider == "openai-compatible" or self.coding_provider == "openai-compatible")
+            and (
+                self.planning_provider == "openai-compatible"
+                or self.coding_provider == "openai-compatible"
+            )
         ):
             self.openai_api_key = self.minds_api_key
             if not self.openai_base_url:

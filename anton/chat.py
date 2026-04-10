@@ -61,6 +61,7 @@ from anton.utils.clipboard import (
     format_file_message,
     human_size,
 )
+from anton.commands.bug_report import handle_report_bug
 from anton.chat_session import build_runtime_context, rebuild_session
 from anton.commands.session import handle_resume
 from anton.commands.datasource import (
@@ -137,7 +138,6 @@ _RESILIENCE_NUDGE = (
 
 # TODO: Is this enough for now?
 TOKEN_STATUS_CACHE_TTL = 60.0
-
 
 
 class ChatSession:
@@ -238,6 +238,7 @@ class ChatSession:
 
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
+
         _now = _dt.datetime.now()
         _current_datetime = _now.strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -336,9 +337,9 @@ class ChatSession:
         if self._cortex is not None:
             wisdom = self._cortex.get_scratchpad_context()
             if wisdom:
-                scratchpad_tool[
-                    "description"
-                ] += f"\n\nLessons from past sessions:\n{wisdom}"
+                scratchpad_tool["description"] += (
+                    f"\n\nLessons from past sessions:\n{wisdom}"
+                )
 
         tools = [scratchpad_tool]
         if self._cortex is not None:
@@ -739,7 +740,10 @@ class ChatSession:
 
         # Detect max_tokens truncation — the LLM was cut off mid-response.
         # Inject a continuation prompt so it can finish what it was doing.
-        if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+        if (
+            llm_response.stop_reason in ("max_tokens", "length")
+            and not llm_response.tool_calls
+        ):
             self._history.append(
                 {"role": "assistant", "content": llm_response.content or ""}
             )
@@ -920,7 +924,8 @@ class ChatSession:
                                         description=description,
                                     )
                         elif tc.name == "connect_new_datasource" or (
-                            tc.name == "publish_or_preview" and tc.input.get("action") == "publish"
+                            tc.name == "publish_or_preview"
+                            and tc.input.get("action") == "publish"
                         ):
                             # Interactive tool — pause spinner AND escape watcher
                             yield StreamTaskProgress(
@@ -1010,7 +1015,10 @@ class ChatSession:
                 llm_response = response.response
 
                 # Detect max_tokens truncation inside tool loop
-                if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
+                if (
+                    llm_response.stop_reason in ("max_tokens", "length")
+                    and not llm_response.tool_calls
+                ):
                     self._history.append(
                         {"role": "assistant", "content": llm_response.content or ""}
                     )
@@ -1269,7 +1277,6 @@ def _apply_error_tracking(
     return result_text
 
 
-
 async def _handle_connect(
     console: Console,
     settings: AntonSettings,
@@ -1331,7 +1338,9 @@ async def _handle_connect(
         console.print("    [bold]q[/]  Back")
         console.print()
 
-        action = await prompt_or_cancel("(anton) Select", choices=["1", "2", "q"], default="q")
+        action = await prompt_or_cancel(
+            "(anton) Select", choices=["1", "2", "q"], default="q"
+        )
         if action is None or action == "q":
             console.print("[anton.muted]Aborted.[/]")
             console.print()
@@ -1392,7 +1401,9 @@ async def _handle_connect(
             console.print(f"    [bold]{i}[/]  {ref_name}")
         console.print()
         ds_choices = [str(i) for i in range(1, len(mind_datasources) + 1)]
-        ds_pick = await prompt_or_cancel("(anton) Select datasource", choices=ds_choices)
+        ds_pick = await prompt_or_cancel(
+            "(anton) Select datasource", choices=ds_choices
+        )
         if ds_pick is None:
             return session
         picked_ds = mind_datasources[int(ds_pick) - 1]
@@ -1404,9 +1415,7 @@ async def _handle_connect(
 
     if ds_name:
         try:
-            all_datasources = list_datasources(
-                minds_url, api_key, verify=ssl_verify
-            )
+            all_datasources = list_datasources(minds_url, api_key, verify=ssl_verify)
             for ds in all_datasources:
                 if ds.get("name") == ds_name:
                     ds_engine = ds.get("engine", "unknown")
@@ -1493,15 +1502,15 @@ async def _handle_connect(
     )
 
 
-
-
 def _extract_html_title(path, re_module) -> str:
     """Extract <title> content from an HTML file. Returns '' if not found."""
     try:
         # Read only the first 4KB — title is always near the top
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             head = f.read(4096)
-        m = re_module.search(r"<title[^>]*>(.*?)</title>", head, re_module.IGNORECASE | re_module.DOTALL)
+        m = re_module.search(
+            r"<title[^>]*>(.*?)</title>", head, re_module.IGNORECASE | re_module.DOTALL
+        )
         return m.group(1).strip() if m else ""
     except Exception:
         return ""
@@ -1523,7 +1532,9 @@ async def _handle_publish(
 
     # 1. Ensure Minds API key is available
     if not settings.minds_api_key:
-        console.print("  [anton.muted]To publish dashboards you need a free Minds account.[/]")
+        console.print(
+            "  [anton.muted]To publish dashboards you need a free Minds account.[/]"
+        )
         console.print()
         has_key = await prompt_or_cancel(
             "  Do you have an mdb.ai API key?",
@@ -1563,9 +1574,13 @@ async def _handle_publish(
             target = Path(settings.workspace_path) / file_arg
     else:
         # List HTML files sorted by modification time (most recent first)
-        html_files = sorted(
-            output_dir.glob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
-        ) if output_dir.is_dir() else []
+        html_files = (
+            sorted(
+                output_dir.glob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
+            )
+            if output_dir.is_dir()
+            else []
+        )
         if not html_files:
             console.print("  [anton.warning]No HTML files found in .anton/output/[/]")
             console.print()
@@ -1575,7 +1590,7 @@ async def _handle_publish(
         offset = 0
 
         while True:
-            page = html_files[offset:offset + PAGE_SIZE]
+            page = html_files[offset : offset + PAGE_SIZE]
             has_more = offset + PAGE_SIZE < len(html_files)
 
             console.print("  [anton.cyan]Available reports:[/]")
@@ -1586,7 +1601,9 @@ async def _handle_publish(
                 console.print(f"  [bold]{i}[/]  {label}  [anton.muted]{f.name}[/]")
 
             if has_more:
-                console.print(f"\n  [anton.muted]m  Show more ({len(html_files) - offset - PAGE_SIZE} remaining)[/]")
+                console.print(
+                    f"\n  [anton.muted]m  Show more ({len(html_files) - offset - PAGE_SIZE} remaining)[/]"
+                )
 
             console.print()
             choice = await prompt_or_cancel("  Select", default="1")
@@ -1619,7 +1636,11 @@ async def _handle_publish(
     from rich.live import Live
     from rich.spinner import Spinner
 
-    with Live(Spinner("dots", text="  Publishing...", style="anton.cyan"), console=console, transient=True):
+    with Live(
+        Spinner("dots", text="  Publishing...", style="anton.cyan"),
+        console=console,
+        transient=True,
+    ):
         try:
             result = publish(
                 target,
@@ -1641,8 +1662,6 @@ async def _handle_publish(
         webbrowser.open(view_url)
 
 
-
-
 async def _handle_unpublish(
     console: Console,
     settings,
@@ -1655,7 +1674,9 @@ async def _handle_unpublish(
 
     # 1. Ensure Minds API key is available
     if not settings.minds_api_key:
-        console.print("  [anton.warning]No Minds API key configured. Run /publish first.[/]")
+        console.print(
+            "  [anton.warning]No Minds API key configured. Run /publish first.[/]"
+        )
         console.print()
         return
 
@@ -1664,7 +1685,11 @@ async def _handle_unpublish(
     from rich.spinner import Spinner
 
     reports = []
-    with Live(Spinner("dots", text="  Loading published reports...", style="anton.cyan"), console=console, transient=True):
+    with Live(
+        Spinner("dots", text="  Loading published reports...", style="anton.cyan"),
+        console=console,
+        transient=True,
+    ):
         try:
             reports = list_published(
                 api_key=settings.minds_api_key,
@@ -1686,7 +1711,7 @@ async def _handle_unpublish(
     offset = 0
 
     while True:
-        page = reports[offset:offset + PAGE_SIZE]
+        page = reports[offset : offset + PAGE_SIZE]
         has_more = offset + PAGE_SIZE < len(reports)
 
         console.print("  [anton.cyan]Published reports:[/]")
@@ -1697,7 +1722,9 @@ async def _handle_unpublish(
             console.print(f"  [bold]{i}[/]  {title}  [anton.muted]{url}[/]")
 
         if has_more:
-            console.print(f"\n  [anton.muted]m  Show more ({len(reports) - offset - PAGE_SIZE} remaining)[/]")
+            console.print(
+                f"\n  [anton.muted]m  Show more ({len(reports) - offset - PAGE_SIZE} remaining)[/]"
+            )
 
         console.print()
         choice = await prompt_or_cancel("  Select report to unpublish")
@@ -1735,7 +1762,11 @@ async def _handle_unpublish(
         return
 
     # 5. Delete
-    with Live(Spinner("dots", text="  Removing...", style="anton.cyan"), console=console, transient=True):
+    with Live(
+        Spinner("dots", text="  Removing...", style="anton.cyan"),
+        console=console,
+        transient=True,
+    ):
         try:
             unpublish(
                 selected["md5"],
@@ -1760,7 +1791,9 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     import os as _os
     import time as _time
 
-    script_path = Path(__file__).resolve().parent / "demo_data" / "nvda_btc_scratchpad_backup.py"
+    script_path = (
+        Path(__file__).resolve().parent / "demo_data" / "nvda_btc_scratchpad_backup.py"
+    )
     if not script_path.is_file():
         return None
 
@@ -1797,8 +1830,31 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     answer_text = (answer or "").strip().lower()
 
     # Classify: does the user want to run it?
-    _skip_words = {"no", "n", "skip", "nah", "pass", "nope", "later", "chat", "straight"}
-    _go_words = {"yes", "y", "ok", "sure", "go", "yeah", "yep", "run", "do it", "let's go", "lets go", "go for it"}
+    _skip_words = {
+        "no",
+        "n",
+        "skip",
+        "nah",
+        "pass",
+        "nope",
+        "later",
+        "chat",
+        "straight",
+    }
+    _go_words = {
+        "yes",
+        "y",
+        "ok",
+        "sure",
+        "go",
+        "yeah",
+        "yep",
+        "run",
+        "do it",
+        "let's go",
+        "lets go",
+        "go for it",
+    }
 
     wants_demo = None
     for w in _go_words:
@@ -1816,20 +1872,25 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
 
     if not wants_demo:
         console.print()
-        console.print("  [anton.muted]All good! Ask me anything \u2014 data questions, dashboards, analysis, you name it.[/]")
+        console.print(
+            "  [anton.muted]All good! Ask me anything \u2014 data questions, dashboards, analysis, you name it.[/]"
+        )
         console.print()
         return None
 
     # Typed message with ellipsis animation
     console.print()
     from anton.channel.theme import get_palette as _gp3
+
     _c = _gp3().cyan
     _r, _g, _b = int(_c[1:3], 16), int(_c[3:5], 16), int(_c[5:7], 16)
     _ac = f"\033[1;38;2;{_r};{_g};{_b}m"
     _ar = "\033[0m"
 
     _prefix = f"{_ac}anton>{_ar} "
-    _typed_msg = "Perfect! Fetching live data, crunching numbers, and building the dashboard"
+    _typed_msg = (
+        "Perfect! Fetching live data, crunching numbers, and building the dashboard"
+    )
     console.file.write(_prefix)
     console.file.flush()
     for ch in _typed_msg:
@@ -1862,13 +1923,12 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     output_html = str(Path(output_dir) / "nvda_btc_dashboard.html")
     code = (
         f"import os as _os; _os.makedirs({output_dir!r}, exist_ok=True)\n"
-        f"__file__ = {str(script_path)!r}\n"
-        + code
+        f"__file__ = {str(script_path)!r}\n" + code
     )
     # Replace the OUTPUT_PATH line so the dashboard goes to .anton/output/
     code = code.replace(
         'OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvda_btc_dashboard.html")',
-        f'OUTPUT_PATH = {output_html!r}',
+        f"OUTPUT_PATH = {output_html!r}",
     )
 
     from anton.scratchpad import Cell
@@ -1879,7 +1939,9 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     pad = await session._scratchpads.get_or_create("main")
 
     # Pre-install dependencies so the main script doesn't fail mid-run
-    install_spinner = Text("  Installing dependencies (yfinance, pandas, numpy)...", style="anton.muted")
+    install_spinner = Text(
+        "  Installing dependencies (yfinance, pandas, numpy)...", style="anton.muted"
+    )
     with Live(
         Spinner("dots", text=install_spinner, style="anton.cyan"),
         console=console,
@@ -1889,7 +1951,9 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         await pad.install_packages(["yfinance", "pandas", "numpy"])
     console.print(f"  [anton.success]\u2714[/] [anton.muted]Dependencies ready[/]")
 
-    spinner_text = Text("  Scratchpad(Building NVDA vs BTC dashboard...)", style="anton.muted")
+    spinner_text = Text(
+        "  Scratchpad(Building NVDA vs BTC dashboard...)", style="anton.muted"
+    )
     cell = None
     with Live(
         Spinner("dots", text=spinner_text, style="anton.cyan"),
@@ -1918,26 +1982,30 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         console.print()
         return None
 
-    console.print(f"  [anton.success]\u2714[/] [anton.muted]Dashboard built successfully[/]")
+    console.print(
+        f"  [anton.success]\u2714[/] [anton.muted]Dashboard built successfully[/]"
+    )
 
     # Inject context into session history so the LLM knows data is live
     _demo_stdout = (cell.stdout or "")[:3000]
-    session._history.append({
-        "role": "assistant",
-        "content": (
-            "I built an interactive NVIDIA vs Bitcoin 5-year investment dashboard. "
-            "The dashboard HTML is at: " + output_html + "\n\n"
-            "The scratchpad 'main' is still running with all data loaded in memory:\n"
-            "- prices DataFrame (monthly OHLCV, returns, cumulative, drawdowns)\n"
-            "- risk DataFrame (annual stats, Sharpe, Sortino, Calmar, win rate)\n"
-            "- annual DataFrame (year-by-year breakdown)\n"
-            "- mc DataFrame (1,000-path Monte Carlo, 60 months)\n"
-            "- scorecard DataFrame (12-metric head-to-head comparison)\n\n"
-            "All variables are live in the 'main' scratchpad — the user can ask "
-            "follow-up questions and I can use the existing data without re-fetching.\n\n"
-            f"Script output:\n{_demo_stdout}"
-        ),
-    })
+    session._history.append(
+        {
+            "role": "assistant",
+            "content": (
+                "I built an interactive NVIDIA vs Bitcoin 5-year investment dashboard. "
+                "The dashboard HTML is at: " + output_html + "\n\n"
+                "The scratchpad 'main' is still running with all data loaded in memory:\n"
+                "- prices DataFrame (monthly OHLCV, returns, cumulative, drawdowns)\n"
+                "- risk DataFrame (annual stats, Sharpe, Sortino, Calmar, win rate)\n"
+                "- annual DataFrame (year-by-year breakdown)\n"
+                "- mc DataFrame (1,000-path Monte Carlo, 60 months)\n"
+                "- scorecard DataFrame (12-metric head-to-head comparison)\n\n"
+                "All variables are live in the 'main' scratchpad — the user can ask "
+                "follow-up questions and I can use the existing data without re-fetching.\n\n"
+                f"Script output:\n{_demo_stdout}"
+            ),
+        }
+    )
 
     # Show findings — typed out like the intro message
     console.print()
@@ -1953,6 +2021,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         "",
     ]
     from anton.channel.theme import get_palette as _gp2
+
     _cyan = _gp2().cyan
     # Convert hex color to ANSI 24-bit escape
     _r, _g, _b = int(_cyan[1:3], 16), int(_cyan[3:5], 16), int(_cyan[5:7], 16)
@@ -1968,7 +2037,9 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         console.file.write("\n")
         console.file.flush()
     console.print()
-    console.print("[anton.muted] Ask me follow-ups, a completely different question, or connect your own data (using the /connect command).[/]")
+    console.print(
+        "[anton.muted] Ask me follow-ups, a completely different question, or connect your own data (using the /connect command).[/]"
+    )
     console.print("[anton.muted] What\u2019s next, boss?[/]")
     console.print()
 
@@ -2087,14 +2158,32 @@ def _desktop_greeting(console: Console, settings) -> None:
 
 
 def run_chat(
-    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
+    console: Console,
+    settings: AntonSettings,
+    *,
+    resume: bool = False,
+    first_run: bool = False,
+    desktop_first_run: bool = False,
 ) -> None:
     """Launch the interactive chat REPL."""
-    asyncio.run(_chat_loop(console, settings, resume=resume, first_run=first_run, desktop_first_run=desktop_first_run))
+    asyncio.run(
+        _chat_loop(
+            console,
+            settings,
+            resume=resume,
+            first_run=first_run,
+            desktop_first_run=desktop_first_run,
+        )
+    )
 
 
 async def _chat_loop(
-    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
+    console: Console,
+    settings: AntonSettings,
+    *,
+    resume: bool = False,
+    first_run: bool = False,
+    desktop_first_run: bool = False,
 ) -> None:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.llm.client import LLMClient
@@ -2225,6 +2314,7 @@ async def _chat_loop(
     console.print()
 
     from anton.analytics import send_event
+
     _query_count = 0
     _total_questions = 0  # tracks first 10 questions for time estimates
 
@@ -2307,6 +2397,7 @@ async def _chat_loop(
 
             try:
                 from anton.channel.theme import get_palette as _gp
+
                 _you_color = _gp().user_prompt
                 user_input = await prompt_session.prompt_async(
                     [(f"bold fg:{_you_color}", "you>"), ("", " ")]
@@ -2414,9 +2505,7 @@ async def _chat_loop(
                 elif cmd == "/edit":
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     if not arg:
-                        console.print(
-                            "[anton.warning]Usage: /edit <engine-name>[/]"
-                        )
+                        console.print("[anton.warning]Usage: /edit <engine-name>[/]")
                         console.print()
                     else:
                         session = await handle_connect_datasource(
@@ -2428,9 +2517,7 @@ async def _chat_loop(
                     continue
                 elif cmd == "/test":
                     arg = parts[1].strip() if len(parts) > 1 else ""
-                    await handle_test_datasource(
-                        console, session._scratchpads, arg
-                    )
+                    await handle_test_datasource(console, session._scratchpads, arg)
                     continue
                 elif cmd == "/resume":
                     session, resumed_id = await handle_resume(
@@ -2457,6 +2544,11 @@ async def _chat_loop(
                     continue
                 elif cmd == "/unpublish":
                     await _handle_unpublish(console, settings, workspace)
+                    continue
+                elif cmd == "/report-bug":
+                    await handle_report_bug(
+                        console, settings, workspace, session, cortex
+                    )
                     continue
                 elif cmd == "/help":
                     print_slash_help(console)
@@ -2541,9 +2633,13 @@ async def _chat_loop(
                 parts = []
 
                 if settings.minds_api_key and settings.minds_url:
-                    #TODO: Lets check if this is best solution
+                    # TODO: Lets check if this is best solution
                     now = time.monotonic()
-                    if last_token_status_checked_at is None or (now - last_token_status_checked_at) >= TOKEN_STATUS_CACHE_TTL:
+                    if (
+                        last_token_status_checked_at is None
+                        or (now - last_token_status_checked_at)
+                        >= TOKEN_STATUS_CACHE_TTL
+                    ):
                         last_token_status = check_minds_token_limits(
                             settings.minds_url.rstrip("/"),
                             settings.minds_api_key,
@@ -2551,8 +2647,14 @@ async def _chat_loop(
                         )
                         last_token_status_checked_at = now
                     if last_token_status.billing_cycle_limit > 0:
-                        _pct = last_token_status.billing_cycle_used * 100 // last_token_status.billing_cycle_limit
-                        parts.append(f"{last_token_status.billing_cycle_used:,} / {last_token_status.billing_cycle_limit:,} ({_pct}%)")
+                        _pct = (
+                            last_token_status.billing_cycle_used
+                            * 100
+                            // last_token_status.billing_cycle_limit
+                        )
+                        parts.append(
+                            f"{last_token_status.billing_cycle_used:,} / {last_token_status.billing_cycle_limit:,} ({_pct}%)"
+                        )
 
                 parts.append(f"{elapsed:.1f}s")
                 if not settings.minds_api_key and not settings.minds_url:
@@ -2562,8 +2664,17 @@ async def _chat_loop(
                 toolbar["stats"] = "  ".join(parts)
                 toolbar["status"] = ""
                 display.finish()
-                if settings.minds_api_key and settings.minds_url and last_token_status is not None and last_token_status.status is TokenLimitStatus.WARNING:
-                    pct = int(last_token_status.used / last_token_status.limit * 100) if last_token_status.limit else 80
+                if (
+                    settings.minds_api_key
+                    and settings.minds_url
+                    and last_token_status is not None
+                    and last_token_status.status is TokenLimitStatus.WARNING
+                ):
+                    pct = (
+                        int(last_token_status.used / last_token_status.limit * 100)
+                        if last_token_status.limit
+                        else 80
+                    )
                     console.print(
                         f"[anton.warning]Approaching token limit: {last_token_status.used:,} / "
                         f"{last_token_status.limit:,} tokens used ({pct}%). "
