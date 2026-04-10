@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from anton.core.backends.base import ScratchpadRuntime
+from anton.core.backends.docker.backend import DockerScratchpadRuntime
 from anton.core.backends.local import LocalScratchpadRuntime
 
 
@@ -47,7 +48,7 @@ class ScratchpadManager:
     async def get_or_create(self, name: str) -> ScratchpadRuntime:
         """Return existing pad or create + start a new one."""
         if name not in self._pads:
-            pad = LocalScratchpadRuntime(
+            pad = DockerScratchpadRuntime(
                 name=name,
                 coding_provider=self._coding_provider,
                 coding_model=self._coding_model,
