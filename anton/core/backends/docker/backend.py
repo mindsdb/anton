@@ -6,6 +6,9 @@ import logging
 from pathlib import Path
 import tarfile
 
+# TODO: How do we manage these dependencies?
+# Maybe allow the package to be installed with extras?
+# E.g. `pip install anton[docker]`
 import docker
 from docker.errors import APIError, NotFound
 
