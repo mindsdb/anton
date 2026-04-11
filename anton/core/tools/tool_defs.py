@@ -55,7 +55,12 @@ SCRATCHPAD_TOOL = ToolDef(
         "The total timeout scales from your estimated_execution_time_seconds "
         "(roughly 2x the estimate). You MUST provide estimated_execution_time_seconds "
         "for every exec call. For very long operations, provide a realistic estimate "
-        "and use progress() to keep the cell alive."
+        "and use progress() to keep the cell alive.\n\n"
+        "IMPORTANT: If live data fetching fails (any 4xx/5xx HTTP error) and you fall back "
+        "to synthetic, simulated, or estimated data, you MUST immediately warn the user with "
+        "a clear message like: '⚠️ Warning: Could not fetch live data. Results below are "
+        "based on synthetic data and do not reflect real values.' Never present synthetic "
+        "data as if it were real without this warning."
     ),
     input_schema={
         "type": "object",
