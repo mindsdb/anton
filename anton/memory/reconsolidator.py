@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from anton.memory.hippocampus import Hippocampus
+from anton.core.memory.hippocampus import Hippocampus
 
 
 def needs_reconsolidation(project_dir: Path) -> bool:

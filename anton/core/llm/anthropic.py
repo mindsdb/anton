@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 import anthropic
 
-from anton.llm.provider import (
+from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
@@ -57,10 +57,15 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if exc.status_code == 429 and isinstance(exc.body, dict) and exc.body.get("detail"):
+            if (
+                exc.status_code == 429
+                and isinstance(exc.body, dict)
+                and exc.body.get("detail")
+            ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
                 msg += " Visit https://mdb.ai to upgrade or to top up your tokens."
-                from anton.llm.provider import TokenLimitExceeded
+                from .provider import TokenLimitExceeded
+
                 raise TokenLimitExceeded(msg) from exc
             else:
                 msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
@@ -132,7 +137,12 @@ class AnthropicProvider(LLMProvider):
                         idx = event.index
                         block = event.content_block
                         if block.type == "tool_use":
-                            blocks[idx] = {"type": "tool_use", "id": block.id, "name": block.name, "json_parts": []}
+                            blocks[idx] = {
+                                "type": "tool_use",
+                                "id": block.id,
+                                "name": block.name,
+                                "json_parts": [],
+                            }
                             yield StreamToolUseStart(id=block.id, name=block.name)
                         else:
                             blocks[idx] = {"type": "text"}
@@ -147,7 +157,9 @@ class AnthropicProvider(LLMProvider):
                             info = blocks.get(idx, {})
                             if info.get("type") == "tool_use":
                                 info["json_parts"].append(delta.partial_json)
-                                yield StreamToolUseDelta(id=info["id"], json_delta=delta.partial_json)
+                                yield StreamToolUseDelta(
+                                    id=info["id"], json_delta=delta.partial_json
+                                )
 
                     elif event.type == "content_block_stop":
                         idx = event.index
@@ -156,7 +168,9 @@ class AnthropicProvider(LLMProvider):
                             raw_json = "".join(info["json_parts"])
                             parsed_input = json.loads(raw_json) if raw_json else {}
                             tool_calls.append(
-                                ToolCall(id=info["id"], name=info["name"], input=parsed_input)
+                                ToolCall(
+                                    id=info["id"], name=info["name"], input=parsed_input
+                                )
                             )
                             yield StreamToolUseEnd(id=info["id"])
 
@@ -169,10 +183,15 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if exc.status_code == 429 and isinstance(exc.body, dict) and exc.body.get("detail"):
+            if (
+                exc.status_code == 429
+                and isinstance(exc.body, dict)
+                and exc.body.get("detail")
+            ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
                 msg += " Visit https://mdb.ai to upgrade or to top up your tokens."
-                from anton.llm.provider import TokenLimitExceeded
+                from .provider import TokenLimitExceeded
+
                 raise TokenLimitExceeded(msg) from exc
             else:
                 msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."

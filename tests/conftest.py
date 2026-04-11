@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from anton.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 
 
 @pytest.fixture()

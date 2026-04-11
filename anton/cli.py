@@ -21,11 +21,12 @@ from rich.text import Text
 from anton import __version__
 
 from anton.utils.prompt import prompt_or_cancel
-from anton.llm.openai import build_chat_completion_kwargs
+from anton.core.llm.openai import build_chat_completion_kwargs
 
 from anton.chat import ChatSession
-from anton.llm.client import LLMClient
-from anton.scratchpad import ScratchpadManager
+from anton.core.session import ChatSessionConfig
+from anton.core.llm.client import LLMClient
+from anton.core.backends.manager import ScratchpadManager
 
 from anton.commands.datasource import (
     handle_remove_data_source,
@@ -1170,7 +1171,7 @@ def connect_data_source(
         )
         or "",
     )
-    session = ChatSession(llm_client)
+    session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
         await handle_connect_datasource(
@@ -1214,7 +1215,7 @@ def edit_data_source(
         )
         or "",
     )
-    session = ChatSession(llm_client)
+    session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
         await handle_connect_datasource(

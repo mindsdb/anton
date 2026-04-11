@@ -12,8 +12,8 @@ from anton.minds_client import refresh_knowledge
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
-    from anton.memory.cortex import Cortex
-    from anton.memory.episodes import EpisodicMemory
+    from anton.core.memory.cortex import Cortex
+    from anton.core.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
     from anton.workspace import Workspace
 
@@ -65,8 +65,9 @@ def rebuild_session(
     session_id: str | None = None,
 ) -> "ChatSession":
     """Rebuild LLMClient + ChatSession after settings change."""
-    from anton.llm.client import LLMClient
+    from anton.core.llm.client import LLMClient
     from anton.chat import ChatSession
+    from anton.core.session import ChatSessionConfig
 
     state["llm_client"] = LLMClient.from_settings(settings)
 
@@ -84,8 +85,8 @@ def rebuild_session(
         if settings.coding_provider == "anthropic"
         else settings.openai_api_key
     ) or ""
-    return ChatSession(
-        state["llm_client"],
+    return ChatSession(ChatSessionConfig(
+        llm_client=state["llm_client"],
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
@@ -98,4 +99,5 @@ def rebuild_session(
         history_store=history_store,
         session_id=session_id,
         proactive_dashboards=settings.proactive_dashboards,
-    )
+        output_dir=settings.output_dir,
+    ))

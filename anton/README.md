@@ -11,19 +11,24 @@ And here we are: Like an adrenaline junkie eyeing at a bungee looking for anothe
 
 It is probably obvious now, but Anton has a brain-inspired architecture, and the more we build it the more it resembles/mirrors functional parts of the brain.  On the other hand we also understand that people don't need to know anything about the brain to play with Anton, so we mapped some of the places/files where users can have inputs, or investigate what's up, to names that make more sense than the scientific name of that function of the brain.
 
-The current implementation has three blocks:
+The current implementation has six blocks, mapping the major learning systems:
 
-| Brain Region                 | Function                                         | Anton Equivalent                                              |
-|------------------------------|--------------------------------------------------|---------------------------------------------------------------|
-| Prefrontal Cortex (PFC)      | Executive control, planning, the "inner voice"  | Orchestrator — decides what to work on, how, and when to stop |
-| Working Memory (dlPFC)       | Temporary reasoning space, ~4 slots             | Scratchpads — isolated reasoning environments                 |
-| Hippocampus                  | Episodic memory, records experiences            | Experience Store — logs of problem + context + solution       |
+| Brain Region                 | Function                                          | Anton Equivalent                                              |
+|------------------------------|---------------------------------------------------|---------------------------------------------------------------|
+| Prefrontal Cortex (PFC)      | Executive control, planning, the "inner voice"   | Orchestrator — decides what to work on, how, and when to stop |
+| Working Memory (dlPFC)       | Temporary reasoning space, ~4 slots              | Scratchpads — isolated reasoning environments                 |
+| Hippocampus                  | Episodic memory, records experiences             | Experience Store — logs of problem + context + solution       |
+| Cortex (semantic memory)     | Facts, rules, identity — the consolidated knowledge | Engrams — `lessons.md`, `rules.md`, `profile.md`            |
+| Striatum (procedural memory) | Habits and learned procedures — patterns of action | Skills — multi-stage reusable procedures with declarative + chunked + code representations |
+| Cerebellum (error learning)  | Supervised correction — "what I expected vs what happened" | Cerebellum — buffers errored scratchpad cells, extracts generalizable lessons via post-mortem |
+
+These six systems coexist the way they coexist in the brain: declarative and procedural memory are dissociable (a person with hippocampal damage like H.M. can lose new declarative memories but still learn motor skills), and the cerebellum operates in parallel with continued action rather than blocking it.
 
 
 
 ## Architecture of Anton
 
-These three parts work in a very simple way:
+The high-level flow — how the executive, scratchpads, and the long-term stores collaborate on every turn:
 
 ```
   ┌────────────────────────────────────────────────────┐
@@ -31,7 +36,7 @@ These three parts work in a very simple way:
   │                                                    │
   │  On new problem:                                   │
   │    1. Check SKILL LIBRARY → match?                 │
-  │       YES → deploy skill's template scratchpad     │
+  │       YES → recall_skill(label) → load procedure   │
   │       NO  → open fresh scratchpad                  │
   │    2. Monitor scratchpad progress                  │
   │    3. Detect stuck/failure → pivot strategy        │
@@ -49,26 +54,32 @@ These three parts work in a very simple way:
   │  - Can request sub-scratchpads (decomposition)       │
   │  - Can invoke the hypocampus in a loop               │
   │                                                      │
-  └────────────────────┬─────────────────────────────────┘
-                       │ on success
-                       ▼
-  ┌──────────────────────────────────────────────────────┐
-  │         EXPERIENCE STORE (hippocampus)               │
-  │                                                      │
-  │  Each entry:                                         │
-  │  {                                                   │
-  │    problem_signature: "...",                         │
-  │    context: { what tools, what domain, what input }, │
-  │    scratchpad_trace: [ step1, step2, ... ],          │
-  │    outcome: success | failure,                       │
-  │    cost: tokens/time spent,                          │
-  │    salience: how important/novel was this            │
-  │  }                                                   │
-  │                                                      │
-  │  Searchable by similarity (embeddings)               │
-  └──────────────────────────────────────────────────────┘
-
+  │  Every cell execution fires pre/post hooks observed  │
+  │  by the CEREBELLUM (post-mortem error learning).     │
+  └──────┬──────────────┬───────────────────┬────────────┘
+         │              │                   │
+         │ on success   │ on cell errors    │ on success
+         ▼              ▼                   ▼
+  ┌────────────┐  ┌──────────────┐  ┌─────────────────────┐
+  │ EXPERIENCE │  │  CEREBELLUM  │  │   SKILL LIBRARY     │
+  │   STORE    │  │              │  │                     │
+  │ (hipp.)    │  │ Buffers bad  │  │ /skill save → LLM   │
+  │            │  │ cells, runs  │  │ drafts a procedure  │
+  │ Episodes — │  │ post-mortem  │  │ with label + name + │
+  │ JSONL log  │  │ via LLM,     │  │ when_to_use +       │
+  │ of every   │  │ encodes new  │  │ declarative_md.     │
+  │ turn.      │  │ lessons via  │  │                     │
+  │            │  │ Cortex.      │  │ Future turns recall │
+  │ Recall via │  │              │  │ the procedure via   │
+  │ `recall`   │  │ Lessons feed │  │ recall_skill tool.  │
+  │ tool.      │  │ next code    │  │                     │
+  │            │  │ generation   │  │ Stored at           │
+  │            │  │ (procedural  │  │ ~/.anton/skills/    │
+  │            │  │ priming).    │  │   <label>/          │
+  └────────────┘  └──────────────┘  └─────────────────────┘
 ```
+
+The brain analog: the executive (PFC) plans and delegates to working memory (scratchpads), which can pull on procedural memory (striatum/skills) for known recipes and on declarative memory (hippocampus/cortex/engrams) for facts. The cerebellum runs in parallel with continued action — it never blocks the agent, it just refines future cells through supervised error learning.
 
 And the Hipocampus also is controlled as follows:
 
@@ -122,6 +133,8 @@ And the Hipocampus also is controlled as follows:
 | **Prefrontal Cortex** (dlPFC/vmPFC) | `cortex.py` | The executive coordinator. Manages two hippocampi (global + project), decides which memories to load into the LLM's context window, gates whether new memories need confirmation. |
 | **Medial Temporal Lobe** (episodic) | `episodes.py` | Raw episodic memory. Logs every conversation turn as timestamped JSONL — user input, assistant responses, tool calls, scratchpad output. Searchable via the `recall` tool. Like HSAM: never forgets. |
 | **Hippocampal Replay** (SWS consolidation) | `consolidator.py` | After a scratchpad session ends, replays what happened in compressed form and extracts durable lessons via a fast LLM call. Like sleep — offline, post-hoc, selective. |
+| **Striatum** (procedural memory) | `skills.py` | Long-term procedural memory. Stores reusable skills as multi-stage directories (declarative → chunks → code). The LLM retrieves skills on demand via the `recall_skill` tool, the way the basal ganglia activates a learned action sequence in response to a familiar context. |
+| **Cerebellum** (supervised error learning) | `cerebellum.py` | Forward-model + error correction. Observes every scratchpad cell via pre/post execute hooks, buffers errored/warning cells across the turn, and runs a post-mortem LLM diff to extract generalizable lessons. Lessons flow through the existing wisdom-injection pipeline into future code generation. Operates in parallel with the agent — never blocks. |
 | **Reconsolidation** (Nader et al.) | `reconsolidator.py` | One-time migration. When old memory formats are reactivated, they enter a labile state and get re-encoded in the new format. Preserves content, updates structure. |
 | **Medial PFC / Default Mode Network** | `profile.md` | Always-on self-model. Identity facts (name, timezone, preferences) that contextualize all processing — you don't "look up" your own name. |
 | **Basal Ganglia + OFC** | `rules.md` | Go/No-Go behavioral gates. The direct pathway enables ("always"), the indirect pathway suppresses ("never"), the OFC handles conditions ("when X → do Y"). |
@@ -134,17 +147,26 @@ And the Hipocampus also is controlled as follows:
 
 ```
 ~/.anton/                              GLOBAL scope (cross-project)
-└── memory/
-    ├── profile.md                     Identity — who the user is
-    ├── rules.md                       Always/never/when behavioral rules
-    ├── lessons.md                     Semantic facts from experience
-    └── topics/                        Deep domain expertise
-        └── *.md
+├── memory/
+│   ├── profile.md                     Identity — who the user is
+│   ├── rules.md                       Always/never/when behavioral rules
+│   ├── lessons.md                     Semantic facts from experience
+│   └── topics/                        Deep domain expertise
+│       └── *.md
+└── skills/                            PROCEDURAL MEMORY (striatum)
+    └── <label>/                       One directory per skill
+        ├── meta.json                  label, name, when_to_use, provenance, presence flags
+        ├── declarative.md             Stage 1 — step-by-step procedure (always present)
+        ├── chunks.md                  Stage 2 — higher-level recipes/macros (optional, v2+)
+        ├── code/                      Stage 3 — runnable helper modules (optional, v2+)
+        │   └── __init__.py
+        ├── requirements.txt           Stage 3 dependencies (optional)
+        └── stats.json                 Per-stage usage counters (recommended/used)
 
 <project>/.anton/                      PROJECT scope (workspace-specific)
 ├── memory/
 │   ├── rules.md                       Project-specific rules
-│   ├── lessons.md                     Project-specific knowledge
+│   ├── lessons.md                     Project-specific knowledge (cerebellum writes here)
 │   └── topics/
 │       └── *.md
 ├── episodes/                          EPISODIC MEMORY (conversation archive)
@@ -154,7 +176,7 @@ And the Hipocampus also is controlled as follows:
 └── .env                               Secrets (unchanged)
 ```
 
-Profile (`profile.md`) is global-only — identity is singular. Rules and lessons exist at both scopes. `anton.md` stays as the user-written instruction file and is not managed by the memory system.
+Profile (`profile.md`) is global-only — identity is singular. Rules and lessons exist at both scopes. Skills live globally (one library across projects) at `~/.anton/skills/`. `anton.md` stays as the user-written instruction file and is not managed by the memory system.
 
 ## Memory Entry Format
 
@@ -442,6 +464,192 @@ On first run after upgrading, Anton automatically migrates old memory formats:
 - Old files are preserved — nothing is deleted.
 - Runs synchronously at startup (fast, no LLM calls needed).
 
+## Procedural Memory — The Skills System
+
+Skills are Anton's **procedural memory** — reusable workflows the user has marked as worth remembering. Brain analog: the **striatum** stores motor programs and habits, learned action sequences that fire when a familiar context is recognized. Anton's skill system mirrors this: when the LLM sees a request that matches a stored skill, it pulls the procedure into working memory and follows it instead of reasoning from scratch.
+
+Skills are intentionally distinct from engrams. **Engrams hold facts** ("CoinGecko rate-limits at 50 req/min"), are loaded into every prompt unconditionally because they're cheap, and live in `lessons.md` / `rules.md` / `profile.md`. **Skills hold whole procedures** ("how to summarize a CSV end-to-end"), are NOT loaded into every prompt, and the LLM explicitly retrieves them via the `recall_skill` tool when it recognizes a match. Both systems coexist in the brain — declarative and procedural memory are dissociable — and both coexist in Anton.
+
+### Skill Directory Format
+
+Each skill is a directory at `~/.anton/skills/<label>/` containing multi-stage representations that coexist (rather than graduating between stages):
+
+```
+~/.anton/skills/csv_summary/
+├── meta.json          ← label, name, description, when_to_use, provenance, presence flags
+├── declarative.md     ← Stage 1: step-by-step procedure the LLM reads (always present)
+├── chunks.md          ← Stage 2: higher-level recipes/macros (emerges with use, v2+)
+├── code/              ← Stage 3: runnable helper modules (emerges with reliability, v2+)
+│   └── __init__.py
+├── requirements.txt   ← Stage 3 dependencies (optional)
+└── stats.json         ← per-stage usage counters
+```
+
+The three stages mirror the cortico-striatal-cerebellar gradient:
+- **Stage 1 (declarative)** — what the prefrontal cortex reads when first learning a skill. Slow, deliberate, fully flexible.
+- **Stage 2 (chunks)** — chunked sub-procedures (associative striatum). Faster than Stage 1, still LLM-mediated.
+- **Stage 3 (code)** — runnable helpers (sensorimotor striatum). Cheapest, fastest, used when context is highly familiar.
+
+The executive picks the highest stage that's reliable enough for the current context. v1 only ships Stage 1; the directory format pre-allocates the other slots so consolidation can fill them later without a migration.
+
+### Naming: `label`, not `slug`
+
+Each skill's unique identifier is its `label`. In cognitive psychology, a *label* is the declarative handle by which a procedural memory is addressed in working memory — the verbal token the executive holds when deciding to invoke a stored procedure. It's deliberately distinct from `name` (the human-readable display like "CSV Summary") and `when_to_use` (the retrieval cue describing the matching context).
+
+### How Skills Get Created
+
+Skills are created manually in v1 via the `/skill save` command. The user runs it after a successful task; the LLM reads the recent scratchpad cells + chat history and drafts the skill via `LLMClient.generate_object` with a `_SkillDraft` Pydantic schema:
+
+```
+you> Take a quick look at sales_q3.csv
+
+anton> [opens scratchpad, loads pandas, infers schema, prints describe(), plots distributions]
+       Here's what I found...
+
+you> /skill save csv summary
+anton> Drafting a skill from recent work…
+       Saved skill csv_summary → ~/.anton/skills/csv_summary/
+       Name: CSV Summary
+       When to use: User asks to explore, summarize, or describe a CSV file.
+```
+
+Automatic skill extraction (the consolidator promoting recurring scratchpad patterns into skills) is a v2/v3 feature. v1 deliberately uses manual curation to learn what "good" skills look like before automating.
+
+### How Skills Get Used
+
+On every turn, the system prompt includes a compact `## Procedural memory` section listing every available skill as one line: `- <label> — <when_to_use>`. The full procedures stay on disk. When the LLM recognizes a match, it calls the `recall_skill` tool:
+
+```
+{"name": "recall_skill", "input": {"label": "csv_summary"}}
+```
+
+The tool reads `declarative.md` and returns it as the tool result, which the LLM follows as guidance for the rest of the turn. Each successful recall increments `stats.json::stage_1::recommended` — that's the classifier signal, mechanically captured without any LLM compliance dance.
+
+Brain analog: the prefrontal cortex doesn't keep every skill loaded. It has fast pattern recognition that flags "I might need skill X" and *retrieves* the skill into working memory only when it actually needs it. The `recall_skill` tool is exactly this retrieval operation.
+
+### Skill Slash Commands
+
+| Command | What it does |
+|---|---|
+| `/skill save [name hint]` | LLM drafts a new skill from recent work and saves it |
+| `/skills list` (or `/skill list`) | Show all saved skills with usage counters |
+| `/skill show <label>` | Print one skill's procedure + stats (typo-tolerant via closest_match) |
+| `/skill remove <label>` | Delete a skill from disk |
+
+### Typo Recovery
+
+When the LLM passes a label that doesn't exist (typos, guesses), `recall_skill` uses `closest_match()` to find the nearest existing slug via difflib and returns that skill's procedure with a warning. The `recommended` counter is credited to the *resolved* label, not the input — so `recall_skill('csv_sumary')` still increments `csv_summary` in the stats. The LLM gets useful behavior even when it gets the spelling wrong.
+
+## Cerebellum — Supervised Error Learning
+
+The Cerebellum is Anton's **supervised error-correction system**. It observes every scratchpad cell and learns from the ones that diverge from intent. Brain analog: the cerebellum's classical role is *forward modeling and error correction* — when a motor command is issued, the cerebellum predicts the expected sensory consequences, and when actual feedback arrives, it computes the prediction error and uses it to refine future commands.
+
+For Anton, the "motor command" is a scratchpad cell. Before the cell runs, the LLM declares its intent via the `one_line_description` field on the scratchpad tool. That description IS the forward model — the prediction of what the cell should do. After the cell runs, we have its actual outcome (stdout, stderr, error). The Cerebellum compares the two and, when they diverge meaningfully, encodes a generalizable lesson that future code-generating LLM calls will see.
+
+### Decoupling: Hooks Live in the Dispatcher, Not the Runtime
+
+The Cerebellum operates via two observer hooks called from the scratchpad tool dispatcher (`handle_scratchpad`), NOT from the runtime backend itself:
+
+```
+handle_scratchpad (orchestration layer)
+  ├─ build prelim Cell from tool input
+  ├─ FIRE pre-execute observers ──→ Cerebellum.on_pre_execute (counter)
+  ├─ pad.execute(code, ...)        (pure execution — runtime never sees observers)
+  ├─ FIRE post-execute observers ─→ Cerebellum.on_post_execute (buffer if errored)
+  └─ return formatted result
+```
+
+This decoupling is intentional. `LocalScratchpadRuntime`, `ScratchpadManager`, and any future `RemoteScratchpadRuntime` are **completely hook-agnostic** — they don't import the Cerebellum, they don't have hook attributes, they never call observers. When a remote runtime backend is added, it inherits zero hook code because there is none to inherit. The orchestration layer is the only place where execution and observation meet.
+
+### Cheap Path
+
+Most cells succeed cleanly. The Cerebellum's `on_post_execute` hook checks `cell.error is None and not cell.stderr.strip()` and returns immediately for clean cells — they're never buffered, no LLM call is ever made for them. Only cells that errored or warned trigger the buffer. The cost of running the Cerebellum on a happy-path turn is **zero LLM calls**.
+
+### Batched Per-Turn Diff
+
+When errored cells exist, they accumulate in a buffer across the turn. At end-of-turn, `_schedule_cerebellum_flush()` fires `Cerebellum.flush()` as a fire-and-forget background task. The user gets their reply immediately while the diff runs in parallel:
+
+1. The buffered cells get formatted into a compact post-mortem prompt
+2. One LLM call via `LLMClient.generate_object_code` (the cheap coding model) returns a `_DiffPassResult` Pydantic model with extracted lessons
+3. Each lesson is wrapped as an `Engram` with `kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`, and routed through `Cortex.encode()` — the same path manual lessons and the consolidator already use
+4. Future scratchpad cells see those lessons via the existing `recall_scratchpad_wisdom()` injection into the scratchpad tool description
+
+The cerebellum is a **producer** only — it generates new lesson entries for the existing storage and retrieval pipeline. There's no parallel storage system, no separate `corrections.md` file. Whatever the consolidator and `/memorize` write to, the cerebellum also writes to.
+
+Brain analog: cerebellar plasticity (LTD at parallel-fiber → Purkinje cell synapses) operates in parallel with continued action, never blocking it. Lessons compound silently across turns; future cells avoid traps that earlier cells fell into.
+
+### The Generated Lessons Look Like
+
+```markdown
+- For CSV files with mixed column types, pass low_memory=False to pd.read_csv. <!-- topic:scratchpad source:consolidation ts:2026-04-11 -->
+- Wrap pd.to_datetime() calls in errors='coerce' when the input may contain malformed strings. <!-- topic:scratchpad source:consolidation ts:2026-04-11 -->
+```
+
+These appear in `lessons.md` like any other engram, carry the same metadata, and get pruned by the same compaction loop when memory grows past threshold.
+
+## Structured Output — `LLMClient.generate_object`
+
+Anton has a single primitive for getting structured data out of the LLM, used by the cerebellum, the consolidator, the cortex's identity/compaction passes, the connect collector, the skill drafter, and the custom-datasource flow. It lives at `anton/llm/client.py`:
+
+```python
+async def generate_object(
+    self,
+    schema_class,        # A Pydantic BaseModel subclass, or list[Model]
+    *,
+    system: str,
+    messages: list[dict],
+    max_tokens: int | None = None,
+):
+    """Forced-tool-call structured output via the planning provider."""
+```
+
+There's also a paired `generate_object_code(...)` that uses the cheap *coding* provider — appropriate for fast/cheap structured tasks like the cerebellum's post-mortem and the cortex's identity extraction.
+
+### How It Works
+
+1. The Pydantic model is converted to a JSON schema via `model_json_schema()`
+2. A synthetic tool is built whose `input_schema` is that JSON schema
+3. The LLM provider is called with `tool_choice={"type": "tool", "name": tool_name}` — this *forces* the LLM to call the tool rather than returning text
+4. The tool's input dict is validated through `model_validate()` and returned as a typed instance
+
+### Why It Beats Asking for JSON in Text
+
+| Old pattern (text JSON) | New pattern (`generate_object`) |
+|---|---|
+| "Return ONLY valid JSON, no commentary, no markdown fences" | Forced tool_choice — the LLM cannot return text |
+| Manual `json.loads()` with try/except | Pydantic `model_validate()` with structural validation |
+| Strip markdown fences with regex (`_strip_json_fences`) | Never needed — there's no text response to strip |
+| Defensive `if not isinstance(data, dict): return` checks | Pydantic catches type errors at the schema layer |
+| Field-by-field `.get(key, default)` extraction | Typed attribute access on the validated instance |
+
+### The Shared Helper
+
+The schema-derivation and validation logic lives in exactly one place — `anton/llm/structured.py` — and is shared by both `LLMClient.generate_object` (main process, async) and `_ScratchpadLLM.generate_object` (subprocess bridge, sync). Two pure helper functions:
+
+```python
+def build_structured_tool(schema_class) -> tuple[dict, type, bool]:
+    """Pydantic model → (tool_dict, validator_class, is_list)."""
+
+def unwrap_structured_response(tool_call_input, validator_class, is_list):
+    """LLM tool call input → validated typed Pydantic instance."""
+```
+
+This pattern is what every extraction call site uses. Adding a new one is mechanical: define a Pydantic model with `Field(description=...)` on each field, call `await session._llm.generate_object(MySchema, ...)`, wrap in try/except for graceful degradation. The field descriptions on the Pydantic model double as the LLM's instructions — there's no separate prompt explaining the schema.
+
+### Where It's Used
+
+| Module | Schema | Provider | Purpose |
+|---|---|---|---|
+| `connect_collector.py::extract_variables` | `_ExtractionResult` | planning | Parse free-form credential input into structured fields |
+| `commands/skills.py::handle_skill_save` | `_SkillDraft` | planning | LLM drafts a skill from recent scratchpad work |
+| `commands/datasource.py::handle_add_custom_datasource` | `_CustomDatasourceSpec` | planning | LLM identifies a custom datasource's auth fields |
+| `cortex.py::_compact_file` | `_CompactionResult` | **coding** | Memory deduplication during synaptic homeostasis |
+| `cortex.py::maybe_update_identity` | `_IdentityFacts` | **coding** | Default-mode identity extraction every 5 turns |
+| `consolidator.py::replay_and_extract` | `_ConsolidatedLessons` | **coding** | Sleep-replay extraction of lessons from scratchpad sessions |
+| `cerebellum.py::_run_diff` | `_DiffPassResult` | **coding** | Post-mortem error learning from cell failures |
+
+The split between *planning* and *coding* providers preserves the original intent of each call site — anything that previously used `_llm.code()` now uses `generate_object_code` (cheap, fast model), and anything that previously used `_llm.plan()` now uses `generate_object` (planning model).
+
 ## Concurrency Safety
 
 | Operation | Scope | Strategy |
@@ -486,12 +694,24 @@ Source (user/LLM/consolidation)
 ```
 anton/memory/
 ├── hippocampus.py      Engram + Hippocampus class
-├── cortex.py           Cortex class
+├── cortex.py           Cortex class (executive declarative-memory coordinator)
 ├── episodes.py         Episode + EpisodicMemory class
-├── consolidator.py     Consolidator class
+├── consolidator.py     Consolidator class (sleep-replay → Engrams)
+├── cerebellum.py       Cerebellum class (supervised error learning over scratchpad cells)
+├── skills.py           Skill, SkillStore, SkillStats — procedural memory storage layer
 ├── reconsolidator.py   needs_reconsolidation() + reconsolidate() functions
 ├── learnings.py        [legacy] LearningStore — replaced by Hippocampus
 └── store.py            SessionStore — session history (orthogonal to long-term memory)
+
+anton/llm/
+├── client.py           LLMClient with plan/code/generate_object/generate_object_code
+├── structured.py       build_structured_tool + unwrap_structured_response (shared helper)
+└── ...                 anthropic.py, openai.py, provider.py, prompt_builder.py
+
+anton/tools/
+├── recall_skill.py     RECALL_SKILL_TOOL — the LLM's procedural memory retrieval primitive
+├── tool_handlers.py    handle_scratchpad with pre/post-execute observer firing
+└── ...                 registry.py, tool_defs.py
 ```
 
 ### `hippocampus.py` — Storage Engine
@@ -516,17 +736,17 @@ The Hippocampus handles one scope (global OR project). It doesn't decide what to
 
 ### `cortex.py` — Executive Coordinator
 
-The Cortex manages two Hippocampus instances and orchestrates all memory operations.
+The Cortex manages two Hippocampus instances and orchestrates all declarative memory operations. It is also the encoding endpoint that the cerebellum and consolidator route their generated lessons through.
 
 | Method | Purpose |
 |---|---|
 | `build_memory_context()` | Assemble memories for system prompt injection (~5800 token budget) |
-| `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes for tool description injection |
-| `encode(engrams)` | Route engrams to correct hippocampus by scope. Returns action log. |
+| `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes for tool description injection. **This is the channel the cerebellum's lessons flow through into future code generation.** |
+| `encode(engrams)` | Route engrams to correct hippocampus by scope. Returns action log. Called by `/memorize`, the consolidator, and the cerebellum. |
 | `encoding_gate(engram)` | Check if an engram needs user confirmation (mode-dependent) |
-| `needs_compaction()` | Check if any file exceeds 50 entries |
-| `compact_all()` | LLM-assisted deduplication + merge on all oversized files |
-| `maybe_update_identity(message)` | Extract identity facts from user message (fast model, background) |
+| `needs_compaction()` | Check if any file exceeds the threshold |
+| `compact_all()` | LLM-assisted deduplication + merge on all oversized files. Uses `generate_object_code(_CompactionResult, ...)`. |
+| `maybe_update_identity(message)` | Extract identity facts from user message via `generate_object_code(_IdentityFacts, ...)`. Background, fires every 5 turns. |
 
 ### `episodes.py` — Episodic Memory
 
@@ -546,7 +766,51 @@ The EpisodicMemory handles raw conversation logging and recall.
 | Method | Purpose |
 |---|---|
 | `should_replay(cells)` | Heuristic check: errors, 5+ cells, or cancellations → True |
-| `replay_and_extract(cells, llm)` | Compress cells → fast LLM call → parse JSON → return Engrams |
+| `replay_and_extract(cells, llm)` | Compress cells → `generate_object_code(_ConsolidatedLessons, ...)` → return Engrams |
+
+### `cerebellum.py` — Supervised Error Learning
+
+| Method | Purpose |
+|---|---|
+| `on_pre_execute(cell)` | Pre-execute hook called by `handle_scratchpad`. Counter only in v1. |
+| `on_post_execute(cell)` | Post-execute hook. Cheap path skips clean cells; errored/warning cells get buffered. |
+| `flush()` | Run the batched diff pass on all buffered cells, encode lessons via Cortex, clear buffer. Fire-and-forget at end-of-turn. |
+| `reset()` | Drop the buffer without encoding (used when a turn is cancelled mid-flight). |
+| `buffered_count` | Number of cells waiting for the next flush. |
+| `_run_diff(cells)` | Internal: send buffered cells to `generate_object_code(_DiffPassResult, ...)` and return validated lessons. |
+| `_encode_lessons(lessons)` | Internal: wrap lessons as Engrams (`kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`) and route through `Cortex.encode()`. |
+
+### `skills.py` — Procedural Memory Store
+
+| Method | Purpose |
+|---|---|
+| `SkillStore.list_all()` | Return every loadable skill, sorted by label. |
+| `SkillStore.list_summaries()` | Lightweight listing — `[{"label": "...", "name": "...", "when_to_use": "..."}]`. Used by the prompt builder to inject the procedural-memory section without loading any declarative content. |
+| `SkillStore.load(label)` | Read a single skill by label. Returns None if absent or malformed. |
+| `SkillStore.save(skill)` | Write the skill directory. Creates `meta.json`, `declarative.md`, `stats.json`. Never wipes accumulated counters. |
+| `SkillStore.delete(label)` | Remove a skill directory. |
+| `SkillStore.increment_recommended(label, *, stage)` | Atomic-ish bump of the per-stage `recommended` counter (called by `recall_skill`). |
+| `SkillStore.closest_match(bad_label, *, cutoff=0.6)` | Difflib-based fuzzy match for typo recovery. |
+| `make_unique_label(base, store)` | Generate a slug that doesn't collide with any existing skill (`csv_summary`, `csv_summary_2`, ...). |
+| `slugify(text)` | Normalize arbitrary text into a snake_case identifier. |
+
+### `tools/recall_skill.py` — Procedural Memory Retrieval Tool
+
+The LLM-facing tool that pulls a skill into working memory. Lives alongside the other tool defs but is the only tool whose handler reads `session._skill_store`.
+
+| Element | Purpose |
+|---|---|
+| `RECALL_SKILL_TOOL` | The `ToolDef` registered with the session — name, description, input_schema, handler. |
+| `handle_recall_skill(session, tc_input)` | Resolve the label (with closest_match fallback for typos), increment the per-stage `recommended` counter, return a formatted procedure to the LLM as the tool result. |
+
+### `llm/structured.py` — Shared Schema Helper
+
+Two pure helper functions for forced-tool-call structured output. Used by both `LLMClient.generate_object` (main process, async) and `_ScratchpadLLM.generate_object` (subprocess bridge, sync) — they share this code via lazy imports so neither runtime forces pydantic at module load time.
+
+| Function | Purpose |
+|---|---|
+| `build_structured_tool(schema_class)` | Pydantic model (or `list[Model]`) → `(tool_dict, validator_class, is_list)`. The `tool_dict` is ready to pass as `tools=[...]` with `tool_choice={"type": "tool", "name": tool_dict["name"]}`. |
+| `unwrap_structured_response(tool_call_input, validator_class, is_list)` | Validate the LLM's tool call input via Pydantic and unwrap the wrapper if it was a list. Raises `pydantic.ValidationError` on schema drift. |
 
 ### `reconsolidator.py` — Legacy Migration
 
@@ -557,11 +821,11 @@ The EpisodicMemory handles raw conversation logging and recall.
 
 ## Integration Points in chat.py
 
-The memory system is wired into `ChatSession` and `_chat_loop()`:
+The memory + skills + cerebellum systems are wired into `ChatSession` and `_chat_loop()`:
 
 ```
 1. _chat_loop() startup:
-   → Creates Cortex(global_dir, project_dir, mode, llm)
+   → Creates Cortex(global_hc=Hippocampus(global_dir), project_hc=Hippocampus(project_dir), mode, llm)
    → Creates EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
    → Starts episodic session if enabled
    → Runs reconsolidation if needed
@@ -570,49 +834,74 @@ The memory system is wired into `ChatSession` and `_chat_loop()`:
 2. ChatSession.__init__():
    → Stores cortex as self._cortex
    → Stores episodic as self._episodic
+   → Initializes self._skill_store = SkillStore() (procedural memory)
+   → Initializes self._cerebellum = Cerebellum(cortex=self._cortex, llm=self._llm)
+   → Initializes self._scratchpad_observers = [self._cerebellum]
    → Initializes self._pending_memory_confirmations = []
 
 3. ChatSession._build_system_prompt():
    → Calls cortex.build_memory_context()  →  injected before anton.md
+   → Passes self._skill_store to prompt builder
+   → Builder appends "## Procedural memory" section listing all available skills
 
 4. ChatSession._build_tools():
    → Calls cortex.get_scratchpad_context()  →  appended to scratchpad tool desc
    → Includes MEMORIZE_TOOL in tool list
    → Includes RECALL_TOOL when episodic memory is enabled
+   → Includes RECALL_SKILL_TOOL (always available — no-op if no skills saved)
 
 5. Tool dispatch (tools.py):
    → "memorize" → handle_memorize() → cortex.encode()
    → "recall" → handle_recall() → episodic.recall_formatted()
+   → "recall_skill" → handle_recall_skill() → SkillStore.load() + increment_recommended()
+   → "scratchpad" exec → handle_scratchpad() fires pre/post observers around pad.execute()
 
-6. turn_stream():
+6. handle_scratchpad (tool_handlers.py) — observer dispatch:
+   → Build prelim Cell from tool input (code + description + estimated_time)
+   → _fire_pre_execute(session, prelim_cell) → cerebellum.on_pre_execute (counter)
+   → pad.execute(...) — pure execution, runtime never sees observers
+   → _fire_post_execute(session, cell) → cerebellum.on_post_execute (buffer if errored)
+
+7. turn_stream():
    → Logs user input to episodic memory (before LLM call)
    → Logs assistant response to episodic memory (after LLM call)
 
-7. _stream_and_handle_tools() tool loop:
+8. _stream_and_handle_tools() tool loop:
    → Logs each tool_call to episodic memory
    → Logs each tool_result to episodic memory
    → Logs scratchpad cell output to episodic memory
    → _maybe_consolidate_scratchpads() → background asyncio.create_task
 
-8. After turn (turn_stream):
+9. End of turn (turn / turn_stream):
    → Every 5 turns → cortex.maybe_update_identity() as background task
+   → _schedule_cerebellum_flush() → fire-and-forget background task
+     → Runs cerebellum diff on all buffered cells
+     → Encodes extracted lessons via cortex.encode()
+     → Lessons appear in next turn's scratchpad tool description automatically
 
-9. Before user prompt (_chat_loop):
-   → Show pending memory confirmations → user approves/rejects/picks
+10. Before user prompt (_chat_loop):
+    → Show pending memory confirmations → user approves/rejects/picks
 
-10. /setup wizard (sub-menu):
+11. Slash commands for skills (chat.py):
+    → /skill save [name hint] → handle_skill_save() → drafts via generate_object → SkillStore.save()
+    → /skills or /skill list → handle_skills_list() → tabular display of skills + counters
+    → /skill show <label> → handle_skill_show() → full procedure + stats
+    → /skill remove <label> → handle_skill_remove() → SkillStore.delete()
+
+12. /setup wizard (sub-menu):
     → Option 1: Models — provider, API key, planning & coding models
     → Option 2: Memory — memory mode (autopilot/copilot/off) + episodic toggle
     → Persisted to ANTON_MEMORY_MODE and ANTON_EPISODIC_MEMORY in .anton/.env
 
-11. /memory (read-only dashboard):
+13. /memory (read-only dashboard):
     → Shows semantic memory counts (global/project rules, lessons, topics)
     → Shows episodic memory status (ON/OFF) and session count
     → No configuration prompts — directs to /setup > Memory
 
-12. _rebuild_session():
+14. _rebuild_session():
     → Updates cortex._llm and cortex.mode when settings change
     → Propagates episodic memory instance
+    → Re-creates cerebellum if llm or cortex changed
 ```
 
 ## Context Budget Summary
@@ -624,7 +913,11 @@ The memory system is wired into `ChatSession` and `_chat_loop()`:
 | Project rules | Basal Ganglia | ~1500 tokens | Always (system prompt) |
 | Global lessons | ATL semantics | ~1000 tokens | Always (most recent first) |
 | Project lessons | ATL semantics | ~1000 tokens | Always (most recent first) |
-| Scratchpad wisdom | Procedural memory | ~500 tokens | Scratchpad active (tool desc) |
+| Scratchpad wisdom | Procedural priming | ~500 tokens | Scratchpad active (tool desc). Cerebellum-generated lessons flow through here. |
+| Procedural memory list | Striatum (skill labels) | ~50 tokens per skill (compact list) | Always — when any skills are saved. Full procedures NOT loaded; only labels + when_to_use. |
 | Topic files | Cortical association | Unlimited | On demand |
-| Episodic recall | MTL episodic | Variable | On demand (recall tool) |
-| **Total in prompt** | **Working memory** | **~5800 tokens** | ~3% of 200K context |
+| Skill procedures | Striatum (full skills) | Variable per skill | On demand (`recall_skill` tool) — only when the LLM recognizes a match |
+| Episodic recall | MTL episodic | Variable | On demand (`recall` tool) |
+| **Total in prompt** | **Working memory** | **~5800 tokens + ~50/skill** | ~3% of 200K context |
+
+The procedural memory list scales linearly with the number of saved skills but stays cheap (~50 tokens each — slug + one-line `when_to_use`). The full skill procedures are *paid for only when retrieved*, the same way the prefrontal cortex doesn't keep every procedural memory loaded — it has fast pattern recognition that flags relevance and pulls the full procedure from storage on demand.

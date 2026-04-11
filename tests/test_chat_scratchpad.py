@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from anton.chat import SCRATCHPAD_TOOL, ChatSession
+from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
 from anton.commands.session import handle_resume
-from anton.llm.provider import LLMResponse, StreamComplete, StreamToolResult, ToolCall, Usage
+from anton.core.llm.provider import LLMResponse, StreamComplete, StreamToolResult, ToolCall, Usage
+
+
+@pytest.fixture()
+def workspace():
+    # Keep scratchpad venvs inside the repo workspace (pytest runs sandboxed and
+    # can't write to the real home directory).
+    base = Path(__file__).resolve().parents[1] / ".pytest-workspace"
+    base.mkdir(parents=True, exist_ok=True)
+    return MagicMock(base=base)
 
 
 def _text_response(text: str) -> LLMResponse:
@@ -39,29 +50,29 @@ def _scratchpad_response(
 
 class TestScratchpadToolDefinition:
     def test_tool_definition_structure(self):
-        assert SCRATCHPAD_TOOL["name"] == "scratchpad"
-        props = SCRATCHPAD_TOOL["input_schema"]["properties"]
+        assert SCRATCHPAD_TOOL.name == "scratchpad"
+        props = SCRATCHPAD_TOOL.input_schema["properties"]
         assert "action" in props
         assert "name" in props
         assert "code" in props
         assert "packages" in props
-        assert SCRATCHPAD_TOOL["input_schema"]["required"] == ["action", "name"]
+        assert SCRATCHPAD_TOOL.input_schema["required"] == ["action", "name"]
 
     def test_tool_has_install_action(self):
-        actions = SCRATCHPAD_TOOL["input_schema"]["properties"]["action"]["enum"]
+        actions = SCRATCHPAD_TOOL.input_schema["properties"]["action"]["enum"]
         assert "install" in actions
 
     def test_packages_property_is_array_of_strings(self):
-        packages_prop = SCRATCHPAD_TOOL["input_schema"]["properties"]["packages"]
+        packages_prop = SCRATCHPAD_TOOL.input_schema["properties"]["packages"]
         assert packages_prop["type"] == "array"
         assert packages_prop["items"] == {"type": "string"}
 
-    async def test_scratchpad_tool_in_tools(self):
+    async def test_scratchpad_tool_in_tools(self, workspace):
         """scratchpad should always be in _build_tools() output."""
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             await session.turn("hello")
 
@@ -74,7 +85,7 @@ class TestScratchpadToolDefinition:
 
 
 class TestScratchpadExecViaChat:
-    async def test_scratchpad_exec_via_chat(self):
+    async def test_scratchpad_exec_via_chat(self, workspace):
         """exec action flows through and returns output."""
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(
@@ -84,7 +95,7 @@ class TestScratchpadExecViaChat:
             ]
         )
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             reply = await session.turn("what is 7 * 6?")
 
@@ -100,7 +111,7 @@ class TestScratchpadExecViaChat:
 
 
 class TestScratchpadViewViaChat:
-    async def test_scratchpad_view_via_chat(self):
+    async def test_scratchpad_view_via_chat(self, workspace):
         """view action returns cell history."""
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(
@@ -111,7 +122,7 @@ class TestScratchpadViewViaChat:
             ]
         )
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             await session.turn("run and show")
 
@@ -129,7 +140,7 @@ class TestScratchpadViewViaChat:
 
 
 class TestScratchpadRemoveViaChat:
-    async def test_scratchpad_remove_via_chat(self):
+    async def test_scratchpad_remove_via_chat(self, workspace):
         """remove action cleans up the scratchpad."""
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(
@@ -140,7 +151,7 @@ class TestScratchpadRemoveViaChat:
             ]
         )
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             await session.turn("create and remove")
 
@@ -155,7 +166,7 @@ class TestScratchpadRemoveViaChat:
 
 
 class TestScratchpadDumpViaChat:
-    async def test_scratchpad_dump_via_chat(self):
+    async def test_scratchpad_dump_via_chat(self, workspace):
         """dump action flows through chat, returns markdown with code fences."""
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(
@@ -169,7 +180,7 @@ class TestScratchpadDumpViaChat:
             ]
         )
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             await session.turn("show me my work")
 
@@ -202,7 +213,7 @@ class _FakeAsyncIter:
 
 
 class TestScratchpadDumpStreaming:
-    async def test_scratchpad_dump_streams_tool_result(self):
+    async def test_scratchpad_dump_streams_tool_result(self, workspace):
         """dump action yields a StreamToolResult for display, but sends a short
         summary back to the LLM to avoid it parroting the full notebook."""
         mock_llm = AsyncMock()
@@ -231,7 +242,7 @@ class TestScratchpadDumpStreaming:
 
         mock_llm.plan_stream = fake_plan_stream
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             events = []
             async for event in session.turn_stream("show work"):
@@ -255,7 +266,7 @@ class TestScratchpadDumpStreaming:
 
 
 class TestScratchpadStreaming:
-    async def test_scratchpad_in_streaming_path(self):
+    async def test_scratchpad_in_streaming_path(self, workspace):
         """scratchpad exec should work in turn_stream() too."""
         tool_response = _scratchpad_response("Computing.", "exec", "s", "print(99)")
         final_response = _text_response("Got 99.")
@@ -274,7 +285,7 @@ class TestScratchpadStreaming:
 
         mock_llm.plan_stream = fake_plan_stream
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             events = []
             async for event in session.turn_stream("compute 99"):
@@ -294,7 +305,7 @@ class TestScratchpadStreaming:
 
 
 class TestScratchpadInstallViaChat:
-    async def test_install_action_dispatch(self):
+    async def test_install_action_dispatch(self, workspace):
         """install action flows through chat and returns pip output."""
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(
@@ -306,7 +317,7 @@ class TestScratchpadInstallViaChat:
             ]
         )
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             reply = await session.turn("install cowsay")
 
@@ -320,7 +331,7 @@ class TestScratchpadInstallViaChat:
         finally:
             await session.close()
 
-    async def test_install_empty_packages_via_chat(self):
+    async def test_install_empty_packages_via_chat(self, workspace):
         """install with no packages returns a message without crashing."""
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(
@@ -330,7 +341,7 @@ class TestScratchpadInstallViaChat:
             ]
         )
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
             await session.turn("install nothing")
 

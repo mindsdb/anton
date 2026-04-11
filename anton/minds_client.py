@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from anton.llm.openai import build_chat_completion_kwargs
+from anton.core.llm.openai import build_chat_completion_kwargs
 
 if TYPE_CHECKING:
     from anton.settings import AntonSettings

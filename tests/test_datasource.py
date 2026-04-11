@@ -12,6 +12,7 @@ from rich.console import Console
 from anton.chat import (
     ChatSession,
 )
+from anton.core.session import ChatSessionConfig
 from anton.commands.datasource import (
     _PROMPT_RECONNECT_CANCEL,
     handle_add_custom_datasource,
@@ -142,14 +143,36 @@ def registry(datasources_md):
 
 @pytest.fixture()
 def make_session():
-    """Factory that creates a fresh ChatSession with mocked scratchpads."""
+    """Factory that creates a fresh ChatSession with mocked scratchpads.
+
+    The default `generate_object` dispatcher returns a sensible empty
+    instance for whichever Pydantic schema the production code asks
+    for. Tests that need a non-empty result should override
+    `session._llm.generate_object` after construction.
+    """
 
     def _factory():
+        from anton.connect_collector import _ExtractionResult
+
+        async def _default_generate_object(schema_class, **kwargs):
+            # Known extraction schemas → empty defaults so the call
+            # falls back to "no structured data" behavior. Unknown
+            # schemas → raise so the caller's try/except sees a clear
+            # failure (matching the pre-refactor behavior where
+            # json.loads would fail on the canned "UNKNOWN" content).
+            if schema_class is _ExtractionResult:
+                return _ExtractionResult()
+            raise RuntimeError(
+                f"test mock has no default for {schema_class.__name__}; "
+                "override session._llm.generate_object in this test"
+            )
+
         mock_llm = AsyncMock()
         plan_response = MagicMock()
         plan_response.content = "UNKNOWN"
         mock_llm.plan = AsyncMock(return_value=plan_response)
-        session = ChatSession(mock_llm)
+        mock_llm.generate_object = AsyncMock(side_effect=_default_generate_object)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
         session._scratchpads = AsyncMock()
         return session
 
@@ -585,12 +608,12 @@ class TestHandleConnectDatasource:
         assert DataVault(vault_dir=vault_dir).list_connections() == []
 
     @pytest.mark.asyncio
-    async def test_partial_save_on_n_answer(self, registry, vault_dir, make_session):
-        """Answering 'n' saves partial credentials and returns without testing."""
+    async def test_partial_save_on_skip(self, registry, vault_dir, make_session):
+        """Answering 'skip' at the bulk prompt saves partial credentials and returns without testing."""
         session = make_session()
         console = MagicMock()
         vault = DataVault(vault_dir=vault_dir)
-        responses = iter(["PostgreSQL", "n", "n", "db.example.com", "", "", "", "", ""])
+        responses = iter(["PostgreSQL", "n", "skip"])
 
         with (
             patch("anton.commands.datasource.DataVault", return_value=vault),
@@ -627,13 +650,11 @@ class TestHandleConnectDatasource:
             [
                 "PostgreSQL",
                 "n",
-                "y",
                 "db.example.com",
                 "5432",
                 "prod_db",
                 "alice",
                 "s3cr3t",
-                "",
             ]
         )
 
@@ -661,6 +682,241 @@ class TestHandleConnectDatasource:
         assert "postgresql" in last["content"].lower()
 
     @pytest.mark.asyncio
+    async def test_test_failed_decline_sets_status(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """When the connection test fails and the user declines to
+        re-enter credentials, the handler should set
+        session._pending_connect_status = 'test_failed' so the tool
+        wrapper can return an accurate (non-misleading) message to the
+        LLM instead of claiming the user pressed Escape.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = make_pad(make_cell(stdout="", error="connection refused"))
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        # Engine pick + decline retry after the test fails
+        responses = iter(["PostgreSQL", "n"])
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                known_variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                    "password": "wrong",
+                },
+            )
+
+        # Connection NOT saved
+        assert vault.list_connections() == []
+        # Status correctly marked as test_failed (not "escaped")
+        assert getattr(session, "_pending_connect_status", None) == "test_failed"
+
+    @pytest.mark.asyncio
+    async def test_fully_prefilled_known_variables_skips_help_prompt(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """When known_variables covers every required field, skip the
+        'Do you need instructions?' prompt entirely and go straight to
+        test + save. The user has already provided everything.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        # Only the engine selection prompt should fire. After that, the
+        # collector is already complete and the flow proceeds directly
+        # to the connection test.
+        responses = iter(["PostgreSQL"])
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                known_variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                    "password": "s3cr3t",
+                },
+            )
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+        assert saved["port"] == "5432"
+        assert saved["database"] == "prod_db"
+        assert saved["user"] == "alice"
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_credentials_pasted_at_help_prompt(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """Pasting credentials at the 'Do you need instructions?' prompt
+        should extract them instead of forcing a re-prompt or re-asking
+        for every field.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        # Mock the LLM to return a structured extraction for the paste.
+        # connect_collector.extract_variables now uses generate_object
+        # with a Pydantic schema, so the mock returns the typed object.
+        from anton.connect_collector import _ExtractionResult
+        extract_response = _ExtractionResult(
+            variables={
+                "host": "db.example.com",
+                "port": "5432",
+                "database": "prod_db",
+                "user": "alice",
+                "password": "s3cr3t",
+            },
+            is_redirect=False,
+            redirect_engine="",
+            redirect_reason="",
+        )
+        session._llm.generate_object = AsyncMock(return_value=extract_response)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        pasted = (
+            "host: db.example.com\n"
+            "port: 5432\n"
+            "database: prod_db\n"
+            "user: alice\n"
+            "password: s3cr3t"
+        )
+        # Only two user inputs needed: the engine pick, then the paste
+        # at the help prompt. The collector becomes complete immediately
+        # after extraction, so no further prompts are issued.
+        responses = iter(["PostgreSQL", pasted])
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+        assert saved["port"] == "5432"
+        assert saved["database"] == "prod_db"
+        assert saved["user"] == "alice"
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_from_tool_call_does_not_append_to_history(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """With from_tool_call=True the handler must NOT mutate session._history.
+
+        If it did, the appended assistant message would land between the
+        surrounding tool_use and tool_result blocks, violating the
+        Anthropic API invariant and producing a 400 error on the next
+        LLM call ("tool_use ids were found without tool_result blocks").
+        """
+        session = make_session()
+        # Simulate being mid-tool-call: history already contains an
+        # assistant message with a tool_use that needs a tool_result next.
+        session._history = [
+            {"role": "user", "content": "connect to postgres"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me connect you."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_test_123",
+                        "name": "connect_new_datasource",
+                        "input": {"engine": "postgres"},
+                    },
+                ],
+            },
+        ]
+        history_len_before = len(session._history)
+
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "n",
+                "db.example.com",
+                "5432",
+                "prod_db",
+                "alice",
+                "s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                from_tool_call=True,
+            )
+
+        # Connection saved successfully...
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        # ...but history MUST be untouched (the tool wrapper appends
+        # the tool_result separately after this returns).
+        assert len(session._history) == history_len_before
+        assert session._history[-1]["role"] == "assistant"
+        assert isinstance(session._history[-1]["content"], list)
+        assert session._history[-1]["content"][-1]["type"] == "tool_use"
+
+    @pytest.mark.asyncio
     async def test_failed_test_offers_retry(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):
@@ -679,13 +935,11 @@ class TestHandleConnectDatasource:
             [
                 "PostgreSQL",
                 "n",
-                "y",
                 "db.example.com",
                 "5432",
                 "prod_db",
                 "alice",
                 "wrongpassword",
-                "",
                 "y",
                 "correctpassword",
             ]
@@ -723,13 +977,11 @@ class TestHandleConnectDatasource:
             [
                 "PostgreSQL",
                 "n",
-                "y",
                 "db.example.com",
                 "5432",
                 "prod_db",
                 "alice",
                 "badpass",
-                "",
                 "n",
             ]
         )
@@ -765,13 +1017,11 @@ class TestHandleConnectDatasource:
             [
                 "PostgreSQL",
                 "n",
-                "y",
                 "db.example.com",
                 "5432",
                 "prod_db",
                 "alice",
                 "s3cr3t",
-                "",
             ]
         )
 
@@ -800,7 +1050,7 @@ class TestHandleConnectDatasource:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["HubSpot", "1", "n", "y", "pat-na1-abc123"])
+        responses = iter(["HubSpot", "1", "n", "pat-na1-abc123"])
 
         with (
             patch("anton.commands.datasource.DataVault", return_value=vault),
@@ -822,13 +1072,29 @@ class TestHandleConnectDatasource:
         assert "client_secret" not in saved
 
     @pytest.mark.asyncio
-    async def test_selective_field_collection(
+    async def test_bulk_key_value_extraction(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):
-        """Typing 'host,user,password' collects only those three fields."""
+        """A single bulk response with key=value pairs fills multiple fields at once."""
         session = make_session()
         console = MagicMock()
         vault = DataVault(vault_dir=vault_dir)
+
+        # Mock the LLM extraction to return a typed Pydantic result
+        # (connect_collector now uses generate_object with a schema).
+        from anton.connect_collector import _ExtractionResult
+        bulk_response = _ExtractionResult(
+            variables={
+                "host": "db.example.com",
+                "port": "5432",
+                "database": "prod_db",
+                "user": "alice",
+            },
+            is_redirect=False,
+            redirect_engine="",
+            redirect_reason="",
+        )
+        session._llm.generate_object = AsyncMock(return_value=bulk_response)
 
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
@@ -837,10 +1103,8 @@ class TestHandleConnectDatasource:
             [
                 "PostgreSQL",
                 "n",
-                "host,user,password",
-                "db.example.com",
-                "alice",
-                "s3cr3t",
+                "host=db.example.com port=5432 database=prod_db user=alice",
+                "s3cr3t",  # only password remains → single-field prompt
             ]
         )
 
@@ -858,7 +1122,11 @@ class TestHandleConnectDatasource:
         assert len(conns) == 1
         saved = vault.load("postgresql", conns[0]["name"])
         assert saved is not None
-        assert set(saved.keys()) == {"host", "user", "password"}
+        assert saved["host"] == "db.example.com"
+        assert saved["port"] == "5432"
+        assert saved["database"] == "prod_db"
+        assert saved["user"] == "alice"
+        assert saved["password"] == "s3cr3t"
 
 
 class TestCredentialScrubbing:
@@ -926,13 +1194,11 @@ class TestCredentialScrubbing:
             [
                 "PostgreSQL",
                 "n",
-                "y",
                 "db.host.com",
                 "5432",
                 "mydb",
                 "alice",
                 secret_pw,
-                "public",
             ]
         )
 
@@ -1483,13 +1749,11 @@ class TestEnvActivationCollisionFree:
             [
                 "PostgreSQL",
                 "n",
-                "y",
                 "db.example.com",
                 "5432",
                 "prod_db",
                 "alice",
                 "s3cr3t",
-                "",
             ]
         )
 
@@ -1880,11 +2144,19 @@ class TestStaleDsRegistrationState:
 class TestAddCustomDatasourceFlow:
     """Tests for _handle_add_custom_datasource field-collection logic."""
 
-    def _make_llm_response(self, fields: list[dict], display_name: str = "MyDB") -> str:
-        """Return a JSON string mimicking the LLM's plan() response."""
-        import json as _json
+    def _make_spec(self, fields: list[dict], display_name: str = "MyDB"):
+        """Return a _CustomDatasourceSpec instance mimicking the LLM's response."""
+        from anton.commands.datasource import (
+            _CustomDatasourceField,
+            _CustomDatasourceSpec,
+        )
 
-        return _json.dumps({"display_name": display_name, "pip": "", "fields": fields})
+        return _CustomDatasourceSpec(
+            display_name=display_name,
+            pip="",
+            test_snippet="",
+            fields=[_CustomDatasourceField(**f) for f in fields],
+        )
 
     def _make_registry(self, tmp_path):
         """Return a minimal registry mock that accepts any slug."""
@@ -1894,12 +2166,10 @@ class TestAddCustomDatasourceFlow:
         reg.get.return_value = None  # triggers inline fallback
         return reg
 
-    def _make_llm(self, json_text: str):
-        """Return an AsyncMock LLM whose plan() returns json_text."""
+    def _make_llm(self, spec):
+        """Return an AsyncMock LLM whose generate_object() returns the spec."""
         llm = AsyncMock()
-        response = MagicMock()
-        response.content = json_text
-        llm.plan = AsyncMock(return_value=response)
+        llm.generate_object = AsyncMock(return_value=spec)
         return llm
 
     def _mock_ds_path(self, mock_path_cls, tmp_path):
@@ -1913,7 +2183,7 @@ class TestAddCustomDatasourceFlow:
         """Required non-secret field without inline value triggers Prompt.ask."""
         session = make_session()
         session._llm = self._make_llm(
-            self._make_llm_response(
+            self._make_spec(
                 [
                     {
                         "name": "host",
@@ -1953,7 +2223,7 @@ class TestAddCustomDatasourceFlow:
         """Required secret field without inline value triggers password prompt."""
         session = make_session()
         session._llm = self._make_llm(
-            self._make_llm_response(
+            self._make_spec(
                 [
                     {
                         "name": "api_key",
@@ -1991,7 +2261,7 @@ class TestAddCustomDatasourceFlow:
         """Empty responses for all required fields causes a hard stop (None)."""
         session = make_session()
         session._llm = self._make_llm(
-            self._make_llm_response(
+            self._make_spec(
                 [
                     {
                         "name": "host",
@@ -2037,21 +2307,22 @@ class TestCustomDatasourceConnectFlow:
 
     # ── helpers (mirrors TestAddCustomDatasourceFlow) ────────────────────
 
-    def _make_llm_response(
+    def _make_spec(
         self,
         fields: list[dict],
         display_name: str = "My API Service",
         test_snippet: str = "",
-    ) -> str:
-        import json as _json
+    ):
+        from anton.commands.datasource import (
+            _CustomDatasourceField,
+            _CustomDatasourceSpec,
+        )
 
-        return _json.dumps(
-            {
-                "display_name": display_name,
-                "pip": "",
-                "test_snippet": test_snippet,
-                "fields": fields,
-            }
+        return _CustomDatasourceSpec(
+            display_name=display_name,
+            pip="",
+            test_snippet=test_snippet,
+            fields=[_CustomDatasourceField(**f) for f in fields],
         )
 
     def _make_registry(self, tmp_path):
@@ -2064,11 +2335,9 @@ class TestCustomDatasourceConnectFlow:
         reg.get.return_value = None  # triggers inline fallback engine_def
         return reg
 
-    def _make_llm(self, json_text: str):
+    def _make_llm(self, spec):
         llm = AsyncMock()
-        response = MagicMock()
-        response.content = json_text
-        llm.plan = AsyncMock(return_value=response)
+        llm.generate_object = AsyncMock(return_value=spec)
         return llm
 
     def _mock_ds_path(self, mock_path_cls, tmp_path):
@@ -2086,7 +2355,7 @@ class TestCustomDatasourceConnectFlow:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
         session._llm = self._make_llm(
-            self._make_llm_response(
+            self._make_spec(
                 [
                     {
                         "name": "api_key",
@@ -2142,7 +2411,7 @@ class TestCustomDatasourceConnectFlow:
         pad = make_pad(make_cell(stdout="", stderr="connection refused"))
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
         session._llm = self._make_llm(
-            self._make_llm_response(
+            self._make_spec(
                 [
                     {
                         "name": "api_key",
@@ -2195,7 +2464,7 @@ class TestCustomDatasourceConnectFlow:
         ])
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
         session._llm = self._make_llm(
-            self._make_llm_response(
+            self._make_spec(
                 [
                     {
                         "name": "api_key",
@@ -2257,7 +2526,7 @@ class TestCustomDatasourceConnectFlow:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
         session._llm = self._make_llm(
-            self._make_llm_response(
+            self._make_spec(
                 [
                     {
                         "name": "api_key",
@@ -2569,7 +2838,6 @@ class TestPromptCopyConsistency:
             "(reconnect/cancel)",
             "(anton) Would you like to re-enter your credentials? (y/n)",
             "(anton) Use this datasource? (y/n)",
-            "(anton) Do you have these available? (y/n/<list params>)",
             "(anton) (reconnect/cancel)",
         ],
     )

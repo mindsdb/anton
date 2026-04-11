@@ -9,14 +9,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from anton.chat import ChatSession, _handle_connect
+from anton.core.session import ChatSessionConfig
 from anton.minds_client import describe_minds_connection_error
 from anton.config.settings import AntonSettings
-from anton.tools import MEMORIZE_TOOL
+from anton.core.tools.tool_defs import MEMORIZE_TOOL
 from anton.context.self_awareness import SelfAwarenessContext
-from anton.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.workspace import Workspace
-from anton.memory.cortex import Cortex
-from anton.memory.hippocampus import Hippocampus
+from anton.core.memory.cortex import Cortex
+from anton.core.memory.hippocampus import Hippocampus
 
 
 def _text_response(text: str) -> LLMResponse:
@@ -76,13 +77,13 @@ def memory_dirs(tmp_path):
 @pytest.fixture()
 def cortex(memory_dirs):
     global_dir, project_dir = memory_dirs
-    return Cortex(global_dir=global_dir, project_dir=project_dir, mode="autopilot")
+    return Cortex(global_hc=Hippocampus(global_dir), project_hc=Hippocampus(project_dir), mode="autopilot")
 
 
 class TestMemorizeTool:
     def test_tool_definition_structure(self):
-        assert MEMORIZE_TOOL["name"] == "memorize"
-        props = MEMORIZE_TOOL["input_schema"]["properties"]
+        assert MEMORIZE_TOOL.name == "memorize"
+        props = MEMORIZE_TOOL.input_schema["properties"]
         assert "entries" in props
 
     async def test_memorize_creates_rule(self, cortex, memory_dirs):
@@ -98,7 +99,7 @@ class TestMemorizeTool:
             ]
         )
 
-        session = ChatSession(mock_llm, cortex=cortex)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
         reply = await session.turn("always use httpx instead of requests")
         await asyncio.sleep(0)  # Let fire-and-forget encode task run
 
@@ -124,7 +125,7 @@ class TestMemorizeTool:
             ]
         )
 
-        session = ChatSession(mock_llm, cortex=cortex)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
         await session.turn("coingecko rate limits at 50 per minute")
         await asyncio.sleep(0)  # Let fire-and-forget encode task run
 
@@ -145,7 +146,7 @@ class TestMemorizeTool:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
-        session = ChatSession(mock_llm, cortex=cortex)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
         await session.turn("hi")
 
         call_kwargs = mock_llm.plan.call_args
@@ -158,7 +159,7 @@ class TestMemorizeTool:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
-        session = ChatSession(mock_llm, self_awareness=None, cortex=None)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, self_awareness=None, cortex=None))
         await session.turn("hello")
 
         call_kwargs = mock_llm.plan.call_args
@@ -172,7 +173,7 @@ class TestMemorizeTool:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
-        session = ChatSession(mock_llm, cortex=cortex)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
         await session.turn("hello")
 
         call_kwargs = mock_llm.plan.call_args
@@ -194,7 +195,7 @@ class TestMemorizeTool:
             ]
         )
 
-        session = ChatSession(mock_llm, cortex=cortex)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
         await session.turn("note this")
 
         tool_result_msgs = [
@@ -214,11 +215,11 @@ class TestAntonMdInjection:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
-        session = ChatSession(
-            mock_llm,
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
             cortex=cortex,
             workspace=ws,
-        )
+        ))
         await session.turn("hi")
 
         call_kwargs = mock_llm.plan.call_args
@@ -233,11 +234,11 @@ class TestAntonMdInjection:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
-        session = ChatSession(
-            mock_llm,
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
             cortex=cortex,
             workspace=ws,
-        )
+        ))
         await session.turn("hi")
 
         call_kwargs = mock_llm.plan.call_args
@@ -251,10 +252,10 @@ class TestRuntimeContext:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
-        session = ChatSession(
-            mock_llm,
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
             runtime_context="- Provider: anthropic\n- Planning model: claude-sonnet-4-6\n- Coding model: claude-opus-4-6",
-        )
+        ))
         await session.turn("hi")
 
         call_kwargs = mock_llm.plan.call_args
@@ -268,10 +269,10 @@ class TestRuntimeContext:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
-        session = ChatSession(
-            mock_llm,
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
             runtime_context="- Provider: anthropic",
-        )
+        ))
         await session.turn("hi")
 
         call_kwargs = mock_llm.plan.call_args
@@ -283,7 +284,7 @@ class TestRuntimeContext:
         mock_llm = AsyncMock()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
-        session = ChatSession(mock_llm, runtime_context="")
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, runtime_context=""))
         await session.turn("hi")
 
         call_kwargs = mock_llm.plan.call_args

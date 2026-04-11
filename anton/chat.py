@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import os
 import urllib.error
-import re as _re
 import sys
-import uuid
 import time
-from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,19 +12,16 @@ import anthropic
 
 from anton.clipboard import (
     cleanup_old_uploads,
-    clipboard_unavailable_reason,
     grab_clipboard,
     is_clipboard_supported,
     parse_dropped_paths as _parse_dropped_paths,
     save_clipboard_image,
 )
-from anton.llm.prompts import CHAT_SYSTEM_PROMPT, build_visualizations_prompt
-from anton.llm.provider import (
-    ContextOverflowError,
+from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.llm.provider import (
     TokenLimitExceeded,
     StreamComplete,
     StreamContextCompacted,
-    StreamEvent,
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
@@ -36,25 +29,13 @@ from anton.llm.provider import (
     StreamToolUseEnd,
     StreamToolUseStart,
 )
-from anton.scratchpad import ScratchpadManager
-from anton.tools import (
-    CONNECT_DATASOURCE_TOOL,
-    MEMORIZE_TOOL,
-    PUBLISH_TOOL,
-    RECALL_TOOL,
-    SCRATCHPAD_TOOL,
-    dispatch_tool,
-    format_cell_result,
-    prepare_scratchpad_exec,
-)
 from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_limits
 from anton.commands.setup import (
     handle_memory,
     handle_setup,
-    handle_setup_memory,
     handle_setup_models,
 )
-from anton.commands.ui import handle_theme, print_slash_help
+from anton.commands.ui import handle_explain, handle_theme, print_slash_help
 from anton.utils.clipboard import (
     ensure_clipboard,
     format_clipboard_image_message,
@@ -69,13 +50,14 @@ from anton.commands.datasource import (
     handle_connect_datasource,
     handle_test_datasource,
 )
+from anton.commands.skills import (
+    handle_skill_remove,
+    handle_skill_save,
+    handle_skill_show,
+    handle_skills_list,
+)
+from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
 from anton.utils.prompt import (
-    MINDS_KEYS,
-    LLM_KEYS,
-    SECRET_PATTERNS,
-    mask_secret,
-    is_secret_key,
-    display_value,
     prompt_or_cancel,
     prompt_minds_api_key,
 )
@@ -84,1190 +66,28 @@ from anton.minds_client import (
     normalize_minds_url,
     describe_minds_connection_error,
     list_minds,
-    get_mind,
-    refresh_knowledge,
     list_datasources,
     test_llm,
 )
 from anton.data_vault import DataVault
 from anton.utils.datasources import (
-    build_datasource_context,
     register_secret_vars,
-    restore_namespaced_env,
-    remove_engine_block,
-    scrub_credentials,
-    parse_connection_slug,
 )
 from anton.datasource_registry import (
-    DatasourceEngine,
-    DatasourceField,
     DatasourceRegistry,
 )
-from anton.llm.openai import build_chat_completion_kwargs
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style as PTStyle
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Prompt
 
 if TYPE_CHECKING:
     from rich.console import Console
 
     from anton.config.settings import AntonSettings
-    from anton.context.self_awareness import SelfAwarenessContext
-    from anton.llm.client import LLMClient
-    from anton.memory.cortex import Cortex
-    from anton.memory.episodes import EpisodicMemory
-    from anton.memory.history_store import HistoryStore
+    from anton.core.memory.episodes import EpisodicMemory
     from anton.workspace import Workspace
-
-
-_MAX_TOOL_ROUNDS = 25  # Hard limit on consecutive tool-call rounds per turn
-_MAX_CONTINUATIONS = 3  # Max times the verification loop can restart the tool loop
-_CONTEXT_PRESSURE_THRESHOLD = 0.7  # Trigger compaction when context is 70% full
-_MAX_CONSECUTIVE_ERRORS = 5  # Stop if the same tool fails this many times in a row
-_RESILIENCE_NUDGE_AT = 2  # Inject resilience nudge after this many consecutive errors
-_RESILIENCE_NUDGE = (
-    "\n\nSYSTEM: This tool has failed twice in a row. Before retrying the same approach or "
-    "asking the user for help, try a creative workaround — different headers/user-agent, "
-    "a public API, archive.org, an alternate library, or a completely different data source. "
-    "Only involve the user if the problem truly requires something only they can provide."
-)
-
-# TODO: Is this enough for now?
-TOKEN_STATUS_CACHE_TTL = 60.0
-
-
-
-class ChatSession:
-    """Manages a multi-turn conversation with tool-call delegation."""
-
-    def __init__(
-        self,
-        llm_client: LLMClient,
-        *,
-        self_awareness: SelfAwarenessContext | None = None,
-        cortex: Cortex | None = None,
-        episodic: EpisodicMemory | None = None,
-        runtime_context: str = "",
-        workspace: Workspace | None = None,
-        console: Console | None = None,
-        coding_provider: str = "anthropic",
-        coding_api_key: str = "",
-        coding_base_url: str = "",
-        initial_history: list[dict] | None = None,
-        history_store: HistoryStore | None = None,
-        session_id: str | None = None,
-        proactive_dashboards: bool = False,
-    ) -> None:
-        self._llm = llm_client
-        self._self_awareness = self_awareness
-        self._cortex = cortex
-        self._episodic = episodic
-        self._runtime_context = runtime_context
-        self._proactive_dashboards = proactive_dashboards
-        self._workspace = workspace
-        self._console = console
-        self._history: list[dict] = list(initial_history) if initial_history else []
-        self._pending_memory_confirmations: list = []
-        self._turn_count = (
-            sum(1 for m in self._history if m.get("role") == "user")
-            if initial_history
-            else 0
-        )
-        self._history_store = history_store
-        self._session_id = session_id
-        self._cancel_event = asyncio.Event()
-        self._escape_watcher: "EscapeWatcher | None" = None
-        self._active_datasource: str | None = None
-        self._scratchpads = ScratchpadManager(
-            coding_provider=coding_provider,
-            coding_model=getattr(llm_client, "coding_model", ""),
-            coding_api_key=coding_api_key,
-            coding_base_url=coding_base_url,
-            workspace_path=workspace.base if workspace else None,
-        )
-
-    @property
-    def history(self) -> list[dict]:
-        return self._history
-
-    def repair_history(self) -> None:
-        """Fix dangling tool_use blocks left by mid-stream cancellation.
-
-        The Anthropic API requires every tool_use to be followed by a
-        tool_result.  If we cancelled mid-turn, the last assistant message
-        may contain tool_use blocks with no corresponding tool_result in
-        the next message.  Append synthetic tool_results so the
-        conversation can continue.
-        """
-        if not self._history:
-            return
-        last = self._history[-1]
-        if last.get("role") != "assistant":
-            return
-        content = last.get("content")
-        if not isinstance(content, list):
-            return
-        tool_ids = [
-            block["id"]
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "tool_use"
-        ]
-        if not tool_ids:
-            return
-        self._history.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tid,
-                        "content": "Cancelled by user.",
-                    }
-                    for tid in tool_ids
-                ],
-            }
-        )
-
-    def _persist_history(self) -> None:
-        """Save current history to disk if a history store is configured."""
-        if self._history_store and self._session_id:
-            self._history_store.save(self._session_id, self._history)
-
-    async def _build_system_prompt(self, user_message: str = "") -> str:
-        import datetime as _dt
-        _now = _dt.datetime.now()
-        _current_datetime = _now.strftime("%A, %B %d, %Y at %I:%M %p")
-
-        prompt = CHAT_SYSTEM_PROMPT.format(
-            runtime_context=self._runtime_context,
-            visualizations_section=build_visualizations_prompt(
-                self._proactive_dashboards
-            ),
-            current_datetime=_current_datetime,
-        )
-        # Inject memory context (replaces old self_awareness)
-        if self._cortex is not None:
-            memory_section = await self._cortex.build_memory_context(user_message)
-            if memory_section:
-                prompt += memory_section
-        elif self._self_awareness is not None:
-            # Fallback for legacy usage (tests, etc.)
-            sa_section = self._self_awareness.build_prompt_section()
-            if sa_section:
-                prompt += sa_section
-        # Inject anton.md project context (user-written takes priority)
-        if self._workspace is not None:
-            md_context = self._workspace.build_anton_md_context()
-            if md_context:
-                prompt += md_context
-        # Inject connected datasource context without credentials
-        ds_ctx = build_datasource_context(active_only=self._active_datasource)
-        if ds_ctx:
-            prompt += ds_ctx
-        return prompt
-
-    # Packages the LLM is most likely to care about when writing scratchpad code.
-    _NOTABLE_PACKAGES: set[str] = {
-        "numpy",
-        "pandas",
-        "matplotlib",
-        "seaborn",
-        "scipy",
-        "scikit-learn",
-        "requests",
-        "httpx",
-        "aiohttp",
-        "beautifulsoup4",
-        "lxml",
-        "pillow",
-        "sympy",
-        "networkx",
-        "sqlalchemy",
-        "pydantic",
-        "rich",
-        "tqdm",
-        "click",
-        "fastapi",
-        "flask",
-        "django",
-        "openai",
-        "anthropic",
-        "tiktoken",
-        "transformers",
-        "torch",
-        "polars",
-        "pyarrow",
-        "openpyxl",
-        "xlsxwriter",
-        "plotly",
-        "bokeh",
-        "altair",
-        "pytest",
-        "hypothesis",
-        "yaml",
-        "pyyaml",
-        "toml",
-        "tomli",
-        "tomllib",
-        "jinja2",
-        "markdown",
-        "pygments",
-        "cryptography",
-        "paramiko",
-        "boto3",
-    }
-
-    def _build_tools(self) -> list[dict]:
-        scratchpad_tool = dict(SCRATCHPAD_TOOL)
-        pkg_list = self._scratchpads._available_packages
-        if pkg_list:
-            notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
-            if notable:
-                pkg_line = ", ".join(notable)
-                extra = f"\n\nInstalled packages ({len(pkg_list)} total, notable: {pkg_line})."
-            else:
-                extra = f"\n\nInstalled packages: {len(pkg_list)} total (standard library plus dependencies)."
-            scratchpad_tool["description"] = SCRATCHPAD_TOOL["description"] + extra
-
-        # Inject scratchpad wisdom from memory (procedural priming)
-        if self._cortex is not None:
-            wisdom = self._cortex.get_scratchpad_context()
-            if wisdom:
-                scratchpad_tool[
-                    "description"
-                ] += f"\n\nLessons from past sessions:\n{wisdom}"
-
-        tools = [scratchpad_tool]
-        if self._cortex is not None:
-            tools.append(MEMORIZE_TOOL)
-        elif self._self_awareness is not None:
-            # Legacy fallback
-            from anton.tools import MEMORIZE_TOOL as _MT
-
-            tools.append(_MT)
-        if self._episodic is not None and self._episodic.enabled:
-            tools.append(RECALL_TOOL)
-        tools.append(CONNECT_DATASOURCE_TOOL)
-        tools.append(PUBLISH_TOOL)
-        return tools
-
-    async def close(self) -> None:
-        """Clean up scratchpads and other resources."""
-        await self._scratchpads.close_all()
-
-    async def _summarize_history(self) -> None:
-        """Compress old conversation turns into a summary using the coding model.
-
-        Splits history into old (first 60%) and recent (last 40%), keeping at
-        least 4 recent turns.  The old portion is summarized by the fast coding
-        model and replaced with a single user message.
-        """
-        if len(self._history) < 6:
-            return  # Too short to summarize
-
-        min_recent = 4
-        split = max(int(len(self._history) * 0.6), 1)
-        # Ensure we keep at least min_recent turns
-        split = min(split, len(self._history) - min_recent)
-        if split < 2:
-            return
-
-        # Walk split backward to avoid breaking tool_use / tool_result pairs.
-        # A user message containing tool_result blocks must stay with the
-        # preceding assistant message that contains the matching tool_use.
-        while split > 1:
-            msg = self._history[split]
-            if msg.get("role") != "user":
-                break
-            content = msg.get("content")
-            if not isinstance(content, list):
-                break
-            has_tool_result = any(
-                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-            )
-            if not has_tool_result:
-                break
-            # This user message has tool_results — keep it (and its paired
-            # assistant message) in the recent portion.
-            split -= 1
-            # Also pull back over the preceding assistant message so the
-            # pair stays together.
-            if split > 1 and self._history[split].get("role") == "assistant":
-                split -= 1
-
-        if split < 2:
-            return
-
-        old_turns = self._history[:split]
-        recent_turns = self._history[split:]
-
-        # Serialize old turns into text for summarization
-        lines: list[str] = []
-        for msg in old_turns:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                lines.append(f"[{role}]: {content[:2000]}")
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            lines.append(f"[{role}]: {block['text'][:1000]}")
-                        elif block.get("type") == "tool_use":
-                            lines.append(
-                                f"[{role}/tool_use]: {block.get('name', '')}({str(block.get('input', ''))[:500]})"
-                            )
-                        elif block.get("type") == "tool_result":
-                            lines.append(
-                                f"[tool_result]: {str(block.get('content', ''))[:500]}"
-                            )
-
-        old_text = "\n".join(lines)
-        # Cap at ~8000 chars to avoid overloading the summarizer
-        if len(old_text) > 8000:
-            old_text = old_text[:8000] + "\n... (truncated)"
-
-        try:
-            summary_response = await self._llm.code(
-                system=(
-                    "Summarize this conversation history concisely. Preserve:\n"
-                    "- Key decisions and conclusions\n"
-                    "- Important data/results discovered\n"
-                    "- Variable names and values that are still relevant\n"
-                    "- Errors encountered and how they were resolved\n"
-                    "Keep it under 2000 tokens. Use bullet points."
-                ),
-                messages=[{"role": "user", "content": old_text}],
-                max_tokens=2048,
-            )
-            summary = summary_response.content or "(summary unavailable)"
-        except Exception:
-            # If summarization fails, just do a simple truncation
-            summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
-
-        summary_msg = {
-            "role": "user",
-            "content": f"[Context summary of earlier conversation]\n{summary}",
-        }
-
-        # If the recent portion starts with a user message, insert a minimal
-        # assistant separator to avoid consecutive user messages (API error).
-        if recent_turns and recent_turns[0].get("role") == "user":
-            self._history = [
-                summary_msg,
-                {"role": "assistant", "content": "Understood."},
-                *recent_turns,
-            ]
-        else:
-            self._history = [summary_msg] + recent_turns
-
-    def _compact_scratchpads(self) -> bool:
-        """Compact all active scratchpads. Returns True if any were compacted."""
-        compacted = False
-        for pad in self._scratchpads._pads.values():
-            if pad._compact_cells():
-                compacted = True
-        return compacted
-
-    async def turn(self, user_input: str | list[dict]) -> str:
-        self._history.append({"role": "user", "content": user_input})
-
-        user_msg_str = user_input if isinstance(user_input, str) else ""
-        system = await self._build_system_prompt(user_msg_str)
-        tools = self._build_tools()
-
-        try:
-            response = await self._llm.plan(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            )
-        except ContextOverflowError:
-            await self._summarize_history()
-            self._compact_scratchpads()
-            response = await self._llm.plan(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            )
-
-        # Proactive compaction
-        if response.usage.context_pressure > _CONTEXT_PRESSURE_THRESHOLD:
-            await self._summarize_history()
-            self._compact_scratchpads()
-
-        # Handle tool calls
-        tool_round = 0
-        error_streak: dict[str, int] = {}
-        resilience_nudged: set[str] = set()
-
-        while response.tool_calls:
-            tool_round += 1
-            if tool_round > _MAX_TOOL_ROUNDS:
-                self._history.append(
-                    {"role": "assistant", "content": response.content or ""}
-                )
-                self._history.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"SYSTEM: You have used {_MAX_TOOL_ROUNDS} tool-call rounds on this turn. "
-                            "Pause here. Summarize what you have accomplished so far and what remains. "
-                            "If you believe you are on a good track and can finish the task with more steps, "
-                            "tell the user and ask if they'd like you to continue. "
-                            "Do NOT retry automatically — wait for the user's response."
-                        ),
-                    }
-                )
-                response = await self._llm.plan(
-                    system=system,
-                    messages=self._history,
-                )
-                break
-
-            # Build assistant message with content blocks
-            assistant_content: list[dict] = []
-            if response.content:
-                assistant_content.append({"type": "text", "text": response.content})
-            for tc in response.tool_calls:
-                assistant_content.append(
-                    {
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    }
-                )
-            self._history.append({"role": "assistant", "content": assistant_content})
-
-            # Process each tool call via registry
-            tool_results: list[dict] = []
-            for tc in response.tool_calls:
-                try:
-                    result_text = await dispatch_tool(self, tc.name, tc.input)
-                except Exception as exc:
-                    result_text = f"Tool '{tc.name}' failed: {exc}"
-
-                result_text = scrub_credentials(result_text)
-                result_text = _apply_error_tracking(
-                    result_text,
-                    tc.name,
-                    error_streak,
-                    resilience_nudged,
-                )
-
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": result_text,
-                    }
-                )
-
-            self._history.append({"role": "user", "content": tool_results})
-
-            # Get follow-up from LLM
-            try:
-                response = await self._llm.plan(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                )
-            except ContextOverflowError:
-                await self._summarize_history()
-                self._compact_scratchpads()
-                response = await self._llm.plan(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                )
-
-            # Proactive compaction during tool loop
-            if response.usage.context_pressure > _CONTEXT_PRESSURE_THRESHOLD:
-                await self._summarize_history()
-                self._compact_scratchpads()
-
-        # Text-only response
-        reply = response.content or ""
-        self._history.append({"role": "assistant", "content": reply})
-
-        # Periodic memory vacuum (Systems Consolidation)
-        if self._cortex is not None and self._cortex.mode != "off":
-            self._cortex.maybe_vacuum()
-
-        return reply
-
-    async def turn_stream(
-        self, user_input: str | list[dict]
-    ) -> AsyncIterator[StreamEvent]:
-        """Streaming version of turn(). Yields events as they arrive."""
-        self._history.append({"role": "user", "content": user_input})
-
-        # Log user input to episodic memory
-        if self._episodic is not None:
-            content = (
-                user_input if isinstance(user_input, str) else str(user_input)[:2000]
-            )
-            self._episodic.log_turn(self._turn_count + 1, "user", content)
-
-        user_msg_str = user_input if isinstance(user_input, str) else ""
-        assistant_text_parts: list[str] = []
-        _max_auto_retries = 2
-        _retry_count = 0
-
-        while True:
-            try:
-                async for event in self._stream_and_handle_tools(user_msg_str):
-                    if isinstance(event, StreamTextDelta):
-                        assistant_text_parts.append(event.text)
-                    yield event
-                break  # completed successfully
-            except Exception as _agent_exc:
-                # Token/billing limit — don't retry, let the chat loop handle it
-                if isinstance(_agent_exc, TokenLimitExceeded):
-                    raise
-                _retry_count += 1
-                if _retry_count <= _max_auto_retries:
-                    # Inject the error into history and let the LLM try to recover
-                    self._history.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
-                                "If you can diagnose and fix the issue, continue working on the task. "
-                                "Adjust your approach to avoid the same error. "
-                                "If this is unrecoverable, summarize what you accomplished and suggest next steps."
-                            ),
-                        }
-                    )
-                    # Continue the while loop — _stream_and_handle_tools will be called
-                    # again with the error context now in history
-                    continue
-                else:
-                    # Exhausted retries — stop and summarize for the user
-                    self._history.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
-                                "Stop retrying. Please:\n"
-                                "1. Summarize what you accomplished so far.\n"
-                                "2. Explain what went wrong in plain language.\n"
-                                "3. Suggest next steps — what the user can try (e.g. rephrase, "
-                                "simplify the request, or ask you to continue from where you left off).\n"
-                                "Be concise and helpful."
-                            ),
-                        }
-                    )
-                    try:
-                        async for event in self._llm.plan_stream(
-                            system=await self._build_system_prompt(user_msg_str),
-                            messages=self._history,
-                        ):
-                            if isinstance(event, StreamTextDelta):
-                                assistant_text_parts.append(event.text)
-                            yield event
-                    except Exception:
-                        fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
-                        assistant_text_parts.append(fallback)
-                        yield StreamTextDelta(text=fallback)
-                    break
-
-        # Log assistant response to episodic memory
-        if self._episodic is not None and assistant_text_parts:
-            self._episodic.log_turn(
-                self._turn_count + 1,
-                "assistant",
-                "".join(assistant_text_parts)[:2000],
-            )
-
-        # Identity extraction (Default Mode Network — every 5 turns)
-        self._turn_count += 1
-        self._persist_history()
-        if self._cortex is not None and self._cortex.mode != "off":
-            if self._turn_count % 5 == 0 and isinstance(user_input, str):
-                asyncio.create_task(self._cortex.maybe_update_identity(user_input))
-            # Periodic memory vacuum (Systems Consolidation)
-            self._cortex.maybe_vacuum()
-
-    async def _stream_and_handle_tools(
-        self, user_message: str = ""
-    ) -> AsyncIterator[StreamEvent]:
-        """Stream one LLM call, handle tool loops, yield all events."""
-        system = await self._build_system_prompt(user_message)
-        tools = self._build_tools()
-
-        # Guard against summarizing an already-summarized history within the same
-        # turn (e.g. ContextOverflowError on first call + pressure > threshold on
-        # the tool-loop follow-up would previously produce a summary of a summary).
-        _compacted_this_turn = False
-
-        response: StreamComplete | None = None
-
-        try:
-            async for event in self._llm.plan_stream(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            ):
-                yield event
-                if isinstance(event, StreamComplete):
-                    response = event
-        except ContextOverflowError:
-            await self._summarize_history()
-            self._compact_scratchpads()
-            _compacted_this_turn = True
-            yield StreamContextCompacted(
-                message="Context was getting long — older history has been summarized."
-            )
-            async for event in self._llm.plan_stream(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            ):
-                yield event
-                if isinstance(event, StreamComplete):
-                    response = event
-
-        if response is None:
-            return
-
-        llm_response = response.response
-
-        # Detect max_tokens truncation — the LLM was cut off mid-response.
-        # Inject a continuation prompt so it can finish what it was doing.
-        if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
-            self._history.append(
-                {"role": "assistant", "content": llm_response.content or ""}
-            )
-            self._history.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "SYSTEM: Your response was truncated because it exceeded the output token limit. "
-                        "Continue exactly where you left off. If you were about to call a tool, "
-                        "call it now. If the code you were writing was too long, split it into smaller parts."
-                    ),
-                }
-            )
-            response = None
-            try:
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                ):
-                    yield event
-                    if isinstance(event, StreamComplete):
-                        response = event
-            except ContextOverflowError:
-                if not _compacted_this_turn:
-                    await self._summarize_history()
-                    self._compact_scratchpads()
-                    _compacted_this_turn = True
-                yield StreamContextCompacted(
-                    message="Context was getting long — older history has been summarized."
-                )
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                ):
-                    yield event
-                    if isinstance(event, StreamComplete):
-                        response = event
-
-            if response is None:
-                return
-            llm_response = response.response
-
-        # Proactive compaction
-        if (
-            not _compacted_this_turn
-            and llm_response.usage.context_pressure > _CONTEXT_PRESSURE_THRESHOLD
-        ):
-            await self._summarize_history()
-            self._compact_scratchpads()
-            _compacted_this_turn = True
-            yield StreamContextCompacted(
-                message="Context was getting long — older history has been summarized."
-            )
-
-        # Tool-call loop with circuit breaker, wrapped in a completion
-        # verification outer loop that can restart the tool loop if the
-        # task isn't actually done yet.
-        continuation = 0
-        _max_rounds_hit = False
-
-        while True:  # Completion verification loop
-            tool_round = 0
-            error_streak: dict[str, int] = {}
-            resilience_nudged: set[str] = set()
-
-            while llm_response.tool_calls:
-                tool_round += 1
-                if tool_round > _MAX_TOOL_ROUNDS:
-                    _max_rounds_hit = True
-                    self._history.append(
-                        {"role": "assistant", "content": llm_response.content or ""}
-                    )
-                    self._history.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"SYSTEM: You have used {_MAX_TOOL_ROUNDS} tool-call rounds on this turn. "
-                                "Pause here. Summarize what you have accomplished so far and what remains. "
-                                "If you believe you are on a good track and can finish the task with more steps, "
-                                "tell the user and ask if they'd like you to continue. "
-                                "Do NOT retry automatically — wait for the user's response."
-                            ),
-                        }
-                    )
-                    async for event in self._llm.plan_stream(
-                        system=system,
-                        messages=self._history,
-                    ):
-                        yield event
-                    break
-
-                # Build assistant message with content blocks
-                assistant_content: list[dict] = []
-                if llm_response.content:
-                    assistant_content.append(
-                        {"type": "text", "text": llm_response.content}
-                    )
-                for tc in llm_response.tool_calls:
-                    assistant_content.append(
-                        {
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.input,
-                        }
-                    )
-                self._history.append(
-                    {"role": "assistant", "content": assistant_content}
-                )
-
-                # Process each tool call
-                tool_results: list[dict] = []
-                for tc in llm_response.tool_calls:
-                    if self._episodic is not None:
-                        self._episodic.log_turn(
-                            self._turn_count + 1,
-                            "tool_call",
-                            str(tc.input)[:2000],
-                            tool=tc.name,
-                        )
-
-                    try:
-                        if tc.name == "scratchpad" and tc.input.get("action") == "exec":
-                            # Inline streaming exec — yields progress events
-                            prep = await prepare_scratchpad_exec(self, tc.input)
-                            if isinstance(prep, str):
-                                result_text = prep
-                            else:
-                                (
-                                    pad,
-                                    code,
-                                    description,
-                                    estimated_time,
-                                    estimated_seconds,
-                                ) = prep
-                                yield StreamTaskProgress(
-                                    phase="scratchpad_start",
-                                    message=description or "Running code",
-                                    eta_seconds=estimated_seconds,
-                                )
-                                import time as _time
-
-                                _sp_t0 = _time.monotonic()
-                                from anton.scratchpad import Cell
-
-                                cell = None
-                                async for item in pad.execute_streaming(
-                                    code,
-                                    description=description,
-                                    estimated_time=estimated_time,
-                                    estimated_seconds=estimated_seconds,
-                                    cancel_event=self._cancel_event,
-                                ):
-                                    if isinstance(item, str):
-                                        yield StreamTaskProgress(
-                                            phase="scratchpad", message=item
-                                        )
-                                    elif isinstance(item, Cell):
-                                        cell = item
-                                _sp_elapsed = _time.monotonic() - _sp_t0
-                                yield StreamTaskProgress(
-                                    phase="scratchpad_done",
-                                    message=description or "Done",
-                                    eta_seconds=_sp_elapsed,
-                                )
-                                result_text = (
-                                    format_cell_result(cell)
-                                    if cell
-                                    else "No result produced."
-                                )
-                                if self._episodic is not None and cell is not None:
-                                    self._episodic.log_turn(
-                                        self._turn_count + 1,
-                                        "scratchpad",
-                                        (cell.stdout or "")[:2000],
-                                        description=description,
-                                    )
-                        elif tc.name == "connect_new_datasource" or (
-                            tc.name == "publish_or_preview" and tc.input.get("action") == "publish"
-                        ):
-                            # Interactive tool — pause spinner AND escape watcher
-                            yield StreamTaskProgress(
-                                phase="interactive",
-                                message="",
-                            )
-                            if self._escape_watcher:
-                                self._escape_watcher.pause()
-                            result_text = await dispatch_tool(self, tc.name, tc.input)
-                            if self._escape_watcher:
-                                self._escape_watcher.resume()
-                            yield StreamTaskProgress(
-                                phase="analyzing",
-                                message="Analyzing results...",
-                            )
-                        else:
-                            result_text = await dispatch_tool(self, tc.name, tc.input)
-                            if (
-                                tc.name == "scratchpad"
-                                and tc.input.get("action") == "dump"
-                            ):
-                                yield StreamToolResult(content=result_text)
-                                result_text = (
-                                    "The full notebook has been displayed to the user above. "
-                                    "Do not repeat it. Here is the content for your reference:\n\n"
-                                    + result_text
-                                )
-                    except Exception as exc:
-                        result_text = f"Tool '{tc.name}' failed: {exc}"
-
-                    if self._episodic is not None:
-                        self._episodic.log_turn(
-                            self._turn_count + 1,
-                            "tool_result",
-                            result_text[:2000],
-                            tool=tc.name,
-                        )
-                    result_text = scrub_credentials(result_text)
-                    result_text = _apply_error_tracking(
-                        result_text, tc.name, error_streak, resilience_nudged
-                    )
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": result_text,
-                        }
-                    )
-
-                self._history.append({"role": "user", "content": tool_results})
-
-                # Signal that tools are done and LLM is now analyzing
-                yield StreamTaskProgress(
-                    phase="analyzing", message="Analyzing results..."
-                )
-
-                # Stream follow-up
-                response = None
-                try:
-                    async for event in self._llm.plan_stream(
-                        system=system,
-                        messages=self._history,
-                        tools=tools,
-                    ):
-                        yield event
-                        if isinstance(event, StreamComplete):
-                            response = event
-                except ContextOverflowError:
-                    if not _compacted_this_turn:
-                        await self._summarize_history()
-                        self._compact_scratchpads()
-                        _compacted_this_turn = True
-                    yield StreamContextCompacted(
-                        message="Context was getting long — older history has been summarized."
-                    )
-                    async for event in self._llm.plan_stream(
-                        system=system,
-                        messages=self._history,
-                        tools=tools,
-                    ):
-                        yield event
-                        if isinstance(event, StreamComplete):
-                            response = event
-
-                if response is None:
-                    return
-                llm_response = response.response
-
-                # Detect max_tokens truncation inside tool loop
-                if llm_response.stop_reason in ("max_tokens", "length") and not llm_response.tool_calls:
-                    self._history.append(
-                        {"role": "assistant", "content": llm_response.content or ""}
-                    )
-                    self._history.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "SYSTEM: Your response was truncated because it exceeded the output token limit. "
-                                "Continue exactly where you left off. If you were about to call a tool, "
-                                "call it now. If the code you were writing was too long, split it into smaller parts."
-                            ),
-                        }
-                    )
-                    response = None
-                    try:
-                        async for event in self._llm.plan_stream(
-                            system=system,
-                            messages=self._history,
-                            tools=tools,
-                        ):
-                            yield event
-                            if isinstance(event, StreamComplete):
-                                response = event
-                    except ContextOverflowError:
-                        if not _compacted_this_turn:
-                            await self._summarize_history()
-                            self._compact_scratchpads()
-                            _compacted_this_turn = True
-                        yield StreamContextCompacted(
-                            message="Context was getting long — older history has been summarized."
-                        )
-                        async for event in self._llm.plan_stream(
-                            system=system,
-                            messages=self._history,
-                            tools=tools,
-                        ):
-                            yield event
-                            if isinstance(event, StreamComplete):
-                                response = event
-
-                    if response is None:
-                        return
-                    llm_response = response.response
-
-                # Proactive compaction during tool loop
-                if (
-                    not _compacted_this_turn
-                    and llm_response.usage.context_pressure
-                    > _CONTEXT_PRESSURE_THRESHOLD
-                ):
-                    await self._summarize_history()
-                    self._compact_scratchpads()
-                    _compacted_this_turn = True
-                    yield StreamContextCompacted(
-                        message="Context was getting long — older history has been summarized."
-                    )
-
-            # --- Completion verification ---
-            # Only verify when tools were actually used (not for simple Q&A)
-            # and we haven't hit the max-rounds hard stop.
-            if tool_round == 0 or _max_rounds_hit:
-                break
-
-            # Append the assistant's final text so the verifier can see it
-            reply = llm_response.content or ""
-            self._history.append({"role": "assistant", "content": reply})
-
-            if continuation >= _MAX_CONTINUATIONS:
-                # Budget exhausted — ask LLM to diagnose and present to user
-                self._history.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "SYSTEM: You have attempted to complete this task multiple times "
-                            "but verification indicates it is still not done. Do NOT try again. "
-                            "Instead:\n"
-                            "1. Summarize exactly what was accomplished so far.\n"
-                            "2. Identify the specific blocker or failure preventing completion.\n"
-                            "3. Suggest concrete next steps the user can take to unblock this.\n"
-                            "Be honest and specific — do not be vague about what went wrong."
-                        ),
-                    }
-                )
-                yield StreamTaskProgress(
-                    phase="analyzing", message="Diagnosing incomplete task..."
-                )
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                ):
-                    yield event
-                # Consolidation still runs after diagnosis
-                break
-
-            # Ask the LLM to self-assess completion.
-            # Use a copy of history with a trailing user message so models
-            # that don't support assistant-prefill won't reject the request.
-            verify_messages = list(self._history) + [
-                {
-                    "role": "user",
-                    "content": (
-                        "SYSTEM: Evaluate whether the task the user originally requested "
-                        "has been fully completed based on the conversation above."
-                    ),
-                }
-            ]
-            verification = await self._llm.plan(
-                system=(
-                    "You are a task-completion verifier. Given the conversation, determine "
-                    "whether the user's original request has been fully completed.\n\n"
-                    "Respond with EXACTLY one of these lines, followed by a brief reason:\n"
-                    "STATUS: COMPLETE — <reason>\n"
-                    "STATUS: INCOMPLETE — <reason>\n"
-                    "STATUS: STUCK — <reason>\n\n"
-                    "COMPLETE = the task is done or the response fully answers the question.\n"
-                    "INCOMPLETE = more work can be done to finish the task.\n"
-                    "STUCK = a blocker prevents completion (missing info, permissions, etc).\n\n"
-                    "Be strict: if the user asked for X and only part of X was delivered, "
-                    "that is INCOMPLETE, not COMPLETE. But if the user asked a question "
-                    "and the assistant answered it, that is COMPLETE even without tool use."
-                ),
-                messages=verify_messages,
-                max_tokens=256,
-            )
-
-            status_text = (verification.content or "").strip().upper()
-            if "STATUS: COMPLETE" in status_text:
-                break
-            if "STATUS: STUCK" in status_text:
-                # Stuck — inject diagnosis request and let the LLM explain
-                reason = (verification.content or "").strip()
-                self._history.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"SYSTEM: Task verification determined this task is stuck.\n"
-                            f"Verifier assessment: {reason}\n\n"
-                            "Explain to the user what went wrong, what you tried, and "
-                            "suggest specific next steps they can take to unblock this."
-                        ),
-                    }
-                )
-                yield StreamTaskProgress(
-                    phase="analyzing", message="Diagnosing blocked task..."
-                )
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                ):
-                    yield event
-                break
-
-            # INCOMPLETE — continue working
-            continuation += 1
-            reason = (verification.content or "").strip()
-            self._history.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"SYSTEM: Task verification determined this task is not yet complete "
-                        f"(attempt {continuation}/{_MAX_CONTINUATIONS}).\n"
-                        f"Verifier assessment: {reason}\n\n"
-                        "Continue working on the original request. Pick up where you left off "
-                        "and finish the remaining work. Do not repeat work already done."
-                    ),
-                }
-            )
-            yield StreamTaskProgress(
-                phase="analyzing",
-                message=f"Task incomplete — continuing ({continuation}/{_MAX_CONTINUATIONS})...",
-            )
-
-            # Re-enter tool loop: get next LLM response with tools available
-            response = None
-            async for event in self._llm.plan_stream(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            ):
-                yield event
-                if isinstance(event, StreamComplete):
-                    response = event
-            if response is None:
-                return
-            llm_response = response.response
-            # Loop back to the top of the completion verification loop
-
-        # Text-only final response — append to history (if not already appended
-        # by the verification block above).
-        if not self._history or self._history[-1].get("role") != "assistant":
-            reply = llm_response.content or ""
-            self._history.append({"role": "assistant", "content": reply})
-
-        # Consolidation: replay scratchpad sessions to extract lessons
-        if self._cortex is not None and self._cortex.mode != "off":
-            self._maybe_consolidate_scratchpads()
-
-    def _maybe_consolidate_scratchpads(self) -> None:
-        """Check if any scratchpad sessions warrant consolidation and fire it off."""
-        from anton.memory.consolidator import Consolidator
-
-        consolidator = Consolidator()
-        for pad in self._scratchpads._pads.values():
-            cells = list(pad.cells)
-            if consolidator.should_replay(cells):
-                asyncio.create_task(self._consolidate(cells))
-
-    async def _consolidate(self, cells: list) -> None:
-        """Run offline consolidation on a completed scratchpad session."""
-        from anton.memory.consolidator import Consolidator
-
-        consolidator = Consolidator()
-        engrams = await consolidator.replay_and_extract(cells, self._llm)
-        if not engrams or self._cortex is None:
-            return
-
-        auto_encode = [e for e in engrams if not self._cortex.encoding_gate(e)]
-        needs_confirm = [e for e in engrams if self._cortex.encoding_gate(e)]
-
-        if auto_encode:
-            await self._cortex.encode(auto_encode)
-
-        if needs_confirm:
-            self._pending_memory_confirmations.extend(needs_confirm)
-
-
-def _apply_error_tracking(
-    result_text: str,
-    tool_name: str,
-    error_streak: dict[str, int],
-    resilience_nudged: set[str],
-) -> str:
-    """Track consecutive errors per tool and append nudge/circuit-breaker messages."""
-    is_error = any(
-        marker in result_text
-        for marker in ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
-    )
-    if is_error:
-        error_streak[tool_name] = error_streak.get(tool_name, 0) + 1
-    else:
-        error_streak[tool_name] = 0
-        resilience_nudged.discard(tool_name)
-
-    streak = error_streak.get(tool_name, 0)
-    if streak >= _RESILIENCE_NUDGE_AT and tool_name not in resilience_nudged:
-        result_text += _RESILIENCE_NUDGE
-        resilience_nudged.add(tool_name)
-
-    if streak >= _MAX_CONSECUTIVE_ERRORS:
-        result_text += (
-            f"\n\nSYSTEM: The '{tool_name}' tool has failed {_MAX_CONSECUTIVE_ERRORS} times "
-            "in a row. Stop retrying this approach. Either try a completely different "
-            "strategy or tell the user what's going wrong so they can help."
-        )
-
-    return result_text
-
 
 
 async def _handle_connect(
@@ -1871,7 +691,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         f'OUTPUT_PATH = {output_html!r}',
     )
 
-    from anton.scratchpad import Cell
+    from anton.core.backends.base import Cell
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
@@ -2097,8 +917,9 @@ async def _chat_loop(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
     from anton.context.self_awareness import SelfAwarenessContext
-    from anton.llm.client import LLMClient
-    from anton.memory.cortex import Cortex
+    from anton.core.llm.client import LLMClient
+    from anton.core.memory.cortex import Cortex
+    from anton.core.memory.hippocampus import Hippocampus
     from anton.workspace import Workspace
 
     # Use a mutable container so closures always see the current client
@@ -2126,8 +947,8 @@ async def _chat_loop(
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
 
     cortex = Cortex(
-        global_dir=global_memory_dir,
-        project_dir=project_memory_dir,
+        global_hc=Hippocampus(global_memory_dir),
+        project_hc=Hippocampus(project_memory_dir),
         mode=settings.memory_mode,
         llm_client=state["llm_client"],
     )
@@ -2145,7 +966,7 @@ async def _chat_loop(
     if cortex.needs_compaction():
         asyncio.create_task(cortex.compact_all())
 
-    from anton.memory.episodes import EpisodicMemory
+    from anton.core.memory.episodes import EpisodicMemory
 
     episodes_dir = settings.workspace_path / ".anton" / "episodes"
     episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
@@ -2169,8 +990,8 @@ async def _chat_loop(
         if settings.coding_provider == "anthropic"
         else settings.openai_api_key
     ) or ""
-    session = ChatSession(
-        state["llm_client"],
+    session = ChatSession(ChatSessionConfig(
+        llm_client=state["llm_client"],
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
@@ -2183,7 +1004,8 @@ async def _chat_loop(
         history_store=history_store,
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,
-    )
+        tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
+    ))
 
     # Handle --resume flag at startup
     if resume:
@@ -2432,6 +1254,32 @@ async def _chat_loop(
                         console, session._scratchpads, arg
                     )
                     continue
+                elif cmd == "/skill":
+                    # /skill save [name hint] | /skill show <label> | /skill remove <label>
+                    sub_parts = parts[1].strip().split(maxsplit=1) if len(parts) > 1 else []
+                    sub = sub_parts[0] if sub_parts else ""
+                    rest = sub_parts[1] if len(sub_parts) > 1 else ""
+                    if sub == "save":
+                        await handle_skill_save(
+                            console, session, name_hint=rest
+                        )
+                    elif sub == "show":
+                        handle_skill_show(console, rest)
+                    elif sub == "remove":
+                        handle_skill_remove(console, rest)
+                    elif sub == "list" or sub == "":
+                        handle_skills_list(console)
+                    else:
+                        console.print()
+                        console.print(
+                            "[anton.warning]Usage: /skill save [name] | "
+                            "/skill list | /skill show <label> | /skill remove <label>[/]"
+                        )
+                        console.print()
+                    continue
+                elif cmd == "/skills":
+                    handle_skills_list(console)
+                    continue
                 elif cmd == "/resume":
                     session, resumed_id = await handle_resume(
                         console,
@@ -2457,6 +1305,9 @@ async def _chat_loop(
                     continue
                 elif cmd == "/unpublish":
                     await _handle_unpublish(console, settings, workspace)
+                    continue
+                elif cmd == "/explain":
+                    handle_explain(console, settings.workspace_path)
                     continue
                 elif cmd == "/help":
                     print_slash_help(console)
@@ -2543,7 +1394,7 @@ async def _chat_loop(
                 if settings.minds_api_key and settings.minds_url:
                     #TODO: Lets check if this is best solution
                     now = time.monotonic()
-                    if last_token_status_checked_at is None or (now - last_token_status_checked_at) >= TOKEN_STATUS_CACHE_TTL:
+                    if last_token_status_checked_at is None or (now - last_token_status_checked_at) >= settings.token_status_cache_ttl:
                         last_token_status = check_minds_token_limits(
                             settings.minds_url.rstrip("/"),
                             settings.minds_api_key,

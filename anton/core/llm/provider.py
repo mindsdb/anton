@@ -27,6 +27,7 @@ class LLMResponse:
     usage: Usage = field(default_factory=Usage)
     stop_reason: str | None = None
 
+
 @dataclass
 class StreamTextDelta:
     text: str
@@ -57,6 +58,7 @@ class StreamComplete:
 @dataclass
 class StreamTaskProgress:
     """Progress event from agent task execution (planning, building, executing)."""
+
     phase: str
     message: str
     eta_seconds: float | None = None
@@ -65,12 +67,14 @@ class StreamTaskProgress:
 @dataclass
 class StreamToolResult:
     """Tool result that should be displayed to the user (e.g. scratchpad dump)."""
+
     content: str
 
 
 @dataclass
 class StreamContextCompacted:
     """Notification that context was compacted to free up space."""
+
     message: str
 
 

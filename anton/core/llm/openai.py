@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 import openai
 
-from anton.llm.provider import (
+from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
@@ -25,14 +25,16 @@ def _translate_tools(tools: list[dict]) -> list[dict]:
     """Anthropic tool format -> OpenAI function-calling format."""
     result = []
     for tool in tools:
-        result.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {}),
-            },
-        })
+        result.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {}),
+                },
+            }
+        )
     return result
 
 
@@ -99,14 +101,16 @@ def _translate_assistant_blocks(blocks: list[dict]) -> list[dict]:
         if block.get("type") == "text":
             text_parts.append(block["text"])
         elif block.get("type") == "tool_use":
-            tool_calls.append({
-                "id": block["id"],
-                "type": "function",
-                "function": {
-                    "name": block["name"],
-                    "arguments": json.dumps(block.get("input", {})),
-                },
-            })
+            tool_calls.append(
+                {
+                    "id": block["id"],
+                    "type": "function",
+                    "function": {
+                        "name": block["name"],
+                        "arguments": json.dumps(block.get("input", {})),
+                    },
+                }
+            )
 
     msg: dict = {"role": "assistant"}
     content = "\n".join(text_parts) if text_parts else None
@@ -133,11 +137,13 @@ def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
                 content = "\n".join(
                     b.get("text", "") for b in content if b.get("type") == "text"
                 )
-            result.append({
-                "role": "tool",
-                "tool_call_id": block["tool_use_id"],
-                "content": str(content),
-            })
+            result.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": block["tool_use_id"],
+                    "content": str(content),
+                }
+            )
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
         elif block.get("type") == "image":
@@ -146,18 +152,22 @@ def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
             if source.get("type") == "base64":
                 media_type = source.get("media_type", "image/png")
                 data = source.get("data", "")
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{media_type};base64,{data}"},
-                })
+                content_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                    }
+                )
 
     if content_parts:
         # If only text parts, flatten to a simple string for compatibility
         if all(p.get("type") == "text" for p in content_parts):
-            result.append({
-                "role": "user",
-                "content": "\n".join(p["text"] for p in content_parts),
-            })
+            result.append(
+                {
+                    "role": "user",
+                    "content": "\n".join(p["text"] for p in content_parts),
+                }
+            )
         else:
             result.append({"role": "user", "content": content_parts})
 
@@ -231,10 +241,15 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 429 and isinstance(exc.body, dict) and exc.body.get("detail"):
+            if (
+                exc.status_code == 429
+                and isinstance(exc.body, dict)
+                and exc.body.get("detail")
+            ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
                 msg += " Visit https://mdb.ai to upgrade or to top up your tokens."
-                from anton.llm.provider import TokenLimitExceeded
+                from .provider import TokenLimitExceeded
+
                 raise TokenLimitExceeded(msg) from exc
             else:
                 msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
@@ -256,7 +271,9 @@ class OpenAIProvider(LLMProvider):
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
-                        input=json.loads(tc.function.arguments) if tc.function.arguments else {},
+                        input=json.loads(tc.function.arguments)
+                        if tc.function.arguments
+                        else {},
                     )
                 )
 
@@ -331,7 +348,9 @@ class OpenAIProvider(LLMProvider):
                             # New tool call
                             tc_state[idx] = {
                                 "id": tc_delta.id or "",
-                                "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                                "name": tc_delta.function.name
+                                if tc_delta.function and tc_delta.function.name
+                                else "",
                                 "args_parts": [],
                             }
                             if tc_state[idx]["id"] and tc_state[idx]["name"]:
@@ -348,7 +367,9 @@ class OpenAIProvider(LLMProvider):
 
                         # Accumulate argument fragments
                         if tc_delta.function and tc_delta.function.arguments:
-                            tc_state[idx]["args_parts"].append(tc_delta.function.arguments)
+                            tc_state[idx]["args_parts"].append(
+                                tc_delta.function.arguments
+                            )
                             yield StreamToolUseDelta(
                                 id=tc_state[idx]["id"],
                                 json_delta=tc_delta.function.arguments,
@@ -359,10 +380,15 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 429 and isinstance(exc.body, dict) and exc.body.get("detail"):
+            if (
+                exc.status_code == 429
+                and isinstance(exc.body, dict)
+                and exc.body.get("detail")
+            ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
                 msg += " Visit https://mdb.ai to upgrade or top up your tokens."
-                from anton.llm.provider import TokenLimitExceeded
+                from .provider import TokenLimitExceeded
+
                 raise TokenLimitExceeded(msg) from exc
             else:
                 msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."

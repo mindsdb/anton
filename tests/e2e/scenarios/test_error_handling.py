@@ -78,6 +78,7 @@ def test_malformed_json_handled_gracefully(cfg, tmp_path):
     assert_not_output(result, "Traceback (most recent call last)")
 
 
+@pytest.mark.stub_only
 def test_large_input_no_crash(cfg, stub, tmp_path):
     stub.queue_text("Got your big message.")
     stub.queue_verification_ok()
