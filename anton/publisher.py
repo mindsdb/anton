@@ -24,7 +24,7 @@ _LLM_SECRET_VARS = (
 _TEXT_EXTENSIONS = {".html", ".htm", ".js", ".css"}
 
 
-DEFAULT_PUBLISH_URL = "https://4nton.ai"
+DEFAULT_PUBLISH_URL = "https://anton.mindsdb.com"
 
 # Patterns that capture relative paths from HTML attributes and CSS url()
 _REF_PATTERNS = [

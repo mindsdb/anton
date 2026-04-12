@@ -67,7 +67,7 @@ class AntonSettings(BaseSettings):
     minds_ssl_verify: bool = True
 
     # Publish service (anton-services API Gateway)
-    publish_url: str = "https://4nton.ai"
+    publish_url: str = "https://anton.mindsdb.com"
 
     @field_validator("minds_ssl_verify", mode="before")
     @classmethod
