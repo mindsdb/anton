@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 
 @dataclass
@@ -234,3 +235,17 @@ class ScratchpadRuntime(ABC):
         )
         self.cells = [summary_cell] + recent
         return True
+
+
+class ScratchpadRuntimeFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        name: str,
+        cells: list[Cell] | None,
+        coding_provider: str,
+        coding_model: str,
+        coding_api_key: str,
+        coding_base_url: str,
+        workspace_path: Path | None,
+    ) -> ScratchpadRuntime: ...
