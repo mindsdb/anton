@@ -63,7 +63,7 @@ class ChatSessionConfig:
     """
 
     llm_client: LLMClient
-    runtime_factory: ScratchpadRuntimeFactory = field(default_factory=local_scratchpad_runtime_factory)
+    runtime_factory: ScratchpadRuntimeFactory = field(default=local_scratchpad_runtime_factory)
     cells: list[Cell] | None = None
     settings: CoreSettings | None = None
     self_awareness: SelfAwarenessContext | None = None
