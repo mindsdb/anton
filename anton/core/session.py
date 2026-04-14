@@ -5,7 +5,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
+from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.datasources.data_vault import DataVault
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
@@ -60,16 +63,16 @@ class ChatSessionConfig:
     """
 
     llm_client: LLMClient
+    runtime_factory: ScratchpadRuntimeFactory = field(default=local_scratchpad_runtime_factory)
+    cells: list[Cell] | None = None
     settings: CoreSettings | None = None
     self_awareness: SelfAwarenessContext | None = None
     cortex: Cortex | None = None
     episodic: EpisodicMemory | None = None
-    runtime_context: str = ""
+    system_prompt_context: SystemPromptContext = field(default_factory=SystemPromptContext)
     workspace: Workspace | None = None
+    data_vault: DataVault | None = None
     console: Console | None = None
-    coding_provider: str = "anthropic"
-    coding_api_key: str = ""
-    coding_base_url: str = ""
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
@@ -93,11 +96,12 @@ class ChatSession:
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
-        self._runtime_context = config.runtime_context
+        self._system_prompt_context = config.system_prompt_context
         self._proactive_dashboards = config.proactive_dashboards
         self._extra_tools = config.tools
         self._output_dir = config.output_dir
         self._workspace = config.workspace
+        self._data_vault = config.data_vault
         self._console = config.console
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
@@ -113,13 +117,18 @@ class ChatSession:
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
+
+        coding_provider = config.llm_client.coding_provider
+        coding_conn = coding_provider.export_connection_info()
         self._scratchpads = ScratchpadManager(
-            coding_provider=config.coding_provider,
-            coding_model=getattr(config.llm_client, "coding_model", ""),
-            coding_api_key=config.coding_api_key,
-            coding_base_url=config.coding_base_url,
+            runtime_factory=config.runtime_factory,
+            coding_provider=coding_conn.provider,
+            coding_model=config.llm_client.coding_model,
+            coding_api_key=coding_conn.api_key or "",
+            coding_base_url=coding_conn.base_url or "",
             workspace_path=config.workspace.base if config.workspace else None,
         )
+
         self.tool_registry = ToolRegistry()
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
         # Lives at ~/.anton/skills/<label>/. The recall_skill tool retrieves
@@ -288,7 +297,7 @@ class ChatSession:
             md_context = self._workspace.build_anton_md_context()
 
         # Inject connected datasource context without credentials
-        ds_ctx = build_datasource_context(active_only=self._active_datasource)
+        ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
@@ -297,7 +306,7 @@ class ChatSession:
         prompt = prompt_builder.build(
             output_dir=self._output_dir,
             current_datetime=_current_datetime,
-            runtime_context=self._runtime_context,
+            system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
             tool_defs=self.tool_registry.get_tool_defs(),
             memory_context=memory_section,

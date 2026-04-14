@@ -123,7 +123,7 @@ def _parse_file(
 class DatasourceRegistry:
     """Parsed registry of all available data source engines."""
 
-    _BUILTIN_PATH: Path = Path(__file__).parent / "config" / "datasources.md"
+    _BUILTIN_PATH: Path = Path(__file__).resolve().parent / "datasources.md"
     _USER_PATH: Path = Path("~/.anton/datasources.md").expanduser()
 
     def __init__(self) -> None:

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from anton.core.backends.base import ScratchpadRuntime
-from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.base import Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
 
 
 class ScratchpadManager:
@@ -13,17 +12,21 @@ class ScratchpadManager:
 
     def __init__(
         self,
-        coding_provider: str = "anthropic",
-        coding_model: str = "",
-        coding_api_key: str = "",
-        coding_base_url: str = "",
+        runtime_factory: ScratchpadRuntimeFactory,
+        coding_provider: str,
+        coding_model: str,
+        coding_api_key: str,
+        coding_base_url: str,
+        cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
+        self._runtime_factory = runtime_factory
         self._coding_provider = coding_provider
         self._coding_model = coding_model
         self._coding_api_key = coding_api_key
         self._coding_base_url = coding_base_url
+        self._cells = cells
         self._workspace_path = workspace_path
         self._available_packages: list[str] = self.probe_packages()
 
@@ -47,8 +50,9 @@ class ScratchpadManager:
     async def get_or_create(self, name: str) -> ScratchpadRuntime:
         """Return existing pad or create + start a new one."""
         if name not in self._pads:
-            pad = LocalScratchpadRuntime(
+            pad = self._runtime_factory(
                 name=name,
+                cells=self._cells,
                 coding_provider=self._coding_provider,
                 coding_model=self._coding_model,
                 coding_api_key=self._coding_api_key,

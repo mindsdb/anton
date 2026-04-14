@@ -10,7 +10,11 @@ from anton.connect_collector import (
     _ExtractionResult,
     extract_variables,
 )
-from anton.datasource_registry import AuthMethod, DatasourceEngine, DatasourceField
+from anton.core.datasources.datasource_registry import (
+    AuthMethod,
+    DatasourceEngine,
+    DatasourceField,
+)
 
 
 def _postgres_engine() -> DatasourceEngine:

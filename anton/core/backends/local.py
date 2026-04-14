@@ -19,22 +19,10 @@ from anton.core.backends.wire import (
     RESULT_START,
 )
 from anton.core.settings import CoreSettings
+from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 _MAX_OUTPUT = 10_000
-
-
-def _compute_timeouts(estimated_seconds: int) -> tuple[float, float]:
-    """Compute (total_timeout, inactivity_timeout) from an estimated run time.
-
-    Reads defaults from CoreSettings so they're tunable via env vars.
-    """
-    s = CoreSettings()
-    if estimated_seconds <= 0:
-        return float(s.cell_timeout_default), float(s.cell_inactivity_timeout)
-    total = max(estimated_seconds * 2, estimated_seconds + 30)
-    inactivity = max(estimated_seconds * 0.5, 30)
-    return float(total), float(inactivity)
 
 
 class LocalScratchpadRuntime(ScratchpadRuntime):
@@ -46,23 +34,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self,
         name: str,
         *,
+        coding_provider: str,
+        coding_model: str,
+        coding_api_key: str,
+        coding_base_url: str,
         cells: list[Cell] | None = None,
-        coding_provider: str = "anthropic",
-        coding_model: str = "",
-        coding_api_key: str = "",
-        coding_base_url: str = "",
         workspace_path: Path | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
             name,
-            cells=cells,
             coding_provider=coding_provider,
             coding_model=coding_model,
             coding_api_key=coding_api_key,
+            coding_base_url=coding_base_url,
+            cells=cells,
             workspace_path=workspace_path,
         )
-        self._coding_base_url = coding_base_url
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -444,7 +432,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._proc.stdin.write(payload.encode())  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
-        total_timeout, inactivity_timeout = _compute_timeouts(estimated_seconds)
+        total_timeout, inactivity_timeout = compute_timeouts(estimated_seconds)
 
         try:
             result_data: dict | None = None
@@ -682,3 +670,24 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     pass
         else:
             self._proc.kill()
+
+
+def local_scratchpad_runtime_factory(
+    *,
+    name: str,
+    coding_provider: str,
+    coding_model: str,
+    coding_api_key: str,
+    coding_base_url: str,
+    cells: list[Cell] | None,
+    workspace_path: Path | None,
+) -> ScratchpadRuntime:
+    return LocalScratchpadRuntime(
+        name=name,
+        coding_provider=coding_provider,
+        coding_model=coding_model,
+        coding_api_key=coding_api_key,
+        coding_base_url=coding_base_url,
+        cells=cells,
+        workspace_path=workspace_path,
+    )

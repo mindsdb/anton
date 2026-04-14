@@ -6,10 +6,10 @@ our cloud ScratchpadRuntime (Enterprise).
 
 from __future__ import annotations
 
-import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 
 @dataclass
@@ -37,17 +37,19 @@ class ScratchpadRuntime(ABC):
         self,
         name: str,
         *,
+        coding_provider: str,
+        coding_model: str,
+        coding_api_key: str,
+        coding_base_url: str,
         cells: list[Cell] | None = None,
-        coding_provider: str = "anthropic",
-        coding_model: str = "",
-        coding_api_key: str = "",
         workspace_path: Path | None = None,
     ) -> None:
         self.name = name
-        self.cells: list[Cell] = cells if cells is not None else []
         self._coding_provider = coding_provider
         self._coding_model = coding_model
         self._coding_api_key = coding_api_key
+        self._coding_base_url = coding_base_url
+        self.cells: list[Cell] = cells if cells is not None else []
         self._workspace_path = workspace_path or Path("~/.anton").expanduser()
         self._installed_packages: set[str] = set()
 
@@ -233,3 +235,17 @@ class ScratchpadRuntime(ABC):
         )
         self.cells = [summary_cell] + recent
         return True
+
+
+class ScratchpadRuntimeFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        name: str,
+        cells: list[Cell] | None,
+        coding_provider: str,
+        coding_model: str,
+        coding_api_key: str,
+        coding_base_url: str,
+        workspace_path: Path | None,
+    ) -> ScratchpadRuntime: ...

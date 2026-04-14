@@ -31,7 +31,7 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     )
 
     from anton.commands.datasource import handle_connect_datasource
-    from anton.data_vault import DataVault
+    from anton.core.datasources.data_vault import DataVault
 
     # Check which connections exist before
     vault = DataVault()

@@ -13,13 +13,12 @@ import json as _json
 import ssl
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anton.core.llm.openai import build_chat_completion_kwargs
 
 if TYPE_CHECKING:
-    from anton.settings import AntonSettings
+    from anton.config.settings import AntonSettings
 
 
 def minds_request(

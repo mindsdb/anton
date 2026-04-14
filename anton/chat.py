@@ -18,6 +18,7 @@ from anton.clipboard import (
     save_clipboard_image,
 )
 from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.core.llm.provider import (
     TokenLimitExceeded,
     StreamComplete,
@@ -69,11 +70,11 @@ from anton.minds_client import (
     list_datasources,
     test_llm,
 )
-from anton.data_vault import DataVault
+from anton.core.datasources.data_vault import DataVault
 from anton.utils.datasources import (
     register_secret_vars,
 )
-from anton.datasource_registry import (
+from anton.core.datasources.datasource_registry import (
     DatasourceRegistry,
 )
 
@@ -985,22 +986,14 @@ async def _chat_loop(
     # Build runtime context so the LLM knows what it's running on
     runtime_context = build_runtime_context(settings)
 
-    coding_api_key = (
-        settings.anthropic_api_key
-        if settings.coding_provider == "anthropic"
-        else settings.openai_api_key
-    ) or ""
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
-        runtime_context=runtime_context,
+        system_prompt_context=SystemPromptContext(runtime_context=runtime_context),
         workspace=workspace,
         console=console,
-        coding_provider=settings.coding_provider,
-        coding_api_key=coding_api_key,
-        coding_base_url=settings.openai_base_url or "",
         history_store=history_store,
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,

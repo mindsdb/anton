@@ -9,6 +9,7 @@ from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
+    ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
     StreamTextDelta,
@@ -22,11 +23,17 @@ from .provider import (
 
 
 class AnthropicProvider(LLMProvider):
+    name: str = "anthropic"
+
     def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key
         kwargs = {}
         if api_key:
             kwargs["api_key"] = api_key
         self._client = anthropic.AsyncAnthropic(**kwargs)
+
+    def export_connection_info(self) -> ProviderConnectionInfo:
+        return ProviderConnectionInfo(provider=self.name, api_key=self._api_key)
 
     async def complete(
         self,

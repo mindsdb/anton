@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from anton.config.settings import AntonSettings
+from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.minds_client import refresh_knowledge
 
 if TYPE_CHECKING:
@@ -90,12 +91,9 @@ def rebuild_session(
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
-        runtime_context=runtime_context,
+        system_prompt_context=SystemPromptContext(runtime_context=runtime_context),
         workspace=workspace,
         console=console,
-        coding_provider=settings.coding_provider,
-        coding_api_key=api_key,
-        coding_base_url=settings.openai_base_url or "",
         history_store=history_store,
         session_id=session_id,
         proactive_dashboards=settings.proactive_dashboards,

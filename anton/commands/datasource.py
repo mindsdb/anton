@@ -15,8 +15,8 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 
 from anton.connect_collector import ConnectionCollector, extract_variables
-from anton.data_vault import DataVault
-from anton.datasource_registry import (
+from anton.core.datasources.data_vault import DataVault
+from anton.core.datasources.datasource_registry import (
     AuthMethod,
     DatasourceEngine,
     DatasourceField,

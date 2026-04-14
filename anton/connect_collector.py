@@ -20,10 +20,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-
 from pydantic import BaseModel, Field
 
-from anton.datasource_registry import AuthMethod, DatasourceEngine, DatasourceField
+from anton.core.datasources.datasource_registry import (
+    AuthMethod,
+    DatasourceEngine,
+    DatasourceField,
+)
 
 if TYPE_CHECKING:
     from rich.console import Console

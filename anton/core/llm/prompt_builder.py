@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,21 @@ from .prompts import (
 if TYPE_CHECKING:
     from anton.core.memory.skills import SkillStore
     from anton.core.tools.tool_defs import ToolDef
+
+
+@dataclass(frozen=True)
+class SystemPromptContext:
+    """Bundled prompt-injection points for the system prompt.
+
+    Three levels with increasing importance (later = stronger influence):
+      1. ``prefix``  — prepended before the base prompt
+      2. ``runtime_context`` — interpolated into the RUNTIME IDENTITY section
+      3. ``suffix``  — appended after all other sections
+    """
+
+    runtime_context: str = ""
+    prefix: str = ""
+    suffix: str = ""
 
 
 class ChatSystemPromptBuilder:
@@ -109,7 +125,7 @@ class ChatSystemPromptBuilder:
         self,
         *,
         current_datetime: str,
-        runtime_context: str,
+        system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
         output_dir: str,
         tool_defs: list["ToolDef"] | None = None,
@@ -126,8 +142,14 @@ class ChatSystemPromptBuilder:
             output_path=output_path,
         )
 
-        prompt = CHAT_SYSTEM_PROMPT.format(
-            runtime_context=runtime_context,
+        prompt = ""
+
+        prefix = system_prompt_context.prefix.strip()
+        if prefix:
+            prompt += f"{prefix}\n\n"
+
+        prompt += CHAT_SYSTEM_PROMPT.format(
+            runtime_context=system_prompt_context.runtime_context,
             visualizations_section=visualizations_section,
             current_datetime=current_datetime,
         )
@@ -149,7 +171,11 @@ class ChatSystemPromptBuilder:
         if procedural_memory:
             prompt += procedural_memory
 
+        suffix = system_prompt_context.suffix.strip()
+        if suffix:
+            prompt += f"\n\n{suffix}"
+
         return prompt
 
 
-__all__ = ["ChatSystemPromptBuilder"]
+__all__ = ["ChatSystemPromptBuilder", "SystemPromptContext"]
