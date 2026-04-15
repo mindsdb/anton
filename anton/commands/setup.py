@@ -7,6 +7,7 @@ from rich.console import Console
 
 from anton.config.settings import AntonSettings
 from anton.utils.prompt import prompt_or_cancel
+from anton.memory.manage import handle_setup_memory
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
@@ -15,70 +16,6 @@ if TYPE_CHECKING:
     from anton.core.memory.cortex import Cortex
     from anton.workspace import Workspace
 
-
-async def handle_setup_memory(
-    console: Console,
-    settings: AntonSettings,
-    workspace: "Workspace",
-    cortex: "Cortex | None",
-    episodic: "EpisodicMemory | None" = None,
-) -> None:
-    """Setup sub-menu: memory mode and episodic memory toggle."""
-    console.print()
-    console.print("[anton.cyan]Memory configuration[/]")
-    console.print()
-
-    console.print("  Memory mode:")
-    console.print(
-        r"    [bold]1[/]  Autopilot — Anton decides what to remember       [dim]\[recommended][/]"
-    )
-    console.print(
-        r"    [bold]2[/]  Co-pilot — save obvious, confirm ambiguous        [dim]\[selective][/]"
-    )
-    console.print(
-        r"    [bold]3[/]  Off — never save memory (still reads existing)    [dim]\[suppressed][/]"
-    )
-    console.print()
-
-    mode_map = {"1": "autopilot", "2": "copilot", "3": "off"}
-    current_mode_num = {"autopilot": "1", "copilot": "2", "off": "3"}.get(
-        settings.memory_mode, "1"
-    )
-    mode_choice = await prompt_or_cancel(
-        "(anton) Memory mode", choices=["1", "2", "3"], default=current_mode_num
-    )
-    if mode_choice is None:
-        console.print()
-        return
-    memory_mode = mode_map[mode_choice]
-    settings.memory_mode = memory_mode
-    workspace.set_secret("ANTON_MEMORY_MODE", memory_mode)
-    if cortex is not None:
-        cortex.mode = memory_mode
-
-    if episodic is not None:
-        console.print()
-        ep_status = "ON" if episodic.enabled else "OFF"
-        console.print(
-            f"  Episodic memory (conversation archive): Currently [bold]{ep_status}[/]"
-        )
-        toggle = await prompt_or_cancel(
-            "(anton) Toggle episodic memory?", choices=["y", "n"], default="n"
-        )
-        if toggle is None:
-            toggle = "n"
-        if toggle == "y":
-            new_state = not episodic.enabled
-            episodic.enabled = new_state
-            settings.episodic_memory = new_state
-            workspace.set_secret(
-                "ANTON_EPISODIC_MEMORY", "true" if new_state else "false"
-            )
-            console.print(f"  Episodic memory: [bold]{'ON' if new_state else 'OFF'}[/]")
-
-    console.print()
-    console.print("[anton.success]Configuration updated.[/]")
-    console.print()
 
 
 async def handle_setup_models(

@@ -81,7 +81,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
-from anton.memory.manage import handle_memory_cmd
+from anton.memory.manage import MemoryManage
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -1077,6 +1077,7 @@ async def _chat_loop(
         style=pt_style,
     )
 
+    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
     try:
         while True:
             # Memory confirmation UX — show pending lessons before prompt
@@ -1208,7 +1209,7 @@ async def _chat_loop(
                     )
                     continue
                 elif cmd == "/memory":
-                    handle_memory_cmd(stripped, console, settings, cortex, episodic=episodic)
+                    memory_manage.handle(cmd=stripped)
                     continue
                 elif cmd == "/connect":
                     arg = parts[1].strip() if len(parts) > 1 else ""
