@@ -610,7 +610,7 @@ async def _handle_unpublish(
     with Live(Spinner("dots", text="  Removing...", style="anton.cyan"), console=console, transient=True):
         try:
             unpublish(
-                selected["md5"],
+                selected.get("report_id") or selected["md5"],
                 api_key=settings.minds_api_key,
                 publish_url=settings.publish_url,
                 ssl_verify=settings.minds_ssl_verify,
