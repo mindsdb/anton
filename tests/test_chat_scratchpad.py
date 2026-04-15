@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from tests.conftest import make_mock_llm
 
 import pytest
 
@@ -69,7 +70,7 @@ class TestScratchpadToolDefinition:
 
     async def test_scratchpad_tool_in_tools(self, workspace):
         """scratchpad should always be in _build_tools() output."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
@@ -87,7 +88,7 @@ class TestScratchpadToolDefinition:
 class TestScratchpadExecViaChat:
     async def test_scratchpad_exec_via_chat(self, workspace):
         """exec action flows through and returns output."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _scratchpad_response("Let me compute.", "exec", "main", "print(7 * 6)"),
@@ -113,7 +114,7 @@ class TestScratchpadExecViaChat:
 class TestScratchpadViewViaChat:
     async def test_scratchpad_view_via_chat(self, workspace):
         """view action returns cell history."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _scratchpad_response("Running code.", "exec", "analysis", "x = 10\nprint(x)"),
@@ -142,7 +143,7 @@ class TestScratchpadViewViaChat:
 class TestScratchpadRemoveViaChat:
     async def test_scratchpad_remove_via_chat(self, workspace):
         """remove action cleans up the scratchpad."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _scratchpad_response("Creating.", "exec", "tmp", "print('hi')"),
@@ -168,7 +169,7 @@ class TestScratchpadRemoveViaChat:
 class TestScratchpadDumpViaChat:
     async def test_scratchpad_dump_via_chat(self, workspace):
         """dump action flows through chat, returns markdown with code fences."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 # First: exec some code
@@ -216,7 +217,7 @@ class TestScratchpadDumpStreaming:
     async def test_scratchpad_dump_streams_tool_result(self, workspace):
         """dump action yields a StreamToolResult for display, but sends a short
         summary back to the LLM to avoid it parroting the full notebook."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — task done"))
 
         call_count = 0
@@ -271,7 +272,7 @@ class TestScratchpadStreaming:
         tool_response = _scratchpad_response("Computing.", "exec", "s", "print(99)")
         final_response = _text_response("Got 99.")
 
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — task done"))
 
         call_count = 0
@@ -307,7 +308,7 @@ class TestScratchpadStreaming:
 class TestScratchpadInstallViaChat:
     async def test_install_action_dispatch(self, workspace):
         """install action flows through chat and returns pip output."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _scratchpad_response(
@@ -333,7 +334,7 @@ class TestScratchpadInstallViaChat:
 
     async def test_install_empty_packages_via_chat(self, workspace):
         """install with no packages returns a message without crashing."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _scratchpad_response("Installing.", "install", "main", packages=[]),

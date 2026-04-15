@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .prompts import (
@@ -20,15 +19,18 @@ if TYPE_CHECKING:
 class SystemPromptContext:
     """Bundled prompt-injection points for the system prompt.
 
-    Three levels with increasing importance (later = stronger influence):
+    Four levels with increasing importance (later = stronger influence):
       1. ``prefix``  — prepended before the base prompt
       2. ``runtime_context`` — interpolated into the RUNTIME IDENTITY section
-      3. ``suffix``  — appended after all other sections
+      3. ``output_context`` — free-text instructions on where to
+         store generated resources (visualizations, HTML files, data exports)
+      4. ``suffix``  — appended after all other sections
     """
 
     runtime_context: str = ""
     prefix: str = ""
     suffix: str = ""
+    output_context: str = ""
 
 
 class ChatSystemPromptBuilder:
@@ -108,16 +110,15 @@ class ChatSystemPromptBuilder:
         self,
         *,
         proactive_dashboards: bool,
-        output_path: str,
+        output_context: str,
     ) -> str:
         visualizations_output_format_prompt = (
             VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
             if proactive_dashboards
             else VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT
         )
-        # The output-format prompt can reference `{output_path}`.
         output_format = visualizations_output_format_prompt.format(
-            output_path=output_path
+            output_context=output_context,
         )
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
@@ -127,7 +128,6 @@ class ChatSystemPromptBuilder:
         current_datetime: str,
         system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
-        output_dir: str,
         tool_defs: list["ToolDef"] | None = None,
         memory_context: str = "",
         project_context: str = "",
@@ -135,11 +135,9 @@ class ChatSystemPromptBuilder:
         datasource_context: str = "",
         skill_store: "SkillStore | None" = None,
     ) -> str:
-        output_path = f"{Path(str(output_dir)).as_posix().rstrip('/')}/"
-
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
-            output_path=output_path,
+            output_context=system_prompt_context.output_context,
         )
 
         prompt = ""

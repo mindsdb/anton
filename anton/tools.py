@@ -31,10 +31,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     )
 
     from anton.commands.datasource import handle_connect_datasource
-    from anton.core.datasources.data_vault import DataVault
 
-    # Check which connections exist before
-    vault = DataVault()
+    from anton.core.datasources.data_vault import LocalDataVault
+    vault = session._data_vault or LocalDataVault()
     before = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
 
     # Clear any stale status from a previous run
@@ -48,6 +47,7 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         prefill=engine,
         known_variables=known_variables or None,
         from_tool_call=True,
+        vault=vault,
     )
 
     # Check if a new connection was actually added
@@ -207,31 +207,88 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
             "API key setup flow."
         )
 
+    import json as _json
+
     from rich.live import Live
     from rich.spinner import Spinner
 
-    with Live(Spinner("dots", text="  Publishing...", style="anton.cyan"), console=console, transient=True):
+    # Check if this file was previously published — reuse report_id to
+    # update instead of creating a new report every time.
+    output_dir = file_path.parent
+    published_json = output_dir / ".published.json"
+    published_map: dict = {}
+    try:
+        if published_json.is_file():
+            published_map = _json.loads(published_json.read_text())
+    except Exception:
+        pass
+
+    file_key = file_path.name
+    prev = published_map.get(file_key)
+    report_id = prev.get("report_id") if isinstance(prev, dict) else None
+
+    action_text = "  Updating..." if report_id else "  Publishing..."
+    with Live(Spinner("dots", text=action_text, style="anton.cyan"), console=console, transient=True):
         try:
             result = publish(
                 file_path,
                 api_key=settings.minds_api_key,
+                report_id=report_id,
                 publish_url=settings.publish_url,
                 ssl_verify=settings.minds_ssl_verify,
             )
         except Exception as e:
-            console.print(f"  [anton.error]Publish failed: {e}[/]")
-            console.print()
-            return f"PUBLISH FAILED: {e}"
+            if report_id:
+                # The report may have been deleted server-side — retry
+                # without report_id to create a fresh one.
+                try:
+                    result = publish(
+                        file_path,
+                        api_key=settings.minds_api_key,
+                        publish_url=settings.publish_url,
+                        ssl_verify=settings.minds_ssl_verify,
+                    )
+                except Exception as e2:
+                    console.print(f"  [anton.error]Publish failed: {e2}[/]")
+                    console.print()
+                    return f"PUBLISH FAILED: {e2}"
+            else:
+                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                console.print()
+                return f"PUBLISH FAILED: {e}"
 
     view_url = result.get("view_url", "")
-    console.print(f"  [anton.success]Published![/]")
+    returned_report_id = result.get("report_id", "")
+    version = result.get("version", 1)
+    unchanged = result.get("unchanged", False)
+
+    if unchanged:
+        console.print(f"  [anton.muted]Already up to date (v{version})[/]")
+    elif report_id:
+        console.print(f"  [anton.success]Updated! (v{version})[/]")
+    else:
+        console.print(f"  [anton.success]Published![/]")
     console.print(f"  [link={view_url}]{view_url}[/link]")
     console.print()
+
+    # Persist the mapping so future publishes of the same file update
+    # instead of creating a new report.
+    if returned_report_id:
+        published_map[file_key] = {
+            "report_id": returned_report_id,
+            "url": view_url,
+            "last_md5": result.get("md5", ""),
+        }
+        try:
+            published_json.write_text(_json.dumps(published_map, indent=2))
+        except Exception:
+            pass
 
     if view_url:
         webbrowser.open(view_url)
 
-    return f"Published successfully!\nView URL: {view_url}"
+    status = "Updated" if report_id else "Published"
+    return f"{status} successfully!\nView URL: {view_url}"
 
 
 PUBLISH_TOOL = ToolDef(

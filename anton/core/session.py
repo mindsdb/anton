@@ -77,7 +77,6 @@ class ChatSessionConfig:
     history_store: HistoryStore | None = None
     session_id: str | None = None
     proactive_dashboards: bool = False
-    output_dir: str = ""
     tools: list[ToolDef] = field(default_factory=list)
 
 
@@ -99,7 +98,6 @@ class ChatSession:
         self._system_prompt_context = config.system_prompt_context
         self._proactive_dashboards = config.proactive_dashboards
         self._extra_tools = config.tools
-        self._output_dir = config.output_dir
         self._workspace = config.workspace
         self._data_vault = config.data_vault
         self._console = config.console
@@ -304,7 +302,6 @@ class ChatSession:
 
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
-            output_dir=self._output_dir,
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,

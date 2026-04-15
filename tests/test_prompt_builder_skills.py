@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.skills import Skill, SkillStore
 
 
@@ -40,9 +40,8 @@ def populated_store(tmp_path: Path) -> SkillStore:
 def _build_prompt(builder: ChatSystemPromptBuilder, **overrides) -> str:
     defaults = dict(
         current_datetime="2026-04-10T12:00:00+00:00",
-        runtime_context="test runtime",
+        system_prompt_context=SystemPromptContext(runtime_context="test runtime"),
         proactive_dashboards=False,
-        output_dir="/tmp/anton_out",
     )
     defaults.update(overrides)
     return builder.build(**defaults)

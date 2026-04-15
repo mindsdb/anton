@@ -24,7 +24,7 @@ _LLM_SECRET_VARS = (
 _TEXT_EXTENSIONS = {".html", ".htm", ".js", ".css"}
 
 
-DEFAULT_PUBLISH_URL = "https://anton.mindsdb.com"
+DEFAULT_PUBLISH_URL = "https://4nton.ai"
 
 # Patterns that capture relative paths from HTML attributes and CSS url()
 _REF_PATTERNS = [
@@ -99,18 +99,26 @@ def publish(
     file_path: Path,
     *,
     api_key: str,
+    report_id: str | None = None,
     publish_url: str = DEFAULT_PUBLISH_URL,
     ssl_verify: bool = True,
 ) -> dict:
     """Zip and upload an HTML file/directory. Returns the upload response dict.
 
-    Response keys: user_prefix, md5, view_url, files
+    Args:
+        report_id: If provided, updates an existing report (new version).
+                   If None, creates a new report.
+
+    Response keys: user_prefix, report_id, md5, view_url, version, files
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Path not found: {file_path}")
 
     zipped = _zip_html(file_path)
-    payload = json.dumps({"file_payload": base64.b64encode(zipped).decode()}).encode()
+    payload_dict: dict = {"file_payload": base64.b64encode(zipped).decode()}
+    if report_id:
+        payload_dict["report_id"] = report_id
+    payload = json.dumps(payload_dict).encode()
 
     url = f"{publish_url.rstrip('/')}/upload"
     raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)

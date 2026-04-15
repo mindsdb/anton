@@ -6,8 +6,10 @@
     ▐   ▐        █▀█ █ ▀█  █  █▄█ █ ▀█
     ▐   ▐
 ```
-# Meet Anton - an autonomous agent that gets real work done
-Anton is your personal AI agent that works so you don't have to. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No setup, no plugins, no fuss.
+
+# Meet Anton - an agent that gets real work done
+
+Anton is a personal AI agent that helps you get actual-work done. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No setup, no plugins, no fuss.
 
 It doesn't just answer questions. It *does things*: cleans your inbox, builds integrations, analyzes your data, automates workflows - whatever the task requires.
 
@@ -16,11 +18,11 @@ It doesn't just answer questions. It *does things*: cleans your inbox, builds in
 ## Quick start
 **macOS - Desktop App:**
 
-<a href="https://mindsdb-anton.s3.us-east-2.amazonaws.com/anton-latest-universal-signed.pkg">
+<a href="https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg">
 <img width="64" alt="DesktopApp" src="https://github.com/user-attachments/assets/ed7c1e3a-3700-45cc-a9a8-efb57b43dcfd" />
 </a>
 
- Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/anton-latest-universal-signed.pkg) the Anton Desktop App for MacOS.
+ Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
 
 
 **macOS / Linux - CLI:**
@@ -77,7 +79,9 @@ Set up a WhatsApp integration so I can message you from my phone.
 
 Anton doesn't wait for someone to build a connector. It writes the integration code itself, sets it up, and gets it running - so you can chat with it from WhatsApp, Telegram, or whatever channel you need.
 
+
 ### 🔧 Ask for anything that requires action
+
 - **Send emails** - connect accounts, draft messages or even send them on your behalf.
 - **Manage Calendarss** - Summarize your day, create meetings, block time, etc. All just by asking.
 - **Automated reporting** - pull from multiple databases, crunch numbers, deliver a report on a schedule.

@@ -29,6 +29,9 @@ class _ToolActivity:
     printed: bool = False  # whether the activity line has been printed
     done: bool = False  # whether execution is complete
     start_time: float = 0.0  # monotonic timestamp when execution began
+    work_elapsed: float = 0.0  # actual execution seconds (filled on done)
+    reasoning_elapsed: float = 0.0  # LLM thinking seconds after this step
+    done_line_printed: bool = False  # whether the combined ✔ line was printed
 
 
 # Witty one-liners for non-scratchpad tool display. One is picked at
@@ -377,17 +380,16 @@ class StreamDisplay:
             return
 
         if phase == "scratchpad_done":
-            # Mark the scratchpad line as complete with actual elapsed time
+            # Stash work elapsed — the ✔ line is deferred until
+            # reasoning_done arrives so we can print one combined line.
             for act in reversed(self._activities):
                 if act.name == "scratchpad" and act.printed and not act.done:
-                    elapsed = eta if eta else 0  # eta_seconds carries elapsed time
                     act.done = True
-                    self._stop_spinner()
-                    self._print_done_line(act, elapsed)
+                    act.work_elapsed = eta if eta else 0
                     self._line1_fun = random.choice(THINKING_MESSAGES)  # noqa: S311
                     self._line2_status = random.choice(WORKING_FOOTER_MESSAGES)  # noqa: S311
                     self._line3_peek = ""
-                    self._start_spinner()
+                    self._update_spinner()
                     break
             return
 
@@ -414,14 +416,12 @@ class StreamDisplay:
             return
 
         if phase == "tool_done":
-            # Non-scratchpad tool finished — print ✔ + actual elapsed
+            # Stash work elapsed — combined line printed on reasoning_done.
             elapsed = eta if eta else 0
             for act in reversed(self._activities):
                 if act.name == message and act.printed and not act.done:
                     act.done = True
-                    self._stop_spinner()
-                    self._print_done_line(act, elapsed)
-                    self._start_spinner()
+                    act.work_elapsed = elapsed
                     break
             return
 
@@ -436,9 +436,16 @@ class StreamDisplay:
             return
 
         if phase == "reasoning_done":
-            elapsed = eta if eta else 0
+            reasoning_elapsed = eta if eta else 0
+            # Find the last done-but-not-yet-printed activity and print
+            # the combined ✔ line: worked + reasoned on one line.
             self._stop_spinner()
-            self._print_reasoning_line(elapsed)
+            for act in reversed(self._activities):
+                if act.done and not act.done_line_printed:
+                    act.reasoning_elapsed = reasoning_elapsed
+                    act.done_line_printed = True
+                    self._print_done_line(act, act.work_elapsed, reasoning_elapsed)
+                    break
             self._start_spinner()
             return
 
@@ -451,6 +458,14 @@ class StreamDisplay:
     def finish(self) -> None:
         """Stop spinner and print the final answer."""
         self._stop_spinner()
+
+        # Flush any activity whose ✔ line was deferred but never got a
+        # reasoning_done (happens for the last tool in a turn — the LLM
+        # goes straight to text, so reasoning_done never fires).
+        for act in self._activities:
+            if act.done and not act.done_line_printed:
+                act.done_line_printed = True
+                self._print_done_line(act, act.work_elapsed)
 
         # Print initial text as muted "inner speech" (if not already printed)
         if self._initial_text and not self._initial_printed:
@@ -522,21 +537,35 @@ class StreamDisplay:
         line.append(label, style="bold")
         self._console.print(line)
 
-    def _print_done_line(self, act: _ToolActivity, elapsed: float) -> None:
-        """Print a completion marker for a finished activity."""
+    def _print_done_line(
+        self,
+        act: _ToolActivity,
+        work_elapsed: float,
+        reasoning_elapsed: float = 0.0,
+    ) -> None:
+        """Print a single combined completion line for a finished activity.
+
+        Format: ``  ✔ (Worked: 1.9s, Reasoned: 7.1s)``
+        If reasoning_elapsed is 0 (e.g. last tool in the turn with no
+        follow-up reasoning), only the work time is shown.
+        """
         line = Text()
         line.append("  \u2714 ", style="green")
-        elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{int(elapsed * 1000)}ms"
-        line.append(elapsed_str, style="anton.muted")
+        work_str = self._fmt_elapsed(work_elapsed)
+
+        if reasoning_elapsed > 0:
+            reason_str = self._fmt_elapsed(reasoning_elapsed)
+            line.append(f"(Worked: {work_str}, Reasoned: {reason_str})", style="anton.muted")
+        else:
+            line.append(work_str, style="anton.muted")
+
         self._console.print(line)
 
-    def _print_reasoning_line(self, elapsed: float) -> None:
-        """Print the LLM's reasoning time between tool rounds."""
-        line = Text()
-        elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{int(elapsed * 1000)}ms"
-        line.append("  Reasoning: ", style="anton.muted")
-        line.append(elapsed_str, style="anton.muted")
-        self._console.print(line)
+    @staticmethod
+    def _fmt_elapsed(seconds: float) -> str:
+        if seconds >= 1:
+            return f"{seconds:.1f}s"
+        return f"{int(seconds * 1000)}ms"
 
 
 class EscapeWatcher:

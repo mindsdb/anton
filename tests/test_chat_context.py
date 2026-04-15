@@ -5,11 +5,13 @@ import socket
 import urllib.error
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
+from tests.conftest import make_mock_llm
 
 import pytest
 
 from anton.chat import ChatSession, _handle_connect
 from anton.core.session import ChatSessionConfig
+from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.minds_client import describe_minds_connection_error
 from anton.config.settings import AntonSettings
 from anton.core.tools.tool_defs import MEMORIZE_TOOL
@@ -88,7 +90,7 @@ class TestMemorizeTool:
 
     async def test_memorize_creates_rule(self, cortex, memory_dirs):
         """When LLM calls memorize, a rule is created in memory."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _memorize_response(
@@ -114,7 +116,7 @@ class TestMemorizeTool:
 
     async def test_memorize_creates_lesson(self, cortex, memory_dirs):
         """When LLM calls memorize with kind=lesson, a lesson is created."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _memorize_response(
@@ -143,7 +145,7 @@ class TestMemorizeTool:
         hc = Hippocampus(project_dir)
         hc.encode_rule("Use httpx instead of requests", kind="always", confidence="high", source="user")
 
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
@@ -156,7 +158,7 @@ class TestMemorizeTool:
 
     async def test_no_cortex_excludes_memorize_tool(self):
         """Without cortex or self_awareness, memorize tool is not offered."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, self_awareness=None, cortex=None))
@@ -170,7 +172,7 @@ class TestMemorizeTool:
 
     async def test_cortex_includes_memorize_tool(self, cortex):
         """With cortex, memorize tool is included."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
@@ -184,7 +186,7 @@ class TestMemorizeTool:
 
     async def test_tool_result_in_history(self, cortex, memory_dirs):
         """memorize tool result appears in conversation history."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _memorize_response(
@@ -212,7 +214,7 @@ class TestAntonMdInjection:
         """anton.md content is injected into the system prompt."""
         ws.anton_md_path.write_text("This project uses Django and PostgreSQL")
 
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
         session = ChatSession(ChatSessionConfig(
@@ -231,7 +233,7 @@ class TestAntonMdInjection:
         """Empty anton.md doesn't add a section to the prompt."""
         ws.anton_md_path.write_text("")
 
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
         session = ChatSession(ChatSessionConfig(
@@ -249,12 +251,12 @@ class TestAntonMdInjection:
 class TestRuntimeContext:
     async def test_runtime_context_injected_into_system_prompt(self):
         """Runtime context (provider/model) appears in the system prompt."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
         session = ChatSession(ChatSessionConfig(
             llm_client=mock_llm,
-            runtime_context="- Provider: anthropic\n- Planning model: claude-sonnet-4-6\n- Coding model: claude-opus-4-6",
+            system_prompt_context=SystemPromptContext(runtime_context="- Provider: anthropic\n- Planning model: claude-sonnet-4-6\n- Coding model: claude-opus-4-6"),
         ))
         await session.turn("hi")
 
@@ -266,12 +268,12 @@ class TestRuntimeContext:
 
     async def test_system_prompt_warns_not_to_ask_about_llm(self):
         """System prompt includes instruction to never ask which LLM to use."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
         session = ChatSession(ChatSessionConfig(
             llm_client=mock_llm,
-            runtime_context="- Provider: anthropic",
+            system_prompt_context=SystemPromptContext(runtime_context="- Provider: anthropic"),
         ))
         await session.turn("hi")
 
@@ -281,10 +283,10 @@ class TestRuntimeContext:
 
     async def test_conversation_discipline_in_prompt(self):
         """System prompt includes conversation discipline rules."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
-        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, runtime_context=""))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, system_prompt_context=SystemPromptContext()))
         await session.turn("hi")
 
         call_kwargs = mock_llm.plan.call_args

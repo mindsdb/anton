@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.skills import Skill, SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL, handle_recall_skill
 from anton.core.tools.registry import ToolRegistry
@@ -67,9 +67,8 @@ class TestPromptBuilderReceivesStore:
         builder = ChatSystemPromptBuilder()
         prompt = builder.build(
             current_datetime="2026-04-10",
-            runtime_context="test",
+            system_prompt_context=SystemPromptContext(runtime_context="test"),
             proactive_dashboards=False,
-            output_dir="/tmp/x",
             skill_store=store_with_one_skill,
         )
         assert "## Procedural memory" in prompt
@@ -79,9 +78,8 @@ class TestPromptBuilderReceivesStore:
         builder = ChatSystemPromptBuilder()
         prompt = builder.build(
             current_datetime="2026-04-10",
-            runtime_context="test",
+            system_prompt_context=SystemPromptContext(runtime_context="test"),
             proactive_dashboards=False,
-            output_dir="/tmp/x",
             skill_store=None,
         )
         assert "Procedural memory" not in prompt

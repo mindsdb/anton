@@ -5,7 +5,7 @@ import re
 import yaml
 from typing import TYPE_CHECKING
 
-from anton.core.datasources.data_vault import DataVault, _slug_env_prefix
+from anton.core.datasources.data_vault import DataVault, LocalDataVault, _slug_env_prefix
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
 
 if TYPE_CHECKING:
@@ -114,7 +114,7 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
     If active_only is set, only the matching slug is included.
     """
     try:
-        vault = vault or DataVault()
+        vault = vault or LocalDataVault()
         conns = vault.list_connections()
     except Exception:
         return ""

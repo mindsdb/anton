@@ -570,7 +570,7 @@ def _setup_prompt(
     def _toolbar():
         return HTML("<style fg='#ff69b4'>\u23f5\u23f5 Esc to go back</style>")
 
-    suffix = f" ({default}): " if default else ": "
+    suffix = f" ({default}):" if default else ":"
     session: PromptSession[str] = PromptSession(
         mouse_support=False,
         bottom_toolbar=_toolbar,
@@ -586,6 +586,7 @@ def _setup_prompt(
     except RuntimeError:
         in_async = False
 
+    suffix = suffix + '\u2009'
     if in_async:
         # We're inside an async context (e.g. /setup from chat loop)
         # Run prompt_toolkit in a thread to avoid nested event loop conflict

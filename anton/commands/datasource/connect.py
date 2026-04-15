@@ -1,593 +1,57 @@
-"""Slash-command handlers for datasource commands."""
+"""Main datasource connection flow."""
 
 from __future__ import annotations
 
 import json
-import os
-import re
 import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.padding import Padding
-
 from anton.connect_collector import ConnectionCollector, extract_variables
-from anton.core.datasources.data_vault import DataVault
-from anton.core.datasources.datasource_registry import (
-    AuthMethod,
-    DatasourceEngine,
-    DatasourceField,
-    DatasourceRegistry,
-)
-from anton.utils.datasources import (
-    register_secret_vars,
-    remove_engine_block,
-    restore_namespaced_env,
-    parse_connection_slug,
-)
+from anton.core.datasources.data_vault import DataVault, LocalDataVault
+from anton.core.datasources.datasource_registry import DatasourceRegistry
+from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
 from anton.utils.prompt import prompt_or_cancel
-from anton.core.backends.manager import ScratchpadManager
-
-if TYPE_CHECKING:
-    from anton.chat import ChatSession
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM-facing schema (Pydantic) for handle_add_custom_datasource
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class _CustomDatasourceField(BaseModel):
-    """One credential field in a custom-datasource spec."""
-
-    name: str = Field(
-        ...,
-        description=(
-            "snake_case field name (e.g. 'host', 'api_key'). Must be a "
-            "valid Python identifier; this becomes both the on-disk key "
-            "and the env var suffix (DS_<NAME>)."
-        ),
-    )
-    value: str = Field(
-        default="",
-        description=(
-            "Inline value if the user already provided one in their "
-            "description, otherwise empty string."
-        ),
-    )
-    secret: bool = Field(
-        default=False,
-        description=(
-            "True if the field is sensitive (passwords, API keys, "
-            "tokens) — affects how it's stored and prompted for."
-        ),
-    )
-    required: bool = Field(
-        default=True,
-        description="True if the connection cannot be tested without this field.",
-    )
-    description: str = Field(
-        default="",
-        description=(
-            "One-line description shown to the user when prompting "
-            "for this field."
-        ),
-    )
-
-
-class _CustomDatasourceSpec(BaseModel):
-    """Structured output of the LLM call in handle_add_custom_datasource."""
-
-    display_name: str = Field(
-        ...,
-        description="Human-readable name for the service (e.g. 'GitHub API').",
-    )
-    pip: str = Field(
-        default="",
-        description=(
-            "pip-installable package name (or space-separated names) "
-            "needed to interact with this service. Empty string if no "
-            "extra package is required (e.g. plain HTTPS via stdlib)."
-        ),
-    )
-    test_snippet: str = Field(
-        default="",
-        description=(
-            "Python code that tests the connection using os.environ "
-            "vars DS_FIELDNAME (uppercase field name with DS_ prefix) "
-            "and prints 'ok' on success. Empty string if untestable."
-        ),
-    )
-    fields: list[_CustomDatasourceField] = Field(
-        default_factory=list,
-        description=(
-            "Credential fields the user will need to provide. List in "
-            "the order they should be prompted."
-        ),
-    )
+from anton.commands.datasource.helpers import show_credential_help
+from anton.commands.datasource.custom import handle_add_custom_datasource
+from anton.commands.datasource.verify import run_connection_test
 
 _PROMPT_RECONNECT_CANCEL = "(reconnect/cancel)"
 
 
-def handle_list_data_sources(console: Console) -> None:
-    """Print all saved Local Vault connections in a table with status."""
-    from rich.table import Table
-
-    vault = DataVault()
-    registry = DatasourceRegistry()
-    conns = vault.list_connections()
-    console.print()
-    if not conns:
-        console.print("[anton.muted]No data sources connected yet.[/]")
-        console.print("[anton.muted]Use /connect to add one.[/]")
-        console.print()
-        return
-
-    table = Table(title="Local Vault — Saved Connections", show_lines=False)
-    table.add_column("Name", style="bold")
-    table.add_column("Source")
-    table.add_column("Status")
-
-    for c in conns:
-        slug = f"{c['engine']}-{c['name']}"
-        engine_def = registry.get(c["engine"])
-        source = engine_def.display_name if engine_def else c["engine"]
-        fields = vault.load(c["engine"], c["name"]) or {}
-
-        if not fields:
-            status = "[yellow]incomplete[/]"
-        elif engine_def and engine_def.auth_method != "choice":
-            required = [f.name for f in engine_def.fields if f.required]
-            missing = [name for name in required if name not in fields]
-            status = "[yellow]incomplete[/]" if missing else "[green]saved[/]"
-        else:
-            status = "[green]saved[/]"
-
-        table.add_row(slug, source, status)
-
-    console.print(table)
-    console.print()
-
-
-async def handle_remove_data_source(console: Console, slug: str) -> None:
-    """Delete a connection from the Local Vault by slug (engine-name)."""
-    vault = DataVault()
-    registry = DatasourceRegistry()
-
-    if not slug:
-        connections = vault.list_connections()
-        if not connections:
-            console.print("[anton.muted]No saved connections to remove.[/]")
-            console.print()
-            return
-        console.print()
-        console.print("[anton.cyan](anton)[/] Which connection do you want to remove?\n")
-        for i, c in enumerate(connections, 1):
-            conn_slug = f"{c['engine']}-{c['name']}"
-            engine_def = registry.get(c["engine"])
-            label = engine_def.display_name if engine_def else c["engine"]
-            console.print(f"          [bold]{i:>2}.[/bold] {conn_slug} [dim]({label})[/]")
-        console.print()
-        choices = [str(i) for i in range(1, len(connections) + 1)]
-        pick = await prompt_or_cancel("(anton) Enter a number", choices=choices)
-        if pick is None:
-            console.print("[anton.muted]Cancelled.[/]")
-            console.print()
-            return
-        picked = connections[int(pick) - 1]
-        slug = f"{picked['engine']}-{picked['name']}"
-
-    parsed = parse_connection_slug(slug, [e.engine for e in registry.all_engines()], vault=vault)
-    if parsed is None:
-        console.print(
-            f"[anton.warning]Invalid name '{slug}'. Use engine-name format.[/]"
+def _build_redirect_message(
+    collector: ConnectionCollector,
+    user_message: str,
+    target_engine: str | None = None,
+) -> str:
+    """Build a structured REDIRECT message for the main agent."""
+    collector.redirect_message = user_message.strip()
+    payload = collector.to_redirect_result()
+    parts = [
+        f"REDIRECT during {payload['engine_display']} connection setup.",
+        f"Collected so far: {json.dumps(payload['collected_variables'])}.",
+    ]
+    if payload["missing_required"]:
+        parts.append(
+            f"Still missing: {', '.join(payload['missing_required'])}."
         )
-        console.print()
-        return
-    engine, name = parsed
-    if vault.load(engine, name) is None:
-        console.print(f"[anton.warning]No connection '{slug}' found.[/]")
-        console.print()
-        return
-
-    confirm = await prompt_or_cancel(
-        f"(anton) Remove '{slug}' from Local Vault?",
-        choices=["y", "n"], default="n",
+    if target_engine:
+        parts.append(f"User wants to switch to: {target_engine}.")
+    parts.append(f'User said: "{collector.redirect_message}".')
+    parts.append(
+        "Decide what to do next — you may call connect_new_datasource "
+        "again with the correct engine and pass known_variables to "
+        "pre-fill what's already collected."
     )
-    if confirm is not None and confirm.strip().lower() == "y":
-        vault.delete(engine, name)
-        restore_namespaced_env(vault)
-        engine_def = registry.get(engine)
-        if engine_def is not None and engine_def.custom:
-            remaining = [
-                c for c in vault.list_connections() if c["engine"] == engine
-            ]
-            if not remaining:
-                user_path = DatasourceRegistry._USER_PATH
-                if user_path.is_file():
-                    updated = remove_engine_block(
-                        user_path.read_text(encoding="utf-8"), engine
-                    )
-                    user_path.write_text(updated, encoding="utf-8")
-                    registry.reload()
-        console.print(f"[anton.success]Removed {slug}.[/]")
-    else:
-        console.print("[anton.muted]Cancelled.[/]")
-    console.print()
+    return " ".join(parts)
 
-
-async def show_credential_help(
-    console: Console,
-    session: "ChatSession",
-    service_name: str,
-    current_field,
-    all_fields: list,
-) -> None:
-    """Use the LLM to explain how to obtain credentials."""
-    field_descriptions = ", ".join(
-        f"{f.name} ({f.description})" for f in all_fields
-    )
-    storage_note = (
-        "The credentials will be stored securely in Anton's Local Vault — "
-        "do NOT suggest storage tips, password managers, or safe-keeping advice."
-    )
-    if current_field is not None:
-        prompt = (
-            f"I'm connecting to {service_name} and need to provide: {field_descriptions}\n\n"
-            f"I need help with the '{current_field.name}' field"
-            f" ({current_field.description}).\n\n"
-            "Give me a brief step-by-step guide on where and how to get this credential. "
-            f"Be concise — numbered steps, no fluff. {storage_note}"
-        )
-        heading = f"[anton.cyan](anton)[/] How to get [bold]{current_field.name}[/]:"
-    else:
-        prompt = (
-            f"I'm connecting to {service_name} and need these credentials: {field_descriptions}\n\n"
-            "Give me a brief step-by-step guide on where and how to obtain each of these. "
-            f"Be concise — numbered steps, no fluff. {storage_note}"
-        )
-        heading = f"[anton.cyan](anton)[/] How to get credentials for [bold]{service_name}[/]:"
-
-    console.print()
-    console.print("[anton.muted]        Looking up instructions…[/]")
-
-    try:
-        resp = await session._llm.plan(
-            system="You are a helpful assistant that guides users through obtaining credentials for services.",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            max_tokens=512,
-        )
-        help_text = (resp.content or "").strip()
-    except Exception:
-        help_text = "Sorry, couldn't fetch help right now. Try checking the service's documentation."
-
-    console.print()
-    console.print(heading)
-    console.print()
-    console.print(Padding(Markdown(help_text), (0, 0, 0, 8)))
-    console.print()
-
-
-async def run_connection_test(
-    console: "Console",
-    scratchpads: "ScratchpadManager",
-    vault: "DataVault",
-    engine_def: "DatasourceEngine",
-    credentials: dict[str, str],
-    retry_fields: "list[DatasourceField]",
-) -> bool:
-    """Inject flat DS_* vars, run engine_def.test_snippet, restore env.
-
-    Returns True on success, False if the user declines retry after failure.
-    Mutates credentials in-place when the user re-enters secrets on retry.
-    """
-    while True:
-        console.print()
-        console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
-
-        vault.clear_ds_env()
-        for key, value in credentials.items():
-            os.environ[f"DS_{key.upper()}"] = value
-        register_secret_vars(engine_def)  # flat mode, for scrubbing during test
-
-        try:
-            pad = await scratchpads.get_or_create("__datasource_test__")
-            await pad.reset()
-            if engine_def.pip:
-                if isinstance(engine_def.pip, list):
-                    pip_pkgs = engine_def.pip
-                else:
-                    # Split space-separated package strings into individual packages
-                    pip_pkgs = engine_def.pip.split()
-                install_result = await pad.install_packages(pip_pkgs)
-                if "failed" in (install_result or "").lower():
-                    console.print()
-                    console.print(f"[anton.warning](anton)[/] Package install issue: {install_result[:200]}")
-
-            # Run the test, retry up to 2 times on ModuleNotFoundError
-            cell = None
-            for attempt in range(3):
-                cell = await pad.execute(engine_def.test_snippet)
-                if cell.error and "ModuleNotFoundError" in cell.error:
-                    # Extract the missing module and try to install it
-                    match = re.search(r"No module named '([^']+)'", cell.error)
-                    if match:
-                        missing = match.group(1).split(".")[0]
-                        await pad.install_packages([missing])
-                        continue
-                break
-        finally:
-            restore_namespaced_env(vault)
-
-        if cell.error or (cell.stdout.strip() != "ok" and cell.stderr.strip()):
-            error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
-            last_line = next(
-                (ln for ln in reversed(error_text.splitlines()) if ln.strip()), error_text
-            )
-            console.print()
-            console.print("[anton.warning](anton)[/] ✗ Connection failed.")
-            console.print()
-            console.print(f"        Error: {last_line}")
-            console.print()
-            retry = await prompt_or_cancel(
-                "(anton) Would you like to re-enter your credentials?",
-                choices=["y", "n"], default="n",
-            )
-            if retry is None or retry.strip().lower() != "y":
-                return False
-            console.print()
-            for f in retry_fields:
-                if not f.secret:
-                    continue
-                value = await prompt_or_cancel(f"(anton) {f.name}", password=True)
-                if value is None:
-                    return False
-                if value:
-                    credentials[f.name] = value
-            continue
-
-        console.print("[anton.success]        ✓ Connected successfully![/]")
-        return True
-
-
-async def handle_add_custom_datasource(
-    console: Console,
-    name: str,
-    registry,
-    session: "ChatSession",
-    *,
-    known_service: bool = False,
-):
-    """Ask for the tool name, use the LLM to identify required fields, then collect credentials."""
-
-    console.print()
-    if name:
-        tool_name = name
-    else:
-        tool_name = await prompt_or_cancel(
-            "(anton) What is the name of the tool or service?",
-        )
-        if not tool_name or not tool_name.strip():
-            return None
-        tool_name = tool_name.strip()
-
-    if known_service:
-        # LLM already recognised this service — skip the auth question
-        user_answer = ""
-        console.print("[anton.muted]        Working out the connection details…[/]")
-    else:
-        user_answer = await prompt_or_cancel(
-            f"(anton) How do you authenticate with {tool_name}? "
-            "Describe what credentials you have (don't paste actual values)",
-        )
-        if not user_answer or not user_answer.strip():
-            return None
-        console.print()
-        console.print("[anton.muted]    Got it — working out the connection details…[/]")
-
-    llm_prompt = f"The user wants to connect to {repr(tool_name)}."
-    if user_answer:
-        llm_prompt += f" They said: {user_answer}"
-    else:
-        llm_prompt += " Determine the standard authentication fields for this service."
-    llm_prompt += (
-        "\n\nReturn the connection spec following the schema you've been given. "
-        "For test_snippet, write Python that uses os.environ['DS_<FIELDNAME>'] "
-        "vars (uppercase, DS_ prefix) and prints 'ok' on success."
-    )
-
-    try:
-        spec: _CustomDatasourceSpec = await session._llm.generate_object(
-            _CustomDatasourceSpec,
-            system="You are a data source connection expert.",
-            messages=[{"role": "user", "content": llm_prompt}],
-            max_tokens=1024,
-        )
-    except Exception:
-        console.print(
-            "[anton.warning]        Couldn't identify connection details. Try again.[/]"
-        )
-        console.print()
-        return None
-
-    test_snippet = spec.test_snippet.strip()
-    fields: list[DatasourceField] = []
-    for f in spec.fields:
-        if not f.name:
-            continue
-        fields.append(
-            DatasourceField(
-                name=f.name,
-                required=f.required,
-                secret=f.secret,
-                description=f.description,
-            )
-        )
-
-    if not fields:
-        console.print("[anton.warning]    Couldn't identify any connection fields.[/]")
-        console.print()
-        return None
-
-    display_name = spec.display_name or name
-    pip_pkg = spec.pip
-
-    # Show summary
-    console.print()
-    console.print("      [bold]── What I'll save ──────────────────────────[/]")
-    credentials: dict[str, str] = {}
-    for f, raw in zip(fields, spec.fields):
-        inline_value = (raw.value or "").strip()
-        if f.secret and inline_value:
-            console.print(
-                f"        • [bold]{f.name:<14}[/] (secret — provided, stored securely)"
-            )
-            credentials[f.name] = inline_value
-        elif f.secret:
-            console.print(
-                f"        • [bold]{f.name:<14}[/] (secret — I'll ask for this)"
-            )
-        else:
-            val_display = inline_value or "[anton.muted]<to be collected>[/]"
-            console.print(f"        • [bold]{f.name:<14}[/] {val_display}")
-            if inline_value:
-                credentials[f.name] = inline_value
-    console.print()
-
-    # Offer help before collecting credentials
-    help_answer = await prompt_or_cancel(
-        "(anton) Do you need instructions on how to obtain these credentials?",
-        choices=["y", "n"], default="n",
-    )
-    if help_answer is None:
-        return None
-    if help_answer.strip().lower() == "y":
-        await show_credential_help(
-            console, session, display_name, None, fields,
-        )
-
-    # Prompt for any secret fields not provided inline
-    for f, raw in zip(fields, spec.fields):
-        if not f.secret:
-            continue
-        if (raw.value or "").strip():
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name}", password=True)
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    # Prompt for any required non-secret fields not provided inline
-    for f, raw in zip(fields, spec.fields):
-        if f.secret:
-            continue
-        if not f.required:
-            continue
-        if f.name in credentials:
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name}")
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    # Offer to collect optional non-secret fields
-    for f, raw in zip(fields, spec.fields):
-        if f.secret or f.required or f.name in credentials:
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name} (optional — press Enter to skip)")
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    if not credentials:
-        console.print("[anton.warning]        No credentials collected. Aborting.[/]")
-        console.print()
-        return None
-
-    # Build engine slug and write definition to ~/.anton/datasources.md
-    slug = re.sub(r"[^\w]", "_", display_name.lower()).strip("_")
-    field_lines = "\n".join(
-        f"  - {{ name: {f.name}, required: {str(f.required).lower()}, "
-        f'secret: {str(f.secret).lower()}, description: "{f.description}" }}'
-        for f in fields
-    )
-    test_snippet_yaml = ""
-    if test_snippet:
-        indented = "\n".join(f"  {line}" for line in test_snippet.splitlines())
-        test_snippet_yaml = f"test_snippet: |\n{indented}\n"
-
-    yaml_block = (
-        f"\n---\n\n## {display_name}\n"
-        "```yaml\n"
-        f"engine: {slug}\n"
-        f"display_name: {display_name}\n"
-        + (f"pip: {pip_pkg}\n" if pip_pkg else "")
-        + f"fields:\n{field_lines}\n"
-        + test_snippet_yaml
-        + "```\n"
-    )
-    user_ds_path = Path("~/.anton/datasources.md").expanduser()
-    tmp_path = user_ds_path.with_suffix(".tmp")
-
-    # Write to temp, validate it parses, then rename atomically
-    existing = (
-        user_ds_path.read_text(encoding="utf-8") if user_ds_path.is_file() else ""
-    )
-
-    existing = remove_engine_block(existing, slug)
-
-    tmp_path.write_text(existing + yaml_block, encoding="utf-8")
-
-    parsed = registry.validate_file(tmp_path)
-    if slug in parsed:
-        import shutil
-
-        shutil.move(str(tmp_path), str(user_ds_path))
-    else:
-        tmp_path.unlink(missing_ok=True)
-        console.print(
-            "[anton.warning]Could not validate engine definition — "
-            "credentials saved but engine not written to datasources.md.[/]"
-        )
-
-    registry.reload()
-    engine_def = registry.get(slug)
-    if engine_def is None:
-        # Fallback: construct inline so the flow can continue even if parse failed
-        engine_def = DatasourceEngine(
-            engine=slug,
-            display_name=display_name,
-            pip=pip_pkg,
-            fields=fields,
-            test_snippet=test_snippet,
-        )
-
-    # All required fields must be present before the caller saves credentials
-    missing_required = [f.name for f in fields if f.required and f.name not in credentials]
-    if missing_required:
-        console.print(
-            "[anton.warning]    Cannot save — missing required fields: "
-            f"{', '.join(missing_required)}. Aborting.[/]"
-        )
-        console.print()
-        return None
-
-    return engine_def, credentials
+if TYPE_CHECKING:
+    from rich.console import Console
+    from anton.chat import ChatSession
+    from anton.core.backends.manager import ScratchpadManager
 
 
 async def _reconnect_to_saved(
-    console: Console,
+    console: "Console",
     session: "ChatSession",
     vault: "DataVault",
     registry: "DatasourceRegistry",
@@ -611,9 +75,6 @@ async def _reconnect_to_saved(
     )
     console.print()
     if not from_tool_call:
-        # When invoked via the LLM tool call, we must not append to
-        # session._history here — it would land between a tool_use and
-        # its tool_result. The tool wrapper returns a fresh message.
         session._history.append(
             {
                 "role": "assistant",
@@ -626,48 +87,15 @@ async def _reconnect_to_saved(
     return session
 
 
-def _build_redirect_message(
-    collector: ConnectionCollector,
-    user_message: str,
-    target_engine: str | None = None,
-) -> str:
-    """Build a structured REDIRECT message for the main agent.
-
-    Returns a string describing what was collected so far, what's still
-    missing, and what the user said. The caller decides where to put it
-    (session history for slash-command path, or tool-result return for
-    the LLM tool-call path — never both, to keep tool_use/tool_result
-    ordering intact).
-    """
-    collector.redirect_message = user_message.strip()
-    payload = collector.to_redirect_result()
-    parts = [
-        f"REDIRECT during {payload['engine_display']} connection setup.",
-        f"Collected so far: {json.dumps(payload['collected_variables'])}.",
-    ]
-    if payload["missing_required"]:
-        parts.append(
-            f"Still missing: {', '.join(payload['missing_required'])}."
-        )
-    if target_engine:
-        parts.append(f"User wants to switch to: {target_engine}.")
-    parts.append(f'User said: "{collector.redirect_message}".')
-    parts.append(
-        "Decide what to do next — you may call connect_new_datasource "
-        "again with the correct engine and pass known_variables to "
-        "pre-fill what's already collected."
-    )
-    return " ".join(parts)
-
-
 async def handle_connect_datasource(
-    console: Console,
-    scratchpads: ScratchpadManager,
+    console: "Console",
+    scratchpads: "ScratchpadManager",
     session: "ChatSession",
     datasource_name: str | None = None,
     prefill: str | None = None,
     known_variables: dict[str, str] | None = None,
     from_tool_call: bool = False,
+    vault: "DataVault | None" = None,
 ) -> "ChatSession":
     """
     Connect a data source by entering credentials, either for a new name or re-entering for an existing one.
@@ -684,7 +112,7 @@ async def handle_connect_datasource(
     message from the vault diff instead.
     """
 
-    vault = DataVault()
+    vault = vault or LocalDataVault()
     registry = DatasourceRegistry()
 
     if datasource_name is not None:
@@ -723,7 +151,6 @@ async def handle_connect_datasource(
         console.print("[anton.muted]        Press Enter to keep the current value.[/]")
         console.print()
 
-        # Detect which fields to present (handle auth_method=choice)
         active_fields = engine_def.fields
         if engine_def.auth_method == "choice" and engine_def.auth_methods:
             for am in engine_def.auth_methods:
@@ -734,7 +161,6 @@ async def handle_connect_datasource(
             if not active_fields:
                 active_fields = engine_def.auth_methods[0].fields
 
-        # Start from existing values; let user update field-by-field
         credentials: dict[str, str] = dict(existing)
         for f in active_fields:
             current = existing.get(f.name, "")
@@ -750,7 +176,6 @@ async def handle_connect_datasource(
                     return session
                 if value:
                     credentials[f.name] = value
-                # else: keep existing (already in credentials)
             elif current:
                 value = await prompt_or_cancel(
                     f"{field_label}",
@@ -813,9 +238,8 @@ async def handle_connect_datasource(
     display_engines = popular_engines + other_engines + custom_engines
 
     saved_connections = vault.list_connections()
-    # Build deduplicated list of engine types from saved connections (one per engine)
     seen_engines: set[str] = set()
-    recent_engine_entries: list[tuple[str, str]] = []  # (engine_slug, display_name)
+    recent_engine_entries: list[tuple[str, str]] = []
     for c in saved_connections:
         if c["engine"] not in seen_engines:
             seen_engines.add(c["engine"])
@@ -917,7 +341,6 @@ async def handle_connect_datasource(
                 from_tool_call=from_tool_call,
             )
 
-        # top_choice == "2": create new connection
         answer = await get_create_new_answer()
         if answer is None:
             return session
@@ -937,10 +360,9 @@ async def handle_connect_datasource(
             from_tool_call=from_tool_call,
         )
 
-    engine_def: DatasourceEngine | None = None
+    engine_def = None
     custom_source = False
     llm_recognised = False
-    # Recently used data sources are numbered after popular engines
     saved_start = len(popular_engines) + 1
     max_num = len(popular_engines) + len(recent_engine_entries)
 
@@ -951,7 +373,6 @@ async def handle_connect_datasource(
         elif 1 <= pick_num <= len(popular_engines):
             engine_def = popular_engines[pick_num - 1]
         elif recent_engine_entries and saved_start <= pick_num <= max_num:
-            # User picked a recently used data source — start a new connection of that engine
             picked_engine_slug, _ = recent_engine_entries[pick_num - saved_start]
             engine_def = registry.get(picked_engine_slug)
             if engine_def is None:
@@ -966,7 +387,6 @@ async def handle_connect_datasource(
 
     if engine_def is None and not custom_source:
         engine_def = registry.find_by_name(stripped_answer)
-        # if exact match not found, try substring match against display and engine names
         if engine_def is None:
             needle = stripped_answer.lower()
             candidates = [
@@ -996,7 +416,7 @@ async def handle_connect_datasource(
                     console.print("[anton.warning]Invalid choice. Aborting.[/]")
                     console.print()
                     return session
-        # Ask the LLM to identify the datasource
+
         if engine_def is None:
             engine_names = [e.display_name for e in all_engines]
             try:
@@ -1085,9 +505,9 @@ async def handle_connect_datasource(
             )
         return session
 
-    assert engine_def is not None  # custom_source path always returns before this line
+    assert engine_def is not None
     active_fields = engine_def.fields
-    chosen_method: "AuthMethod | None" = None
+    chosen_method = None
     if engine_def.auth_method == "choice" and engine_def.auth_methods:
         console.print()
         console.print(
@@ -1111,11 +531,6 @@ async def handle_connect_datasource(
             return session
         active_fields = chosen_method.fields
 
-    # ── Smart credential collection ────────────────────────────────────
-    # Track filled vs. missing fields as a puzzle. Each user response is
-    # parsed via the LLM to extract any variables mentioned, so users can
-    # fill multiple fields at once, paste a connection string, or change
-    # direction mid-flow.
     collector = ConnectionCollector(
         engine_def=engine_def,
         auth_method=chosen_method,
@@ -1129,9 +544,6 @@ async def handle_connect_datasource(
     optional_fields = [f for f in active_fields if not f.required]
 
     if collector.is_complete:
-        # Pre-fill already covered everything — skip the field list and
-        # the help prompt and go straight to testing + saving. Show a
-        # brief confirmation of what was received.
         filled_names = [
             f.name for f in active_fields if collector.collected.get(f.name)
         ]
@@ -1143,7 +555,6 @@ async def handle_connect_datasource(
         )
         console.print()
     else:
-        # Show the field list so the user sees what's expected.
         console.print()
         console.print(
             f"[anton.cyan](anton)[/] To connect [bold]"
@@ -1176,10 +587,6 @@ async def handle_connect_datasource(
 
         console.print()
 
-        # Offer instructions — but only if nothing has been pre-filled.
-        # If the user already provided some credentials (via the tool's
-        # `known_variables` or a paste), they clearly know what they're
-        # doing and don't need guidance — just prompt for what's missing.
         if not collector.collected:
             help_answer = await prompt_or_cancel(
                 "(anton) Do you need instructions on how to obtain these credentials?",
@@ -1193,7 +600,6 @@ async def handle_connect_datasource(
                     console, session, engine_def.display_name, None, active_fields,
                 )
             elif normalized and normalized != "n":
-                # Non-y/n answer — maybe the user pasted credentials here.
                 extracted = await extract_variables(
                     help_answer,
                     expected_fields=collector.active_fields,
@@ -1225,9 +631,6 @@ async def handle_connect_datasource(
         console.print()
 
         next_field = collector.next_field
-        # When only one required field remains, ask for it directly with
-        # the matching prompt style (password masking, default value,
-        # etc.). No LLM extraction needed — the answer IS the value.
         only_one_required = (
             next_field is not None
             and next_field.required
@@ -1245,14 +648,11 @@ async def handle_connect_datasource(
             if value is None:
                 return session
             if not value:
-                # Empty answer for the only missing required field —
-                # treat as a partial save signal.
                 partial = True
                 break
             collector.fill(next_field.name, value)
             continue
 
-        # Multiple fields remain — open prompt that accepts bulk input
         missing_names = ", ".join(f.name for f in collector.missing_required)
         prompt_label = (
             f"(anton) Provide values for {missing_names} "
@@ -1280,8 +680,6 @@ async def handle_connect_datasource(
             redirect_text = _build_redirect_message(
                 collector, value, extracted.redirect_engine
             )
-            # Stash for the tool wrapper; also mirror to history only if
-            # we're NOT inside a tool_use/tool_result pair.
             session._pending_connect_redirect = redirect_text
             if not from_tool_call:
                 session._history.append(
@@ -1298,8 +696,6 @@ async def handle_connect_datasource(
                 console.print()
                 continue
 
-        # LLM returned nothing structured — fall back to treating the
-        # input as the value for the next missing required field.
         if next_field is not None:
             collector.fill(next_field.name, value.strip())
         else:
@@ -1328,10 +724,6 @@ async def handle_connect_datasource(
         if not await run_connection_test(
             console, scratchpads, vault, engine_def, credentials, active_fields
         ):
-            # Either the test failed and the user declined to re-enter
-            # credentials, or the user pressed Escape during the retry
-            # prompt. Mark this so the tool wrapper can return an
-            # accurate (non-misleading) message to the LLM.
             session._pending_connect_status = "test_failed"
             return session
 
@@ -1385,10 +777,6 @@ async def handle_connect_datasource(
     )
     console.print()
 
-    # Inject a brief assistant message so the LLM is aware of the new
-    # connection — but only when NOT in a tool call (in that case the
-    # tool wrapper constructs its own return message; appending here
-    # would break tool_use/tool_result pairing).
     if not from_tool_call:
         session._history.append(
             {
@@ -1400,94 +788,3 @@ async def handle_connect_datasource(
             }
         )
     return session
-
-
-async def handle_test_datasource(
-    console: Console,
-    scratchpads: ScratchpadManager,
-    slug: str,
-) -> None:
-    """Test an existing Local Vault connection by running its test_snippet."""
-    if not slug:
-        console.print(
-            "[anton.warning]Usage: /test <engine-name>[/]"
-        )
-        console.print()
-        return
-
-    vault = DataVault()
-    registry = DatasourceRegistry()
-    parsed = parse_connection_slug(slug, [e.engine for e in registry.all_engines()], vault=vault)
-    if parsed is None:
-        console.print(
-            f"[anton.warning]Invalid name '{slug}'. Use engine-name format.[/]"
-        )
-        console.print()
-        return
-    engine, name = parsed
-    fields = vault.load(engine, name)
-    if fields is None:
-        console.print(
-            f"[anton.warning]No connection '{slug}' found in Local Vault.[/]"
-        )
-        console.print()
-        return
-
-    engine_def = registry.get(engine)
-    if engine_def is None:
-        console.print(
-            f"[anton.warning]Unknown engine '{engine}'. Cannot test.[/]"
-        )
-        console.print()
-        return
-
-    if not engine_def.test_snippet:
-        console.print(
-            f"[anton.warning]No test snippet defined for '{engine}'. Cannot test.[/]"
-        )
-        console.print()
-        return
-
-    console.print()
-    console.print(
-        f"[anton.cyan](anton)[/] Testing connection [bold]{slug}[/bold]…"
-    )
-
-    vault.clear_ds_env()
-    vault.inject_env(engine, name, flat=True)
-    register_secret_vars(engine_def)  # flat names for scrubbing during test
-
-    cell = None
-    try:
-        pad = await scratchpads.get_or_create("__datasource_test__")
-        await pad.reset()
-        if engine_def.pip:
-            await pad.install_packages([engine_def.pip])
-        cell = await pad.execute(engine_def.test_snippet)
-    finally:
-        restore_namespaced_env(vault)
-
-    if cell is None or cell.error or (
-        cell.stdout.strip() != "ok" and cell.stderr.strip()
-    ):
-        error_text = ""
-        if cell is not None:
-            error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
-        first_line = (
-            next((ln for ln in error_text.splitlines() if ln.strip()), error_text)
-            if error_text
-            else "unknown error"
-        )
-        console.print()
-        console.print(
-            f"[anton.warning](anton)[/] ✗ Connection test failed for"
-            f" [bold]{slug}[/bold]."
-        )
-        console.print()
-        console.print(f"        Error: {first_line}")
-    else:
-        console.print(
-            f"[anton.success]        ✓ Connection test passed for"
-            f" [bold]{slug}[/bold]![/]"
-        )
-    console.print()

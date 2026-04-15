@@ -24,7 +24,7 @@ import pytest
 from rich.console import Console
 
 from anton.commands.skills import _SkillDraft, handle_skill_save
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.registry import ToolRegistry
@@ -123,9 +123,8 @@ async def test_full_skills_loop(console, store_root):
     builder = ChatSystemPromptBuilder()
     prompt = builder.build(
         current_datetime="2026-04-10T13:00:00+00:00",
-        runtime_context="test",
+        system_prompt_context=SystemPromptContext(runtime_context="test"),
         proactive_dashboards=False,
-        output_dir="/tmp/x",
         skill_store=fresh_store,
     )
     assert "## Procedural memory" in prompt

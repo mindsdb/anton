@@ -17,6 +17,7 @@ dependencies = [
     "prompt-toolkit>=3.0",
     "packaging>=21.0",
     "pyyaml>=6.0",
+    "dill==0.3.8",
 ]
 
 [project.optional-dependencies]

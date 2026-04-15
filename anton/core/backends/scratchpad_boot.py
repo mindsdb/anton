@@ -4,14 +4,52 @@ import os
 import sys
 import traceback
 
+import dill
+
 from anton.core.backends.wire import (
     CELL_DELIM,
     RESULT_START,
     RESULT_END,
 )
 
+
+# --- Python session persistence and namespace injection ---
+PERSIST_SESSION = os.environ.get("ANTON_SCRATCHPAD_PERSIST_SESSION", "false").lower() in {"1", "true", "yes", "on"}
+SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "/anton_scratchpad_session.pkl")
+
+
+def _load_namespace() -> tuple[dict, str | None]:
+    if not PERSIST_SESSION:
+        return {"__builtins__": __builtins__}, None
+    try:
+        with open(SESSION_PATH, "rb") as f:
+            ns = dill.load(f)
+        if not isinstance(ns, dict):
+            raise TypeError("Session file did not contain a namespace dict")
+        ns.setdefault("__builtins__", __builtins__)
+        return ns, None
+    except FileNotFoundError:
+        return {"__builtins__": __builtins__}, None
+    except Exception:
+        return (
+            {"__builtins__": __builtins__},
+            "Failed to load scratchpad session; starting fresh.\n" + traceback.format_exc(),
+        )
+
+
+def _dump_namespace(ns: dict) -> str | None:
+    if not PERSIST_SESSION:
+        return None
+    try:
+        with open(SESSION_PATH, "wb") as f:
+            dill.dump(ns, f)
+        return None
+    except Exception:
+        return "Failed to dump scratchpad session.\n" + traceback.format_exc()
+
+
 # Persistent namespace across cells
-namespace = {"__builtins__": __builtins__}
+namespace, _ = _load_namespace()
 namespace["_anton_explainability_queries"] = []
 
 # --- Inject get_llm() for LLM access from scratchpad code ---
@@ -690,6 +728,10 @@ while True:
             stdout_val[:_MAX_OUTPUT]
             + f"\n\n... (truncated, {len(stdout_val)} chars total)"
         )
+
+    # Persist session after each cell.
+    _dump_namespace(namespace)
+
     result = {
         "stdout": stdout_val,
         "stderr": err_buf.getvalue(),
