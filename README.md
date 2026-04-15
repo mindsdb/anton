@@ -7,7 +7,7 @@
     ▐   ▐
 ```
 # Meet Anton - an autonomous agent that gets real work done
-Anton is your personal AI agent that works so you don't have to. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No setup, no plugins, no fuss.
+Anton is a personal AI agent that helps you get actual-work done. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No setup, no plugins, no fuss.
 
 It doesn't just answer questions. It *does things*: cleans your inbox, builds integrations, analyzes your data, automates workflows - whatever the task requires.
 
