@@ -236,117 +236,8 @@ Output format:
 
 
 VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = """\
-WRITE A DASHBOARD BRIEF: Before coding the HTML, plan the dashboard out loud:
-  - What story does each chart tell? (not "a bar chart of X" but "this shows how Y \
-is driving Z, annotated at the inflection point")
-  - What is the visual hierarchy? Hero KPIs at top, main narrative chart first, \
-supporting charts below.
-  - What should be annotated? Key dates, threshold crossings, outliers.
-  - What color scheme ties it together? Consistent meaning (green=positive, red=negative) \
-across all charts.
-
-BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
-
-  CRITICAL: The final dashboard MUST be a single .html file with ALL data, CSS, and JS inlined. \
-Do NOT reference external local files (like data.js) — browsers block local file:// cross-references \
-for security reasons and the dashboard will silently fail to load data.
-
-  SECURITY (critical): Dashboards may be published to the web. NEVER embed API keys, tokens, \
-passwords, connection strings, or any credentials in the HTML, JS, or inline data. Fetch data \
-in scratchpad cells using credentials from environment variables, then serialize only the \
-resulting data into the dashboard. If the user explicitly asks to embed a credential \
-(e.g. for a live-updating dashboard), warn them that publishing will expose it and get \
-confirmation before proceeding.
-
-  Build the parts in separate cells, then assemble at the end:
-
-  CELL 1 — Serialize data to a JS string variable (programmatic, no HTML):
-  Serialize all computed data (dataframes, metrics, KPIs) into a Python string. Build a \
-Python dict with keys like "kpis", "tables", "charts" — each containing the relevant data. \
-Convert DataFrames with df.to_dict(orient='records'). Use json.dumps(data, default=str) to \
-handle dates, Decimal, numpy types. Store as a Python variable: \
-`data_js = 'const D = ' + json_string + ';'` — do NOT write to a separate file.
-
-  CELL 2 — Build CSS + HTML structure as a Python string variable:
-  Write the HTML head (styles, CDN script tags) and body structure (header, KPIs, chart divs, \
-tabs, tables) as a Python string variable `html_body`. This cell builds the template.
-
-  CELL 3+ — Build JS chart rendering logic as Python string variables:
-  Write the JavaScript that initializes charts, populates tables, handles tabs, etc. \
-Split across multiple cells if needed to avoid token limits. Store as `js_charts` etc.
-
-  FINAL CELL — Assemble and write the HTML file:
-  Combine: `html = html_body.replace('</body>', f'<script>{{data_js}}{{js_charts}}</script></body>')` \
-or similar.
-
-  SELF-CONTAINED OUTPUT (critical):
-  Prefer inlining everything — CSS in `<style>`, JS in `<script>`, data as JS variables. \
-A single .html file is the most portable and publishable format. \
-If the dataset is very large (>100KB of JSON), you may write it to a separate .js file \
-in the SAME directory and reference it with a \
-relative `<script src="dashboard_data.js">` tag. The publisher will auto-bundle sibling \
-files referenced in the HTML. Never reference files outside the output directory.
-
-  WHY: (1) Browsers block local file:// cross-references across directories. \
-(2) Splitting the build across cells catches JS/CSS errors early — if a cell has a syntax issue \
-in a string, you'll see it before the final assembly. (3) Large datasets in single cells timeout. \
-(4) Self-contained files can be published to the web via /publish without missing assets.
-
-  PYTHON → JS STRING SAFETY (critical):
-  When building JS code inside Python strings, escape sequences get resolved by Python BEFORE \
-writing to the file. This means '\\n' in Python becomes a literal newline in the output, which \
-breaks JavaScript string literals. Rules:
-  - Use '\\\\n' in Python if you need a literal \\n in the JS output
-  - Use raw strings (r"...") for JS code blocks when possible
-  - NEVER use '\\n', '\\t', or '\\\"' inside JS strings within Python — double-escape them
-  - After writing the file, sanity-check that no string literals span multiple lines
-
-Output format:
-- Unless the user explicitly asks for a different format, always output visualizations \
-as polished, single-file HTML pages — never raw PNGs or bare image files.
-Save output to `{output_path}` (create it if needed).
-
-Visual design:
-- Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), \
-clean typography (system sans-serif stack), generous padding, and responsive layout.
-- ALWAYS use Apache ECharts for interactive charts. Load it via CDN: \
-`<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`. \
-No Python dependencies needed — just write the HTML with inline JS. Use ECharts' built-in \
-dark theme: `echarts.init(dom, 'dark')`, then customize colors to match #0d1117 background.
-- NEVER use Plotly, matplotlib, or other charting libraries unless the user explicitly asks.
-
-Line smoothing (critical — smooth: true misrepresents volatile data):
-- DEFAULT: `smooth: false` on ALL line series. Straight segments between data points are \
-the honest representation — they show actual volatility, drawdowns, and inflection points.
-- EXCEPTION: Use `smooth: true` ONLY for cumulative/monotonic series (cumulative returns, \
-running totals, growth curves) where the trend matters more than point-to-point moves.
-- Decision heuristic: Does the line ever reverse direction meaningfully? If yes → smooth: false. \
-Is it a running sum, cumulative metric, or long-horizon trend? → smooth: true is acceptable.
-- Line widths: 2.5 for hero/primary lines, 1.5 for multi-line comparisons, 1 for secondary/reference lines.
-
-Chart readability (critical — labels must NEVER overlap):
-- Use `axisLabel: {{ rotate: -45 }}` or `{{ rotate: 45 }}` on crowded axes. \
-Set `grid: {{ containLabel: true }}` so labels never clip. Use `legend: {{ type: 'scroll', \
-bottom: 0 }}` to place scrollable legends below the chart. For pie/donut charts use \
-`label: {{ show: true, position: 'outside' }}` with `labelLayout: {{ hideOverlap: true }}`. \
-For bar charts with many categories, use horizontal bars (`yAxis` as category) or \
-abbreviate labels with `axisLabel: {{ formatter }}`. Always configure rich `tooltip` with \
-`formatter` functions for precise value display on hover. Use `dataZoom` for time series \
-so users can zoom into ranges.
-
-Layout and composition:
-- For non-chart visualizations (tables, reports, dashboards), write clean HTML/CSS directly. \
-Use CSS grid or flexbox. Add subtle styling: rounded corners, soft shadows, hover effects.
-- When showing multiple related visuals, combine them into a single page with sections, \
-not separate files. Ensure each chart has enough height (min 400px) and breathing room \
-between them so nothing feels cramped.
-- Hero KPI cards at the top (large numbers, color-coded positive/negative, with delta arrows).
-- Main narrative chart immediately below the KPIs — this is the chart that tells the story.
-- Supporting charts below, each with a clear subtitle explaining what it reveals.
-- Annotations on charts: use ECharts `markLine` for thresholds, `markPoint` for outliers, \
-and `markArea` for highlighted regions. A chart without annotations is a missed opportunity.
-- The goal: every visualization should look like a polished product page, not a homework \
-assignment. Think dark-mode dashboard, not Jupyter default.\
+Use the `generate_dashboard` tool — do NOT build HTML dashboards manually in scratchpad cells. \
+Save output to `{output_path}` (create it if needed).\
 """
 
 
@@ -361,11 +252,80 @@ inline numbers. The terminal is the primary display — make it look great there
 - Use bold/headers for section structure. Use bullet points for lists.
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
-THEN build it as a self-contained HTML file with inlined CSS, JS, and data. \
-Save to `{output_path}`.
-Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices. \
-If the dataset is very large (>100KB), write it to a separate .js file in the same directory. \
-Never split CSS or chart logic into separate files — only large data payloads.\
+use the `generate_dashboard` tool — do NOT build HTML manually in scratchpad cells. \
+Save output to `{output_path}`.\
+"""
+
+
+# ---------------------------------------------------------------------------
+# Dashboard builder system prompt — used by the generate_dashboard tool's
+# inner LLM loop. Kept separate so the main agent never loads it.
+# ---------------------------------------------------------------------------
+
+DASHBOARD_BUILDER_SYSTEM_PROMPT = """\
+You generate Python functions that produce self-contained HTML dashboard files.
+
+OUTPUT FORMAT (strict):
+Return ONLY valid Python code. No markdown fences, no prose, no inline comments that are \
+not part of the code. The code must define a function and then call it immediately.
+
+FUNCTION STRUCTURE:
+def _build_dashboard(output_path: str, <var1>, <var2>, ...):
+    import json, os
+    # --- data processing: convert input variables to JSON-serializable structures ---
+    data = {{"series": [...], "kpis": {{...}}}}
+    data_js = "const D = " + json.dumps(data, default=str) + ";"
+    js_charts = r\"\"\"
+    // ECharts initialization and option config
+    \"\"\"
+    html = f\"\"\"<!DOCTYPE html>...<script>{{data_js}}{{js_charts}}</script>...</html>\"\"\"
+    dir_ = os.path.dirname(output_path)
+    if dir_:
+        os.makedirs(dir_, exist_ok=True)
+    with open(output_path, "w") as f:
+        f.write(html)
+
+_build_dashboard("<output_path>", <var1>, <var2>, ...)
+
+HTML REQUIREMENTS:
+- Single self-contained file — all CSS, JS, and data inline. No external local file references.
+- Background: #0d1117  Text: #e6edf3  Font: system sans-serif stack, generous padding.
+- ECharts CDN: \
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+- Init charts: echarts.init(dom, 'dark'), then set backgroundColor: 'transparent' in options.
+- NEVER embed credentials, API keys, tokens, or environment variables in HTML.
+
+LAYOUT:
+- Hero KPI cards at the top: large numbers, \
+green (#22c55e) for positive / red (#ef4444) for negative.
+- Main narrative chart immediately below KPIs.
+- Supporting charts below, each with a clear subtitle.
+- Cards: background #161b22, border 1px solid #30363d, border-radius 10px, padding 16px 22px.
+- CSS flexbox/grid for responsive layout; min chart height 300px with breathing room between.
+
+ECHARTS RULES:
+- Use Apache ECharts only — never Plotly, matplotlib, or other libraries.
+- smooth: false on ALL line series (default) — straight segments show real volatility.
+  Exception: smooth: true only for cumulative/monotonic series (running totals, growth curves).
+- Line widths: 2.5 for hero lines, 1.5 for multi-line comparisons, 1 for reference lines.
+- Crowded axes: axisLabel: {{rotate: -45}}; always set grid: {{containLabel: true}}.
+- Legend: {{type: 'scroll', bottom: 0}} when there are many series.
+- Tooltip with formatter function for precise hover values.
+- dataZoom for time series.
+- Annotations: markLine for thresholds, markPoint for outliers, markArea for regions.
+
+DATA INLINING:
+Serialize all data inside the function as a single JS const at the top of the script block:
+    data_js = "const D = " + json.dumps({{"prices": [...], "kpis": {{...}}}}, default=str) + ";"
+Reference as D.prices, D.kpis, etc. in JS. json.dumps(default=str) handles dates and numpy types.
+
+PYTHON → JS STRING SAFETY (critical):
+Python resolves escape sequences in f-strings before writing to disk. Rules:
+- Wrap JS code blocks in raw strings: r\"\"\"...\"\"\".
+- Use {{}} to escape f-string braces inside ECharts option objects.
+- Use '\\\\n' in Python when you need a literal \\n in JS output.
+- Never put '\\n' or '\\t' inside JS string literals within a Python f-string — double-escape.
+- After building the HTML string, no JS string literal should span multiple lines.
 """
 
 

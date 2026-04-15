@@ -57,7 +57,7 @@ from anton.commands.skills import (
     handle_skill_show,
     handle_skills_list,
 )
-from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
+from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL, GENERATE_DASHBOARD_TOOL
 from anton.utils.prompt import (
     prompt_or_cancel,
     prompt_minds_api_key,
@@ -997,7 +997,7 @@ async def _chat_loop(
         history_store=history_store,
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,
-        tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
+        tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL, GENERATE_DASHBOARD_TOOL],
     ))
 
     # Handle --resume flag at startup
