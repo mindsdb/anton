@@ -2,6 +2,8 @@
 Conversations service for managing conversation operations.
 """
 
+import asyncio
+import base64
 import csv
 import io
 from datetime import datetime, timezone
@@ -12,6 +14,7 @@ from mindsdb_sdk.server import Server
 from mindsdb_sql_parser import parse_sql
 from mindsdb_sql_parser.ast import Select
 from mindsdb_sql_parser.exceptions import ParsingException
+from pydantic import ValidationError
 from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, func, select
@@ -29,7 +32,15 @@ from minds.common.utilities import format_numeric_columns
 from minds.model.conversation import Conversation
 from minds.model.message import Message
 from minds.model.message_event import MessageEvent
-from minds.schemas.charts import ChartResponse, PieIntent, ScatterIntent, XYIntent
+from minds.schemas.charts import (
+    ChartImageResponse,
+    ChartImageTokenPayload,
+    ChartIntent,
+    ChartResponse,
+    PieIntent,
+    ScatterIntent,
+    XYIntent,
+)
 from minds.schemas.chat import Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationMetadata, ConversationResponse
 from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse, MessageResultResponse
@@ -670,7 +681,7 @@ class ConversationsService:
             if message.sql_query is None:
                 raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
 
-            sql_query = str(message.sql_query)
+            sql_query = str(message.sql_query).strip()
 
             # Validate the SQL query to prevent SQL injection.
             parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
@@ -791,7 +802,7 @@ class ConversationsService:
             if message.sql_query is None:
                 raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
 
-            sql_query = str(message.sql_query)
+            sql_query = str(message.sql_query).strip()
 
             # Validate the SQL query to prevent SQL injection.
             _ = self._validate_and_parse_sql_query(sql_query)
@@ -826,16 +837,13 @@ class ConversationsService:
         """
         Generate a Chart.js configuration from a message's SQL query results.
 
-        This method fetches the SQL query associated with a message, executes it,
-        and compiles the results into a Chart.js configuration based on the provided intent.
-
         Args:
             conversation_id: ID of the conversation.
             message_id: ID of the message with the SQL query.
             intent: Chart intent specification (XYIntent, PieIntent, or ScatterIntent).
 
         Returns:
-            ChartResponse: Complete Chart.js configuration with metadata and warnings.
+            ChartResponse containing Chart.js configuration, metadata, and warnings.
 
         Raises:
             ConversationNotFoundError: If conversation is not found.
@@ -845,52 +853,21 @@ class ConversationsService:
             InvalidSQLQueryError: If SQL query is invalid.
             ValueError: If intent references invalid columns.
         """
-        # Import here to avoid circular imports
-        from minds.schemas.charts import ChartResponse
-        from minds.services.chart_compiler import MAX_ROWS_TO_PROCESS, compile_chartjs
-
         logger.debug(
-            f"Getting chart for conversation {conversation_id} and message {message_id} "
+            f"Getting chart config for conversation {conversation_id} and message {message_id} "
             f"for user {self.user_id} in organization {self.organization_id}"
         )
 
         try:
-            # Validate conversation and message
-            conversation = await self._get_conversation(conversation_id)
-            if not conversation:
-                raise ConversationNotFoundError(f"Conversation with ID '{conversation_id}' not found")
+            from minds.services.chart_compiler import render_plan_to_chartjs
 
-            message = await self._get_message(conversation_id, message_id)
-            if not message:
-                raise MessageNotFoundError(f"Message with ID '{message_id}' not found")
-
-            if message.role != Role.assistant:
-                raise MessageNotAssistantError(f"Message with ID '{message_id}' is not an assistant message")
-
-            if message.sql_query is None:
-                raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
-
-            sql_query = str(message.sql_query)
-            parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
-            database_engines = extract_database_engines_from_select(
-                parsed_sql_query,
-                mindsdb_client=self.mindsdb_client,
-                exclude_cte_names=True,
+            plan, warnings, meta = await self._compile_conversation_message_chart(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                intent=intent,
             )
-
-            if "mssql" in database_engines:
-                # For MSSQL, LIMIT isn't supported, so we use TOP instead.
-                limited_sql_query = f"SELECT TOP {MAX_ROWS_TO_PROCESS} * FROM ({sql_query}) AS chart_data"
-            else:
-                limited_sql_query = f"SELECT * FROM ({sql_query}) AS chart_data LIMIT {MAX_ROWS_TO_PROCESS}"
-
-            result = self.mindsdb_client.query(limited_sql_query).fetch()
-
-            # Compile the Chart.js configuration
-            config, warnings, meta = compile_chartjs(result, intent)
-
             return ChartResponse(
-                config=config,
+                config=render_plan_to_chartjs(plan),
                 meta=meta,
                 warnings=warnings,
             )
@@ -1049,6 +1026,175 @@ class ConversationsService:
                 f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
             )
             raise ConversationsServiceError(f"Failed to get report: {str(e)}") from None
+
+    async def render_conversation_message_chart_png(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+        intent: ChartIntent,
+    ) -> bytes:
+        """Render a conversation chart directly to PNG bytes."""
+        from minds.services.chart_renderer import render_chart_image
+
+        logger.debug(
+            f"Rendering direct chart PNG for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in organization {self.organization_id}"
+        )
+
+        try:
+            plan, _, _ = await self._compile_conversation_message_chart(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                intent=intent,
+            )
+            return await asyncio.to_thread(render_chart_image, plan)
+        except (
+            ConversationNotFoundError,
+            MessageNotFoundError,
+            MessageNotAssistantError,
+            MessageNoSQLQueryError,
+            InvalidSQLQueryError,
+            ValueError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error rendering chart PNG for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to render chart image: {str(e)}") from None
+
+    async def get_conversation_message_chart_image(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+        intent: ChartIntent,
+    ) -> ChartImageResponse:
+        """
+        Return an authenticated URL for a server-rendered chart image.
+
+        The returned URL is an authenticated fetch endpoint that renders the
+        chart on demand. Callers should not treat it as a durable, immutable
+        snapshot reference.
+        """
+
+        logger.debug(
+            f"Getting chart image URL for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in organization {self.organization_id}"
+        )
+
+        try:
+            _, warnings, meta = await self._compile_conversation_message_chart(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                intent=intent,
+            )
+            token = self._build_chart_image_token(intent)
+            image_url = f"/api/v1/conversations/{conversation_id}/items/{message_id}/chart?token={token}"
+
+            return ChartImageResponse(
+                image_url=image_url,
+                meta=meta,
+                warnings=warnings,
+            )
+        except (
+            ConversationNotFoundError,
+            MessageNotFoundError,
+            MessageNotAssistantError,
+            MessageNoSQLQueryError,
+            InvalidSQLQueryError,
+            ValueError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error preparing chart image URL for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to prepare chart image URL: {str(e)}") from None
+
+    async def render_conversation_message_chart_by_token(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+        token: str,
+    ) -> bytes:
+        """Render a chart image from an opaque token."""
+
+        logger.debug(
+            f"Rendering chart image from token for conversation {conversation_id} and message {message_id} "
+            f"for user {self.user_id} in organization {self.organization_id}"
+        )
+
+        try:
+            intent = self._parse_chart_image_token(token)
+            return await self.render_conversation_message_chart_png(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                intent=intent,
+            )
+        except (
+            ConversationNotFoundError,
+            MessageNotFoundError,
+            MessageNotAssistantError,
+            MessageNoSQLQueryError,
+            InvalidSQLQueryError,
+            ValueError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error rendering chart image from token for conversation {conversation_id} and message {message_id} "
+                f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+            )
+            raise ConversationsServiceError(f"Failed to render chart image: {str(e)}") from None
+
+    async def _compile_conversation_message_chart(
+        self,
+        conversation_id: UUID,
+        message_id: UUID,
+        intent: ChartIntent,
+    ) -> tuple:
+        """Compile chart artifacts shared by all chart delivery endpoints."""
+        from minds.services.chart_compiler import MAX_ROWS_TO_PROCESS, compile_chart
+
+        await self._get_conversation(conversation_id)
+        message = await self._get_message(conversation_id, message_id)
+
+        if message.role != Role.assistant:
+            raise MessageNotAssistantError(f"Message with ID '{message_id}' is not an assistant message")
+
+        if message.sql_query is None:
+            raise MessageNoSQLQueryError(f"Message with ID '{message_id}' does not have a SQL query")
+
+        sql_query = str(message.sql_query).strip()
+        parsed_sql_query = self._validate_and_parse_sql_query(sql_query)
+        database_engines = extract_database_engines_from_select(
+            parsed_sql_query,
+            mindsdb_client=self.mindsdb_client,
+            exclude_cte_names=True,
+        )
+
+        if "mssql" in database_engines:
+            limited_sql_query = f"SELECT TOP {MAX_ROWS_TO_PROCESS} * FROM ({sql_query}) AS chart_data"
+        else:
+            limited_sql_query = f"SELECT * FROM ({sql_query}) AS chart_data LIMIT {MAX_ROWS_TO_PROCESS}"
+
+        result = self.mindsdb_client.query(limited_sql_query).fetch()
+        return compile_chart(result, intent)
+
+    def _build_chart_image_token(self, intent: ChartIntent) -> str:
+        payload = ChartImageTokenPayload(intent=intent).model_dump_json(exclude_none=True)
+        token_bytes = base64.urlsafe_b64encode(payload.encode("utf-8"))
+        return token_bytes.decode("ascii").rstrip("=")
+
+    def _parse_chart_image_token(self, token: str) -> ChartIntent:
+        try:
+            padded = token + ("=" * (-len(token) % 4))
+            payload = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+            return ChartImageTokenPayload.model_validate_json(payload).intent
+        except (UnicodeDecodeError, ValidationError, ValueError) as e:
+            raise ValueError("Invalid chart image token") from e
 
     def _validate_and_parse_sql_query(self, sql_query: str) -> Select:
         """

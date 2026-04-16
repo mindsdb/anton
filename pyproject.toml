@@ -1,6 +1,6 @@
 [project]
 name = "minds"
-version = "1.9.0"
+version = "1.9.1"
 requires-python = ">=3.10,<4.0"
 dependencies = [
     "pydantic==2.12.5",
@@ -24,6 +24,7 @@ dependencies = [
     "pydantic-settings==2.10.1",
     "tabulate==0.9.0",
     "mind-castle==0.4.9",
+    "matplotlib==3.10.8",
     "statsig-python-core==0.15.1",
     "docker==7.1.0",
     "statsig-python-core==0.15.1",

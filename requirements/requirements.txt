@@ -18,6 +18,7 @@ anthropic>=0.70.0,<0.76.0
 mindsdb_sdk @ https://github.com/mindsdb/mindsdb_python_sdk/archive/refs/heads/main.zip # Update to latest version once merged
 pandas==2.3.1
 prefect==3.4.18
+matplotlib==3.10.8
 async-property==0.2.2
 pydantic-settings==2.10.1
 tabulate==0.9.0  # Required for pandas.DataFrame.to_markdown()

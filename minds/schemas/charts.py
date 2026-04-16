@@ -6,7 +6,9 @@ The LLM outputs a small "intent" JSON, which the backend compiles into a full
 Chart.js configuration using the message's SQL query results.
 """
 
-from typing import Literal
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -108,14 +110,62 @@ class ScatterIntent(BaseIntent):
 ChartIntent = XYIntent | PieIntent | ScatterIntent
 
 
+class RenderChartType(str, Enum):
+    """Compiled chart kind for RenderPlan (Chart.js `type` string values)."""
+
+    BAR = "bar"
+    LINE = "line"
+    PIE = "pie"
+    SCATTER = "scatter"
+
+
+class ChartOutputFormat(str, Enum):
+    CHARTJS = "chartjs"
+    PNG = "png"
+    IMAGE_URL = "image_url"
+
+
 class ChartRequest(BaseModel):
-    """Request model for chart generation endpoint."""
+    """Request model for the unified chart endpoint."""
 
     intent: ChartIntent = Field(
         ...,
         discriminator="type",
         description="Chart intent specification",
     )
+    output: ChartOutputFormat = Field(
+        default=ChartOutputFormat.CHARTJS,
+        description=(
+            "Desired output format. "
+            "'chartjs' returns a Chart.js configuration for frontend rendering. "
+            "'png' returns server-rendered PNG bytes directly. "
+            "'image_url' returns a URL to an authenticated server-rendered image endpoint."
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class AxisSpec:
+    title: str | None
+    scale_type: str
+
+
+@dataclass(frozen=True)
+class SeriesSpec:
+    label: str
+    values: list[float] | None = None
+    points: list[tuple[float, float]] | None = None
+
+
+@dataclass(frozen=True)
+class RenderPlan:
+    chart_type: RenderChartType
+    title: str | None
+    show_legend: bool
+    labels: list[Any]
+    series: list[SeriesSpec]
+    x_axis: AxisSpec
+    y_axis: AxisSpec
 
 
 class ChartWarning(BaseModel):
@@ -150,4 +200,28 @@ class ChartResponse(BaseModel):
     warnings: list[ChartWarning] = Field(
         default_factory=list,
         description="Warnings from chart compilation",
+    )
+
+
+class ChartImageResponse(BaseModel):
+    """Response model for server-rendered chart image URLs."""
+
+    image_url: str = Field(
+        ...,
+        description="Opaque authenticated URL for fetching the rendered chart image",
+    )
+    meta: ChartMeta = Field(..., description="Metadata about the chart")
+    warnings: list[ChartWarning] = Field(
+        default_factory=list,
+        description="Warnings from chart compilation",
+    )
+
+
+class ChartImageTokenPayload(BaseModel):
+    """Opaque payload embedded in an image URL token."""
+
+    intent: ChartIntent = Field(
+        ...,
+        discriminator="type",
+        description="Chart intent specification",
     )
