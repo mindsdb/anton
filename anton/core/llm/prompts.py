@@ -267,10 +267,19 @@ Your task is to produce ONE single self-contained HTML file with a dashboard \
 that fully meets the requirements described below.
 
 The following will outline general requirements, dashboard description with user preferences, and a history \
-of commands already executed. In the event of a conflict between general requirements \
+of commands already executed in scratchpad. In the event of a conflict between general requirements \
 and user preferences, always prioritize user preferences, except in matters of privacy and security.
 
 ## GENERAL REQUIREMENTS
+
+WRITE A DASHBOARD BRIEF: Before coding the HTML, plan the dashboard out loud:
+- What story does each chart tell? (not "a bar chart of X" but "this shows how Y \
+is driving Z, annotated at the inflection point")
+- What is the visual hierarchy? Hero KPIs at top, main narrative chart first, \
+supporting charts below.
+- What should be annotated? Key dates, threshold crossings, outliers.
+- What color scheme ties it together? Consistent meaning (green=positive, red=negative) \
+across all charts.
 
 CRITICAL: The final dashboard MUST be a single .html file with ALL data, CSS, and JS inlined. \
 Do NOT reference external local files (like data.js) — browsers block local file:// cross-references \
@@ -282,15 +291,6 @@ in scratchpad cells using credentials from environment variables, then serialize
 resulting data into the dashboard. If the user explicitly asks to embed a credential \
 (e.g. for a live-updating dashboard), warn them that publishing will expose it and get \
 confirmation before proceeding.
-
-WRITE A DASHBOARD BRIEF: Before coding the HTML, plan the dashboard out loud:
-- What story does each chart tell? (not "a bar chart of X" but "this shows how Y \
-is driving Z, annotated at the inflection point")
-- What is the visual hierarchy? Hero KPIs at top, main narrative chart first, \
-supporting charts below.
-- What should be annotated? Key dates, threshold crossings, outliers.
-- What color scheme ties it together? Consistent meaning (green=positive, red=negative) \
-across all charts.
 
 SELF-CONTAINED OUTPUT (critical):
 Prefer inlining everything — CSS in `<style>`, JS in `<script>`, data as JS variables. \
@@ -359,46 +359,6 @@ between them so nothing feels cramped.
 and `markArea` for highlighted regions. A chart without annotations is a missed opportunity.
 - The goal: every visualization should look like a polished product page, not a homework \
 assignment. Think dark-mode dashboard, not Jupyter default.\
-
-HTML REQUIREMENTS:
-- Single self-contained file — all CSS, JS, and data inline. No external local file references.
-- Background: #0d1117  Text: #e6edf3  Font: system sans-serif stack, generous padding.
-- ECharts CDN: \
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-- Init charts: echarts.init(dom, 'dark'), then set backgroundColor: 'transparent' in options.
-- NEVER embed credentials, API keys, tokens, or environment variables in HTML.
-
-LAYOUT:
-- Hero KPI cards at the top: large numbers, \
-green (#22c55e) for positive / red (#ef4444) for negative.
-- Main narrative chart immediately below KPIs.
-- Supporting charts below, each with a clear subtitle.
-- Cards: background #161b22, border 1px solid #30363d, border-radius 10px, padding 16px 22px.
-- CSS flexbox/grid for responsive layout; min chart height 300px with breathing room between.
-
-ECHARTS RULES:
-- Use Apache ECharts only — never Plotly, matplotlib, or other libraries.
-- smooth: false on ALL line series (default) — straight segments show real volatility.
-  Exception: smooth: true only for cumulative/monotonic series (running totals, growth curves).
-- Line widths: 2.5 for hero lines, 1.5 for multi-line comparisons, 1 for reference lines.
-- Crowded axes: axisLabel: {{rotate: -45}}; always set grid: {{containLabel: true}}.
-- Legend: {{type: 'scroll', bottom: 0}} when there are many series.
-- Tooltip with formatter function for precise hover values.
-- dataZoom for time series.
-- Annotations: markLine for thresholds, markPoint for outliers, markArea for regions.
-
-DATA INLINING:
-Serialize all data inside the function as a single JS const at the top of the script block:
-    data_js = "const D = " + json.dumps({{"prices": [...], "kpis": {{...}}}}, default=str) + ";"
-Reference as D.prices, D.kpis, etc. in JS. json.dumps(default=str) handles dates and numpy types.
-
-PYTHON → JS STRING SAFETY (critical):
-Python resolves escape sequences in f-strings before writing to disk. Rules:
-- Wrap JS code blocks in raw strings: r\"\"\"...\"\"\".
-- Use {{}} to escape f-string braces inside ECharts option objects.
-- Use '\\\\n' in Python when you need a literal \\n in JS output.
-- Never put '\\n' or '\\t' inside JS string literals within a Python f-string — double-escape.
-- After building the HTML string, no JS string literal should span multiple lines.
 
 ## How to generate the HTML dashboard
 
