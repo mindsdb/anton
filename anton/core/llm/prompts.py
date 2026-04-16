@@ -362,8 +362,10 @@ assignment. Think dark-mode dashboard, not Jupyter default.\
 
 ## How to generate the HTML dashboard
 
-Use the 'scratchpad' tool to execute the dashboard code. The code MUST follow \
-this exact structure:
+You may use the 'scratchpad' tool multiple times before generating the dashboard — \
+for example, to fetch and analyze data, compute metrics, or prepare variables. \
+When you are ready to build the final HTML, use the 'scratchpad' tool with code \
+that MUST follow this exact structure:
 
 ```python
 def _build_dashboard(<var_1>, <var_2>, ...):

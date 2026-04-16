@@ -347,9 +347,6 @@ async def handle_generate_dashboard(session: "ChatSession", tc_input: dict) -> s
     if not variables:
         return "Error: 'variables' is required — provide a dict of variable_name → description."
 
-    param_names = list(variables.keys())
-    params_str = ", ".join(param_names)
-    call_args = ", ".join([f'"{output_path}"'] + param_names)
     def _var_line(k: str, v) -> str:
         if isinstance(v, dict):
             py_type = v.get("type", "")
@@ -377,18 +374,19 @@ async def handle_generate_dashboard(session: "ChatSession", tc_input: dict) -> s
     initial_user_message = f"""
 ## DASHBOARD DESCRIPTION
 
-Output path: {output_path}
 Title: {title}
+
+Output path: {output_path}
 
 Variables that are recommended to use:
 {var_block}
 
-Dashboard spec:
+Dashboard specification:
 {spec}
 
 ## SCRATCHPAD OUTPUT
 
-Aactual printed output from data-fetching cells — use this to understand \
+Actual printed output from data-fetching cells — use this to understand \
 real column names, value ranges, and data shape:
 ```python
 {scratchpad_context}
@@ -446,88 +444,6 @@ real column names, value ranges, and data shape:
         return f"Dashboard written to {output_path}."
     return "Dashboard generation failed or did not complete successfully."
 
-    # messages: list[dict] = [{"role": "user", "content": user_message}]
-    # last_error = ""
-    # code = ""
-
-    # for attempt in range(2):
-    #     if attempt > 0:
-    #         messages.append({
-    #             "role": "user",
-    #             "content": f"Syntax error: {last_error}. Fix and return the complete corrected code.",
-    #         })
-
-    #     response = await session._llm.plan(
-    #         system=DASHBOARD_BUILDER_SYSTEM_PROMPT,
-    #         messages=messages,
-    #         max_tokens=8192,
-    #     )
-
-    #     # Strip markdown fences the LLM may add despite instructions
-    #     raw = response.content.strip()
-    #     for fence in ("```python\n", "```py\n", "```\n"):
-    #         if raw.startswith(fence):
-    #             raw = raw[len(fence):]
-    #             break
-    #     if raw.endswith("```"):
-    #         raw = raw[:-3].rstrip()
-    #     code = raw
-
-    #     try:
-    #         ast.parse(code)
-    #         break
-    #     except SyntaxError as e:
-    #         last_error = str(e)
-    #         if attempt == 0:
-    #             messages.append({"role": "assistant", "content": response.content})
-    # else:
-    #     return (
-    #         f"Failed to generate valid Python code after 2 attempts. "
-    #         f"Last syntax error: {last_error}"
-    #     )
-
-    # cell = await pad.execute(
-    #     code,
-    #     description=f"Generate {title} HTML dashboard",
-    #     estimated_time="15s",
-    #     estimated_seconds=15,
-    # )
-
-    # if cell.error:
-    #     return f"Dashboard generation failed:\n{format_cell_result(cell)}"
-
-    # return f"Dashboard written to {output_path}."
-
-# # TODO move to main viz prompt
-# _GENERATE_DASHBOARD_WORKFLOW = """\
-# VISUALIZATIONS — dashboard workflow:
-# 1. FETCH DATA: Use a scratchpad cell to pull data and compute key metrics. Print variable \
-# names, structure, and key values — you'll use these as descriptions in step 3.
-# 2. STREAM INSIGHTS before building anything: narrate findings to the user immediately.
-#   - DATA HIGHLIGHTS: Compact markdown table of key numbers at a glance.
-#   - HEADLINE: One sentence — the single most important finding.
-#   - CONTEXT: Compare against a benchmark or expectation. Raw numbers without comparison \
-# are meaningless.
-#   - THE NON-OBVIOUS: What would an expert notice? Patterns the table doesn't show.
-#   - ASSUMPTIONS: Data source, time range, real-time vs delayed.
-#   - ACTIONABLE EDGE: Risks, thresholds, scenarios worth considering.
-# 3. CALL generate_dashboard with:
-#    - scratchpad_name: the scratchpad where variables live
-#    - variables: {name: {type, description}} for each variable (based on step 1 printed output)
-#    - output_path: ".anton/output/<descriptive_name>.html"
-#    - spec: full description of charts, layout, KPI cards, user preferences, title
-# 4. CALL publish_or_preview with the output path.
-
-# Do NOT build HTML dashboards manually in scratchpad cells. \
-# The generate_dashboard tool handles all HTML/CSS/JS/ECharts rendering.\
-
-# PROACTIVE FOLLOW-UP SUGGESTIONS:
-# After completing analysis, if the user's own data could complement the findings, \
-# offer it in ONE sentence at the end. Examples:
-# - After stock/market analysis → "I can also analyze your portfolio against these benchmarks."
-# - After economic analysis → "I can pull in your company's data to compare."
-# Keep it brief, not pushy. Don't repeat the offer if ignored.\
-# """
 
 GENERATE_DASHBOARD_TOOL = ToolDef(
     name="generate_dashboard",
@@ -586,5 +502,4 @@ GENERATE_DASHBOARD_TOOL = ToolDef(
         "required": ["scratchpad_name", "variables", "output_path", "spec"],
     },
     handler=handle_generate_dashboard,
-    # prompt=_GENERATE_DASHBOARD_WORKFLOW,
 )
