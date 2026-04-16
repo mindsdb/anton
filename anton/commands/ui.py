@@ -17,7 +17,9 @@ def handle_theme(console: Console, arg: str) -> None:
     elif arg in ("light", "dark"):
         new_mode = arg
     else:
-        console.print(f"[anton.warning]Unknown theme '{arg}'. Use: /theme light | /theme dark[/]")
+        console.print(
+            f"[anton.warning]Unknown theme '{arg}'. Use: /theme light | /theme dark[/]"
+        )
         console.print()
         return
 
@@ -37,7 +39,9 @@ def print_slash_help(console: Console) -> None:
     console.print("  [bold]/llm[/]      — Change LLM provider or API key")
 
     console.print("\n[bold]Data Connections[/]")
-    console.print("  [bold]/connect[/]   — Connect a database or API to your Local Vault")
+    console.print(
+        "  [bold]/connect[/]   — Connect a database or API to your Local Vault"
+    )
     console.print("  [bold]/list[/]      — List all saved connections")
     console.print("  [bold]/edit[/]      — Edit credentials for an existing connection")
     console.print("  [bold]/remove[/]    — Remove a saved connection")
@@ -53,6 +57,9 @@ def print_slash_help(console: Console) -> None:
     console.print("  [bold]/resume[/]    — Continue a previous session")
     console.print("  [bold]/publish[/]   — Publish an HTML report to the web")
     console.print("  [bold]/unpublish[/] — Remove a published report")
+
+    console.print("\n[bold]Support[/]")
+    console.print("  [bold]/report-bug[/] — Submit a bug report with diagnostic info")
 
     console.print("\n[bold]General[/]")
     console.print("  [bold]/help[/]      — Show this help menu")
