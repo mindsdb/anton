@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.memory.episodes import Episode, EpisodicMemory
+from anton.core.memory.episodes import Episode, EpisodicMemory
 
 
 @pytest.fixture()

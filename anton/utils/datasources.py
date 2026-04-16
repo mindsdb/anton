@@ -5,11 +5,11 @@ import re
 import yaml
 from typing import TYPE_CHECKING
 
-from anton.data_vault import DataVault, _slug_env_prefix
-from anton.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
+from anton.core.datasources.data_vault import DataVault, LocalDataVault, _slug_env_prefix
+from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
 
 if TYPE_CHECKING:
-    from anton.datasource_registry import DatasourceEngine
+    from anton.core.datasources.datasource_registry import DatasourceEngine
 
 # DS_* var names whose values are known to be secret (passwords, tokens, keys).
 # Populated at startup and after each successful connect.
@@ -105,7 +105,7 @@ def scrub_credentials(text: str) -> str:
     return text
 
 
-def build_datasource_context(active_only: str | None = None) -> str:
+def build_datasource_context(vault: DataVault, active_only: str | None = None) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
 
     Shows the LLM what data sources are connected and which environment
@@ -114,7 +114,7 @@ def build_datasource_context(active_only: str | None = None) -> str:
     If active_only is set, only the matching slug is included.
     """
     try:
-        vault = DataVault()
+        vault = vault or LocalDataVault()
         conns = vault.list_connections()
     except Exception:
         return ""
@@ -125,7 +125,7 @@ def build_datasource_context(active_only: str | None = None) -> str:
         "Credentials are pre-injected as namespaced DS_<ENGINE_NAME>__<FIELD> "
         "environment variables. Use them directly in scratchpad code "
         "(e.g. DS_POSTGRES_PROD_DB__HOST). "
-        "Never read ~/.anton/data_vault/ files directly.\n"
+        "Never read the data vault files directly.\n"
     )
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"

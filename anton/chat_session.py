@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from anton.config.settings import AntonSettings
+from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.minds_client import refresh_knowledge
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
-    from anton.memory.cortex import Cortex
-    from anton.memory.episodes import EpisodicMemory
+    from anton.core.memory.cortex import Cortex
+    from anton.core.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
     from anton.workspace import Workspace
 
@@ -65,8 +66,9 @@ def rebuild_session(
     session_id: str | None = None,
 ) -> "ChatSession":
     """Rebuild LLMClient + ChatSession after settings change."""
-    from anton.llm.client import LLMClient
+    from anton.core.llm.client import LLMClient
     from anton.chat import ChatSession
+    from anton.core.session import ChatSessionConfig
 
     state["llm_client"] = LLMClient.from_settings(settings)
 
@@ -79,23 +81,19 @@ def rebuild_session(
     refresh_knowledge(settings, cortex)
 
     runtime_context = build_runtime_context(settings)
-    api_key = (
-        settings.anthropic_api_key
-        if settings.coding_provider == "anthropic"
-        else settings.openai_api_key
-    ) or ""
-    return ChatSession(
-        state["llm_client"],
+    output_path = f"{settings.output_dir.rstrip('/')}/"
+    return ChatSession(ChatSessionConfig(
+        llm_client=state["llm_client"],
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
-        runtime_context=runtime_context,
+        system_prompt_context=SystemPromptContext(
+            runtime_context=runtime_context,
+            output_context=f"Save output to `{output_path}` (create it if needed).",
+        ),
         workspace=workspace,
         console=console,
-        coding_provider=settings.coding_provider,
-        coding_api_key=api_key,
-        coding_base_url=settings.openai_base_url or "",
         history_store=history_store,
         session_id=session_id,
         proactive_dashboards=settings.proactive_dashboards,
-    )
+    ))

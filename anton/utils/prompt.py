@@ -87,18 +87,18 @@ async def prompt_or_cancel(
     opts_text = choices_display or ("/".join(choices) if choices else "")
 
     if password:
-        suffix = " (hidden): "
+        suffix = " (hidden):"
     elif opts_text and default:
         suffix = (
             f" <b><ansimagenta>[{opts_text}]</ansimagenta></b>"
-            f" <b><ansicyan>({default})</ansicyan></b>: "
+            f" <b><ansicyan>({default})</ansicyan></b>:"
         )
     elif opts_text:
-        suffix = f" <b><ansimagenta>[{opts_text}]</ansimagenta></b>: "
+        suffix = f" <b><ansimagenta>[{opts_text}]</ansimagenta></b>:"
     elif default:
-        suffix = f" <b><ansicyan>({default})</ansicyan></b>: "
+        suffix = f" <b><ansicyan>({default})</ansicyan></b>:"
     else:
-        suffix = ": "
+        suffix = ":"
 
     pt_session: PromptSession[str] = PromptSession(
         mouse_support=False,
@@ -111,11 +111,12 @@ async def prompt_or_cancel(
     from anton.channel.theme import get_palette as _get_palette
     _prompt_color = _get_palette().prompt
 
+    space = '\u2009'
     if label.startswith("(anton) "):
         body = label[len("(anton) "):]
-        message = HTML(f"<b><style fg='{_prompt_color}'>(anton)</style></b> {body}{suffix}")
+        message = HTML(f"<b><style fg='{_prompt_color}'>(anton)</style></b> {body}{suffix}{space}")
     else:
-        message = HTML(f"{label}{suffix}")
+        message = HTML(f"{label}{suffix}{space}")
 
     while True:
         _esc = False

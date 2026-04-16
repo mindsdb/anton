@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from anton.llm.anthropic import AnthropicProvider
-from anton.llm.provider import LLMResponse, ToolCall
+from anton.core.llm.anthropic import AnthropicProvider
+from anton.core.llm.provider import LLMResponse, ToolCall
 
 
 class TestDataclasses:
@@ -16,7 +16,7 @@ class TestDataclasses:
 
 class TestAnthropicProvider:
     async def test_complete_text_response(self):
-        with patch("anton.llm.anthropic.anthropic") as mock_anthropic:
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
             mock_client = AsyncMock()
             mock_anthropic.AsyncAnthropic.return_value = mock_client
 
@@ -45,7 +45,7 @@ class TestAnthropicProvider:
             assert result.stop_reason == "end_turn"
 
     async def test_complete_tool_use_response(self):
-        with patch("anton.llm.anthropic.anthropic") as mock_anthropic:
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
             mock_client = AsyncMock()
             mock_anthropic.AsyncAnthropic.return_value = mock_client
 
@@ -78,7 +78,7 @@ class TestAnthropicProvider:
             assert result.stop_reason == "tool_use"
 
     async def test_complete_passes_tool_choice(self):
-        with patch("anton.llm.anthropic.anthropic") as mock_anthropic:
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
             mock_client = AsyncMock()
             mock_anthropic.AsyncAnthropic.return_value = mock_client
 
@@ -110,7 +110,7 @@ class TestAnthropicProvider:
             assert call_kwargs["tools"] == tools
 
     async def test_complete_omits_tool_choice_when_none(self):
-        with patch("anton.llm.anthropic.anthropic") as mock_anthropic:
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
             mock_client = AsyncMock()
             mock_anthropic.AsyncAnthropic.return_value = mock_client
 
@@ -137,7 +137,7 @@ class TestAnthropicProvider:
             assert "tool_choice" not in call_kwargs
 
     async def test_provider_without_api_key(self):
-        with patch("anton.llm.anthropic.anthropic") as mock_anthropic:
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
             mock_anthropic.AsyncAnthropic.return_value = AsyncMock()
             provider = AnthropicProvider()
             mock_anthropic.AsyncAnthropic.assert_called_once_with()

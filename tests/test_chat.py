@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.chat import ChatSession
-from anton.llm.provider import (
+from anton.core.session import ChatSessionConfig
+from tests.conftest import make_mock_llm
+from anton.core.llm.provider import (
     ContextOverflowError,
     LLMResponse,
     StreamComplete,
@@ -28,10 +30,10 @@ def _text_response(text: str) -> LLMResponse:
 class TestChatSession:
     async def test_conversational_turn(self):
         """Text-only response for casual conversation."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hey! How can I help?"))
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
         reply = await session.turn("hi")
 
         assert reply == "Hey! How can I help?"
@@ -39,7 +41,7 @@ class TestChatSession:
 
     async def test_history_grows_across_turns(self):
         """Multiple turns accumulate in history."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
                 _text_response("Hi there!"),
@@ -48,7 +50,7 @@ class TestChatSession:
             ]
         )
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
         await session.turn("hello")
         await session.turn("can you check something")
         await session.turn("the anton repo")
@@ -77,7 +79,7 @@ async def _fake_plan_stream(events):
 class TestChatSessionStreaming:
     async def test_turn_stream_yields_text_deltas(self):
         """Streaming turn yields text deltas and updates history."""
-        mock_llm = AsyncMock()
+        mock_llm = make_mock_llm()
 
         async def _stream(**kwargs):
             yield StreamTextDelta(text="Hello ")
@@ -86,7 +88,7 @@ class TestChatSessionStreaming:
 
         mock_llm.plan_stream = _stream
 
-        session = ChatSession(mock_llm)
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
         events = []
         async for event in session.turn_stream("hi"):
             events.append(event)
@@ -123,7 +125,7 @@ class TestContextCompaction:
                     )
                 )
 
-        session = ChatSession(AsyncMock())
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
         session._llm.plan_stream = _plan_stream
         session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
         session._summarize_history = AsyncMock()
@@ -144,7 +146,7 @@ class TestContextCompaction:
                 )
             )
 
-        session = ChatSession(AsyncMock())
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
         session._llm.plan_stream = _plan_stream
         session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
         session._summarize_history = AsyncMock()
@@ -165,7 +167,7 @@ class TestContextCompaction:
                 )
             )
 
-        session = ChatSession(AsyncMock())
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
         session._llm.plan_stream = _plan_stream
         session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
         session._summarize_history = AsyncMock()

@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 
 def _sanitize(value: str) -> str:
@@ -24,8 +25,47 @@ def _slug_env_prefix(engine: str, name: str) -> str:
     return "DS_" + re.sub(r"[^\w]", "_", raw).upper()
 
 
-class DataVault:
-    """Manages data source connection credentials in ~/.anton/data_vault/."""
+@runtime_checkable
+class DataVault(Protocol):
+    """Interface for credential storage backends.
+
+    The local implementation (LocalDataVault) stores JSON files in
+    ~/.anton/data_vault/. Cloud implementations can satisfy this protocol
+    with any backend (database, secrets manager, etc.) scoped to a user
+    or tenant.
+    """
+
+    def save(self, engine: str, name: str, credentials: dict[str, str]) -> object:
+        """Persist credentials for engine/name. Returns an implementation-defined path/key."""
+        ...
+
+    def load(self, engine: str, name: str) -> dict[str, str] | None:
+        """Return the fields dict for a connection, or None if not found."""
+        ...
+
+    def delete(self, engine: str, name: str) -> bool:
+        """Remove a connection. Returns True if it existed."""
+        ...
+
+    def list_connections(self) -> list[dict[str, str]]:
+        """Return [{engine, name, created_at}] for all stored connections."""
+        ...
+
+    def inject_env(self, engine: str, name: str, *, flat: bool = False) -> list[str] | None:
+        """Load credentials and set DS_* environment variables."""
+        ...
+
+    def clear_ds_env(self) -> None:
+        """Remove all DS_* variables from os.environ."""
+        ...
+
+    def next_connection_number(self, engine: str) -> int:
+        """Return the next auto-increment number for an engine (1-based)."""
+        ...
+
+
+class LocalDataVault:
+    """File-based credential store in ~/.anton/data_vault/."""
 
     def __init__(self, vault_dir: Path | None = None) -> None:
         self._dir = vault_dir or Path("~/.anton/data_vault").expanduser()
@@ -115,7 +155,7 @@ class DataVault:
             prefix = _slug_env_prefix(engine, name)
             for key, value in fields.items():
                 var = f"{prefix}__{key.upper()}"
-                os.environ[var] = value
+                os.environ[var] = value if isinstance(value, str) else str(value)
                 var_names.append(var)
         return var_names
 
@@ -140,7 +180,7 @@ class DataVault:
         ]
         max_n = 0
         for fname in existing:
-            suffix = fname[len(prefix) :]
+            suffix = fname[len(prefix):]
             if suffix.isdigit():
                 max_n = max(max_n, int(suffix))
         return max_n + 1

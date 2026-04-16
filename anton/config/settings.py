@@ -5,6 +5,8 @@ from pathlib import Path
 from pydantic import PrivateAttr, field_validator
 from pydantic_settings import BaseSettings
 
+from anton.core.settings import CoreSettings
+
 
 def _build_env_files() -> list[str]:
     """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env"""
@@ -21,7 +23,7 @@ def _build_env_files() -> list[str]:
 _ENV_FILES = _build_env_files()
 
 
-class AntonSettings(BaseSettings):
+class AntonSettings(CoreSettings):
     model_config = {"env_prefix": "ANTON_", "env_file": _ENV_FILES, "env_file_encoding": "utf-8", "extra": "ignore"}
 
     planning_provider: str = "anthropic"
@@ -39,6 +41,8 @@ class AntonSettings(BaseSettings):
     memory_dir: str = ".anton"
 
     context_dir: str = ".anton/context"
+
+    output_dir: str = ".anton/output"
 
     memory_mode: str = "autopilot"  # autopilot | copilot | off
 
@@ -66,7 +70,7 @@ class AntonSettings(BaseSettings):
     minds_datasource_engine: str | None = None
     minds_ssl_verify: bool = True
 
-    # Publish service (anton-services API Gateway)
+    # Publish service
     publish_url: str = "https://4nton.ai"
 
     @field_validator("minds_ssl_verify", mode="before")
@@ -110,3 +114,5 @@ class AntonSettings(BaseSettings):
             self.memory_dir = str(base / self.memory_dir)
         if not Path(self.context_dir).is_absolute():
             self.context_dir = str(base / self.context_dir)
+        if not Path(self.output_dir).is_absolute():
+            self.output_dir = str(base / self.output_dir)

@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from anton.memory.consolidator import Consolidator
+from anton.core.memory.consolidator import (
+    Consolidator,
+    _ConsolidatedLesson,
+    _ConsolidatedLessons,
+)
 
 
 @dataclass
@@ -56,9 +60,18 @@ class TestReplayAndExtract:
         ]
 
         mock_llm = AsyncMock()
-        mock_llm.code = AsyncMock(return_value=type("R", (), {
-            "content": '[{"text": "Always validate JSON before parsing", "kind": "always", "scope": "global", "confidence": "high"}]'
-        })())
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_ConsolidatedLessons(
+                items=[
+                    _ConsolidatedLesson(
+                        text="Always validate JSON before parsing",
+                        kind="always",
+                        scope="global",
+                        confidence="high",
+                    )
+                ]
+            )
+        )
 
         engrams = await consolidator.replay_and_extract(cells, mock_llm)
         assert len(engrams) == 1
@@ -69,7 +82,9 @@ class TestReplayAndExtract:
     async def test_handles_empty_response(self, consolidator):
         cells = [MockCell(), MockCell()]
         mock_llm = AsyncMock()
-        mock_llm.code = AsyncMock(return_value=type("R", (), {"content": "[]"})())
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_ConsolidatedLessons(items=[])
+        )
 
         engrams = await consolidator.replay_and_extract(cells, mock_llm)
         assert engrams == []
@@ -77,28 +92,39 @@ class TestReplayAndExtract:
     async def test_handles_llm_failure(self, consolidator):
         cells = [MockCell(), MockCell()]
         mock_llm = AsyncMock()
-        mock_llm.code = AsyncMock(side_effect=Exception("API error"))
+        mock_llm.generate_object_code = AsyncMock(side_effect=Exception("API error"))
 
         engrams = await consolidator.replay_and_extract(cells, mock_llm)
         assert engrams == []
 
-    async def test_handles_markdown_fenced_json(self, consolidator):
-        cells = [MockCell(description="test", error="SomeError")]
-        mock_llm = AsyncMock()
-        mock_llm.code = AsyncMock(return_value=type("R", (), {
-            "content": '```json\n[{"text": "Handle errors gracefully", "kind": "lesson", "scope": "project"}]\n```'
-        })())
-
-        engrams = await consolidator.replay_and_extract(cells, mock_llm)
-        assert len(engrams) == 1
-        assert engrams[0].text == "Handle errors gracefully"
-
-    async def test_invalid_entries_skipped(self, consolidator):
+    async def test_skips_blank_text_entries(self, consolidator):
+        """Defensive: even with forced schema, blank text should be skipped."""
         cells = [MockCell(), MockCell()]
         mock_llm = AsyncMock()
-        mock_llm.code = AsyncMock(return_value=type("R", (), {
-            "content": '[{"text": "valid", "kind": "lesson", "scope": "global"}, {"bad": "entry"}, "not a dict"]'
-        })())
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_ConsolidatedLessons(
+                items=[
+                    _ConsolidatedLesson(text="valid", kind="lesson", scope="global"),
+                    _ConsolidatedLesson(text="   ", kind="lesson", scope="project"),
+                ]
+            )
+        )
 
         engrams = await consolidator.replay_and_extract(cells, mock_llm)
         assert len(engrams) == 1
+        assert engrams[0].text == "valid"
+
+    async def test_caps_at_five_lessons(self, consolidator):
+        cells = [MockCell(), MockCell()]
+        mock_llm = AsyncMock()
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_ConsolidatedLessons(
+                items=[
+                    _ConsolidatedLesson(text=f"lesson {i}")
+                    for i in range(10)
+                ]
+            )
+        )
+
+        engrams = await consolidator.replay_and_extract(cells, mock_llm)
+        assert len(engrams) == 5

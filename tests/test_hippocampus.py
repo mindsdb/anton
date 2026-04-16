@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.memory.hippocampus import Hippocampus
+from anton.core.memory.hippocampus import Hippocampus
 
 
 @pytest.fixture()

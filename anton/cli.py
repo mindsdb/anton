@@ -21,11 +21,12 @@ from rich.text import Text
 from anton import __version__
 
 from anton.utils.prompt import prompt_or_cancel
-from anton.llm.openai import build_chat_completion_kwargs
+from anton.core.llm.openai import build_chat_completion_kwargs
 
 from anton.chat import ChatSession
-from anton.llm.client import LLMClient
-from anton.scratchpad import ScratchpadManager
+from anton.core.session import ChatSessionConfig
+from anton.core.llm.client import LLMClient
+from anton.core.backends.manager import ScratchpadManager
 
 from anton.commands.datasource import (
     handle_remove_data_source,
@@ -301,7 +302,11 @@ def main(
 
     from anton.analytics import send_event
 
-    send_event(settings, "anton_started")
+    send_event(
+        settings,
+        "anton_started",
+        has_mdb_key="1" if settings.minds_api_key else "0",
+    )
 
     if ctx.invoked_subcommand is None:
         from anton.chat import run_chat
@@ -569,7 +574,7 @@ def _setup_prompt(
     def _toolbar():
         return HTML("<style fg='#ff69b4'>\u23f5\u23f5 Esc to go back</style>")
 
-    suffix = f" ({default}): " if default else ": "
+    suffix = f" ({default}):" if default else ":"
     session: PromptSession[str] = PromptSession(
         mouse_support=False,
         bottom_toolbar=_toolbar,
@@ -585,6 +590,7 @@ def _setup_prompt(
     except RuntimeError:
         in_async = False
 
+    suffix = suffix + '\u2009'
     if in_async:
         # We're inside an async context (e.g. /setup from chat loop)
         # Run prompt_toolkit in a thread to avoid nested event loop conflict
@@ -1170,7 +1176,7 @@ def connect_data_source(
         )
         or "",
     )
-    session = ChatSession(llm_client)
+    session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
         await handle_connect_datasource(
@@ -1214,7 +1220,7 @@ def edit_data_source(
         )
         or "",
     )
-    session = ChatSession(llm_client)
+    session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
         await handle_connect_datasource(

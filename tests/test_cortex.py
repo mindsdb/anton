@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from anton.memory.cortex import Cortex
-from anton.memory.hippocampus import Engram, Hippocampus
+from anton.core.memory.cortex import Cortex
+from anton.core.memory.hippocampus import Engram, Hippocampus
 
 
 @pytest.fixture()
@@ -21,7 +21,7 @@ def dirs(tmp_path):
 @pytest.fixture()
 def cortex(dirs):
     g, p = dirs
-    return Cortex(global_dir=g, project_dir=p, mode="copilot")
+    return Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot")
 
 
 class TestBuildMemoryContext:
@@ -98,7 +98,7 @@ class TestEncode:
 
     async def test_off_mode_returns_disabled(self, dirs):
         g, p = dirs
-        cortex = Cortex(global_dir=g, project_dir=p, mode="off")
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="off")
         engram = Engram(text="test", kind="lesson", scope="global")
         actions = await cortex.encode([engram])
         assert any("disabled" in a.lower() for a in actions)
@@ -107,19 +107,19 @@ class TestEncode:
 class TestEncodingGate:
     def test_autopilot_never_confirms(self, dirs):
         g, p = dirs
-        cortex = Cortex(global_dir=g, project_dir=p, mode="autopilot")
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
         engram = Engram(text="test", kind="lesson", scope="global", confidence="low")
         assert cortex.encoding_gate(engram) is False
 
     def test_off_never_confirms(self, dirs):
         g, p = dirs
-        cortex = Cortex(global_dir=g, project_dir=p, mode="off")
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="off")
         engram = Engram(text="test", kind="lesson", scope="global", confidence="high")
         assert cortex.encoding_gate(engram) is False
 
     def test_copilot_confirms_low_confidence(self, dirs):
         g, p = dirs
-        cortex = Cortex(global_dir=g, project_dir=p, mode="copilot")
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot")
         low = Engram(text="test", kind="lesson", scope="global", confidence="medium")
         high = Engram(text="test", kind="lesson", scope="global", confidence="high")
         assert cortex.encoding_gate(low) is True
@@ -148,15 +148,19 @@ class TestMaybeUpdateIdentity:
     async def test_off_mode_does_nothing(self, dirs):
         g, p = dirs
         mock_llm = AsyncMock()
-        cortex = Cortex(global_dir=g, project_dir=p, mode="off", llm_client=mock_llm)
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="off", llm_client=mock_llm)
         await cortex.maybe_update_identity("I'm Jorge")
-        mock_llm.code.assert_not_called()
+        mock_llm.generate_object_code.assert_not_called()
 
     async def test_extracts_identity(self, dirs):
+        from anton.core.memory.cortex import _IdentityFacts
+
         g, p = dirs
         mock_llm = AsyncMock()
-        mock_llm.code = AsyncMock(return_value=type("R", (), {"content": '["Name: Jorge"]'})())
-        cortex = Cortex(global_dir=g, project_dir=p, mode="copilot", llm_client=mock_llm)
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_IdentityFacts(facts=["Name: Jorge"])
+        )
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot", llm_client=mock_llm)
         await cortex.maybe_update_identity("Hi, I'm Jorge")
         assert (g / "profile.md").exists()
         assert "Name: Jorge" in (g / "profile.md").read_text()

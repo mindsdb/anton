@@ -64,7 +64,6 @@ class Hippocampus:
         self._lessons_path = base_dir / "lessons.md"
         self._topics_dir = base_dir / "topics"
 
-
     def recall_identity(self) -> str:
         """Load the always-on self-model (profile.md).
 
@@ -247,7 +246,8 @@ class Hippocampus:
                 i += 1
                 section_entries: list[str] = []
                 while i < len(lines) and not (
-                    lines[i].strip().startswith("## ") and lines[i].strip() != section_header
+                    lines[i].strip().startswith("## ")
+                    and lines[i].strip() != section_header
                 ):
                     section_entries.append(lines[i])
                     i += 1
@@ -333,7 +333,9 @@ class Hippocampus:
             if path.is_file():
                 try:
                     content = path.read_text(encoding="utf-8")
-                    count += sum(1 for ln in content.splitlines() if ln.strip().startswith("- "))
+                    count += sum(
+                        1 for ln in content.splitlines() if ln.strip().startswith("- ")
+                    )
                 except (OSError, UnicodeDecodeError):
                     continue
         return count
@@ -353,6 +355,7 @@ class Hippocampus:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 if sys.platform != "win32":
                     import fcntl
+
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
                     f.write(text)
@@ -360,6 +363,7 @@ class Hippocampus:
                 finally:
                     if sys.platform != "win32":
                         import fcntl
+
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             tmp_path.replace(path)
         else:
@@ -367,6 +371,7 @@ class Hippocampus:
             with open(path, "a", encoding="utf-8") as f:
                 if sys.platform != "win32":
                     import fcntl
+
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
                     f.write(text)
@@ -374,6 +379,7 @@ class Hippocampus:
                 finally:
                     if sys.platform != "win32":
                         import fcntl
+
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     @staticmethod

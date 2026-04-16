@@ -27,6 +27,7 @@ class LLMResponse:
     usage: Usage = field(default_factory=Usage)
     stop_reason: str | None = None
 
+
 @dataclass
 class StreamTextDelta:
     text: str
@@ -57,6 +58,7 @@ class StreamComplete:
 @dataclass
 class StreamTaskProgress:
     """Progress event from agent task execution (planning, building, executing)."""
+
     phase: str
     message: str
     eta_seconds: float | None = None
@@ -65,12 +67,14 @@ class StreamTaskProgress:
 @dataclass
 class StreamToolResult:
     """Tool result that should be displayed to the user (e.g. scratchpad dump)."""
+
     content: str
 
 
 @dataclass
 class StreamContextCompacted:
     """Notification that context was compacted to free up space."""
+
     message: str
 
 
@@ -130,7 +134,23 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+@dataclass
+class ProviderConnectionInfo:
+    """Serializable provider connection details.
+
+    `api_key` is marked repr=False to reduce accidental leakage via logs/debugging.
+    """
+
+    provider: str
+    api_key: str | None = field(default=None, repr=False)
+    base_url: str | None = None
+    ssl_verify: bool | None = None
+
+
 class LLMProvider(ABC):
+    # Human-readable provider id (e.g. "anthropic", "openai-compatible").
+    name: str = ""
+
     @abstractmethod
     async def complete(
         self,
@@ -142,6 +162,14 @@ class LLMProvider(ABC):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
     ) -> LLMResponse: ...
+
+    def export_connection_info(self) -> ProviderConnectionInfo:
+        """Return provider connection details for other runtimes (e.g. scratchpad).
+
+        Providers should override this to expose the minimal needed configuration
+        without relying on SDK client internals.
+        """
+        return ProviderConnectionInfo(provider=self.name)
 
     async def stream(
         self,

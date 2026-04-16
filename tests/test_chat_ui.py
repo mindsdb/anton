@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from anton.chat_ui import PHASE_LABELS, StreamDisplay, _tool_display_text
+from anton.chat_ui import PHASE_LABELS, StreamDisplay, _MAX_DESC, _tool_display_text
 
 
 
@@ -111,7 +111,7 @@ class TestActivityTracking:
         display.on_tool_use_end("tool_1")
 
         act = display._activities[0]
-        assert act.description == "Scratchpad(exec)"
+        assert act.description == "exec"  # no Scratchpad() wrapper
 
     @patch("anton.chat_ui.Live")
     def test_finish_prints_activity_summary(self, MockLive):
@@ -163,39 +163,44 @@ class TestActivityTracking:
         display.on_tool_use_end("tool_2")
 
         assert len(display._activities) == 2
-        assert display._activities[0].description == "Scratchpad(exec)"
-        assert display._activities[1].description == "Memory(1 entry/entries)"
+        # Scratchpad now shows just the description (no wrapper)
+        assert display._activities[0].description == "exec"
+        # Memorize now shows a witty phrase (random, so just check it's a string)
+        assert display._activities[1].description  # non-empty
 
     def test_malformed_json_fallback(self):
-        # Bad JSON should not crash, falls back to just the label
+        # Bad JSON should not crash — falls back to a default
         result = _tool_display_text("scratchpad", "{broken json")
-        assert result == "Scratchpad"
+        assert result == "Running code"
 
     def test_tool_display_text_truncation(self):
         long_desc = "a" * 100
         result = _tool_display_text("scratchpad", f'{{"one_line_description": "{long_desc}"}}')
-        assert len(result) <= len("Scratchpad()") + 60
-        assert result.endswith("\u2026)")
+        # No wrapper — just the truncated description
+        assert len(result) <= _MAX_DESC
+        assert result.endswith("\u2026")
 
     def test_tool_display_text_unknown_tool(self):
         result = _tool_display_text("some_new_tool", '{"foo": "bar"}')
-        assert result == "some_new_tool"
+        # Unknown tools get a generic phrase from _GENERIC_TOOL_PHRASES
+        assert isinstance(result, str)
+        assert len(result) > 0
 
     def test_scratchpad_display_uses_one_line_description(self):
-        """one_line_description should be preferred over action for scratchpad."""
+        """one_line_description should be used directly (no Scratchpad() wrapper)."""
         result = _tool_display_text(
             "scratchpad",
             '{"action": "exec", "name": "pad", "one_line_description": "Install packages"}',
         )
-        assert result == "Scratchpad(Install packages)"
+        assert result == "Install packages"
 
     def test_scratchpad_display_falls_back_to_action(self):
-        """Without one_line_description, scratchpad should show action."""
+        """Without one_line_description, scratchpad shows the action."""
         result = _tool_display_text(
             "scratchpad",
             '{"action": "exec", "name": "pad"}',
         )
-        assert result == "Scratchpad(exec)"
+        assert result == "exec"
 
     @patch("anton.chat_ui.Live")
     def test_text_routes_to_initial_before_tools(self, MockLive):

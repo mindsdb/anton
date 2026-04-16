@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from anton.config.settings import AntonSettings
-from anton.llm.client import LLMClient
-from anton.llm.provider import LLMProvider, LLMResponse, Usage
+from anton.core.llm.client import LLMClient
+from anton.core.llm.provider import LLMProvider, LLMResponse, Usage
 
 
 @pytest.fixture()
@@ -75,7 +75,7 @@ class TestLLMClient:
 
 class TestLLMClientFromSettings:
     def test_from_settings_creates_client(self):
-        from anton.llm.anthropic import AnthropicProvider
+        from anton.core.llm.anthropic import AnthropicProvider
 
         with patch("anthropic.AsyncAnthropic"):
             settings = AntonSettings(

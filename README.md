@@ -6,7 +6,9 @@
     ▐   ▐        █▀█ █ ▀█  █  █▄█ █ ▀█
     ▐   ▐
 ```
+
 # Meet Anton - an agent that gets real work done
+
 Anton is a personal AI agent that helps you get actual-work done. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No setup, no plugins, no fuss.
 
 It doesn't just answer questions. It *does things*: cleans your inbox, builds integrations, analyzes your data, automates workflows - whatever the task requires.
@@ -77,7 +79,9 @@ Set up a WhatsApp integration so I can message you from my phone.
 
 Anton doesn't wait for someone to build a connector. It writes the integration code itself, sets it up, and gets it running - so you can chat with it from WhatsApp, Telegram, or whatever channel you need.
 
+
 ### 🔧 Ask for anything that requires action
+
 - **Send emails** - connect accounts, draft messages or even send them on your behalf.
 - **Manage Calendarss** - Summarize your day, create meetings, block time, etc. All just by asking.
 - **Automated reporting** - pull from multiple databases, crunch numbers, deliver a report on a schedule.

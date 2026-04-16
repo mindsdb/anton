@@ -37,7 +37,6 @@ class EpisodicMemory:
         self._session_id: str | None = None
         self._file: Path | None = None
 
-
     @property
     def enabled(self) -> bool:
         return self._enabled
@@ -75,6 +74,7 @@ class EpisodicMemory:
             with self._file.open("a", encoding="utf-8") as f:
                 if sys.platform != "win32":
                     import fcntl
+
                     fcntl.flock(f, fcntl.LOCK_EX)
                     f.write(line)
                     fcntl.flock(f, fcntl.LOCK_UN)
@@ -99,14 +99,16 @@ class EpisodicMemory:
         elif role == "tool_result":
             content = content[:_MAX_TOOL_RESULT]
 
-        self.log(Episode(
-            ts=datetime.now(timezone.utc).isoformat(),
-            session=self._session_id,
-            turn=turn,
-            role=role,
-            content=content,
-            meta=dict(meta),
-        ))
+        self.log(
+            Episode(
+                ts=datetime.now(timezone.utc).isoformat(),
+                session=self._session_id,
+                turn=turn,
+                role=role,
+                content=content,
+                meta=dict(meta),
+            )
+        )
 
     def recall(
         self,
@@ -214,7 +216,9 @@ class EpisodicMemory:
         lines: list[str] = []
         for ep in episodes:
             # Show more content for assistant/scratchpad responses
-            max_len = 2000 if ep.role in ("assistant", "scratchpad", "tool_result") else 500
+            max_len = (
+                2000 if ep.role in ("assistant", "scratchpad", "tool_result") else 500
+            )
             lines.append(f"[{ep.ts}] ({ep.role}) {ep.content[:max_len]}")
         return "\n".join(lines)
 
