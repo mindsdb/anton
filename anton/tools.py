@@ -343,9 +343,13 @@ async def handle_generate_dashboard(session: "ChatSession", tc_input: dict) -> s
     spec: str = tc_input.get("spec", "")
     scratchpad_name: str = tc_input.get("scratchpad_name", "main")
     title: str = tc_input.get("title", "Dashboard")
+    edit_instructions: str = tc_input.get("edit_instructions")
 
-    if not variables:
-        return "Error: 'variables' is required — provide a dict of variable_name → description."
+    if not edit_instructions and not variables:
+        return (
+            "Error: cannot generate a dashboard without data. "
+            "Provide 'variables' for a new dashboard, or 'edit_instructions' to modify an existing one."
+        )
 
     def _var_line(k: str, v) -> str:
         if isinstance(v, dict):
@@ -371,7 +375,41 @@ async def handle_generate_dashboard(session: "ChatSession", tc_input: dict) -> s
         else "(no output from scratchpad cells)"
     )
 
-    initial_user_message = f"""
+    if edit_instructions:
+        from pathlib import Path as _Path
+        existing_path = _Path(output_path)
+        if not existing_path.is_absolute() and session._workspace:
+            existing_path = _Path(session._workspace.base) / output_path
+        if not existing_path.exists():
+            return f"Error: cannot edit — file not found at '{output_path}'. Use generate_dashboard without 'edit_instructions' to create it first."
+        existing_html = existing_path.read_text()
+
+        initial_user_message = f"""
+## EDIT EXISTING DASHBOARD
+
+Output path: {output_path}
+
+## EDIT INSTRUCTIONS
+
+Apply ONLY the following changes — do not restructure, restyle, or reimagine the rest:
+{edit_instructions}
+
+## EXISTING DASHBOARD HTML
+
+```html
+{existing_html}
+```
+
+## SCRATCHPAD OUTPUT
+
+Available variables (use only if needed for the edit):
+```python
+{scratchpad_context}
+```
+
+"""
+    else:
+        initial_user_message = f"""
 ## DASHBOARD DESCRIPTION
 
 Title: {title}
@@ -448,8 +486,10 @@ real column names, value ranges, and data shape:
 GENERATE_DASHBOARD_TOOL = ToolDef(
     name="generate_dashboard",
     description=(
-        "Generate a self-contained HTML dashboard from data already computed in a scratchpad. "
-        "Use this instead of writing dashboard HTML manually in scratchpad cells."
+        "Generate or edit a self-contained HTML dashboard from data already computed in a scratchpad. "
+        "Use this to create a new dashboard or to modify an existing one (e.g. change colors, add charts, "
+        "adjust layout). When editing, pass the existing file path in `output_path` and describe the "
+        "changes in `edit_instructions`. Use this instead of writing dashboard HTML manually in scratchpad cells."
     ),
     input_schema={
         "type": "object",
@@ -496,10 +536,21 @@ GENERATE_DASHBOARD_TOOL = ToolDef(
             },
             "title": {
                 "type": "string",
-                "description": "Dashboard title (e.g. 'TON/USD — Last 1 Hour').",
+                "description": "Dashboard title (e.g. 'BTC/USD — Last 1 Hour').",
+            },
+            "edit_instructions": {
+                "type": "string",
+                "description": (
+                    "When the dashboard already exists and the user wants to modify it, "
+                    "pass the specific change instructions here (e.g. 'change bar color to blue', "
+                    "'add a second Y axis for volume'). When provided, the inner LLM will edit "
+                    "the existing file rather than generating from scratch. "
+                    "Copy the user's request as closely as possible — do NOT rephrase, expand, "
+                    "or infer additional changes beyond what was explicitly asked."
+                ),
             },
         },
-        "required": ["scratchpad_name", "variables", "output_path", "spec"],
+        "required": ["output_path"],
     },
     handler=handle_generate_dashboard,
 )
