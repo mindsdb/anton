@@ -252,7 +252,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 max_tokens=4096,
             )
             result = response.content.strip()
-            if result == "NONE":
+            if result.upper() == "NONE":
                 filtered_when = ""
             elif result:
                 filtered_when = result
