@@ -1038,8 +1038,11 @@ async def _chat_loop(
     runtime_context = build_runtime_context(settings)
 
     output_path = f"{settings.output_dir.rstrip('/')}/"
+    from anton.chat_session import get_runtime_factory
+
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
+        runtime_factory=get_runtime_factory(settings),
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,

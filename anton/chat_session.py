@@ -53,6 +53,29 @@ def build_runtime_context(settings: AntonSettings) -> str:
     return ctx
 
 
+def get_runtime_factory(settings: AntonSettings):
+    """Return the appropriate scratchpad runtime factory based on settings.
+
+    If ANTON_REMOTE_SCRATCHPAD_URL is set (and minds_api_key available),
+    returns a remote factory. Otherwise returns the local factory.
+    """
+    from anton.core.settings import CoreSettings
+
+    core = CoreSettings()
+    if core.remote_scratchpad_url and settings.minds_api_key:
+        from functools import partial
+        from anton.core.backends.remote import remote_scratchpad_runtime_factory
+
+        return partial(
+            remote_scratchpad_runtime_factory,
+            endpoint_url=core.remote_scratchpad_url,
+            api_key=settings.minds_api_key,
+        )
+
+    from anton.core.backends.local import local_scratchpad_runtime_factory
+    return local_scratchpad_runtime_factory
+
+
 def rebuild_session(
     *,
     settings: AntonSettings,
@@ -84,6 +107,7 @@ def rebuild_session(
     output_path = f"{settings.output_dir.rstrip('/')}/"
     return ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
+        runtime_factory=get_runtime_factory(settings),
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
