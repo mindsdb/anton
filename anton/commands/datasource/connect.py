@@ -19,13 +19,19 @@ from anton.commands.datasource.verify import run_connection_test
 _PROMPT_RECONNECT_CANCEL = "(reconnect/cancel)"
 
 
-def looks_like_paste(text: str) -> bool:
+def looks_like_paste(text: str | None) -> bool:
     """True when the user's input looks like pasted credentials rather than
     a datasource name — a URI, JSON blob, env var reference, or file path."""
     stripped = (text or "").strip()
     if not stripped:
         return False
     if stripped.startswith(("/", "~/", "./", "../", "$", "{")):
+        return True
+    # Windows absolute paths: C:\... or C:/...
+    if len(stripped) >= 3 and stripped[1] == ":" and stripped[2] in ("/", "\\"):
+        return True
+    # UNC paths: \\server\share\...
+    if stripped.startswith("\\\\"):
         return True
     tokens = stripped.split()
     return bool(tokens) and "://" in tokens[0]
@@ -50,6 +56,107 @@ def engine_from_uri_scheme(text: str, registry):
             if match is not None:
                 return match
     return None
+
+
+async def resolve_engine_by_name(
+    name: str,
+    all_engines: list,
+    registry: "DatasourceRegistry",
+    console: "Console",
+    session: "ChatSession",
+) -> tuple:
+    """Resolve a datasource name to an engine via exact, fuzzy, and LLM matching.
+
+    Returns ``(engine_def, llm_recognised, cancelled)`` where ``cancelled``
+    is True when the user pressed Escape or gave an invalid pick during
+    ambiguous-candidate selection.
+    """
+    engine_def = registry.find_by_name(name)
+    if engine_def is not None:
+        return engine_def, False, False
+
+    needle = name.lower()
+    candidates = [
+        e for e in all_engines
+        if needle in e.display_name.lower() or needle in e.engine.lower()
+    ]
+    if len(candidates) == 1:
+        return candidates[0], False, False
+    if len(candidates) > 1:
+        console.print()
+        console.print(
+            f"[anton.warning](anton)[/] '{name}' matches multiple engines — "
+            "which one did you mean?"
+        )
+        console.print()
+        for i, e in enumerate(candidates, 1):
+            console.print(f"        {i}. {e.display_name}")
+        console.print()
+        pick = await prompt_or_cancel("(anton) Enter a number")
+        if pick is None:
+            return None, False, True
+        pick = (pick or "").strip()
+        try:
+            return candidates[int(pick) - 1], False, False
+        except (ValueError, IndexError):
+            console.print("[anton.warning]Invalid choice. Aborting.[/]")
+            console.print()
+            return None, False, True
+
+    engine_names = [e.display_name for e in all_engines]
+    llm_text = "UNKNOWN"
+    try:
+        console.print()
+        console.print("[anton.muted]        Looking up datasource…[/]")
+        llm_resp = await session._llm.plan(
+            system="You are a datasource identification assistant.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"The user typed: {name!r}\n"
+                        f"Known datasources: {engine_names!r}\n\n"
+                        "If the user input clearly matches one of the known datasources, "
+                        "reply with EXACTLY: MATCH:<display_name>\n"
+                        "If it does NOT match any known datasource but you recognise it "
+                        "as a real service/tool, reply with EXACTLY: CUSTOM\n"
+                        "If you don't recognise it at all, reply with EXACTLY: UNKNOWN\n"
+                        "Reply with only one of those three forms, nothing else."
+                    ),
+                }
+            ],
+            max_tokens=64,
+        )
+        raw_content = getattr(llm_resp, "content", "")
+        if isinstance(raw_content, list):
+            raw_content = " ".join(b.text for b in raw_content if hasattr(b, "text"))
+        elif not isinstance(raw_content, str):
+            raw_content = ""
+        llm_text = raw_content.strip() or "UNKNOWN"
+    except Exception:
+        llm_text = "UNKNOWN"
+
+    llm_recognised = llm_text == "CUSTOM" or llm_text.startswith("MATCH:")
+
+    if llm_text.startswith("MATCH:"):
+        matched_name = llm_text[len("MATCH:"):].strip()
+        matched_engine = next(
+            (e for e in all_engines if e.display_name == matched_name), None
+        )
+        if matched_engine is not None:
+            if matched_name.lower() != name.lower():
+                confirm = await prompt_or_cancel(
+                    f'(anton) Did you mean "{matched_name}"?',
+                    choices=["y", "n"], default="y",
+                )
+                if confirm is None:
+                    return None, llm_recognised, True
+                if confirm.strip().lower() == "y":
+                    return matched_engine, llm_recognised, False
+            else:
+                return matched_engine, llm_recognised, False
+
+    return None, llm_recognised, False
 
 
 def _build_redirect_message(
@@ -327,6 +434,7 @@ async def handle_connect_datasource(
     engine_def = None
     prefilled_fields: dict[str, str] = {}
     llm_recognised = False
+    resolution_text = stripped_answer  # text for engine resolution; used as custom-fallback hint
 
     paste_like = looks_like_paste(stripped_answer)
     if paste_like:
@@ -343,7 +451,14 @@ async def handle_connect_datasource(
                 return session
             stripped_followup = followup.strip()
             if stripped_followup:
-                engine_def = registry.find_by_name(stripped_followup)
+                resolution_text = stripped_followup
+                engine_def, llm_recognised, cancelled = await resolve_engine_by_name(
+                    stripped_followup, all_engines, registry, console, session
+                )
+                if cancelled:
+                    return session
+            else:
+                resolution_text = ""
         if engine_def is not None:
             parsed_result = parse_credential_input(stripped_answer, engine_def)
             if parsed_result is not None and parsed_result.fields:
@@ -355,88 +470,14 @@ async def handle_connect_datasource(
                 console.print()
 
     if engine_def is None and not paste_like:
-        engine_def = registry.find_by_name(stripped_answer)
-        if engine_def is None:
-            needle = stripped_answer.lower()
-            candidates = [
-                e
-                for e in all_engines
-                if needle in e.display_name.lower() or needle in e.engine.lower()
-            ]
-            if len(candidates) == 1:
-                engine_def = candidates[0]
-            elif len(candidates) > 1:
-                console.print()
-                console.print(
-                    f"[anton.warning](anton)[/] '{stripped_answer}' matches multiple engines — "
-                    "which one did you mean?"
-                )
-                console.print()
-                for i, e in enumerate(candidates, 1):
-                    console.print(f"        {i}. {e.display_name}")
-                console.print()
-                pick = await prompt_or_cancel("(anton) Enter a number")
-                if pick is None:
-                    return session
-                pick = (pick or "").strip()
-                try:
-                    engine_def = candidates[int(pick) - 1]
-                except (ValueError, IndexError):
-                    console.print("[anton.warning]Invalid choice. Aborting.[/]")
-                    console.print()
-                    return session
-
-        if engine_def is None:
-            engine_names = [e.display_name for e in all_engines]
-            try:
-                console.print()
-                console.print("[anton.muted]        Looking up datasource…[/]")
-                llm_resp = await session._llm.plan(
-                    system="You are a datasource identification assistant.",
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": (
-                                f"The user typed: {stripped_answer!r}\n"
-                                f"Known datasources: {engine_names!r}\n\n"
-                                "If the user input clearly matches one of the known datasources, "
-                                "reply with EXACTLY: MATCH:<display_name>\n"
-                                "If it does NOT match any known datasource but you recognise it "
-                                "as a real service/tool, reply with EXACTLY: CUSTOM\n"
-                                "If you don't recognise it at all, reply with EXACTLY: UNKNOWN\n"
-                                "Reply with only one of those three forms, nothing else."
-                            ),
-                        }
-                    ],
-                    max_tokens=64,
-                )
-                raw_content = getattr(llm_resp, "content", "")
-                if not isinstance(raw_content, str):
-                    raw_content = ""
-                llm_text = raw_content.strip() or "UNKNOWN"
-            except Exception:
-                llm_text = "UNKNOWN"
-
-            llm_recognised = llm_text == "CUSTOM" or llm_text.startswith("MATCH:")
-
-            if llm_text.startswith("MATCH:"):
-                matched_name = llm_text[len("MATCH:"):].strip()
-                matched_engine = next(
-                    (e for e in all_engines if e.display_name == matched_name), None
-                )
-                if matched_engine is not None:
-                    if matched_name.lower() != stripped_answer.lower():
-                        confirm = await prompt_or_cancel(
-                            f'(anton) Did you mean "{matched_name}"?',
-                            choices=["y", "n"], default="y",
-                        )
-                        if confirm is not None and confirm.strip().lower() == "y":
-                            engine_def = matched_engine
-                    else:
-                        engine_def = matched_engine
+        engine_def, llm_recognised, cancelled = await resolve_engine_by_name(
+            stripped_answer, all_engines, registry, console, session
+        )
+        if cancelled:
+            return session
 
     if engine_def is None:
-        hint = stripped_answer if not stripped_answer.isdigit() else ""
+        hint = resolution_text if not resolution_text.isdigit() else ""
         _telemetry("ds_connect_attempt", engine=hint or "unknown")
         result = await handle_add_custom_datasource(
             console, hint, registry, session,

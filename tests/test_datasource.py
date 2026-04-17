@@ -22,6 +22,7 @@ from anton.commands.datasource import (
     handle_list_data_sources,
     handle_remove_data_source,
 )
+from anton.commands.datasource.connect import looks_like_paste
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
@@ -2839,3 +2840,167 @@ class TestPromptCopyConsistency:
         assert "[y/n]" not in label
         assert "[reconnect/cancel]" not in label
         assert "(y/n" in label or _PROMPT_RECONNECT_CANCEL in label
+
+
+class TestLooksLikePaste:
+    @pytest.mark.parametrize("path", [
+        "/tmp/creds.json",
+        "~/creds.json",
+        "./creds.json",
+        "../creds.json",
+    ])
+    def test_unix_paths_recognized(self, path):
+        assert looks_like_paste(path) is True
+
+    @pytest.mark.parametrize("path", [
+        "C:\\Users\\me\\creds.json",
+        "C:/Users/me/creds.json",
+        "D:\\tmp\\db.txt",
+    ])
+    def test_windows_drive_paths_recognized(self, path):
+        assert looks_like_paste(path) is True
+
+    @pytest.mark.parametrize("path", [
+        "\\\\server\\share\\creds.json",
+        "\\\\192.168.1.1\\share\\db.json",
+    ])
+    def test_unc_paths_recognized(self, path):
+        assert looks_like_paste(path) is True
+
+    def test_plain_datasource_name_not_paste(self):
+        assert looks_like_paste("PostgreSQL") is False
+        assert looks_like_paste("mysql") is False
+
+    def test_uri_is_paste(self):
+        assert looks_like_paste("postgres://user:pw@host/db") is True
+
+    def test_json_is_paste(self):
+        assert looks_like_paste('{"host": "db.example.com"}') is True
+
+    def test_env_ref_is_paste(self):
+        assert looks_like_paste("$DATABASE_URL") is True
+
+    def test_empty_not_paste(self):
+        assert looks_like_paste("") is False
+
+    def test_none_not_paste(self):
+        assert looks_like_paste(None) is False
+
+
+class TestPasteFollowupResolution:
+    """Tests for the paste-credentials + follow-up datasource-name flow."""
+
+    @pytest.mark.asyncio
+    async def test_paste_followup_exact_match(
+        self, registry, vault_dir, make_session, make_pad
+    ):
+        """Pasted JSON + exact follow-up name resolves the engine and merges parsed fields."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        json_paste = json.dumps({
+            "host": "db.example.com",
+            "port": "5432",
+            "database": "analytics",
+            "user": "alice",
+            "password": "secret",
+        })
+        responses = iter([json_paste, "PostgreSQL"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        assert conns[0]["engine"] == "postgresql"
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+        assert saved["password"] == "secret"
+
+    @pytest.mark.asyncio
+    async def test_paste_followup_fuzzy_match(
+        self, registry, vault_dir, make_session, make_pad
+    ):
+        """Follow-up name that fails exact match still resolves via substring matching."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        json_paste = json.dumps({
+            "host": "db.example.com",
+            "port": "5432",
+            "database": "analytics",
+            "user": "alice",
+            "password": "secret",
+        })
+        # "post" is a substring of "postgresql" / "PostgreSQL" — fuzzy, not exact
+        responses = iter([json_paste, "post"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        assert conns[0]["engine"] == "postgresql"
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+
+    @pytest.mark.asyncio
+    async def test_paste_followup_unresolved_uses_followup_hint(
+        self, registry, vault_dir, make_session
+    ):
+        """When follow-up name doesn't resolve, custom fallback receives the follow-up
+        text as its hint — not the original pasted credentials blob."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        json_paste = json.dumps({"host": "db.example.com", "database": "analytics"})
+        followup_name = "SomeUnknownDB"
+        responses = iter([json_paste, followup_name])
+
+        captured_hints: list[str] = []
+
+        async def fake_custom(con, hint, reg, ses, known_service=False):
+            captured_hints.append(hint)
+            return None
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch(
+                "anton.commands.datasource.connect.handle_add_custom_datasource",
+                side_effect=fake_custom,
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        assert vault.list_connections() == []
+        assert len(captured_hints) == 1
+        assert captured_hints[0] == followup_name
+        assert "host" not in captured_hints[0]
