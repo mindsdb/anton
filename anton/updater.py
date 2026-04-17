@@ -23,7 +23,14 @@ def check_and_update(console, settings) -> bool:
 
     Returns True if an update was applied and the process should restart.
     """
+    import os
+
     if settings.disable_autoupdates:
+        return False
+
+    # Guard against infinite restart loops.  _reexec() sets this before
+    # replacing the process; the new process inherits it and skips the check.
+    if os.environ.get("_ANTON_UPDATED"):
         return False
 
     result: dict = {}
