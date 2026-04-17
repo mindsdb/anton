@@ -375,7 +375,7 @@ async def _handle_remote(
     status = result.get("status", "none")
     endpoint = result.get("endpoint", "")
 
-    # Already running — just save and confirm
+    # Already running — save and confirm
     if status == "running":
         console.print(f"  [anton.success]Remote scratchpad is running[/]")
         console.print(f"  [anton.muted]{endpoint}[/]")
