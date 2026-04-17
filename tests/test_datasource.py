@@ -620,7 +620,7 @@ class TestHandleConnectDatasource:
         session = make_session()
         console = MagicMock()
         vault = LocalDataVault(vault_dir=vault_dir)
-        responses = iter(["PostgreSQL", "n", "skip"])
+        responses = iter(["PostgreSQL", "", "n", "skip"])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -656,6 +656,7 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
+                "",
                 "n",
                 "db.example.com",
                 "5432",
@@ -830,10 +831,10 @@ class TestHandleConnectDatasource:
             "user: alice\n"
             "password: s3cr3t"
         )
-        # Only two user inputs needed: the engine pick, then the paste
-        # at the help prompt. The collector becomes complete immediately
-        # after extraction, so no further prompts are issued.
-        responses = iter(["PostgreSQL", pasted])
+        # Engine pick, skip the paste prompt with Enter, then paste at the
+        # help prompt. The collector becomes complete immediately after
+        # extraction, so no further prompts are issued.
+        responses = iter(["PostgreSQL", "", pasted])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -946,6 +947,7 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
+                "",
                 "n",
                 "db.example.com",
                 "5432",
@@ -992,6 +994,7 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
+                "",
                 "n",
                 "db.example.com",
                 "5432",
@@ -1036,6 +1039,7 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
+                "",
                 "n",
                 "db.example.com",
                 "5432",
@@ -1070,7 +1074,7 @@ class TestHandleConnectDatasource:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["HubSpot", "1", "n", "pat-na1-abc123"])
+        responses = iter(["HubSpot", "1", "", "n", "pat-na1-abc123"])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -1122,6 +1126,7 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
+                "",
                 "n",
                 "host=db.example.com port=5432 database=prod_db user=alice",
                 "s3cr3t",  # only password remains → single-field prompt
@@ -1213,6 +1218,7 @@ class TestCredentialScrubbing:
         responses = iter(
             [
                 "PostgreSQL",
+                "",
                 "n",
                 "db.host.com",
                 "5432",
@@ -1739,6 +1745,7 @@ class TestEnvActivationCollisionFree:
         responses = iter(
             [
                 "PostgreSQL",
+                "",
                 "n",
                 "db.example.com",
                 "5432",

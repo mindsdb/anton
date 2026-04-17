@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from anton.connect_collector import ConnectionCollector, extract_variables
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
+from anton.utils.credential_parsers import parse_credential_input
 from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
 from anton.utils.prompt import prompt_or_cancel
 from anton.commands.datasource.helpers import show_credential_help
@@ -556,6 +557,32 @@ async def handle_connect_datasource(
     )
     if known_variables:
         collector.fill_many(known_variables)
+
+    if not collector.is_complete and not from_tool_call:
+        paste = await prompt_or_cancel(
+            f"(anton) Paste a connection string, JSON, env var "
+            f"($VAR), or file path for {engine_def.display_name} — "
+            f"or press Enter to enter fields one at a time",
+            password=True,
+        )
+        if paste is None:
+            return session
+        if paste.strip():
+            parsed = parse_credential_input(paste, engine_def)
+            if parsed is not None:
+                filled = collector.fill_many(parsed.fields)
+                if filled:
+                    console.print(
+                        f"[anton.muted]        Parsed from "
+                        f"{parsed.source}: {', '.join(filled)}[/]"
+                    )
+                    console.print()
+            else:
+                console.print(
+                    "[anton.muted]        Couldn't parse that directly — "
+                    "I'll ask for fields one at a time.[/]"
+                )
+                console.print()
 
     known_engine_slugs = [e.engine for e in registry.all_engines()]
     partial = False
