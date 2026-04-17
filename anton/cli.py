@@ -18,9 +18,6 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
-import openai
-from openai import AzureOpenAI
-
 from anton import __version__
 
 from anton.utils.prompt import prompt_or_cancel
@@ -239,6 +236,10 @@ def _make_console() -> Console:
 
 
 console = _make_console()
+_ensure_dependencies(console)
+
+import openai
+from openai import AzureOpenAI
 
 
 def _get_settings(ctx: typer.Context):
@@ -284,8 +285,6 @@ def main(
     ),
 ) -> None:
     """Anton — a self-evolving autonomous system."""
-    _ensure_dependencies(console)
-
     from anton.config.settings import AntonSettings
 
     settings = AntonSettings()
@@ -870,7 +869,6 @@ def _setup_anthropic(settings, ws) -> None:
 
 def _setup_openai(settings, ws) -> None:
     """Set up OpenAI with a single model for both reasoning and coding."""
-
     console.print()
     while True:
         api_key = _setup_prompt("API key", is_password=True)
@@ -923,7 +921,6 @@ def _setup_openai(settings, ws) -> None:
 
 def _setup_gemini(settings, ws) -> None:
     """Set up Google Gemini via its OpenAI-compatible endpoint."""
-
     _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     console.print()
