@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncIterator
 
 import openai
+from openai import AsyncAzureOpenAI
 
 from .provider import (
     ContextOverflowError,
@@ -202,21 +203,35 @@ class OpenAIProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         ssl_verify: bool = True,
+        api_version: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url
         self._ssl_verify = ssl_verify
+        self._api_version = api_version
 
         import httpx
 
-        kwargs = {}
-        if api_key:
-            kwargs["api_key"] = api_key
-        if base_url:
-            kwargs["base_url"] = base_url
-        if not ssl_verify:
-            kwargs["http_client"] = httpx.AsyncClient(verify=False)
-        self._client = openai.AsyncOpenAI(**kwargs)
+        if api_version:
+            # Azure OpenAI: use the dedicated client which handles deployment
+            # URL construction and api-version automatically.
+            azure_kwargs: dict = {"api_version": api_version}
+            if api_key:
+                azure_kwargs["api_key"] = api_key
+            if base_url:
+                azure_kwargs["azure_endpoint"] = base_url
+            if not ssl_verify:
+                azure_kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            self._client = AsyncAzureOpenAI(**azure_kwargs)
+        else:
+            kwargs: dict = {}
+            if api_key:
+                kwargs["api_key"] = api_key
+            if base_url:
+                kwargs["base_url"] = base_url
+            if not ssl_verify:
+                kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            self._client = openai.AsyncOpenAI(**kwargs)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(
@@ -224,6 +239,7 @@ class OpenAIProvider(LLMProvider):
             api_key=self._api_key,
             base_url=self._base_url,
             ssl_verify=self._ssl_verify,
+            api_version=self._api_version,
         )
 
     async def complete(
