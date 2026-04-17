@@ -79,10 +79,12 @@ if _scratchpad_model:
             _llm_api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get(
                 "ANTON_OPENAI_API_KEY"
             )
+            _llm_api_version = os.environ.get("ANTON_OPENAI_API_VERSION") or None
             _llm_provider = _ProviderClass(
                 api_key=_llm_api_key or None,
                 base_url=_llm_base_url or None,
                 ssl_verify=_llm_ssl_verify,
+                api_version=_llm_api_version,
             )
         else:
             _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify

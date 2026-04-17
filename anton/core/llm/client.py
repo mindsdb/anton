@@ -218,17 +218,20 @@ class LLMClient:
         from .anthropic import AnthropicProvider
         from .openai import OpenAIProvider
 
+        api_version = getattr(settings, "openai_api_version", None)
         providers = {
             "anthropic": lambda: AnthropicProvider(api_key=settings.anthropic_api_key),
             "openai": lambda: OpenAIProvider(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 ssl_verify=settings.minds_ssl_verify,
+                api_version=api_version,
             ),
             "openai-compatible": lambda: OpenAIProvider(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 ssl_verify=settings.minds_ssl_verify,
+                api_version=api_version,
             ),
         }
 
