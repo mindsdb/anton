@@ -132,12 +132,20 @@ async def handle_connect_datasource(
             datasource_name, [e.engine for e in registry.all_engines()], vault=vault
         )
         if parsed is None:
-            console.print(
-                f"[anton.warning]Invalid slug '{datasource_name}'. "
-                "Expected format: engine-name.[/]"
-            )
-            console.print()
-            return session
+            engine_match = registry.find_by_name(datasource_name)
+            if engine_match is None:
+                console.print(
+                    f"[anton.warning]No connection or engine named "
+                    f"'{datasource_name}'. Use /list to see existing "
+                    f"connections, or /connect with no argument to "
+                    f"browse engines.[/]"
+                )
+                console.print()
+                return session
+            prefill = datasource_name
+            datasource_name = None
+
+    if datasource_name is not None:
         edit_engine, edit_name = parsed
         existing = vault.load(edit_engine, edit_name)
         if existing is None:
@@ -320,46 +328,6 @@ async def handle_connect_datasource(
 
     if prefill:
         answer = prefill
-    elif saved_connections:
-        console.print()
-        console.print("[anton.cyan](anton)[/] What would you like to do?\n")
-        console.print("          [bold]  1.[/bold] Use an existing connection")
-        console.print("          [bold]  2.[/bold] Create a new connection")
-        console.print()
-        top_choice = await prompt_or_cancel(
-            "(anton) Enter a number", choices=["1", "2"]
-        )
-        if top_choice is None:
-            return session
-
-        if top_choice == "1":
-            console.print()
-            console.print("[anton.cyan](anton)[/] Your saved connections:\n")
-            for i, c in enumerate(saved_connections, 1):
-                conn_slug = f"{c['engine']}-{c['name']}"
-                engine_obj = registry.get(c["engine"])
-                engine_label = engine_obj.display_name if engine_obj else c["engine"]
-                console.print(
-                    f"          [bold]{i:>2}.[/bold] {conn_slug}"
-                    f" [dim]— {engine_label}[/]"
-                )
-            console.print()
-            pick = await prompt_or_cancel(
-                "(anton) Enter a number",
-                choices=[str(i) for i in range(1, len(saved_connections) + 1)],
-            )
-            if pick is None:
-                return session
-            picked_conn = saved_connections[int(pick) - 1]
-            picked_slug = f"{picked_conn['engine']}-{picked_conn['name']}"
-            return await _reconnect_to_saved(
-                console, session, vault, registry, picked_slug, picked_conn,
-                from_tool_call=from_tool_call,
-            )
-
-        answer = await get_create_new_answer()
-        if answer is None:
-            return session
     else:
         answer = await get_create_new_answer()
         if answer is None:
