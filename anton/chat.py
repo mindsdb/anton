@@ -347,12 +347,39 @@ async def _handle_remote(
 
     console.print()
 
-    # Ensure minds API key
+    # Ensure minds API key — same flow as /publish
     if not settings.minds_api_key:
-        console.print("  [anton.warning]You need a Minds API key for remote scratchpad.[/]")
-        console.print("  [anton.muted]Run /llm and set up Minds, or set ANTON_MINDS_API_KEY.[/]")
+        import webbrowser
+        from anton.utils.prompt import prompt_or_cancel
+
+        console.print("  [anton.muted]To use remote scratchpad you need a free Minds account.[/]")
         console.print()
-        return
+        has_key = await prompt_or_cancel(
+            "  Do you have an mdb.ai API key?",
+            choices=["y", "n"],
+            choices_display="y/n",
+            default="y",
+        )
+        if has_key is None:
+            console.print()
+            return
+        if has_key.lower() == "n":
+            webbrowser.open(
+                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "?client_id=public-client&response_type=code&scope=openid"
+                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+            )
+            console.print()
+
+        api_key_input = await prompt_or_cancel("  API key", password=True)
+        if api_key_input is None or not api_key_input.strip():
+            console.print()
+            return
+        api_key_input = api_key_input.strip()
+        settings.minds_api_key = api_key_input
+        if workspace:
+            workspace.set_secret("ANTON_MINDS_API_KEY", api_key_input)
+        console.print()
 
     provision_url = settings.publish_url.rstrip("/") + "/provision"
     api_key = settings.minds_api_key
