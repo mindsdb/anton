@@ -19,7 +19,7 @@ class HippocampusProtocol(Protocol):
     satisfies this protocol automatically via structural sub-typing.
     """
 
-    def recall_identity(self) -> str:
+    def recall_identities(self) -> str:
         """Return the identity snapshot (profile.md equivalent)."""
         ...
 

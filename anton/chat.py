@@ -32,7 +32,6 @@ from anton.core.llm.provider import (
 )
 from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_limits
 from anton.commands.setup import (
-    handle_memory,
     handle_setup,
     handle_setup_models,
 )
@@ -82,6 +81,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
+from anton.memory.manage import MemoryManage
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -1132,6 +1132,7 @@ async def _chat_loop(
         style=pt_style,
     )
 
+    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
     try:
         while True:
             # Memory confirmation UX — show pending lessons before prompt
@@ -1263,7 +1264,7 @@ async def _chat_loop(
                     )
                     continue
                 elif cmd == "/memory":
-                    handle_memory(console, settings, cortex, episodic=episodic)
+                    await memory_manage.handle(cmd=stripped)
                     continue
                 elif cmd == "/connect":
                     arg = parts[1].strip() if len(parts) > 1 else ""

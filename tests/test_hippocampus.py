@@ -21,17 +21,17 @@ def hc(mem_dir):
 
 class TestRecallIdentity:
     def test_empty_returns_empty(self, hc):
-        assert hc.recall_identity() == ""
+        assert hc.recall_identities() == ""
 
     def test_reads_profile(self, hc, mem_dir):
         (mem_dir / "profile.md").write_text("# Profile\n- Name: Jorge\n- TZ: PST")
-        result = hc.recall_identity()
+        result = hc.recall_identities()
         assert "Name: Jorge" in result
         assert "TZ: PST" in result
 
     def test_nonexistent_dir(self, tmp_path):
         hc = Hippocampus(tmp_path / "nonexistent")
-        assert hc.recall_identity() == ""
+        assert hc.recall_identities() == ""
 
 
 class TestRecallRules:
