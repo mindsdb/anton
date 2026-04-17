@@ -330,6 +330,129 @@ def _extract_html_title(path, re_module) -> str:
         return ""
 
 
+async def _handle_remote(
+    console: Console,
+    settings,
+    workspace,
+) -> None:
+    """Handle /remote command — provision or check status of remote scratchpad."""
+    import asyncio
+    import json
+    import os
+    import time
+    from urllib.request import Request, urlopen
+
+    from rich.live import Live
+    from rich.spinner import Spinner
+
+    console.print()
+
+    # Ensure minds API key
+    if not settings.minds_api_key:
+        console.print("  [anton.warning]You need a Minds API key for remote scratchpad.[/]")
+        console.print("  [anton.muted]Run /llm and set up Minds, or set ANTON_MINDS_API_KEY.[/]")
+        console.print()
+        return
+
+    provision_url = settings.publish_url.rstrip("/") + "/provision"
+    api_key = settings.minds_api_key
+
+    # Check current status via GET /provision
+    with Live(Spinner("dots", text="  Checking remote scratchpad...", style="anton.cyan"), console=console, transient=True):
+        try:
+            req = Request(
+                provision_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "User-Agent": "anton/1.0",
+                },
+            )
+            with urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
+        except Exception as e:
+            console.print(f"  [anton.error]Failed to check status: {e}[/]")
+            console.print()
+            return
+
+    status = result.get("status", "none")
+    endpoint = result.get("endpoint", "")
+
+    # Already running — just save and confirm
+    if status == "running":
+        console.print(f"  [anton.success]Remote scratchpad is running[/]")
+        console.print(f"  [anton.muted]{endpoint}[/]")
+        console.print()
+        if workspace:
+            workspace.set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
+        os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
+        return
+
+    # Not provisioned — start provisioning
+    if status in ("none", "stopped"):
+        action = "Waking up" if status == "stopped" else "Provisioning"
+        console.print(f"  [anton.muted]{action} remote scratchpad...[/]")
+
+        with Live(Spinner("dots", text=f"  {action}...", style="anton.cyan"), console=console, transient=True):
+            try:
+                req = Request(
+                    provision_url,
+                    data=b"{}",
+                    method="POST",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "anton/1.0",
+                    },
+                )
+                with urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read().decode())
+            except Exception as e:
+                console.print(f"  [anton.error]Provisioning failed: {e}[/]")
+                console.print()
+                return
+
+        endpoint = result.get("endpoint", endpoint)
+        status = result.get("status", "")
+
+    # Poll until ready — 5s intervals, 3 min max
+    if status in ("provisioning", "starting"):
+        max_wait = 180
+        poll_interval = 5
+        start_time = time.time()
+
+        with Live(Spinner("dots", text="  Waiting for instance to be ready...", style="anton.cyan"), console=console, transient=True):
+            while time.time() - start_time < max_wait:
+                await asyncio.sleep(poll_interval)
+                try:
+                    req = Request(
+                        f"{endpoint}/health",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "User-Agent": "anton/1.0",
+                        },
+                    )
+                    with urlopen(req, timeout=5) as resp:
+                        health = json.loads(resp.read().decode())
+                    if health.get("status") == "ok":
+                        break
+                except Exception:
+                    pass
+            else:
+                console.print("  [anton.warning]Instance is still setting up (3+ minutes).[/]")
+                console.print("  [anton.muted]Run /remote again in a few minutes.[/]")
+                console.print()
+                return
+
+    # Save and confirm
+    console.print(f"  [anton.success]Remote scratchpad ready![/]")
+    console.print(f"  [link={endpoint}]{endpoint}[/link]")
+    console.print()
+
+    if workspace:
+        workspace.set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
+    os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
+
+
 async def _handle_publish(
     console: Console,
     settings,
@@ -1368,6 +1491,9 @@ async def _chat_loop(
                 elif cmd == "/theme":
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     handle_theme(console, arg)
+                    continue
+                elif cmd == "/remote":
+                    await _handle_remote(console, settings, workspace)
                     continue
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""
