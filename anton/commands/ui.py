@@ -57,6 +57,7 @@ def print_slash_help(console: Console) -> None:
     console.print("\n[bold]Chat Tools[/]")
     console.print("  [bold]/paste[/]     — Attach an image from your clipboard")
     console.print("  [bold]/resume[/]    — Continue a previous session")
+    console.print("  [bold]/remote[/]    — Set up or manage remote scratchpad")
     console.print("  [bold]/publish[/]   — Publish an HTML report to the web")
     console.print("  [bold]/unpublish[/] — Remove a published report")
     console.print(
