@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from anton.connect_collector import ConnectionCollector, extract_variables
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
-from anton.utils.credential_parsers import parse_credential_input
+from anton.utils.credential_parsers import SCHEME_ALIASES, parse_credential_input
 from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
 from anton.utils.prompt import prompt_or_cancel
 from anton.commands.datasource.helpers import show_credential_help
@@ -17,6 +17,39 @@ from anton.commands.datasource.custom import handle_add_custom_datasource
 from anton.commands.datasource.verify import run_connection_test
 
 _PROMPT_RECONNECT_CANCEL = "(reconnect/cancel)"
+
+
+def looks_like_paste(text: str) -> bool:
+    """True when the user's input looks like pasted credentials rather than
+    a datasource name — a URI, JSON blob, env var reference, or file path."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("/", "~/", "./", "../", "$", "{")):
+        return True
+    tokens = stripped.split()
+    return bool(tokens) and "://" in tokens[0]
+
+
+def engine_from_uri_scheme(text: str, registry):
+    """Infer an engine from a pasted URI's scheme. Returns None for
+    non-URI input or when no engine matches the scheme."""
+    stripped = (text or "").strip()
+    tokens = stripped.split()
+    if not tokens or "://" not in tokens[0]:
+        return None
+    scheme = tokens[0].split("://", 1)[0].lower()
+    if not scheme:
+        return None
+    direct = registry.get(scheme)
+    if direct is not None:
+        return direct
+    for engine_slug, allowed in SCHEME_ALIASES.items():
+        if scheme in allowed:
+            match = registry.get(engine_slug)
+            if match is not None:
+                return match
+    return None
 
 
 def _build_redirect_message(
@@ -256,86 +289,33 @@ async def handle_connect_datasource(
 
     console.print()
     all_engines = registry.all_engines()
-    popular_engines = [e for e in all_engines if e.popular and not e.custom]
-    other_engines = [e for e in all_engines if not e.popular and not e.custom]
-    custom_engines = [e for e in all_engines if e.custom]
-    display_engines = popular_engines + other_engines + custom_engines
-
     saved_connections = vault.list_connections()
-    seen_engines: set[str] = set()
-    recent_engine_entries: list[tuple[str, str]] = []
-    for c in saved_connections:
-        if c["engine"] not in seen_engines:
-            seen_engines.add(c["engine"])
-            engine_obj = registry.get(c["engine"])
-            label = engine_obj.display_name if engine_obj else c["engine"]
-            recent_engine_entries.append((c["engine"], label))
-
-    def print_sections() -> None:
-        console.print(
-            "[anton.cyan](anton)[/] Select a data source to create a new connection:\n"
-        )
-        console.print("       [bold]  Primary")
-        console.print(
-            "         [bold]  0.[/bold] Custom datasource"
-            " (connect anything via API, SQL, or MCP)\n"
-        )
-        if popular_engines:
-            console.print("       [bold]  Most popular")
-            for i, e in enumerate(popular_engines, 1):
-                console.print(f"          [bold]{i:>2}.[/bold] {e.display_name}")
-            console.print()
-        if recent_engine_entries:
-            start = len(popular_engines) + 1
-            console.print("       [bold]  Recently used data sources")
-            for i, (_, label) in enumerate(recent_engine_entries, start):
-                console.print(f"          [bold]{i:>2}.[/bold] {label}")
-            console.print()
-
-    def print_all() -> None:
-        console.print(
-            "[anton.cyan](anton)[/] All data sources (★ = popular):\n"
-        )
-        console.print("       [bold]  Primary")
-        console.print(
-            "         [bold]  0.[/bold] Custom datasource"
-            " (connect anything via API, SQL, or MCP)\n"
-        )
-        for i, e in enumerate(display_engines, 1):
-            star = " ★" if e.popular else ""
-            console.print(f"          [bold]{i:>2}.[/bold] {e.display_name}{star}")
-        console.print()
-
-    async def get_create_new_answer() -> str | None:
-        print_sections()
-        console.print(
-            "       [anton.muted]Don't see yours? Type a datasource name (e.g., GitHub, Gmail, Jira, ...)\n"
-            "       It can be virtually any datasource — we'll figure out the details together.[/]"
-        )
-        console.print()
-        ans = await prompt_or_cancel(
-            "(anton) Enter a number or type a datasource name",
-        )
-        if ans is None:
-            return None
-        if ans.strip().lower() == "all":
-            console.print()
-            print_all()
-            ans = await prompt_or_cancel(
-                "(anton) Enter a number or type a name",
-            )
-        return ans
 
     if prefill:
         answer = prefill
     else:
-        answer = await get_create_new_answer()
+        console.print(
+            "[anton.cyan](anton)[/] What would you like to connect?"
+        )
+        console.print(
+            "        [anton.muted]Examples: PostgreSQL, MySQL, Snowflake, "
+            "BigQuery, Gmail, GitHub, HubSpot, Salesforce, Jira, REST API.[/]"
+        )
+        console.print(
+            "        [anton.muted]You can also paste a connection string, JSON "
+            "credentials, an env var like $DATABASE_URL, or a file path.[/]"
+        )
+        console.print()
+        answer = await prompt_or_cancel("(anton) Connect to")
         if answer is None:
             return session
 
     stripped_answer = answer.strip()
+    if not stripped_answer:
+        return session
+
     known_slugs = {
-        f"{c['engine']}-{c['name']}": c for c in vault.list_connections()
+        f"{c['engine']}-{c['name']}": c for c in saved_connections
     }
     if stripped_answer in known_slugs:
         conn = known_slugs[stripped_answer]
@@ -345,31 +325,36 @@ async def handle_connect_datasource(
         )
 
     engine_def = None
-    custom_source = False
+    prefilled_fields: dict[str, str] = {}
     llm_recognised = False
-    saved_start = len(popular_engines) + 1
-    max_num = len(popular_engines) + len(recent_engine_entries)
 
-    if stripped_answer.isdigit() or (stripped_answer.lstrip("-").isdigit()):
-        pick_num = int(stripped_answer)
-        if pick_num == 0:
-            custom_source = True
-        elif 1 <= pick_num <= len(popular_engines):
-            engine_def = popular_engines[pick_num - 1]
-        elif recent_engine_entries and saved_start <= pick_num <= max_num:
-            picked_engine_slug, _ = recent_engine_entries[pick_num - saved_start]
-            engine_def = registry.get(picked_engine_slug)
-            if engine_def is None:
-                custom_source = True
-        else:
-            console.print(
-                f"[anton.warning](anton)[/] '{stripped_answer}' is out of range. "
-                f"Please enter 0\u2013{max_num}.[/]"
-            )
+    paste_like = looks_like_paste(stripped_answer)
+    if paste_like:
+        engine_def = engine_from_uri_scheme(stripped_answer, registry)
+        if engine_def is None:
             console.print()
-            return session
+            console.print(
+                "[anton.muted]        Got credentials. Which datasource is this for?[/]"
+            )
+            followup = await prompt_or_cancel(
+                "(anton) Datasource (e.g. PostgreSQL, MySQL, Snowflake)"
+            )
+            if followup is None:
+                return session
+            stripped_followup = followup.strip()
+            if stripped_followup:
+                engine_def = registry.find_by_name(stripped_followup)
+        if engine_def is not None:
+            parsed_result = parse_credential_input(stripped_answer, engine_def)
+            if parsed_result is not None and parsed_result.fields:
+                prefilled_fields = dict(parsed_result.fields)
+                console.print(
+                    f"[anton.muted]        Parsed credentials from "
+                    f"{parsed_result.source}.[/]"
+                )
+                console.print()
 
-    if engine_def is None and not custom_source:
+    if engine_def is None and not paste_like:
         engine_def = registry.find_by_name(stripped_answer)
         if engine_def is None:
             needle = stripped_answer.lower()
@@ -425,7 +410,10 @@ async def handle_connect_datasource(
                     ],
                     max_tokens=64,
                 )
-                llm_text = (llm_resp.content or "").strip()
+                raw_content = getattr(llm_resp, "content", "")
+                if not isinstance(raw_content, str):
+                    raw_content = ""
+                llm_text = raw_content.strip() or "UNKNOWN"
             except Exception:
                 llm_text = "UNKNOWN"
 
@@ -447,13 +435,11 @@ async def handle_connect_datasource(
                     else:
                         engine_def = matched_engine
 
-            if engine_def is None:
-                custom_source = True
-
-    if custom_source:
-        _telemetry("ds_connect_attempt", engine=stripped_answer if not stripped_answer.isdigit() else "custom")
+    if engine_def is None:
+        hint = stripped_answer if not stripped_answer.isdigit() else ""
+        _telemetry("ds_connect_attempt", engine=hint or "unknown")
         result = await handle_add_custom_datasource(
-            console, stripped_answer if not stripped_answer.isdigit() else "", registry, session,
+            console, hint, registry, session,
             known_service=llm_recognised,
         )
         if result is None:
@@ -492,6 +478,9 @@ async def handle_connect_datasource(
             )
         return session
 
+    if prefilled_fields:
+        known_variables = {**(known_variables or {}), **prefilled_fields}
+
     assert engine_def is not None
     _telemetry("ds_connect_attempt", engine=engine_def.engine)
     active_fields = engine_def.fields
@@ -526,7 +515,7 @@ async def handle_connect_datasource(
     if known_variables:
         collector.fill_many(known_variables)
 
-    if not collector.is_complete and not from_tool_call:
+    if not collector.is_complete and not from_tool_call and not prefilled_fields:
         paste = await prompt_or_cancel(
             f"(anton) Paste a connection string, JSON, env var "
             f"($VAR), or file path for {engine_def.display_name} — "

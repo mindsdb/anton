@@ -147,11 +147,16 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
     name = "connect_new_datasource",
     description = (
         "Connect a new data source to Anton's Local Vault. Call this when the user "
-        "asks a question that requires data from a source that isn't connected yet "
-        "(e.g. email, database, CRM, API). This starts an interactive connection flow "
-        "where the user enters their credentials.\n\n"
-        "Pass the datasource type/name (e.g. 'gmail', 'postgres', 'salesforce', 'hubspot'). "
-        "Anton will match it to the right connector and guide the user through setup.\n\n"
+        "asks a question that requires data from a source that isn't connected yet. "
+        "Supports databases (PostgreSQL, MySQL, Snowflake, BigQuery, Redshift, "
+        "MongoDB), SaaS services (Gmail, GitHub, HubSpot, Salesforce, Jira), and "
+        "generic REST APIs.\n\n"
+        "Pass the datasource type/name as `engine` (e.g. 'postgres', 'gmail', "
+        "'salesforce'). Anton matches it to the right connector and guides the user "
+        "through setup conversationally — the user can answer with individual field "
+        "values, paste a connection string / DSN (e.g. postgres://u:p@host/db), paste "
+        "JSON credentials, reference an env var like $DATABASE_URL, or point to a "
+        "credentials file.\n\n"
         "If the user has ALREADY mentioned credential values in the conversation "
         "(e.g. 'connect to dynamodb, my access key is AKIA... and region is us-east-1'), "
         "pass them as `known_variables` so the user is not asked again.\n\n"
@@ -162,7 +167,7 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
         "properties": {
             "engine": {
                 "type": "string",
-                "description": "The datasource type or name (e.g. 'gmail', 'postgres', 'snowflake', 'hubspot')",
+                "description": "The datasource type or name (e.g. 'postgres', 'mysql', 'snowflake', 'bigquery', 'gmail', 'github', 'hubspot', 'salesforce', 'jira')",
             },
             "reason": {
                 "type": "string",
@@ -173,8 +178,10 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
                 "description": (
                     "Pre-extracted credential field values from the conversation. "
                     "Use snake_case field names (e.g. {\"host\": \"db.example.com\", "
-                    "\"port\": \"5432\", \"user\": \"admin\"}). Only pass fields the "
-                    "user actually mentioned — never invent values."
+                    "\"port\": \"5432\", \"user\": \"admin\"}). Values may also come "
+                    "from a connection string, JSON blob, or env-var reference the "
+                    "user shared. Only pass fields the user actually mentioned — "
+                    "never invent values."
                 ),
                 "additionalProperties": {"type": "string"},
             },
