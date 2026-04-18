@@ -1528,6 +1528,18 @@ async def _chat_loop(
                     continue
                 elif cmd == "/remote":
                     await _handle_remote(console, settings, workspace)
+                    # Rebuild session so scratchpad uses remote/local factory
+                    session = rebuild_session(
+                        settings=settings,
+                        state=state,
+                        self_awareness=self_awareness,
+                        cortex=cortex,
+                        workspace=workspace,
+                        console=console,
+                        episodic=episodic,
+                        history_store=history_store,
+                        session_id=current_session_id,
+                    )
                     continue
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""
