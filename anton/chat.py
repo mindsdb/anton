@@ -375,8 +375,10 @@ async def _handle_remote(
             return
         api_key_input = api_key_input.strip()
         settings.minds_api_key = api_key_input
-        if workspace:
-            workspace.set_secret("ANTON_MINDS_API_KEY", api_key_input)
+        from pathlib import Path as _P
+        from anton.workspace import Workspace as _W
+        _global_ws = _W(_P.home())
+        _global_ws.set_secret("ANTON_MINDS_API_KEY", api_key_input)
         console.print()
 
     provision_url = settings.publish_url.rstrip("/") + "/provision"
@@ -407,8 +409,9 @@ async def _handle_remote(
         console.print(f"  [anton.success]Remote scratchpad is running[/]")
         console.print(f"  [anton.muted]{endpoint}[/]")
         console.print()
-        if workspace:
-            workspace.set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
+        from pathlib import Path as _P
+        from anton.workspace import Workspace as _W
+        _W(_P.home()).set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
         os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
         return
 
@@ -473,8 +476,9 @@ async def _handle_remote(
     console.print(f"  [link={endpoint}]{endpoint}[/link]")
     console.print()
 
-    if workspace:
-        workspace.set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
+    from pathlib import Path as _P
+    from anton.workspace import Workspace as _W
+    _W(_P.home()).set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
     os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
 
 
@@ -520,8 +524,9 @@ async def _handle_publish(
             return
         api_key = api_key.strip()
         settings.minds_api_key = api_key
-        if workspace:
-            workspace.set_secret("ANTON_MINDS_API_KEY", api_key)
+        from pathlib import Path as _P
+        from anton.workspace import Workspace as _W
+        _W(_P.home()).set_secret("ANTON_MINDS_API_KEY", api_key)
         console.print()
 
     # 2. Find the HTML file to publish
