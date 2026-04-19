@@ -40,12 +40,41 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
             cells=cells,
             workspace_path=workspace_path,
         )
-        self._endpoint = endpoint_url.rstrip("/")
+        self._cloudflare_endpoint = endpoint_url.rstrip("/")  # https://sp-xxx.4nton.ai
+        self._direct_endpoint: str | None = None  # resolved to http://IP:port
         self._api_key = api_key
 
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
+
+    async def _resolve_endpoint(self) -> str:
+        """Resolve the Cloudflare endpoint to a direct IP endpoint.
+
+        Calls /resolve on the Cloudflare Worker which returns the instance's
+        direct IP. Caches the result for subsequent calls.
+        """
+        if self._direct_endpoint:
+            return self._direct_endpoint
+
+        import aiohttp
+
+        url = f"{self._cloudflare_endpoint}/resolve"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    raise RuntimeError(f"Failed to resolve remote scratchpad ({resp.status}): {text}")
+                data = await resp.json()
+
+        endpoint = data.get("endpoint", "")
+        if not endpoint:
+            raise RuntimeError(f"No endpoint returned from /resolve: {data}")
+
+        self._direct_endpoint = endpoint.rstrip("/")
+        return self._direct_endpoint
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -58,7 +87,8 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         """POST to the remote service and return parsed JSON."""
         import aiohttp
 
-        url = f"{self._endpoint}{path}"
+        endpoint = await self._resolve_endpoint()
+        url = f"{endpoint}{path}"
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, json=body or {}, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=300)
@@ -72,7 +102,8 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         """GET from the remote service and return parsed JSON."""
         import aiohttp
 
-        url = f"{self._endpoint}{path}"
+        endpoint = await self._resolve_endpoint()
+        url = f"{endpoint}{path}"
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 url, params=params, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=30)
@@ -86,7 +117,8 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         """POST to an SSE endpoint and yield parsed events."""
         import aiohttp
 
-        url = f"{self._endpoint}{path}"
+        endpoint = await self._resolve_endpoint()
+        url = f"{endpoint}{path}"
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, json=body, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=600)

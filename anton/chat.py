@@ -445,26 +445,38 @@ async def _handle_remote(
         status = result.get("status", "")
 
     # Poll until ready — 5s intervals, 3 min max
+    # Use /resolve to get the direct IP, then poll /health on it
     if status in ("provisioning", "starting"):
         max_wait = 180
         poll_interval = 5
         start_time = time.time()
+        direct_endpoint = None
 
         with Live(Spinner("dots", text="  Waiting for instance to be ready...", style="anton.cyan"), console=console, transient=True):
             while time.time() - start_time < max_wait:
                 await asyncio.sleep(poll_interval)
                 try:
-                    req = Request(
-                        f"{endpoint}/health",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "User-Agent": "anton/1.0",
-                        },
-                    )
-                    with urlopen(req, timeout=5) as resp:
-                        health = json.loads(resp.read().decode())
-                    if health.get("status") == "ok":
-                        break
+                    # First resolve the direct IP via Cloudflare Worker
+                    if not direct_endpoint:
+                        req = Request(
+                            f"{endpoint}/resolve",
+                            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "anton/1.0"},
+                        )
+                        with urlopen(req, timeout=5) as resp:
+                            resolve_data = json.loads(resp.read().decode())
+                        if resolve_data.get("status") == "running":
+                            direct_endpoint = resolve_data.get("endpoint", "")
+
+                    # Then check health directly
+                    if direct_endpoint:
+                        req = Request(
+                            f"{direct_endpoint}/health",
+                            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "anton/1.0"},
+                        )
+                        with urlopen(req, timeout=5) as resp:
+                            health = json.loads(resp.read().decode())
+                        if health.get("status") == "ok":
+                            break
                 except Exception:
                     pass
             else:
