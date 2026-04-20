@@ -19,7 +19,6 @@ Each Hippocampus instance manages one scope's files:
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import re
 import sys
 import time
@@ -27,26 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-
-@dataclass
-class Engram:
-    """A single memory trace — the fundamental unit of memory.
-
-    Named for Karl Lashley's 'engram' — the physical substrate of a memory.
-    Each engram carries its content plus metadata about confidence, origin,
-    and topic for later retrieval and consolidation.
-    """
-
-    text: str
-    kind: Literal["always", "never", "when", "lesson", "profile"] | None = None
-    scope: Literal["global", "project"] | None = None
-    confidence: Literal["high", "medium", "low"] | None = None
-    topic: str = None
-    source: Literal["user", "consolidation", "llm"]  | None = None
-    updated_at: dt.datetime = None
-
-    def __post_init__(self):
-        self.id = hashlib.sha256(self.text.encode("utf-8")).hexdigest()
+from anton.core.memory.base import Engram
 
 
 def _extract_metadata(text: str) -> tuple[str, dict]:

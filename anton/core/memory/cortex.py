@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from anton.core.memory.base import HippocampusProtocol
-from anton.core.memory.hippocampus import Engram, Hippocampus
+from anton.core.memory.base import Engram
+from anton.core.memory.hippocampus import Hippocampus
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
