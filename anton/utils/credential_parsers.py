@@ -182,9 +182,11 @@ def parse_env_ref(
             return None
         resolved.append(value.strip())
 
-    uri_indices = [i for i, v in enumerate(resolved) if "://" in v]
-    if len(uri_indices) == 1 and len(resolved) == 1:
-        inner = parse_uri(resolved[0], engine_def) or parse_json(resolved[0], engine_def)
+    if len(resolved) == 1:
+        inner = (
+            parse_uri(resolved[0], engine_def)
+            or parse_json(resolved[0], engine_def)
+        )
         if inner is not None:
             return ParseResult(fields=inner.fields, source="env")
 

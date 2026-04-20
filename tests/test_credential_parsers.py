@@ -313,3 +313,52 @@ def test_uri_not_first_token_returns_none():
         postgres_engine(),
     )
     assert result is None
+
+
+def test_env_ref_single_dsn_parses_all_fields(monkeypatch):
+    monkeypatch.setenv(
+        "PG_DSN",
+        "postgres://alice:secret@db.example.com:5432/analytics",
+    )
+    result = parse_credential_input("$PG_DSN", postgres_engine())
+    assert result is not None
+    assert result.source == "env"
+    assert result.fields == {
+        "host": "db.example.com",
+        "port": "5432",
+        "user": "alice",
+        "password": "secret",
+        "database": "analytics",
+    }
+
+
+def test_env_ref_single_missing_var_returns_none(monkeypatch):
+    monkeypatch.delenv("PG_DSN_ABSENT", raising=False)
+    result = parse_credential_input("$PG_DSN_ABSENT", postgres_engine())
+    assert result is None
+
+
+def test_env_ref_multiple_all_present_returns_none(monkeypatch):
+    monkeypatch.setenv("PG_HOST", "db.example.com")
+    monkeypatch.setenv("PG_PASSWORD", "secret")
+    result = parse_credential_input(
+        "$PG_HOST $PG_PASSWORD", postgres_engine()
+    )
+    assert result is None
+
+
+def test_env_ref_multiple_one_missing_returns_none(monkeypatch):
+    monkeypatch.setenv("PG_HOST", "db.example.com")
+    monkeypatch.delenv("PG_PASSWORD_ABSENT", raising=False)
+    result = parse_credential_input(
+        "$PG_HOST $PG_PASSWORD_ABSENT", postgres_engine()
+    )
+    assert result is None
+
+
+def test_env_ref_mixed_content_returns_none(monkeypatch):
+    monkeypatch.setenv("PG_HOST", "db.example.com")
+    result = parse_credential_input(
+        "$PG_HOST sometext", postgres_engine()
+    )
+    assert result is None
