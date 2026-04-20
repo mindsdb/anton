@@ -164,17 +164,31 @@ def parse_json(
 def parse_env_ref(
     text: str, engine_def: DatasourceEngine
 ) -> ParseResult | None:
-    match = ENV_REF_RE.match(text.strip())
-    if not match:
+    tokens = text.strip().split()
+    if not tokens:
         return None
-    value = os.environ.get(match.group(1))
-    if not value or not value.strip():
-        return None
-    
-    inner = parse_uri(value, engine_def) or parse_json(value, engine_def)
-    if inner is None:
-        return None
-    return ParseResult(fields=inner.fields, source="env")
+
+    var_names: list[str] = []
+    for token in tokens:
+        m = ENV_REF_RE.match(token)
+        if not m:
+            return None
+        var_names.append(m.group(1))
+
+    resolved: list[str] = []
+    for name in var_names:
+        value = os.environ.get(name)
+        if not value or not value.strip():
+            return None
+        resolved.append(value.strip())
+
+    uri_indices = [i for i, v in enumerate(resolved) if "://" in v]
+    if len(uri_indices) == 1 and len(resolved) == 1:
+        inner = parse_uri(resolved[0], engine_def) or parse_json(resolved[0], engine_def)
+        if inner is not None:
+            return ParseResult(fields=inner.fields, source="env")
+
+    return None
 
 
 def parse_file(
