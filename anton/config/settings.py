@@ -36,6 +36,7 @@ class AntonSettings(CoreSettings):
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    openai_api_version: str | None = None  # Azure api-version query param
 
     memory_enabled: bool = True
     memory_dir: str = ".anton"

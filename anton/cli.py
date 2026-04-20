@@ -21,7 +21,7 @@ from rich.text import Text
 from anton import __version__
 
 from anton.utils.prompt import prompt_or_cancel
-from anton.core.llm.openai import build_chat_completion_kwargs
+from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
 
 from anton.chat import ChatSession
 from anton.core.session import ChatSessionConfig
@@ -236,6 +236,10 @@ def _make_console() -> Console:
 
 
 console = _make_console()
+_ensure_dependencies(console)
+
+import openai
+from openai import AzureOpenAI
 
 
 def _get_settings(ctx: typer.Context):
@@ -281,8 +285,6 @@ def main(
     ),
 ) -> None:
     """Anton — a self-evolving autonomous system."""
-    _ensure_dependencies(console)
-
     from anton.config.settings import AntonSettings
 
     settings = AntonSettings()
@@ -294,7 +296,9 @@ def main(
     from anton.updater import check_and_update
 
     if check_and_update(console, settings):
-        # Re-exec with the freshly installed code so no old modules remain in memory.
+        # Mark the env before replacing the process so the next invocation
+        # skips the update check and doesn't loop.
+        os.environ["_ANTON_UPDATED"] = "1"
         _reexec()
 
     ctx.ensure_object(dict)
@@ -865,8 +869,6 @@ def _setup_anthropic(settings, ws) -> None:
 
 def _setup_openai(settings, ws) -> None:
     """Set up OpenAI with a single model for both reasoning and coding."""
-    import openai
-
     console.print()
     while True:
         api_key = _setup_prompt("API key", is_password=True)
@@ -919,8 +921,6 @@ def _setup_openai(settings, ws) -> None:
 
 def _setup_gemini(settings, ws) -> None:
     """Set up Google Gemini via its OpenAI-compatible endpoint."""
-    import openai
-
     _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     console.print()
@@ -977,10 +977,22 @@ def _setup_gemini(settings, ws) -> None:
     ws.set_secret("ANTON_CODING_MODEL", model)
 
 
-def _setup_custom_openai(settings, ws) -> None:
-    """Set up a custom OpenAI-compatible endpoint (Ollama, vLLM, Together, Groq, LM Studio, etc.)."""
-    import openai
 
+def _strip_to_azure_endpoint(raw_url: str) -> str:
+    """Return only the scheme+host of a URL, stripping any path/query.
+
+    AzureOpenAI constructs the deployment path internally, so the endpoint
+    must not include /openai/deployments/... or ?api-version=...
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc or parsed.path
+    return f"{scheme}://{host}"
+
+
+def _setup_custom_openai(settings, ws) -> None:
+    """Set up a custom OpenAI-compatible endpoint (Ollama, vLLM, Together, Groq, LM Studio, Azure, etc.)."""
     console.print()
     console.print(
         "  [anton.muted]Works with Ollama, vLLM, Together, Groq, LM Studio, or any OpenAI-compatible API.[/]"
@@ -994,7 +1006,6 @@ def _setup_custom_openai(settings, ws) -> None:
         console.print("  [anton.warning]Base URL is required.[/]")
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
         base_url = "http://" + base_url
-    base_url = base_url.rstrip("/")
 
     api_key = _setup_prompt(
         "API key (Enter to skip if not needed)", is_password=True
@@ -1008,10 +1019,32 @@ def _setup_custom_openai(settings, ws) -> None:
             break
         console.print("  [anton.warning]Model name is required.[/]")
 
+    api_version = _setup_prompt(
+        "API version (leave blank for standard endpoints, required for Azure)"
+    ).strip() or None
+    if api_version and _is_azure_endpoint(base_url):
+        # Strip path/query — AzureOpenAI builds the deployment URL internally.
+        base_url = _strip_to_azure_endpoint(base_url)
+
+    base_url = base_url.rstrip("/")
+
     try:
 
         def _test():
-            client = openai.OpenAI(api_key=api_key, base_url=base_url)
+            if api_version and _is_azure_endpoint(base_url):
+                client = AzureOpenAI(
+                    azure_endpoint=base_url,
+                    api_key=api_key,
+                    api_version=api_version,
+                )
+            elif api_version:
+                client = openai.OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    default_query={"api-version": api_version},
+                )
+            else:
+                client = openai.OpenAI(api_key=api_key, base_url=base_url)
             response = client.chat.completions.create(
                 **build_chat_completion_kwargs(
                     model=model,
@@ -1032,12 +1065,14 @@ def _setup_custom_openai(settings, ws) -> None:
 
     settings.openai_api_key = api_key
     settings.openai_base_url = base_url
+    settings.openai_api_version = api_version
     settings.planning_provider = "openai-compatible"
     settings.coding_provider = "openai-compatible"
     settings.planning_model = model
     settings.coding_model = model
     ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
     ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
+    ws.set_secret("ANTON_OPENAI_API_VERSION", api_version or "")
     ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
     ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
     ws.set_secret("ANTON_PLANNING_MODEL", model)
