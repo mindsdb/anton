@@ -164,17 +164,17 @@ class Hippocampus:
             if entry.id != id:
                 continue
             entry.text = text
-            entry.created_at = dt.datetime.now()
+            entry.updated_at = dt.datetime.now()
 
             self.save_identities(entries)
             return
 
     def rewrite_identity(self, entries: list[str]) -> None:
-        """Replace the identity snapshot (profile.md) — full rewrite, not append.
+        """Merge new entries into the identity snapshot (profile.md) and rewrite.
 
-        Unlike other memory operations, identity is a coherent snapshot, not
-        an append log. Like how your self-concept updates as a whole, not
-        by appending new facts to old ones.
+        Deduplicates by exact text and by key prefix (e.g. "Name:" replaces
+        any existing "Name: ..." entry). Unlike a pure append, identity stays
+        a coherent snapshot rather than growing unboundedly.
         """
 
         existing_entries = [
@@ -217,10 +217,11 @@ class Hippocampus:
 
 
     def get_lessons(self, token_budget: int = None) -> list[Engram]:
-        """Load semantic knowledge (lessons.md), most recent first, within budget.
+        """Load semantic knowledge (lessons.md) as Engrams.
 
-        Brain analog: Anterior Temporal Lobe — the convergence hub for semantic
-        facts distilled from many episodes. Budget enforced at ~4 chars/token.
+        When token_budget is None (default) returns all entries in file order.
+        When token_budget is set, returns entries newest-first up to that limit
+        (~4 chars/token).
         """
         if not self._lessons_path.is_file():
             return []
@@ -285,7 +286,7 @@ class Hippocampus:
             if entry.id != id:
                 continue
             entry.text = text
-            entry.created_at = dt.datetime.now()
+            entry.updated_at = dt.datetime.now()
 
             self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries), mode="write")
 
@@ -319,11 +320,10 @@ class Hippocampus:
         return f"# {header}\n" + "".join(lines)
 
     def recall_topic(self, slug: str) -> str:
-        """Load deep domain expertise on demand (topics/{slug}.md).
+        """Load deep domain expertise on demand by given slug.
 
         Brain analog: Cortical Association Areas — specialized regions activated
-        associative
-        ly when contextual cues indicate relevance.
+        associatively when contextual cues indicate relevance.
         """
         slug = self._sanitize_slug(slug)
 
@@ -337,7 +337,7 @@ class Hippocampus:
     def recall_scratchpad_wisdom(self) -> str:
         """Retrieve procedural knowledge relevant to scratchpad execution.
 
-        Returns all "when" rules + lessons with topic starting with "scratchpad-".
+        Returns all "when" rules + lessons whose text contains "scratchpad".
         Injected into tool descriptions so the LLM sees them when composing code.
         """
         parts: list[str] = []
@@ -445,7 +445,7 @@ class Hippocampus:
             if entry.id != id:
                 continue
             entry.text = text
-            entry.created_at = dt.datetime.now()
+            entry.updated_at = dt.datetime.now()
 
             self.save_rules(entries)
             return
@@ -507,10 +507,7 @@ class Hippocampus:
         topic: str = "",
         source: str = "llm",
     ) -> None:
-        """Write a semantic fact to lessons.md.
-
-        If a topic is provided, also creates/appends to topics/{slug}.md.
-        """
+        """Append a semantic fact to lessons.md, tagged with optional topic metadata."""
         self._dir.mkdir(parents=True, exist_ok=True)
 
         ts = time.strftime("%Y-%m-%d")

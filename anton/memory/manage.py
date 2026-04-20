@@ -180,7 +180,7 @@ class MemoryManage:
             id = global_items[num].id
         else:
             method = getattr(self.cortex.project_hc, methods[action])
-            id = global_items[num].id
+            id = project_items[num].id
 
         if action == 'delete':
             method(id)
