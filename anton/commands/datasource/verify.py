@@ -6,6 +6,17 @@ import os
 import re
 from typing import TYPE_CHECKING
 
+_DS_KEY_RE = re.compile(r"KeyError:\s*['\"]DS_([A-Za-z0-9_]+)['\"]")
+
+
+def _friendly_error(raw: str) -> str:
+    """Convert raw Python exceptions from test snippets into readable messages."""
+    m = _DS_KEY_RE.search(raw)
+    if m:
+        field = m.group(1).lower()
+        return f"Credential '{field}' is missing or empty — please re-enter it."
+    return raw
+
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry
 from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
@@ -72,7 +83,7 @@ async def run_connection_test(
             console.print()
             console.print("[anton.warning](anton)[/] ✗ Connection failed.")
             console.print()
-            console.print(f"        Error: {last_line}")
+            console.print(f"        Error: {_friendly_error(last_line)}")
             console.print()
             retry = await prompt_or_cancel(
                 "(anton) Would you like to re-enter your credentials?",
@@ -82,9 +93,13 @@ async def run_connection_test(
                 return False
             console.print()
             for f in retry_fields:
-                if not f.secret:
+                current_val = credentials.get(f.name, "")
+                if not f.secret and (current_val or not f.required):
                     continue
-                value = await prompt_or_cancel(f"(anton) {f.name}", password=True)
+                label = f"(anton) {f.name}"
+                if not f.required:
+                    label += " (optional)"
+                value = await prompt_or_cancel(label, password=f.secret)
                 if value is None:
                     return False
                 if value:
@@ -178,7 +193,7 @@ async def handle_test_datasource(
             f" [bold]{slug}[/bold]."
         )
         console.print()
-        console.print(f"        Error: {first_line}")
+        console.print(f"        Error: {_friendly_error(first_line)}")
     else:
         console.print(
             f"[anton.success]        ✓ Connection test passed for"

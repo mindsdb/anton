@@ -421,6 +421,24 @@ async def handle_connect_datasource(
     if not stripped_answer:
         return session
 
+    if stripped_answer.lower() in ("?", "help", "list", "walkthrough", "show", "options"):
+        console.print()
+        console.print("[anton.cyan](anton)[/] Available datasources:")
+        console.print()
+        for i, e in enumerate(all_engines, 1):
+            console.print(f"        {i:>3}. {e.display_name}")
+        console.print()
+        pick = await prompt_or_cancel("(anton) Enter a number or name")
+        if pick is None:
+            return session
+        pick = pick.strip()
+        if not pick:
+            return session
+        try:
+            stripped_answer = all_engines[int(pick) - 1].display_name
+        except (ValueError, IndexError):
+            stripped_answer = pick
+
     known_slugs = {
         f"{c['engine']}-{c['name']}": c for c in saved_connections
     }
