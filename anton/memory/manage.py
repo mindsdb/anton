@@ -128,24 +128,29 @@ class MemoryManage:
         c.print()
         c.print("[anton.cyan]Memory commands[/]")
         c.print()
-        c.print("  [bold]/memory[/]                                        — status dashboard")
+        c.print("  [bold]/memory[/]                               — status dashboard")
         c.print()
         c.print("  [bold dim]Inspect[/]")
-        c.print("  [bold]/memory rules [global|project][/]                 — show behavioral rules")
-        c.print("  [bold]/memory lessons [global|project][/]               — show learned lessons")
-        c.print("  [bold]/memory identity [global|project][/]               — show identity profile")
-        c.print("  [bold]/memory episodes [query][/]                       — search episodic logs")
+        c.print("  [bold]/memory rules[/]                         — show behavioral rules")
+        c.print("  [bold]/memory rules delete <n>[/]              — delete rule #n")
+        c.print("  [bold]/memory rules edit <n>[/]                — edit rule #n")
         c.print()
-        c.print("  [bold dim]Edit[/]")
-        c.print("  [bold]/memory edit rules|lessons|profile [global|project][/]     — open in $EDITOR")
-        c.print("  [bold]/memory delete rule|lesson|profile <n> [global|project][/] — remove entry #n")
+        c.print("  [bold]/memory lessons[/]                       — show learned lessons")
+        c.print("  [bold]/memory lessons delete <n>[/]            — delete lesson #n")
+        c.print("  [bold]/memory lessons edit <n>[/]              — edit lesson #n")
+        c.print()
+        c.print("  [bold]/memory identity[/]                      — show identity profile")
+        c.print("  [bold]/memory identity delete <n>[/]           — delete identity entry #n")
+        c.print("  [bold]/memory identity edit <n>[/]             — edit identity entry #n")
+        c.print()
+        c.print("  [bold]/memory episodes[/]                      — show episodic sessions")
+        c.print("  [bold]/memory episodes delete <n>[/]           — delete session #n")
         c.print()
         c.print("  [bold dim]Maintenance[/]")
-        c.print("  [bold]/memory prune[/]                                  — remove outdated/low-value entries")
-        c.print("  [bold]/memory vacuum[/]                                 — deduplicate and compact")
-        c.print("  [bold]/memory reset [project|global|all][/]             — wipe a scope")
+        c.print("  [bold]/memory vacuum[/]                        — deduplicate and compact")
+        c.print("  [bold]/memory reset global|project|episodic[/] — wipe a scope")
         c.print()
-        c.print("  [bold]/memory help[/]                                   — show this message")
+        c.print("  [bold]/memory help[/]                          — show this message")
         c.print()
 
     # ------------------------------------------------------------------
@@ -216,9 +221,8 @@ class MemoryManage:
                     prev_kind = engram.kind
                 self._print_numbered_item(n, engram)
 
-        self.console.print(f"Actions:")
-        self.console.print(f" /memory rules delete <n> to delete record")
-        self.console.print(f" /memory rules edit <n> to update record")
+        self.console.print("  [bold]/memory rules delete <n>[/]  — delete rule #n")
+        self.console.print("  [bold]/memory rules edit <n>[/]    — edit rule #n")
 
     async def lessons(self, action: str = None, num: str = None) -> None:
         """Display stored lessons, numbered for easy reference."""
@@ -241,9 +245,8 @@ class MemoryManage:
             for i, item in items.items():
                 self._print_numbered_item(i, item)
 
-        self.console.print(f"Actions:")
-        self.console.print(f" /memory lessons delete <n> to delete record")
-        self.console.print(f" /memory lessons edit <n> to update record")
+        self.console.print("  [bold]/memory lessons delete <n>[/]  — delete lesson #n")
+        self.console.print("  [bold]/memory lessons edit <n>[/]    — edit lesson #n")
 
 
     async def identity(self, action: str = None, num: str = None) -> None:
@@ -267,9 +270,8 @@ class MemoryManage:
             for i, item in items.items():
                 self._print_numbered_item(i, item)
 
-        self.console.print(f"Actions:")
-        self.console.print(f" /memory identity delete <n> to delete record")
-        self.console.print(f" /memory identity edit <n> to update record")
+        self.console.print("  [bold]/memory identity delete <n>[/]  — delete identity entry #n")
+        self.console.print("  [bold]/memory identity edit <n>[/]    — edit identity entry #n")
 
     async def episodes(self, action: str = None, num: str = None) -> None:
         if self.episodic is None:
@@ -310,8 +312,7 @@ class MemoryManage:
                 content = content[:97] + "..."
             self.console.print(f"    [dim]{i:>3}.[/]  {content}")
 
-        self.console.print(f"Actions:")
-        self.console.print(f" /memory episodes delete <n> to delete record")
+        self.console.print("  [bold]/memory episodes delete <n>[/]  — delete session #n")
 
     async def vacuum(self):
         toggle = await prompt_or_cancel(
