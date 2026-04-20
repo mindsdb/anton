@@ -300,8 +300,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             hc = self.global_hc if engram.scope == "global" else self.project_hc
 
             if engram.kind == "profile":
-                # Profile entries accumulate, then rewrite
-                hc.rewrite_identity(engram.text)
+                hc.rewrite_identity([engram.text])
 
                 actions.append(f"Updated identity: {engram.text}")
 

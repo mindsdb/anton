@@ -164,6 +164,9 @@ class MemoryManage:
         }
         nums = list(index.keys())
 
+        if not nums:
+            return self.console.print("Nothing to act on — memory is empty.")
+
         if num is None:
             return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
 
@@ -281,6 +284,9 @@ class MemoryManage:
 
         if action is not None:
             nums = list(items.keys())
+
+            if not nums:
+                return self.console.print("Nothing to act on — no episodes.")
 
             if num is None:
                 return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
@@ -428,7 +434,6 @@ class MemoryManage:
         c = self.console
         c.print()
         c.print(f"[anton.cyan]{title}[/]")
-        c.print()
 
     def _print_numbered_item(self, n, entry) -> None:
         self.console.print(f"    [dim]{n:>3}.[/]  {entry.text}")

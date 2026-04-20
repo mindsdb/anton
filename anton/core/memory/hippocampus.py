@@ -337,36 +337,13 @@ class Hippocampus:
                     parts.append(line.strip())
 
         # Extract scratchpad-related lessons
-        lessons = self.recall_lessons(token_budget=None)
-        for line in lessons.splitlines():
-            if line.strip().startswith("- ") and "scratchpad" in line.lower():
-                stripped = line.strip()
-                if stripped not in parts:
-                    parts.append(stripped)
-
-        # are topics/scratchpad-*.md files created somewhere?
-        # # Check topics/scratchpad-*.md files
-        # if self._topics_dir.is_dir():
-        #     for path in sorted(self._topics_dir.iterdir()):
-        #         if path.name.startswith("scratchpad-") and path.suffix == ".md":
-        #             try:
-        #                 content = path.read_text(encoding="utf-8").strip()
-        #                 if content:
-        #                     parts.append(content)
-        #             except (OSError, UnicodeDecodeError):
-        #                 continue
+        for lesson in self.get_lessons():
+            if "scratchpad" in lesson.text.lower() or (lesson.topic and "scratchpad" in lesson.topic.lower()):
+                entry = f"- {lesson.text}"
+                if entry not in parts:
+                    parts.append(entry)
 
         return "\n".join(parts)
-
-    # def _read_full_lessons(self) -> str:
-    #     """Read lessons.md without budget constraint (for internal use)."""
-    #     if not self._lessons_path.is_file():
-    #         return ""
-    #     try:
-    #         return self._lessons_path.read_text(encoding="utf-8").strip()
-    #     except (OSError, UnicodeDecodeError):
-    #         return ""
-
 
     # ---------- rules -------------------
 
@@ -508,22 +485,6 @@ class Hippocampus:
                 return
             self._encode_with_lock(self._lessons_path, entry, mode="append")
 
-        # topics are insinde of lessons
-        # Also write to topic file if topic is substantial
-        # if topic:
-        #     self._topics_dir.mkdir(parents=True, exist_ok=True)
-        #     slug = self._sanitize_slug(topic)
-        #     topic_path = self._topics_dir / f"{slug}.md"
-        #     if not topic_path.is_file():
-        #         self._encode_with_lock(
-        #             topic_path,
-        #             f"# {topic}\n{entry}",
-        #             mode="write",
-        #         )
-        #     else:
-        #         existing = topic_path.read_text(encoding="utf-8")
-        #         if text not in self._extract_entry_texts(existing):
-        #             self._encode_with_lock(topic_path, entry, mode="append")
 
     def entry_count(self) -> int:
         """Count total entries across rules.md and lessons.md."""
