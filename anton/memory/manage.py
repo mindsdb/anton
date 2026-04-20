@@ -150,45 +150,57 @@ class MemoryManage:
     # Inspect
     # ------------------------------------------------------------------
 
-    # async def _handle_menu_command(self, name, ):
+    async def _handle_menu_command(self, action, num, global_items, project_items, methods: dict = None):
+        index = {
+            **global_items,
+            **project_items,
+        }
+        nums = list(index.keys())
+
+        if num is None:
+            return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
+
+        if num.isdigit():
+            num = int(num)
+        if num not in index:
+            return self.console.print(f"Item {num} not found, choose number between {min(nums)} and {max(nums)}")
+
+        if action not in methods.keys():
+            return self.console.print(f"Unknown action use one of: {','.join(methods.keys())}")
+
+        if num in global_items:
+            method = getattr(self.cortex.global_hc, methods[action])
+            id = global_items[num].id
+        else:
+            method = getattr(self.cortex.project_hc, methods[action])
+            id = global_items[num].id
+
+        if action == 'delete':
+            method(id)
+            self.console.print("[anton.cyan]Deleted[/]")
+
+        elif action == 'edit':
+            text = await prompt_or_cancel("Edit the text>", default_text=index[num].text)
+
+            if text is None:
+                return False
+
+            method(id, text)
+            self.console.print("[anton.cyan]Updated[/]")
+        return True
 
     async def rules(self, action: str = None, num: str = None) -> None:
         """Display stored rules, numbered for easy reference."""
         global_items = dict(enumerate(self.cortex.global_hc.get_rules(), start=1))
         project_items = dict(enumerate(self.cortex.project_hc.get_rules(), start=len(global_items) + 1))
 
-        index = {
-            **global_items,
-            **project_items,
-        }
-
         if action is not None:
-            nums = list(index.keys())
-
-            if num is None:
-                return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
-
-            if num.isdigit():
-                num = int(num)
-            if num not in index:
-                return self.console.print(f"Item {num} not found, choose number between {min(nums)} and {max(nums)}")
-
-            if action == 'delete':
-                if num in global_items:
-                    return self.cortex.global_hc.del_rule(global_items[num].id)
-                else:
-                    return self.cortex.project_hc.del_rule(project_items[num].id)
-
-            elif action == 'edit':
-                text = await prompt_or_cancel("Edit the text>", default_text=index[num].text)
-
-                if text is None:
-                    return
-
-                if num in global_items:
-                    return self.cortex.global_hc.update_rule(global_items[num].id, text)
-                else:
-                    return self.cortex.project_hc.update_rule(project_items[num].id, text)
+            updated = await self._handle_menu_command(action, num, global_items, project_items, methods={
+                'delete': 'del_rule',
+                'edit': 'update_rule',
+            })
+            if not updated:
+                return
 
         for scope_title, items in [("Global", global_items), ("Project", project_items)]:
             if not items:
@@ -210,40 +222,13 @@ class MemoryManage:
         global_items = dict(enumerate(self.cortex.global_hc.get_lessons(), start=1))
         project_items = dict(enumerate(self.cortex.project_hc.get_lessons(), start=len(global_items) + 1))
 
-        index = {
-            **global_items,
-            **project_items,
-        }
-
         if action is not None:
-            nums = list(index.keys())
-
-            if num is None:
-                return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
-
-            if num.isdigit():
-                num = int(num)
-            if num not in index:
-                return self.console.print(f"Item {num} not found, choose number between {min(nums)} and {max(nums)}")
-
-            if action == 'delete':
-                if num in global_items:
-                    return self.cortex.global_hc.del_lesson(global_items[num].id)
-                else:
-                    return self.cortex.project_hc.del_lesson(project_items[num].id)
-
-            elif action == 'edit':
-                text = await prompt_or_cancel("Edit the text>", default_text=index[num].text)
-
-                if text is None:
-                    return
-
-                if num in global_items:
-                    return self.cortex.global_hc.update_lesson(global_items[num].id, text)
-                else:
-                    return self.cortex.project_hc.update_lesson(project_items[num].id, text)
-
-            return self.console.print(f"Unknown action use one of: delete, edit")
+            updated = await self._handle_menu_command(action, num, global_items, project_items, methods={
+                'delete': 'del_lesson',
+                'edit': 'update_lesson',
+            })
+            if not updated:
+                return
 
         for scope_title, items in [("Global", global_items), ("Project", project_items)]:
             if not items:
@@ -262,40 +247,13 @@ class MemoryManage:
         global_items = dict(enumerate(self.cortex.global_hc.get_identities(), start=1))
         project_items = dict(enumerate(self.cortex.project_hc.get_identities(), start=len(global_items) + 1))
 
-        index = {
-            **global_items,
-            **project_items,
-        }
-
         if action is not None:
-            nums = list(index.keys())
-
-            if num is None:
-                return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
-
-            if num.isdigit():
-                num = int(num)
-            if num not in index:
-                return self.console.print(f"Item {num} not found, choose number between {min(nums)} and {max(nums)}")
-
-            if action == 'delete':
-                if num in global_items:
-                    return self.cortex.global_hc.del_identity(global_items[num].id)
-                else:
-                    return self.cortex.project_hc.del_identity(project_items[num].id)
-
-            elif action == 'edit':
-                text = await prompt_or_cancel("Edit the text>", default_text=index[num].text)
-
-                if text is None:
-                    return
-
-                if num in global_items:
-                    return self.cortex.global_hc.update_identity(global_items[num].id, text)
-                else:
-                    return self.cortex.project_hc.update_identity(project_items[num].id, text)
-
-            return self.console.print(f"Unknown action use one of: delete, edit")
+            updated = await self._handle_menu_command(action, num, global_items, project_items, methods={
+                'delete': 'del_identity',
+                'edit': 'update_identity',
+            })
+            if not updated:
+                return
 
         for scope_title, items in [("Global", global_items), ("Project", project_items)]:
             if not items:
