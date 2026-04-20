@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,25 @@ def map_env_fields(
             if lower_key.endswith("_" + name):
                 result[name] = value
                 break
+    return result
+
+
+def _resolve_env_refs(credentials: dict[str, str]) -> dict[str, str]:
+    """Resolve any $VAR literals that slipped through to credential values.
+
+    A single-token value starting with $ is treated as an env var reference.
+    If the variable exists in the environment, the resolved value is used.
+    If it does not exist, the original literal is kept unchanged.
+    """
+    result: dict[str, str] = {}
+    for key, value in credentials.items():
+        token = value.strip()
+        if token.startswith("$") and len(token.split()) == 1:
+            var_name = token.lstrip("$").strip("{}")
+            resolved = os.environ.get(var_name)
+            result[key] = resolved if resolved is not None else value
+        else:
+            result[key] = value
     return result
 
 
@@ -395,7 +415,7 @@ async def handle_connect_datasource(
                 _telemetry("ds_connect_failed", engine=edit_engine)
                 return session
 
-        vault.save(edit_engine, edit_name, credentials)
+        vault.save(edit_engine, edit_name, _resolve_env_refs(credentials))
         _telemetry("ds_connect_success", engine=edit_engine)
         restore_namespaced_env(vault)
         register_secret_vars(engine_def, engine=edit_engine, name=edit_name)
@@ -540,7 +560,7 @@ async def handle_connect_datasource(
                 _telemetry("ds_connect_failed", engine=engine_def.engine)
                 return session
         conn_name = uuid.uuid4().hex[:8]
-        vault.save(engine_def.engine, conn_name, credentials)
+        vault.save(engine_def.engine, conn_name, _resolve_env_refs(credentials))
         _telemetry("ds_connect_success", engine=engine_def.engine)
         slug = f"{engine_def.engine}-{conn_name}"
         restore_namespaced_env(vault)
@@ -803,7 +823,7 @@ async def handle_connect_datasource(
 
     if partial:
         auto_name = uuid.uuid4().hex[:8]
-        vault.save(engine_def.engine, auto_name, credentials)
+        vault.save(engine_def.engine, auto_name, _resolve_env_refs(credentials))
         slug = f"{engine_def.engine}-{auto_name}"
         console.print()
         console.print(
@@ -860,7 +880,7 @@ async def handle_connect_datasource(
             )
         return session
 
-    vault.save(engine_def.engine, conn_name, credentials)
+    vault.save(engine_def.engine, conn_name, _resolve_env_refs(credentials))
     _telemetry("ds_connect_success", engine=engine_def.engine)
     restore_namespaced_env(vault)
     session._active_datasource = slug

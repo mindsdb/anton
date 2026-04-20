@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
+from anton.utils.credential_parsers import parse_credential_input
 from anton.utils.datasources import remove_engine_block
 from anton.utils.prompt import prompt_or_cancel
 from anton.commands.datasource.helpers import show_credential_help
@@ -116,13 +117,13 @@ async def handle_add_custom_datasource(
         console.print("[anton.muted]        Working out the connection details…[/]")
     else:
         user_answer = await prompt_or_cancel(
-            f"(anton) How do you authenticate with {tool_name}? "
-            "Describe what credentials you have (don't paste actual values)",
+            f"(anton) Tell me about {tool_name} — what are you trying to connect, "
+            "or press Enter to let me work out the connection details",
         )
-        if not user_answer or not user_answer.strip():
+        if user_answer is None:
             return None
-        console.print()
-        console.print("[anton.muted]    Got it — working out the connection details…[/]")
+        user_answer = user_answer.strip()
+        console.print("[anton.muted]        Working out the connection details…[/]")
 
     llm_prompt = f"The user wants to connect to {repr(tool_name)}."
     if user_answer:
@@ -172,6 +173,7 @@ async def handle_add_custom_datasource(
 
     display_name = spec.display_name or name
     pip_pkg = spec.pip
+    slug = re.sub(r"[^\w]", "_", display_name.lower()).strip("_")
 
     # Show summary
     console.print()
@@ -206,6 +208,23 @@ async def handle_add_custom_datasource(
             console, session, display_name, None, fields,
         )
 
+    paste = await prompt_or_cancel(
+        f"(anton) Paste credentials for {display_name} — "
+        "or press Enter to enter fields one at a time",
+        password=True,
+    )
+    if paste is None:
+        return None
+    if paste.strip():
+        tmp_engine = DatasourceEngine(
+            engine=slug, display_name=display_name, fields=fields,
+        )
+        parsed = parse_credential_input(paste.strip(), tmp_engine)
+        if parsed is not None and parsed.fields:
+            for k, v in parsed.fields.items():
+                if k not in credentials:
+                    credentials[k] = v
+
     # Prompt for any secret fields not provided inline
     for f, raw in zip(fields, spec.fields):
         if not f.secret:
@@ -219,7 +238,7 @@ async def handle_add_custom_datasource(
             credentials[f.name] = value
 
     # Prompt for any required non-secret fields not provided inline
-    for f, raw in zip(fields, spec.fields):
+    for f in fields:
         if f.secret:
             continue
         if not f.required:
@@ -233,7 +252,7 @@ async def handle_add_custom_datasource(
             credentials[f.name] = value
 
     # Offer to collect optional non-secret fields
-    for f, raw in zip(fields, spec.fields):
+    for f in fields:
         if f.secret or f.required or f.name in credentials:
             continue
         value = await prompt_or_cancel(f"(anton) {f.name} (optional — press Enter to skip)")
@@ -248,7 +267,6 @@ async def handle_add_custom_datasource(
         return None
 
     # Build engine slug and write definition to ~/.anton/datasources.md
-    slug = re.sub(r"[^\w]", "_", display_name.lower()).strip("_")
     field_lines = "\n".join(
         f"  - {{ name: {f.name}, required: {str(f.required).lower()}, "
         f'secret: {str(f.secret).lower()}, description: "{f.description}" }}'

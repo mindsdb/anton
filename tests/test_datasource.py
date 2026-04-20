@@ -1154,6 +1154,128 @@ class TestHandleConnectDatasource:
         assert saved["user"] == "alice"
         assert saved["password"] == "s3cr3t"
 
+    @pytest.mark.asyncio
+    async def test_custom_datasource_empty_description_does_not_abort_flow(
+        self, registry, make_session, tmp_path
+    ):
+        """Pressing Enter (empty description) for an unrecognised service must not
+        silently abort the flow — it should proceed to LLM spec inference.
+
+        Regression: old code had ``if not user_answer or not user_answer.strip():
+        return None`` which caused a silent exit when the user just pressed Enter
+        instead of typing a description for a custom datasource.
+        """
+        from pathlib import Path as RealPath
+        from anton.commands.datasource.custom import (
+            _CustomDatasourceSpec,
+            _CustomDatasourceField,
+        )
+
+        session = make_session()
+        console = MagicMock()
+
+        spec = _CustomDatasourceSpec(
+            display_name="GitHub API",
+            fields=[
+                _CustomDatasourceField(
+                    name="token",
+                    secret=True,
+                    required=True,
+                    description="Personal access token",
+                )
+            ],
+        )
+        session._llm.generate_object = AsyncMock(return_value=spec)
+
+        # Prompt order inside handle_add_custom_datasource (known_service=False):
+        # 1. Description  → "" (Enter, the regression: must NOT exit here)
+        # 2. Help prompt  → "n"
+        # 3. Paste prompt → "" (skip)
+        # 4. Secret field "token" → credential value
+        custom_prompts = iter(["", "n", "", "ghp_test123"])
+
+        ds_file = tmp_path / "datasources.md"
+        ds_file.write_text("")
+
+        def path_factory(p):
+            if "datasources.md" in str(p):
+                return ds_file
+            return RealPath(p)
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(custom_prompts)),
+            ),
+            patch("anton.commands.datasource.custom.Path", side_effect=path_factory),
+            patch.object(
+                registry, "validate_file", return_value={"github_api": MagicMock()}
+            ),
+            patch.object(registry, "reload"),
+        ):
+            result = await handle_add_custom_datasource(
+                console, "GitHub", registry, session, known_service=False
+            )
+
+        # LLM was invoked for spec — we did not exit at the description step
+        session._llm.generate_object.assert_called_once()
+        assert result is not None
+        _, credentials = result
+        assert credentials.get("token") == "ghp_test123"
+
+    @pytest.mark.asyncio
+    async def test_env_var_references_in_known_variables_resolved_before_vault_save(
+        self, registry, vault_dir, make_session, make_pad, monkeypatch
+    ):
+        """Field values containing a $VAR reference must be resolved to the actual
+        environment variable value before being persisted — never stored literally.
+
+        Regression: without _resolve_env_refs, a known_variables entry like
+        ``{"host": "$PG_HOST"}`` would be saved verbatim, so downstream DS_*
+        injection would expose ``$PG_HOST`` instead of the real hostname.
+        """
+        monkeypatch.setenv("PG_HOST", "db.example.com")
+
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        with (
+            patch(
+                "anton.commands.datasource.connect.LocalDataVault", return_value=vault
+            ),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=registry,
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                prefill="PostgreSQL",
+                known_variables={
+                    "host": "$PG_HOST",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                    "password": "s3cr3t",
+                },
+            )
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        # The $VAR literal must be resolved to the real value before save
+        assert saved["host"] == "db.example.com"
+        assert "$PG_HOST" not in saved.values()
+        # Downstream DS_ injection also exposes the resolved value
+        assert os.environ.get("DS_POSTGRESQL_PROD_DB__HOST") == "db.example.com"
+
 
 class TestCredentialScrubbing:
     """_scrub_credentials and _register_secret_vars — flat and namespaced modes."""
@@ -2195,7 +2317,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect to mydb", "n", "localhost"])
+        responses = iter(["I want to connect to mydb", "n", "", "localhost"])
 
         with (
             patch(
@@ -2235,7 +2357,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "n", "mysecret"])
+        responses = iter(["I want to connect", "n", "", "mysecret"])
 
         with (
             patch(
@@ -2280,7 +2402,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "n", "", ""])
+        responses = iter(["I want to connect", "n", "", "", ""])
 
         with (
             patch(
@@ -2367,7 +2489,7 @@ class TestCustomDatasourceConnectFlow:
         )
 
         responses = iter(
-            ["0", "My API Service", "I have an API key", "n", "my_secret_key"]
+            ["0", "My API Service", "I have an API key", "n", "", "my_secret_key"]
         )
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -2422,7 +2544,7 @@ class TestCustomDatasourceConnectFlow:
         )
 
         responses = iter(
-            ["0", "My API Service", "I have an API key", "n", "bad_key", "n"]
+            ["0", "My API Service", "I have an API key", "n", "", "bad_key", "n"]
         )
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -2480,6 +2602,7 @@ class TestCustomDatasourceConnectFlow:
                 "My API Service",
                 "I have an API key",
                 "n",
+                "",
                 "bad_key",
                 "y",
                 "good_key",
@@ -2536,7 +2659,7 @@ class TestCustomDatasourceConnectFlow:
             )
         )
 
-        responses = iter(["0", "My API Service", "I have an API key", "n", "my_key"])
+        responses = iter(["0", "My API Service", "I have an API key", "n", "", "my_key"])
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
         with (
