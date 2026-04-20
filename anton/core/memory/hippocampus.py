@@ -61,7 +61,7 @@ def _extract_metadata(text: str) -> tuple[str, dict]:
         (clean_text, metadata_dict)
         metadata_dict is empty when no comment is present.
     """
-    match = re.search(r"\s*<!--(.*?)-->\s*$", text)
+    match = re.search(r"\s*<!--([^>]*)-->\s*$", text)
     if not match:
         return text.strip(), {}
 
