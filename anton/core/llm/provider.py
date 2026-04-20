@@ -145,6 +145,7 @@ class ProviderConnectionInfo:
     api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
     ssl_verify: bool | None = None
+    api_version: str | None = None  # Azure api-version query param
 
 
 class LLMProvider(ABC):
