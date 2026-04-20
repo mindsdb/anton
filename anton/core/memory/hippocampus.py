@@ -107,6 +107,15 @@ class Hippocampus:
         self._rules_path = base_dir / "rules.md"
         self._lessons_path = base_dir / "lessons.md"
 
+    def clear(self) -> None:
+        for path in (self._profile_path, self._rules_path, self._lessons_path):
+            if path.is_file():
+                path.unlink()
+        topics_dir = self._dir / "topics"
+        if topics_dir.is_dir():
+            for f in topics_dir.glob("*.md"):
+                f.unlink()
+
     # ---------- identity -------------------
 
     def recall_identities(self) -> str:

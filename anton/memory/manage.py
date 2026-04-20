@@ -90,7 +90,8 @@ class MemoryManage:
             "lessons":     self.lessons,
             "identity":     self.identity,
             "episodes":    self.episodes,
-            "vacuum": self.vacuum
+            "vacuum": self.vacuum,
+            "reset": self.reset
         }
 
     # ------------------------------------------------------------------
@@ -301,6 +302,8 @@ class MemoryManage:
         if len(items) > max_shown_items:
             items = items[-max_shown_items:]
             self.console.print(f"Only the last {max_shown_items} are shown:")
+        if len(items) == 0:
+            print("(no items)")
         for i, item in items.items():
             content = item.content.replace('\n', ' ')
             if len(content) > 100:
@@ -320,7 +323,32 @@ class MemoryManage:
         else:
             self.console.print(f"Canceled")
 
+    async def reset(self, scope: str = None) -> None:
 
+        scopes = ['global', 'project', 'episodic']
+
+        self.console.print("Clearing memory")
+        if scope is None:
+            return self.console.print(f"Choose a scope to reset memory: {', '.join(scopes)}")
+
+        if scope not in scopes:
+            return self.console.print(f"Unknown scope: {scope}, choose one of: {', '.join(scopes)}")
+
+        toggle = await prompt_or_cancel(
+            f"(anton) Are you sure to reset {scope} memory? Type 'reset' to confirm",
+            choices=["reset", "n"], default="n"
+        )
+        if toggle != "reset":
+            return self.console.print(f"Canceled")
+
+        if scope == 'global':
+            self.cortex.global_hc.clear()
+        if scope == 'project':
+            self.cortex.project_hc.clear()
+        if scope == 'episodic':
+            self.episodic.clear()
+
+        return self.console.print(f"Reset finished: {scope}")
 
     # ------------------------------------------------------------------
     # Dashboard

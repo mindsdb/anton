@@ -37,6 +37,11 @@ class EpisodicMemory:
         self._session_id: str | None = None
         self._file: Path | None = None
 
+    def clear(self) -> None:
+        if self._dir.is_dir():
+            for f in self._dir.glob("*.jsonl"):
+                f.unlink()
+
     @property
     def enabled(self) -> bool:
         return self._enabled
