@@ -272,14 +272,10 @@ and user preferences, always prioritize user preferences, except in matters of p
 
 ## GENERAL REQUIREMENTS
 
-WRITE A DASHBOARD BRIEF: Before coding the HTML, plan the dashboard out loud:
-- What story does each chart tell? (not "a bar chart of X" but "this shows how Y \
-is driving Z, annotated at the inflection point")
-- What is the visual hierarchy? Hero KPIs at top, main narrative chart first, \
-supporting charts below.
-- What should be annotated? Key dates, threshold crossings, outliers.
-- What color scheme ties it together? Consistent meaning (green=positive, red=negative) \
-across all charts.
+LIST THE INSIGHTS (terse — one line each, not an essay):
+Before coding, list the insights you want to present/convey/highlight as `1 - <chart/infographic/etc>: <insight it conveys and why it matters>..`
+Example: `1 - Line chart of weekly signups: shows growth inflection after the March launch, flags whether momentum is sustained.`
+This is a checklist, not a brief — no narrative prose, no design discussion.
 
 CRITICAL: The final dashboard MUST be a single .html file with ALL data, CSS, and JS inlined. \
 Do NOT reference external local files (like data.js) — browsers block local file:// cross-references \
