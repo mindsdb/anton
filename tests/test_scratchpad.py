@@ -6,17 +6,39 @@ import os
 import pytest
 
 from anton.core.backends.base import Cell
-from anton.core.backends.local import LocalScratchpadRuntime, _compute_timeouts
+from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.backends.local import local_scratchpad_runtime_factory
 
 # Alias for brevity in tests
 Scratchpad = LocalScratchpadRuntime
+
+_SCRATCHPAD_DEFAULTS = dict(
+    coding_provider="anthropic",
+    coding_model="",
+    coding_api_key="",
+    coding_base_url="",
+)
+
+_MANAGER_DEFAULTS = dict(
+    runtime_factory=local_scratchpad_runtime_factory,
+    **_SCRATCHPAD_DEFAULTS,
+)
+
+
+def make_scratchpad(name: str, **kwargs) -> LocalScratchpadRuntime:
+    return Scratchpad(name=name, **{**_SCRATCHPAD_DEFAULTS, **kwargs})
+
+
+def make_manager(**kwargs) -> ScratchpadManager:
+    return ScratchpadManager(**{**_MANAGER_DEFAULTS, **kwargs})
 
 
 class TestScratchpadBasicExecution:
     async def test_basic_execution(self):
         """print(42) should return '42' in stdout."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             cell = await pad.execute("print(42)")
@@ -27,7 +49,7 @@ class TestScratchpadBasicExecution:
 
     async def test_state_persists(self):
         """Variable from cell 1 should be available in cell 2."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             await pad.execute("x = 123")
@@ -39,7 +61,7 @@ class TestScratchpadBasicExecution:
 
     async def test_error_captured_process_survives(self):
         """Exception doesn't kill process; next cell works."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             cell1 = await pad.execute("raise ValueError('boom')")
@@ -56,7 +78,7 @@ class TestScratchpadBasicExecution:
 
     async def test_imports_persist(self):
         """import json in cell 1, json.dumps(...) in cell 2."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             await pad.execute("import json")
@@ -70,7 +92,7 @@ class TestScratchpadBasicExecution:
 class TestScratchpadView:
     async def test_view_history(self):
         """view() should show all cells with outputs."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             await pad.execute("x = 10")
@@ -85,7 +107,7 @@ class TestScratchpadView:
 
     async def test_view_empty(self):
         """view() on empty pad returns a message."""
-        pad = Scratchpad(name="empty")
+        pad = make_scratchpad(name="empty")
         await pad.start()
         try:
             output = pad.view()
@@ -97,7 +119,7 @@ class TestScratchpadView:
 class TestScratchpadReset:
     async def test_reset_clears_state(self):
         """Variables should be gone after reset."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             await pad.execute("x = 42")
@@ -116,7 +138,7 @@ class TestScratchpadEdgeCases:
         """Long-running code triggers timeout."""
         monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "1")
         monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             cell = await pad.execute("import time; time.sleep(60)")
@@ -127,7 +149,7 @@ class TestScratchpadEdgeCases:
 
     async def test_output_truncation(self):
         """stdout exceeding _MAX_OUTPUT is capped in the boot script."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             cell = await pad.execute("print('x' * 20000)")
@@ -139,7 +161,7 @@ class TestScratchpadEdgeCases:
 
     async def test_dead_process_detected(self):
         """If process is dead, execute reports it."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         # Kill the process manually
         pad._proc.kill()
@@ -151,7 +173,7 @@ class TestScratchpadEdgeCases:
 
     async def test_stderr_captured(self):
         """stderr output is captured separately."""
-        pad = Scratchpad(name="test")
+        pad = make_scratchpad(name="test")
         await pad.start()
         try:
             cell = await pad.execute("import sys; sys.stderr.write('warn\\n')")
@@ -163,7 +185,7 @@ class TestScratchpadEdgeCases:
 class TestScratchpadManager:
     async def test_get_or_create(self):
         """Auto-creates a scratchpad on first access."""
-        mgr = ScratchpadManager()
+        mgr = make_manager()
         try:
             pad = await mgr.get_or_create("alpha")
             assert pad.name == "alpha"
@@ -177,7 +199,7 @@ class TestScratchpadManager:
 
     async def test_remove(self):
         """remove() kills and deletes the scratchpad."""
-        mgr = ScratchpadManager()
+        mgr = make_manager()
         try:
             await mgr.get_or_create("beta")
             result = await mgr.remove("beta")
@@ -188,13 +210,13 @@ class TestScratchpadManager:
 
     async def test_remove_nonexistent(self):
         """remove() on unknown name returns a message."""
-        mgr = ScratchpadManager()
+        mgr = make_manager()
         result = await mgr.remove("nope")
         assert "nope" in result
 
     async def test_close_all(self):
         """close_all() cleans up everything."""
-        mgr = ScratchpadManager()
+        mgr = make_manager()
         await mgr.get_or_create("a")
         await mgr.get_or_create("b")
         assert len(mgr.list_pads()) == 2
@@ -207,7 +229,7 @@ class TestScratchpadManager:
         cancel_all_running() would leave _proc pointing to a new (orphan-prone)
         process. close_all() must leave _proc as None.
         """
-        mgr = ScratchpadManager()
+        mgr = make_manager()
         pad = await mgr.get_or_create("test")
         try:
             await pad.execute("x = 1")
@@ -220,7 +242,7 @@ class TestScratchpadManager:
 class TestScratchpadRenderNotebook:
     async def test_render_notebook_basic(self):
         """Produces markdown with code blocks and output."""
-        pad = Scratchpad(name="main")
+        pad = make_scratchpad(name="main")
         await pad.start()
         try:
             await pad.execute("x = 1")
@@ -237,7 +259,7 @@ class TestScratchpadRenderNotebook:
 
     async def test_render_notebook_empty(self):
         """Empty pad returns a message."""
-        pad = Scratchpad(name="empty")
+        pad = make_scratchpad(name="empty")
         await pad.start()
         try:
             md = pad.render_notebook()
@@ -247,7 +269,7 @@ class TestScratchpadRenderNotebook:
 
     async def test_render_notebook_skips_empty_cells(self):
         """Whitespace-only cells are filtered out."""
-        pad = Scratchpad(name="gaps")
+        pad = make_scratchpad(name="gaps")
         await pad.start()
         try:
             await pad.execute("print('a')")
@@ -263,7 +285,7 @@ class TestScratchpadRenderNotebook:
 
     async def test_render_notebook_truncates_long_output(self):
         """Long stdout shows 'more lines' indicator."""
-        pad = Scratchpad(name="long")
+        pad = make_scratchpad(name="long")
         await pad.start()
         try:
             await pad.execute("for i in range(50): print(i)")
@@ -274,7 +296,7 @@ class TestScratchpadRenderNotebook:
 
     async def test_render_notebook_error_summary(self):
         """Only last traceback line shown, not full trace."""
-        pad = Scratchpad(name="err")
+        pad = make_scratchpad(name="err")
         await pad.start()
         try:
             await pad.execute("raise ValueError('boom')")
@@ -288,7 +310,7 @@ class TestScratchpadRenderNotebook:
 
     async def test_render_notebook_hides_stderr_without_error(self):
         """Warnings (stderr only, no error) are filtered out of output sections."""
-        pad = Scratchpad(name="warn")
+        pad = make_scratchpad(name="warn")
         await pad.start()
         try:
             await pad.execute("import sys; sys.stderr.write('some warning\\n')")
@@ -319,7 +341,7 @@ class TestScratchpadRenderNotebook:
 class TestCellMetadata:
     async def test_cell_stores_description_and_estimated_time(self):
         """execute() should store description and estimated_time on the Cell."""
-        pad = Scratchpad(name="meta")
+        pad = make_scratchpad(name="meta")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -335,7 +357,7 @@ class TestCellMetadata:
 
     async def test_cell_defaults_empty_metadata(self):
         """Without arguments, description and estimated_time default to empty."""
-        pad = Scratchpad(name="defaults")
+        pad = make_scratchpad(name="defaults")
         await pad.start()
         try:
             cell = await pad.execute("print(1)")
@@ -346,7 +368,7 @@ class TestCellMetadata:
 
     async def test_view_shows_description_in_header(self):
         """view() should include description in the cell header."""
-        pad = Scratchpad(name="view-desc")
+        pad = make_scratchpad(name="view-desc")
         await pad.start()
         try:
             await pad.execute("print(1)", description="Count to one")
@@ -357,7 +379,7 @@ class TestCellMetadata:
 
     async def test_view_without_description(self):
         """view() without description falls back to plain header."""
-        pad = Scratchpad(name="view-plain")
+        pad = make_scratchpad(name="view-plain")
         await pad.start()
         try:
             await pad.execute("print(1)")
@@ -368,7 +390,7 @@ class TestCellMetadata:
 
     async def test_render_notebook_shows_description(self):
         """render_notebook() should include description in markdown header."""
-        pad = Scratchpad(name="nb-desc")
+        pad = make_scratchpad(name="nb-desc")
         await pad.start()
         try:
             await pad.execute("print(1)", description="Count to one")
@@ -379,7 +401,7 @@ class TestCellMetadata:
 
     async def test_render_notebook_without_description(self):
         """render_notebook() without description uses plain header."""
-        pad = Scratchpad(name="nb-plain")
+        pad = make_scratchpad(name="nb-plain")
         await pad.start()
         try:
             await pad.execute("print(1)")
@@ -394,7 +416,7 @@ class TestScratchpadEnvironment:
     async def test_env_vars_accessible(self, monkeypatch):
         """Secrets from .anton/.env (in os.environ) are accessible in scratchpad."""
         monkeypatch.setenv("MY_TEST_SECRET", "s3cret_value")
-        pad = Scratchpad(name="env-test")
+        pad = make_scratchpad(name="env-test")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -406,7 +428,7 @@ class TestScratchpadEnvironment:
 
     async def test_get_llm_available_when_model_set(self):
         """get_llm() should be injected when ANTON_SCRATCHPAD_MODEL is set."""
-        pad = Scratchpad(name="llm-test", coding_model="claude-test-model")
+        pad = make_scratchpad(name="llm-test", coding_model="claude-test-model")
         await pad.start()
         try:
             cell = await pad.execute("llm = get_llm(); print(llm.model)")
@@ -417,7 +439,7 @@ class TestScratchpadEnvironment:
 
     async def test_get_llm_not_available_without_model(self):
         """get_llm() should not be in namespace when no model is configured."""
-        pad = Scratchpad(name="no-llm")
+        pad = make_scratchpad(name="no-llm")
         await pad.start()
         try:
             cell = await pad.execute("get_llm()")
@@ -428,7 +450,7 @@ class TestScratchpadEnvironment:
 
     async def test_agentic_loop_available_when_model_set(self):
         """agentic_loop() should be injected alongside get_llm()."""
-        pad = Scratchpad(name="agentic-test", coding_model="claude-test-model")
+        pad = make_scratchpad(name="agentic-test", coding_model="claude-test-model")
         await pad.start()
         try:
             cell = await pad.execute("print(callable(agentic_loop))")
@@ -439,7 +461,7 @@ class TestScratchpadEnvironment:
 
     async def test_agentic_loop_not_available_without_model(self):
         """agentic_loop() should not be in namespace when no model is configured."""
-        pad = Scratchpad(name="no-agentic")
+        pad = make_scratchpad(name="no-agentic")
         await pad.start()
         try:
             cell = await pad.execute("agentic_loop()")
@@ -450,7 +472,7 @@ class TestScratchpadEnvironment:
 
     async def test_generate_object_available_when_model_set(self):
         """generate_object() should be available on the LLM wrapper."""
-        pad = Scratchpad(name="genobj-test", coding_model="claude-test-model")
+        pad = make_scratchpad(name="genobj-test", coding_model="claude-test-model")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -466,7 +488,7 @@ class TestScratchpadEnvironment:
         monkeypatch.setenv("ANTON_ANTHROPIC_API_KEY", "sk-ant-test-123")
         # Remove ANTHROPIC_API_KEY if set, to test the bridge
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        pad = Scratchpad(name="key-test", coding_model="test-model")
+        pad = make_scratchpad(name="key-test", coding_model="test-model")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -480,7 +502,7 @@ class TestScratchpadEnvironment:
 class TestScratchpadVenv:
     async def test_venv_created_on_start(self):
         """Venv directory should be created when the scratchpad starts."""
-        pad = Scratchpad(name="venv-test")
+        pad = make_scratchpad(name="venv-test")
         await pad.start()
         try:
             assert pad._venv_dir is not None
@@ -492,7 +514,7 @@ class TestScratchpadVenv:
 
     async def test_venv_persisted_on_close(self):
         """Venv directory should be preserved when the scratchpad is closed."""
-        pad = Scratchpad(name="venv-close")
+        pad = make_scratchpad(name="venv-close")
         await pad.start()
         venv_dir = pad._venv_dir
         assert os.path.isdir(venv_dir)
@@ -508,7 +530,7 @@ class TestScratchpadVenv:
 
     async def test_venv_persists_across_reset(self):
         """Venv should survive a reset (only the process restarts)."""
-        pad = Scratchpad(name="venv-reset")
+        pad = make_scratchpad(name="venv-reset")
         await pad.start()
         venv_dir = pad._venv_dir
         try:
@@ -520,7 +542,7 @@ class TestScratchpadVenv:
 
     async def test_subprocess_uses_venv_python(self):
         """The subprocess should run with the venv's Python executable."""
-        pad = Scratchpad(name="venv-exec")
+        pad = make_scratchpad(name="venv-exec")
         await pad.start()
         try:
             cell = await pad.execute("import sys; print(sys.executable)")
@@ -531,7 +553,7 @@ class TestScratchpadVenv:
 
     async def test_system_packages_available(self):
         """System site-packages should be accessible (e.g. pydantic from parent env)."""
-        pad = Scratchpad(name="venv-syspkg")
+        pad = make_scratchpad(name="venv-syspkg")
         await pad.start()
         try:
             cell = await pad.execute("import pydantic; print(pydantic.__name__)")
@@ -548,7 +570,7 @@ class TestVenvPersistence:
         """Close + reopen same name → packages remembered."""
         import shutil
         venvs_base = tmp_path / "venvs"
-        pad = Scratchpad(name="recycle", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="recycle", _venvs_base=venvs_base)
         await pad.start()
         await pad.install_packages(["cowsay"])
         venv_dir = pad._venv_dir
@@ -562,7 +584,7 @@ class TestVenvPersistence:
             assert "cowsay" in f.read()
 
         # Reopen — should recycle the existing venv
-        pad2 = Scratchpad(name="recycle", _venvs_base=venvs_base)
+        pad2 = make_scratchpad(name="recycle", _venvs_base=venvs_base)
         await pad2.start()
         try:
             assert "cowsay" in pad2._installed_packages
@@ -577,7 +599,7 @@ class TestVenvPersistence:
         """Wrong .python_version → recreates venv."""
         import shutil
         venvs_base = tmp_path / "venvs"
-        pad = Scratchpad(name="ver-mismatch", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="ver-mismatch", _venvs_base=venvs_base)
         await pad.start()
         venv_dir = pad._venv_dir
         await pad.close()
@@ -588,7 +610,7 @@ class TestVenvPersistence:
             f.write("2.7\n")
 
         # Reopen — should detect mismatch, nuke, and recreate
-        pad2 = Scratchpad(name="ver-mismatch", _venvs_base=venvs_base)
+        pad2 = make_scratchpad(name="ver-mismatch", _venvs_base=venvs_base)
         await pad2.start()
         try:
             assert pad2._venv_dir is not None
@@ -605,7 +627,7 @@ class TestVenvPersistence:
         """Delete Python binary → recreates venv."""
         import shutil
         venvs_base = tmp_path / "venvs"
-        pad = Scratchpad(name="corrupt", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="corrupt", _venvs_base=venvs_base)
         await pad.start()
         venv_dir = pad._venv_dir
         python_path = pad._venv_python
@@ -615,7 +637,7 @@ class TestVenvPersistence:
         os.remove(python_path)
 
         # Reopen — should detect corruption, nuke, and recreate
-        pad2 = Scratchpad(name="corrupt", _venvs_base=venvs_base)
+        pad2 = make_scratchpad(name="corrupt", _venvs_base=venvs_base)
         await pad2.start()
         try:
             assert pad2._venv_dir is not None
@@ -631,7 +653,7 @@ class TestVenvPersistence:
     async def test_remove_deletes_persistent_venv(self, tmp_path):
         """ScratchpadManager.remove() fully deletes the persistent venv dir."""
         import shutil
-        mgr = ScratchpadManager(workspace_path=tmp_path)
+        mgr = make_manager(workspace_path=tmp_path)
         try:
             pad = await mgr.get_or_create("deleteme")
             venv_dir = pad._venv_dir
@@ -646,7 +668,7 @@ class TestVenvPersistence:
         """requirements.txt is written when pad has installed packages."""
         import shutil
         venvs_base = tmp_path / "venvs"
-        pad = Scratchpad(name="req-save", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="req-save", _venvs_base=venvs_base)
         await pad.start()
         await pad.install_packages(["cowsay"])
         await pad.close()
@@ -662,7 +684,7 @@ class TestVenvPersistence:
 class TestScratchpadInstall:
     async def test_install_packages_success(self):
         """install_packages should install a package into the venv."""
-        pad = Scratchpad(name="install-test")
+        pad = make_scratchpad(name="install-test")
         await pad.start()
         try:
             result = await pad.install_packages(["cowsay"])
@@ -676,7 +698,7 @@ class TestScratchpadInstall:
 
     async def test_install_empty_list(self):
         """install_packages with empty list returns a message."""
-        pad = Scratchpad(name="install-empty")
+        pad = make_scratchpad(name="install-empty")
         await pad.start()
         try:
             result = await pad.install_packages([])
@@ -686,7 +708,7 @@ class TestScratchpadInstall:
 
     async def test_install_invalid_package(self):
         """install_packages with a bogus name should report failure."""
-        pad = Scratchpad(name="install-bad")
+        pad = make_scratchpad(name="install-bad")
         await pad.start()
         try:
             result = await pad.install_packages(["this-package-does-not-exist-xyz123"])
@@ -696,7 +718,7 @@ class TestScratchpadInstall:
 
     async def test_install_survives_reset(self):
         """Packages installed before a reset should still be available after."""
-        pad = Scratchpad(name="install-reset")
+        pad = make_scratchpad(name="install-reset")
         await pad.start()
         try:
             await pad.install_packages(["cowsay"])
@@ -711,7 +733,7 @@ class TestScratchpadInstall:
 class TestProgressAndTimeouts:
     async def test_progress_function_available_in_namespace(self):
         """progress() should be callable in scratchpad code."""
-        pad = Scratchpad(name="progress-ns")
+        pad = make_scratchpad(name="progress-ns")
         await pad.start()
         try:
             cell = await pad.execute("print(callable(progress))")
@@ -724,7 +746,7 @@ class TestProgressAndTimeouts:
         """Code that calls progress() frequently should survive even with a short inactivity timeout."""
         monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "2")
         monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "10")
-        pad = Scratchpad(name="progress-keep-alive")
+        pad = make_scratchpad(name="progress-keep-alive")
         await pad.start()
         try:
             code = (
@@ -744,7 +766,7 @@ class TestProgressAndTimeouts:
         """Code that sleeps without progress() calls should be killed by inactivity timeout."""
         monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "2")
         monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "60")
-        pad = Scratchpad(name="no-progress")
+        pad = make_scratchpad(name="no-progress")
         await pad.start()
         try:
             cell = await pad.execute("import time; time.sleep(30)")
@@ -755,7 +777,7 @@ class TestProgressAndTimeouts:
 
     async def test_execute_streaming_yields_progress(self):
         """execute_streaming() should yield progress strings and a final Cell."""
-        pad = Scratchpad(name="streaming")
+        pad = make_scratchpad(name="streaming")
         await pad.start()
         try:
             code = (
@@ -781,14 +803,14 @@ class TestProgressAndTimeouts:
 
     async def test_compute_timeouts_no_estimate(self):
         """No estimate should use defaults."""
-        from anton.core.backends.local import _compute_timeouts
+        from anton.core.backends.utils import compute_timeouts as _compute_timeouts
         total, inactivity = _compute_timeouts(0)
         assert total == 120.0
         assert inactivity == 30.0
 
     async def test_compute_timeouts_with_estimate(self):
         """Estimate should scale total timeout and inactivity with no hard cap."""
-        from anton.core.backends.local import _compute_timeouts
+        from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 
         # Small estimate: max(10*2, 10+30) = max(20, 40) = 40
         total, inactivity = _compute_timeouts(10)
@@ -814,7 +836,7 @@ class TestProgressAndTimeouts:
 class TestSampleFunction:
     async def test_sample_available_in_namespace(self):
         """sample() should be callable in scratchpad code."""
-        pad = Scratchpad(name="sample-ns")
+        pad = make_scratchpad(name="sample-ns")
         await pad.start()
         try:
             cell = await pad.execute("print(callable(sample))")
@@ -825,7 +847,7 @@ class TestSampleFunction:
 
     async def test_sample_dict_preview(self):
         """sample() on a dict should show keys and truncated values."""
-        pad = Scratchpad(name="sample-dict")
+        pad = make_scratchpad(name="sample-dict")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -842,7 +864,7 @@ class TestSampleFunction:
 
     async def test_sample_list_preview(self):
         """sample() on a list should show length and first/last items."""
-        pad = Scratchpad(name="sample-list")
+        pad = make_scratchpad(name="sample-list")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -859,7 +881,7 @@ class TestSampleFunction:
 
     async def test_sample_string_preview(self):
         """sample() on a string should show length and a preview."""
-        pad = Scratchpad(name="sample-str")
+        pad = make_scratchpad(name="sample-str")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -875,7 +897,7 @@ class TestSampleFunction:
 
     async def test_sample_full_mode(self):
         """sample(var, mode='full') should show more content."""
-        pad = Scratchpad(name="sample-full")
+        pad = make_scratchpad(name="sample-full")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -891,7 +913,7 @@ class TestSampleFunction:
 
     async def test_sample_set(self):
         """sample() on a set should show length and items."""
-        pad = Scratchpad(name="sample-set")
+        pad = make_scratchpad(name="sample-set")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -906,7 +928,7 @@ class TestSampleFunction:
 
     async def test_sample_custom_object(self):
         """sample() on an unknown object should show type and repr."""
-        pad = Scratchpad(name="sample-obj")
+        pad = make_scratchpad(name="sample-obj")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -923,7 +945,7 @@ class TestSampleFunction:
 
     async def test_sample_bytes(self):
         """sample() on bytes should show length and preview."""
-        pad = Scratchpad(name="sample-bytes")
+        pad = make_scratchpad(name="sample-bytes")
         await pad.start()
         try:
             cell = await pad.execute("sample(b'hello world')")
@@ -935,7 +957,7 @@ class TestSampleFunction:
 
     async def test_sample_named(self):
         """sample() with _name parameter should include the label."""
-        pad = Scratchpad(name="sample-named")
+        pad = make_scratchpad(name="sample-named")
         await pad.start()
         try:
             cell = await pad.execute(
@@ -950,7 +972,7 @@ class TestSampleFunction:
 
     async def test_sample_empty_dict(self):
         """sample() on an empty dict should not crash."""
-        pad = Scratchpad(name="sample-empty")
+        pad = make_scratchpad(name="sample-empty")
         await pad.start()
         try:
             cell = await pad.execute("sample({})")
@@ -961,7 +983,7 @@ class TestSampleFunction:
 
     async def test_sample_empty_list(self):
         """sample() on an empty list should not crash."""
-        pad = Scratchpad(name="sample-empty-list")
+        pad = make_scratchpad(name="sample-empty-list")
         await pad.start()
         try:
             cell = await pad.execute("sample([])")

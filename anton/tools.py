@@ -25,6 +25,19 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     if console is None:
         return "Cannot connect datasource — no console available."
 
+    # ── Telemetry: connection attempt ────────────────────────────────
+    _settings = getattr(session, "_settings", None)
+    if _settings is None:
+        try:
+            from anton.config.settings import AntonSettings
+            _settings = AntonSettings()
+        except Exception:
+            _settings = None
+
+    if _settings:
+        from anton.analytics import send_event
+        send_event(_settings, "ds_connect_attempt", engine=engine)
+
     console.print()
     console.print(
         f"[anton.prompt]anton>[/] I can help with that \u2014 let's connect [bold]{engine}[/] to Anton."
@@ -56,6 +69,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
 
     if new_connections:
         slug = next(iter(new_connections))
+        # ── Telemetry: connection succeeded ──────────────────────────
+        if _settings:
+            send_event(_settings, "ds_connect_success", engine=engine)
         return (
             f"Successfully connected '{slug}'. The datasource is now available. "
             f"Continue helping the user with their original request using this data source."
@@ -94,6 +110,10 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     console.print()
 
     if status == "test_failed":
+        # ── Telemetry: connection failed ─────────────────────────────
+        if _settings:
+            from anton.analytics import send_event
+            send_event(_settings, "ds_connect_failed", engine=engine)
         return (
             f"CONNECTION TEST FAILED: The connection test for '{engine}' did not "
             f"succeed and the user declined to re-enter credentials. Nothing was "

@@ -302,7 +302,11 @@ def main(
 
     from anton.analytics import send_event
 
-    send_event(settings, "anton_started")
+    send_event(
+        settings,
+        "anton_started",
+        has_mdb_key="1" if settings.minds_api_key else "0",
+    )
 
     if ctx.invoked_subcommand is None:
         from anton.chat import run_chat

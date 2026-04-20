@@ -9,9 +9,8 @@
 
 # Meet Anton - an agent that gets real work done
 
-Anton is a personal AI agent that helps you get actual-work done. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No setup, no plugins, no fuss.
+Anton is a personal AI agent that helps you get actual-work done. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No crazy setups, no plugins, no fuss.
 
-It doesn't just answer questions. It *does things*: cleans your inbox, builds integrations, analyzes your data, automates workflows - whatever the task requires.
 
 ![ezgif-24b9e7c74652f0dc](https://github.com/user-attachments/assets/c92f87c1-ff30-4272-92ba-49a8585d5954)
 
@@ -42,7 +41,7 @@ anton
 
 ## What can Anton do?
 
-Anton figures things out live. It doesn't rely on pre-built plugins or predefined workflows - it writes code on the fly, calls APIs, and chains together whatever steps are needed to get the job done.
+Help you with work, Anton starts as a blank canvas that molds to your needs, you simply ask and anton figures things out live. It doesn't rely on pre-built plugins or predefined workflows - it writes code on the fly, calls APIs, and chains together whatever steps are needed to get the job done.
 
 Here are a few examples of what people are using it for:
 
@@ -107,26 +106,7 @@ Although you can use Anton with just public data, the real power happens when yo
 ```powershell
 /connect
 
-(anton) Choose a data source:
-
-         Primary
-           0. Custom datasource (connect anything via API, SQL, or MCP)
-
-         Most popular
-           1. Amazon Redshift
-           2. Databricks
-           3. Google BigQuery
-           4. HubSpot
-           5. MariaDB
-           6. Microsoft SQL Server
-           7. MySQL
-           8. Oracle Database
-           9. PostgreSQL
-          10. Salesforce
-          11. Shopify
-          12. Snowflake
-
-(anton) Enter a number or type a name:
+(anton) What type of datasource (postgres, posthog, gmail, ..):
 
 ```
 
@@ -147,7 +127,8 @@ You can always ask Anton to explain what it did. Ask it to dump its scratchpad a
 ---
 
 ## What's inside
-<p align="center"><img width="800"  alt="image" src="/assets/anton-diagram.png" /></p>
+
+A big part of what makes Anton work is that it doesn’t need a huge collection of separate tools for web, DB, files etc. Most of the work is done through one core harness: The scratchpad, which can dynamically become whatever Anton needs for the task.
 
 For the full architecture of Anton, file formats, and developer guide, see **[anton/README.md](anton/README.md)**.
 
@@ -177,15 +158,7 @@ Anton provides two human-readable memory systems:
 - **Semantic memory** - rules, lessons, identity and domain expertise stored as markdown at global and project scope.  
 - **Episodic memory** - a timestamped archive of every conversation (JSONL in `.anton/episodes/`). Anton can recall prior sessions with the `recall` tool.
 
-Configure memory via `/setup` > Memory or via environment variables.
-
 ---
-
-### Prerequisites
-- `git` - required  
-- Python **3.11+** (Anton will bootstrap an environment if missing)  
-- `curl` - macOS / Linux installs  
-- Internet connection (scratchpad may access web sources)
 
 ### Windows scratchpad firewall
 The Windows installer can add a firewall rule so the scratchpad can reach the internet. If you skipped it, run in an elevated PowerShell:

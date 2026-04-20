@@ -1397,10 +1397,24 @@ async def _chat_loop(
 
             _query_count += 1
             _total_questions += 1
-            if _query_count == 1:
-                send_event(settings, "anton_first_query")
+
+            # Determine the LLM provider label for telemetry
+            _provider = settings.planning_provider or ""
+            if _provider == "openai-compatible" and settings.minds_api_key:
+                _llm_provider = "mdb_ai"
+            elif _provider == "anthropic":
+                _llm_provider = "anthropic"
+            elif "gemini" in (settings.planning_model or "").lower():
+                _llm_provider = "gemini"
+            elif _provider in ("openai", "openai-compatible"):
+                _llm_provider = "openai"
             else:
-                send_event(settings, "anton_query")
+                _llm_provider = "other"
+
+            if _query_count == 1:
+                send_event(settings, "anton_first_query", llm_provider=_llm_provider)
+            else:
+                send_event(settings, "anton_query", llm_provider=_llm_provider)
 
             display.start()
             t0 = time.monotonic()

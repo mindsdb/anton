@@ -115,6 +115,17 @@ async def handle_connect_datasource(
     vault = vault or LocalDataVault()
     registry = DatasourceRegistry()
 
+    try:
+        from anton.config.settings import AntonSettings
+        _settings = AntonSettings()
+    except Exception:
+        _settings = None
+
+    def _telemetry(event_name: str, engine: str = "") -> None:
+        if _settings and not from_tool_call:
+            from anton.analytics import send_event
+            send_event(_settings, event_name, engine=engine)
+
     if datasource_name is not None:
         parsed = parse_connection_slug(
             datasource_name, [e.engine for e in registry.all_engines()], vault=vault
@@ -142,6 +153,8 @@ async def handle_connect_datasource(
             )
             console.print()
             return session
+
+        _telemetry("ds_connect_attempt", engine=edit_engine)
 
         console.print()
         console.print(
@@ -204,9 +217,11 @@ async def handle_connect_datasource(
             if not await run_connection_test(
                 console, scratchpads, vault, engine_def, credentials, active_fields
             ):
+                _telemetry("ds_connect_failed", engine=edit_engine)
                 return session
 
         vault.save(edit_engine, edit_name, credentials)
+        _telemetry("ds_connect_success", engine=edit_engine)
         restore_namespaced_env(vault)
         register_secret_vars(engine_def, engine=edit_engine, name=edit_name)
         console.print()
@@ -467,6 +482,7 @@ async def handle_connect_datasource(
                 custom_source = True
 
     if custom_source:
+        _telemetry("ds_connect_attempt", engine=stripped_answer if not stripped_answer.isdigit() else "custom")
         result = await handle_add_custom_datasource(
             console, stripped_answer if not stripped_answer.isdigit() else "", registry, session,
             known_service=llm_recognised,
@@ -478,9 +494,11 @@ async def handle_connect_datasource(
             if not await run_connection_test(
                 console, scratchpads, vault, engine_def, credentials, engine_def.fields
             ):
+                _telemetry("ds_connect_failed", engine=engine_def.engine)
                 return session
         conn_name = uuid.uuid4().hex[:8]
         vault.save(engine_def.engine, conn_name, credentials)
+        _telemetry("ds_connect_success", engine=engine_def.engine)
         slug = f"{engine_def.engine}-{conn_name}"
         restore_namespaced_env(vault)
         session._active_datasource = slug
@@ -506,6 +524,7 @@ async def handle_connect_datasource(
         return session
 
     assert engine_def is not None
+    _telemetry("ds_connect_attempt", engine=engine_def.engine)
     active_fields = engine_def.fields
     chosen_method = None
     if engine_def.auth_method == "choice" and engine_def.auth_methods:
@@ -724,6 +743,7 @@ async def handle_connect_datasource(
         if not await run_connection_test(
             console, scratchpads, vault, engine_def, credentials, active_fields
         ):
+            _telemetry("ds_connect_failed", engine=engine_def.engine)
             session._pending_connect_status = "test_failed"
             return session
 
@@ -766,6 +786,7 @@ async def handle_connect_datasource(
         return session
 
     vault.save(engine_def.engine, conn_name, credentials)
+    _telemetry("ds_connect_success", engine=engine_def.engine)
     restore_namespaced_env(vault)
     session._active_datasource = slug
     register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)

@@ -1,14 +1,18 @@
 """Auto-update check for Anton."""
-
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
 import threading
+import urllib.request
 
 
 _TOTAL_TIMEOUT = 10  # Hard ceiling — update check never blocks startup longer than this
+
+_RELEASES_LATEST_URL = "https://api.github.com/repos/mindsdb/anton/releases/latest"
+_GITHUB_API_HEADERS = {"Accept": "application/vnd.github+json"}
 
 
 def check_and_update(console, settings) -> bool:
@@ -53,22 +57,12 @@ def _check_and_update(result: dict, settings) -> None:
     if shutil.which("uv") is None:
         return
 
-    # Fetch remote __init__.py to get __version__
-    import urllib.request
-
-    url = "https://raw.githubusercontent.com/mindsdb/anton/main/anton/__init__.py"
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            content = resp.read().decode("utf-8")
-    except Exception:
+    latest_tag = _fetch_latest_release_tag()
+    if not latest_tag:
         return
 
-    # Parse remote version
-    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
-    if not match:
-        return
-    remote_version_str = match.group(1)
+    # Strip leading 'v' for version comparison (e.g. "v0.3.1" -> "0.3.1")
+    remote_version_str = latest_tag.lstrip("v")
 
     # Compare versions
     from packaging.version import InvalidVersion, Version
@@ -84,12 +78,12 @@ def _check_and_update(result: dict, settings) -> None:
     if remote_ver <= local_ver:
         return
 
-    # Newer version available — upgrade
+    # Newer version available — reinstall from the specific release tag
     messages.append(f"  Updating anton {local_ver} \u2192 {remote_ver}...")
 
     try:
         proc = subprocess.run(
-            ["uv", "tool", "upgrade", "anton"],
+            ["uv", "tool", "install", f"git+https://github.com/mindsdb/anton.git@{latest_tag}", "--force"],
             capture_output=True,
             timeout=_TOTAL_TIMEOUT,
         )
@@ -101,25 +95,57 @@ def _check_and_update(result: dict, settings) -> None:
         messages.append("  [dim]Update failed, continuing...[/]")
         return
 
-    # Verify the upgrade actually installed the newer version by checking
-    # what uv reports. If PyPI hasn't published the version yet, uv will
-    # reinstall the old one and we'd loop forever on restart.
+    # Verify the upgrade actually installed the exact release version.
+    # If the release tag and the installed package version diverge, do not
+    # restart into a possibly confusing mixed state.
+    installed_ver = _read_installed_anton_version()
+    if installed_ver is None:
+        messages.append("  [dim]Update could not be verified, continuing...[/]")
+        return
+    if installed_ver != remote_ver:
+        messages.append(
+            "  [dim]Update skipped: installed Anton version does not match the latest release tag.[/]"
+        )
+        return
+
+    messages.append("  \u2713 Updated!")
+    result["new_version"] = remote_version_str
+
+
+def _fetch_latest_release_tag() -> str:
+    """Return the latest GitHub release tag, or an empty string on failure."""
+    try:
+        req = urllib.request.Request(_RELEASES_LATEST_URL, headers=_GITHUB_API_HEADERS)
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return ""
+    tag = data.get("tag_name", "")
+    return str(tag).strip()
+
+
+def _read_installed_anton_version():
+    """Return Anton's installed uv tool version, or None if unreadable."""
+    from packaging.version import InvalidVersion, Version
+
     try:
         verify = subprocess.run(
             ["uv", "tool", "list"],
             capture_output=True,
             timeout=5,
         )
-        tool_list = verify.stdout.decode()
-        # Look for "anton X.Y.Z" in the output
-        installed_match = re.search(r"anton\s+(\S+)", tool_list)
-        if installed_match:
-            installed_ver = Version(installed_match.group(1))
-            if installed_ver < remote_ver:
-                # Upgrade didn't actually install the new version — skip restart
-                return
     except Exception:
-        pass
+        return None
 
-    messages.append("  \u2713 Updated!")
-    result["new_version"] = remote_version_str
+    if verify.returncode != 0:
+        return None
+
+    tool_list = verify.stdout.decode()
+    installed_match = re.search(r"anton\s+(\S+)", tool_list)
+    if not installed_match:
+        return None
+
+    try:
+        return Version(installed_match.group(1))
+    except InvalidVersion:
+        return None

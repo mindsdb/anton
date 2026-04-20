@@ -120,17 +120,30 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# ── 5. Install anton via uv tool ───────────────────────────────────
+# ── 5. Resolve latest release tag ─────────────────────────────────
+Write-Host "  Fetching latest release..."
+try {
+    $release = Invoke-RestMethod "https://api.github.com/repos/mindsdb/anton/releases/latest"
+    $latestTag = $release.tag_name
+    $repoUrl = "git+https://github.com/mindsdb/anton.git@$latestTag"
+}
+catch {
+    Write-Host "warning: Could not determine latest release tag. Falling back to main branch." -ForegroundColor Yellow
+    $repoUrl = "git+https://github.com/mindsdb/anton.git"
+    $latestTag = ""
+}
+
+# ── 6. Install anton via uv tool ───────────────────────────────────
 Write-Host ""
 Write-Host "  This will install:"
-Write-Host "    - anton (from git+https://github.com/mindsdb/anton.git)"
+Write-Host "    - anton (from $repoUrl)"
 Write-Host "    - Into an isolated virtual environment managed by uv"
 Write-Host "    - Python 3.11+ will be downloaded automatically if not present"
 Write-Host ""
 
 if (Confirm-Step "Proceed with installation?") {
     Write-Host "  Installing anton into an isolated venv..."
-    uv tool install "git+https://github.com/mindsdb/anton.git" --force
+    uv tool install $repoUrl --force
     Write-Host "  Installed anton"
 }
 else {
@@ -138,7 +151,7 @@ else {
     exit 0
 }
 
-# ── 6. Verify the venv was created ─────────────────────────────────
+# ── 7. Verify the venv was created ─────────────────────────────────
 $uvToolDir = Join-Path $HOME ".local\share\uv\tools\anton"
 if (Test-Path $uvToolDir) {
     Write-Host "  Venv: $uvToolDir"
@@ -149,7 +162,7 @@ else {
     Write-Host "  Anton may still work — uv manages the environment internally."
 }
 
-# ── 7. Configure firewall for scratchpad internet access ──────────
+# ── 8. Configure firewall for scratchpad internet access ──────────
 #    Anton's scratchpads run Python in per-scratchpad venvs under
 #    ~/.anton/scratchpad-venvs/<name>/Scripts/python.exe.
 #    Windows Firewall blocks new executables by default, so we add a
@@ -215,7 +228,7 @@ else {
     Write-Host "    netsh advfirewall firewall add rule name=`"Anton Scratchpad`" dir=out action=allow program=`"$scratchpadVenvsDir\<name>\Scripts\python.exe`""
 }
 
-# ── 8. Ensure ~/.local/bin is in user PATH ──────────────────────────
+# ── 9. Ensure ~/.local/bin is in user PATH ──────────────────────────
 $uvBinDir = Join-Path $HOME ".local\bin"
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
@@ -234,7 +247,7 @@ else {
     Write-Host "  Added $uvBinDir to user PATH"
 }
 
-# ── 9. Success message ──────────────────────────────────────────────
+# ── 10. Success message ──────────────────────────────────────────────
 Write-Host ""
 Write-Host "  ✓ anton installed successfully!" -ForegroundColor Green
 Write-Host ""

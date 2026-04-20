@@ -346,6 +346,17 @@ abbreviate labels with `axisLabel: {{ formatter }}`. Always configure rich `tool
 `formatter` functions for precise value display on hover. Use `dataZoom` for time series \
 so users can zoom into ranges.
 
+Multi-tab / multi-view dashboards (critical — charts fail silently on hidden containers):
+- ECharts, Chart.js, and Plotly all render nothing when called on a container with \
+`display: none` or 0×0 dimensions — no error, no warning, just a blank chart. \
+NEVER call `echarts.init()` inside `DOMContentLoaded` for tabs/pages that start hidden.
+- Initialize charts lazily, gated on first visibility: in the tab-click handler, \
+check a `Set` of already-rendered tabs and call the page's init function only on \
+first visit. Example pattern: \
+`const _rendered = new Set(['overview']); function showPage(name) {{ /* toggle classes */ \
+if (!_rendered.has(name)) {{ _rendered.add(name); initChartsFor(name); }} }}` \
+— only the default-visible page initializes on load.
+
 Layout and composition:
 - For non-chart visualizations (tables, reports, dashboards), write clean HTML/CSS directly. \
 Use CSS grid or flexbox. Add subtle styling: rounded corners, soft shadows, hover effects.
