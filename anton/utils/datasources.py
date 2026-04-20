@@ -150,14 +150,25 @@ def restore_namespaced_env(vault: DataVault) -> None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
 
 
-def remove_engine_block(text: str, slug: str) -> str:
-    """Return *text* with any YAML datasource block for *slug* removed."""
+def remove_engine_block(text: str, slug: str, display_name: str = "") -> str:
+    """Return *text* with any YAML datasource block for *slug* removed.
+
+    Also removes blocks whose display_name or heading matches *display_name*
+    (case-insensitive) to handle slug drift across LLM runs.
+    """
+    dn_lower = display_name.strip().lower()
     cleaned = []
     prev = 0
     for m in _YAML_BLOCK_RE.finditer(text):
         try:
             data = yaml.safe_load(m.group(3))
-            is_dup = isinstance(data, dict) and str(data.get("engine", "")) == slug
+            if not isinstance(data, dict):
+                is_dup = False
+            else:
+                engine_match = str(data.get("engine", "")) == slug
+                heading_match = dn_lower and m.group(1).strip().lower() == dn_lower
+                dn_match = dn_lower and str(data.get("display_name", "")).lower() == dn_lower
+                is_dup = engine_match or heading_match or dn_match
         except Exception:
             is_dup = False
         if is_dup:

@@ -130,9 +130,11 @@ async def handle_add_custom_datasource(
     else:
         llm_prompt += " Determine the standard authentication fields for this service."
     llm_prompt += (
-        "\n\nReturn the connection spec following the schema you've been given. "
-        "For test_snippet, write Python that uses os.environ['DS_<FIELDNAME>'] "
-        "vars (uppercase, DS_ prefix) and prints 'ok' on success."
+        "\n\nReturn the connection spec following the schema. "
+        "For test_snippet, write Python that imports os. "
+        "Use os.environ['DS_FIELD'] for required fields. "
+        "Use os.environ.get('DS_FIELD', '') for optional fields. "
+        "Print 'ok' on success."
     )
 
     try:
@@ -273,7 +275,7 @@ async def handle_add_custom_datasource(
     existing = (
         user_ds_path.read_text(encoding="utf-8") if user_ds_path.is_file() else ""
     )
-    existing = remove_engine_block(existing, slug)
+    existing = remove_engine_block(existing, slug, display_name)
 
     tmp_path.write_text(existing + yaml_block, encoding="utf-8")
 
