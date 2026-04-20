@@ -19,6 +19,32 @@ from anton.commands.datasource.verify import run_connection_test
 _PROMPT_RECONNECT_CANCEL = "(reconnect/cancel)"
 
 
+def map_env_fields(
+    fields: dict[str, str],
+    engine_def,
+) -> dict[str, str]:
+    """Remap env-var-style keys to engine field names via suffix matching.
+    Keys that already match a field name pass through unchanged.
+    Keys with no match are silently dropped.
+    """
+    valid: set[str] = {f.name for f in engine_def.fields}
+    for method in (engine_def.auth_methods or []):
+        for f in method.fields:
+            valid.add(f.name)
+
+    result: dict[str, str] = {}
+    for key, value in fields.items():
+        lower_key = key.lower()
+        if lower_key in valid:
+            result[lower_key] = value
+            continue
+        for name in valid:
+            if lower_key.endswith("_" + name):
+                result[name] = value
+                break
+    return result
+
+
 def looks_like_paste(text: str | None) -> bool:
     """True when the user's input looks like pasted credentials rather than
     a datasource name — a URI, JSON blob, env var reference, or file path."""
@@ -480,7 +506,10 @@ async def handle_connect_datasource(
         if engine_def is not None:
             parsed_result = parse_credential_input(stripped_answer, engine_def)
             if parsed_result is not None and parsed_result.fields:
-                prefilled_fields = dict(parsed_result.fields)
+                fields = parsed_result.fields
+                if parsed_result.source == "env":
+                    fields = map_env_fields(fields, engine_def)
+                prefilled_fields = dict(fields)
                 console.print(
                     f"[anton.muted]        Parsed credentials from "
                     f"{parsed_result.source}.[/]"
@@ -586,7 +615,10 @@ async def handle_connect_datasource(
         if paste.strip():
             parsed = parse_credential_input(paste, engine_def)
             if parsed is not None:
-                filled = collector.fill_many(parsed.fields)
+                fields = parsed.fields
+                if parsed.source == "env":
+                    fields = map_env_fields(fields, engine_def)
+                filled = collector.fill_many(fields)
                 if filled:
                     console.print(
                         f"[anton.muted]        Parsed from "
