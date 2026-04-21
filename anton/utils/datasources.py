@@ -150,6 +150,22 @@ def restore_namespaced_env(vault: DataVault) -> None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
 
 
+def save_connection(
+    vault: DataVault,
+    engine_def: "DatasourceEngine",
+    name: str,
+    credentials: dict[str, str],
+) -> str:
+    """Persist credentials and refresh DS_* env vars. Returns the connection slug.
+
+    Shared save path used by both /connect and connect_new_datasource tool.
+    """
+    vault.save(engine_def.engine, name, credentials)
+    restore_namespaced_env(vault)
+    register_secret_vars(engine_def, engine=engine_def.engine, name=name)
+    return f"{engine_def.engine}-{name}"
+
+
 def remove_engine_block(text: str, slug: str) -> str:
     """Return *text* with any YAML datasource block for *slug* removed."""
     cleaned = []

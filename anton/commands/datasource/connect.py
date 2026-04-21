@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from anton.connect_collector import ConnectionCollector, extract_variables
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
-from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
+from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env, save_connection
 from anton.utils.prompt import prompt_or_cancel
 from anton.commands.datasource.helpers import show_credential_help
 from anton.commands.datasource.custom import handle_add_custom_datasource
@@ -304,12 +304,9 @@ async def handle_connect_datasource(
                 _telemetry("ds_connect_failed", engine=engine_def.engine)
                 return session
         conn_name = uuid.uuid4().hex[:8]
-        vault.save(engine_def.engine, conn_name, credentials)
+        slug = save_connection(vault, engine_def, conn_name, credentials)
         _telemetry("ds_connect_success", engine=engine_def.engine)
-        slug = f"{engine_def.engine}-{conn_name}"
-        restore_namespaced_env(vault)
         session._active_datasource = slug
-        register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
         console.print(
             f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].'
         )
@@ -592,11 +589,9 @@ async def handle_connect_datasource(
             )
         return session
 
-    vault.save(engine_def.engine, conn_name, credentials)
+    save_connection(vault, engine_def, conn_name, credentials)
     _telemetry("ds_connect_success", engine=engine_def.engine)
-    restore_namespaced_env(vault)
     session._active_datasource = slug
-    register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
     console.print(f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].')
 
     console.print()
