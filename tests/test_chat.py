@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.chat import ChatSession
+from anton.core.backends.base import Cell
 from anton.core.session import ChatSessionConfig
 from tests.conftest import make_mock_llm
 from anton.core.llm.provider import (
@@ -28,6 +29,13 @@ def _text_response(text: str) -> LLMResponse:
 
 
 class TestChatSession:
+    def test_passes_cells_to_scratchpad_manager(self):
+        """Hosts replay prior scratchpad cells via ChatSessionConfig — ScratchpadManager must receive them."""
+        mock_llm = make_mock_llm()
+        prior_cells = [Cell(code="print(1)", stdout="1", stderr="", error=None)]
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cells=prior_cells))
+        assert session._scratchpads._cells is prior_cells
+
     async def test_conversational_turn(self):
         """Text-only response for casual conversation."""
         mock_llm = make_mock_llm()
