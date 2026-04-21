@@ -104,7 +104,7 @@ def _parse_file(
             )
 
         engine_slug = str(data["engine"])
-        engines[engine_slug] = DatasourceEngine(
+        engine = DatasourceEngine(
             engine=engine_slug,
             display_name=str(data.get("display_name", engine_slug)),
             pip=str(data.get("pip", "")),
@@ -116,6 +116,13 @@ def _parse_file(
             popular=bool(data.get("popular", False)),
             custom=custom,
         )
+        if custom:
+            for field in engine.fields:
+                field.required = False
+            for method in engine.auth_methods:
+                for field in method.fields:
+                    field.required = False
+        engines[engine_slug] = engine
 
     return engines
 

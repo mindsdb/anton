@@ -35,6 +35,7 @@ from anton.cli import app as cli_app
 from anton.core.datasources.data_vault import DataVault, LocalDataVault, _slug_env_prefix
 from anton.core.datasources.datasource_registry import (
     DatasourceEngine,
+    DatasourceField,
     DatasourceRegistry,
     _parse_file,
 )
@@ -2324,8 +2325,11 @@ class TestAddCustomDatasourceFlow:
         assert credentials["api_key"] == "mysecret"
 
     @pytest.mark.asyncio
-    async def test_incomplete_custom_datasource_not_saved(self, tmp_path, make_session):
-        """Empty responses for all required fields causes a hard stop (None)."""
+    async def test_all_fields_skipped_returns_empty_credentials(
+        self, tmp_path, make_session
+    ):
+        """Skipping every field (empty input) is now valid — all custom fields
+        are optional, so empty credentials is a successful save."""
         session = make_session()
         session._llm = self._make_llm(
             self._make_spec(
@@ -2364,8 +2368,220 @@ class TestAddCustomDatasourceFlow:
                 console, "mydb", registry, session
             )
 
-        # Must return None — caller must not call vault.save()
-        assert result is None
+        assert result is not None
+        _, credentials = result
+        assert credentials == {}
+
+
+class TestCustomDatasourceRequiredFieldsPolicy:
+    """Verify that custom engines never expose required=True fields at any layer."""
+
+    # ── helpers ─────────────────────────────────────────────────────────────
+
+    def _custom_md(self, tmp_path, *, required_value: str = "true"):
+        md = tmp_path / "custom_datasources.md"
+        md.write_text(
+            dedent(
+                f"""\
+            ## My Custom API
+
+            ```yaml
+            engine: my_custom_api
+            display_name: My Custom API
+            fields:
+              - name: api_key
+                required: {required_value}
+                secret: true
+                description: API key
+              - name: base_url
+                required: {required_value}
+                secret: false
+                description: base URL
+            ```
+        """
+            )
+        )
+        return md
+
+    def _make_spec(self, fields: list[dict], display_name: str = "MyDB"):
+        from anton.commands.datasource import (
+            _CustomDatasourceField,
+            _CustomDatasourceSpec,
+        )
+        return _CustomDatasourceSpec(
+            display_name=display_name,
+            pip="",
+            test_snippet="",
+            fields=[_CustomDatasourceField(**f) for f in fields],
+        )
+
+    def _make_registry(self, tmp_path):
+        reg = MagicMock()
+        reg.validate_file.return_value = {"mydb": MagicMock()}
+        reg.reload.return_value = None
+        reg.get.return_value = None
+        return reg
+
+    # ── load-time: custom file ───────────────────────────────────────────────
+
+    def test_custom_file_required_true_forced_false_on_load(self, tmp_path):
+        """Custom datasources.md with required: true → all fields required=False after load."""
+        md = self._custom_md(tmp_path, required_value="true")
+        engines = _parse_file(md, custom=True)
+        assert "my_custom_api" in engines
+        engine = engines["my_custom_api"]
+        assert all(not f.required for f in engine.fields), (
+            "Custom engine fields must all be required=False after load"
+        )
+
+    def test_builtin_file_required_true_preserved_on_load(self, datasources_md):
+        """Built-in datasources.md with required: true → fields keep required=True."""
+        engines = _parse_file(datasources_md, custom=False)
+        pg = engines.get("postgresql")
+        assert pg is not None
+        required_fields = [f for f in pg.fields if f.required]
+        assert required_fields, "Built-in postgresql must still have required fields"
+
+    def test_custom_load_with_auth_methods_fields_also_forced(self, tmp_path):
+        """Custom engine with auth_methods: all nested fields also required=False."""
+        md = tmp_path / "custom_auth.md"
+        md.write_text(
+            dedent(
+                """\
+            ## Custom Auth Service
+
+            ```yaml
+            engine: custom_auth_service
+            display_name: Custom Auth Service
+            auth_method: choice
+            auth_methods:
+              - name: token
+                display: API Token
+                fields:
+                  - name: token
+                    required: true
+                    secret: true
+                    description: access token
+              - name: basic
+                display: Basic Auth
+                fields:
+                  - name: username
+                    required: true
+                    description: username
+            fields: []
+            ```
+        """
+            )
+        )
+        engines = _parse_file(md, custom=True)
+        engine = engines["custom_auth_service"]
+        for method in engine.auth_methods:
+            for f in method.fields:
+                assert not f.required, (
+                    f"auth_method field {f.name!r} must be required=False for custom engine"
+                )
+
+    # ── save-time: Pydantic default & field construction ────────────────────
+
+    def test_custom_field_pydantic_default_is_false(self):
+        """_CustomDatasourceField defaults required=False without explicit setting."""
+        from anton.commands.datasource import _CustomDatasourceField
+        f = _CustomDatasourceField(name="token")
+        assert f.required is False
+
+    def test_field_constructor_forces_required_false(self):
+        """Even if LLM sets required=True in spec, DatasourceField is built with False."""
+        from anton.commands.datasource import _CustomDatasourceField
+        llm_field = _CustomDatasourceField(
+            name="host", required=True, secret=False, description="hostname"
+        )
+        # Simulate what handle_add_custom_datasource does
+        real_field = DatasourceField(
+            name=llm_field.name,
+            required=False,
+            secret=llm_field.secret,
+            description=llm_field.description,
+        )
+        assert real_field.required is False
+
+    # ── ConnectionCollector: all-optional → immediately complete ────────────
+
+    def test_collector_all_optional_fields_is_complete_with_zero_filled(self):
+        """ConnectionCollector with all required=False reports is_complete immediately."""
+        from anton.connect_collector import ConnectionCollector
+        engine = DatasourceEngine(
+            engine="test_engine",
+            display_name="Test Engine",
+            fields=[
+                DatasourceField(name="api_key", required=False, secret=True),
+                DatasourceField(name="base_url", required=False, secret=False),
+            ],
+        )
+        collector = ConnectionCollector(engine_def=engine)
+        assert collector.is_complete is True
+        assert collector.missing_required == []
+
+    # ── end-to-end: skip all fields → vault save succeeds ───────────────────
+
+    @pytest.mark.asyncio
+    async def test_skip_all_fields_saves_empty_credentials(
+        self, vault_dir, make_session, tmp_path
+    ):
+        """User skips every field with Enter → custom datasource saved with empty creds."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        spec_with_fields = self._make_spec(
+            [
+                {"name": "api_key", "value": "", "secret": True, "required": True,
+                 "description": "API key"},
+                {"name": "base_url", "value": "", "secret": False, "required": True,
+                 "description": "base URL"},
+            ],
+            display_name="WeirdAPI",
+        )
+        session._llm.generate_object = AsyncMock(return_value=spec_with_fields)
+
+        registry = self._make_registry(tmp_path)
+        registry.find_by_name = MagicMock(return_value=None)
+        registry.all_engines = MagicMock(return_value=[])
+
+        # connect: "WeirdAPI" → custom description → help "n" → skip both fields
+        connect_responses = iter(["WeirdAPI"])
+        custom_responses = iter(["it uses token auth", "n", "", ""])
+
+        with (
+            patch(
+                "anton.commands.datasource.connect.LocalDataVault",
+                return_value=vault,
+            ),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=registry,
+            ),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(connect_responses)),
+            ),
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(custom_responses)),
+            ),
+            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+        ):
+            mock_path_cls.return_value.expanduser.return_value = (
+                tmp_path / "datasources.md"
+            )
+            result = await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        conns = vault.list_connections()
+        assert len(conns) == 1, "Custom datasource must be saved even with empty credentials"
+        saved = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert saved == {}, "Empty credentials dict should be saved"
+        assert result is session
 
 
 class TestCustomDatasourceConnectFlow:

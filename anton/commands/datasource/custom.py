@@ -20,6 +20,16 @@ if TYPE_CHECKING:
     from anton.core.datasources.datasource_registry import DatasourceRegistry
 
 
+def _force_all_fields_optional(engine_dict: dict) -> dict:
+    """Custom datasources never have required fields — enforce at save time."""
+    for f in engine_dict.get("fields", []):
+        f["required"] = False
+    for method in engine_dict.get("auth_methods", []):
+        for f in method.get("fields", []):
+            f["required"] = False
+    return engine_dict
+
+
 class _CustomDatasourceField(BaseModel):
     """One credential field in a custom-datasource spec."""
 
@@ -46,8 +56,11 @@ class _CustomDatasourceField(BaseModel):
         ),
     )
     required: bool = Field(
-        default=True,
-        description="True if the connection cannot be tested without this field.",
+        default=False,
+        description=(
+            "Always False for custom datasources — all fields are optional "
+            "by design. Never set this to True."
+        ),
     )
     description: str = Field(
         default="",
@@ -146,6 +159,10 @@ async def handle_add_custom_datasource(
         "\n\nReturn the connection spec following the schema you've been given. "
         "For test_snippet, write Python that uses os.environ['DS_<FIELDNAME>'] "
         "vars (uppercase, DS_ prefix) and prints 'ok' on success."
+        "\n\nIMPORTANT: Every field in the generated spec must have required=False. "
+        "Never set required=True for any field in a custom datasource. "
+        "All fields are optional by design — the user will provide whatever "
+        "they have and Anton will ask for more only if needed."
     )
 
     try:
@@ -170,7 +187,7 @@ async def handle_add_custom_datasource(
         fields.append(
             DatasourceField(
                 name=f.name,
-                required=f.required,
+                required=False,
                 secret=f.secret,
                 description=f.description,
             )
@@ -253,17 +270,22 @@ async def handle_add_custom_datasource(
         if value:
             credentials[f.name] = value
 
-    if not credentials:
-        console.print("[anton.warning]        No credentials collected. Aborting.[/]")
-        console.print()
-        return None
-
     # Build engine slug and write definition to ~/.anton/datasources.md
     slug = re.sub(r"[^\w]", "_", display_name.lower()).strip("_")
-    field_lines = "\n".join(
-        f"  - {{ name: {f.name}, required: {str(f.required).lower()}, "
-        f'secret: {str(f.secret).lower()}, description: "{f.description}" }}'
+    field_dicts: list[dict] = [
+        {
+            "name": f.name,
+            "required": f.required,
+            "secret": f.secret,
+            "description": f.description,
+        }
         for f in fields
+    ]
+    _force_all_fields_optional({"fields": field_dicts, "auth_methods": []})
+    field_lines = "\n".join(
+        f"  - {{ name: {fd['name']}, required: {str(fd['required']).lower()}, "
+        f"secret: {str(fd['secret']).lower()}, description: \"{fd['description']}\" }}"
+        for fd in field_dicts
     )
     test_snippet_yaml = ""
     if test_snippet:
