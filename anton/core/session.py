@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
@@ -991,7 +992,6 @@ class ChatSession:
                                 )
 
                                 _sp_t0 = _time.monotonic()
-                                from anton.core.backends.base import Cell
 
                                 cell = None
                                 async for item in pad.execute_streaming(
@@ -1020,7 +1020,10 @@ class ChatSession:
                                     if cell
                                     else "No result produced."
                                 )
+                                # Same persistence path as non-streaming scratchpad tools:
+                                # Minds maps StreamToolResult → thought.scratchpad.result (JSON Cell) for replay.
                                 if cell is not None:
+                                    yield StreamToolResult(content=json.dumps(asdict(cell)))
                                     self._record_cell_explainability(
                                         pad_name=tc.input.get("name", ""),
                                         description=description,
