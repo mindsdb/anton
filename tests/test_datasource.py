@@ -1181,7 +1181,7 @@ class TestHandleConnectDatasource:
 
         printed = " ".join(str(c) for c in console.print.call_args_list)
         assert "GitHub" in printed
-        assert "built-in connector" in printed
+        assert "custom datasource" in printed
         assert vault.list_connections() == []
         assert result is session
 
@@ -2427,7 +2427,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect to mydb", "n", "localhost"])
+        responses = iter(["I want to connect to mydb", "localhost"])
 
         with (
             patch(
@@ -2467,7 +2467,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "n", "mysecret"])
+        responses = iter(["I want to connect", "mysecret"])
 
         with (
             patch(
@@ -2515,7 +2515,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "n", "", ""])
+        responses = iter(["I want to connect", "", ""])
 
         with (
             patch(
@@ -2532,6 +2532,177 @@ class TestAddCustomDatasourceFlow:
         assert result is not None
         _, credentials = result
         assert credentials == {}
+
+    @pytest.mark.asyncio
+    async def test_no_proactive_help_prompt(self, tmp_path, make_session):
+        """Simplified custom flow must not ask 'need instructions on how
+        to obtain credentials?'. Prompts should be: description + one
+        prompt per missing field (all optional).
+        """
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "hostname",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        # description + host value + api_key value
+        responses = iter(["uses an API key", "localhost", "secret123"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=_prompt,
+            ),
+            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        joined = " | ".join(seen_labels).lower()
+        assert "instructions" not in joined
+        assert "need help" not in joined
+        assert credentials["host"] == "localhost"
+        assert credentials["api_key"] == "secret123"
+        # Exactly 3 prompts: description, host, api_key.
+        assert len(seen_labels) == 3
+
+    @pytest.mark.asyncio
+    async def test_all_inline_values_issue_no_field_prompts(
+        self, tmp_path, make_session
+    ):
+        """When the LLM spec returns inline values for every field, no
+        per-field prompt is issued — only the description prompt runs.
+        """
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "db.internal",
+                        "secret": False,
+                        "required": False,
+                        "description": "hostname",
+                    },
+                    {
+                        "name": "token",
+                        "value": "tok-inline-123",
+                        "secret": True,
+                        "required": False,
+                        "description": "auth token",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        # Only the description prompt should fire.
+        responses = iter(["connects via header token"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=_prompt,
+            ),
+            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        assert credentials == {"host": "db.internal", "token": "tok-inline-123"}
+        assert len(seen_labels) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_values_do_not_hard_stop(self, tmp_path, make_session):
+        """Skipping every field still returns a valid (empty) credentials
+        dict — no 'Cannot save — missing required fields' abort.
+        """
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "hostname",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        # description + skip both fields
+        responses = iter(["no idea", "", ""])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        assert credentials == {}
+        printed = " ".join(str(c) for c in console.print.call_args_list).lower()
+        assert "cannot save" not in printed
+        assert "missing required" not in printed
 
 
 class TestCustomDatasourceRequiredFieldsPolicy:
@@ -2708,9 +2879,9 @@ class TestCustomDatasourceRequiredFieldsPolicy:
         registry.find_by_name = MagicMock(return_value=None)
         registry.all_engines = MagicMock(return_value=[])
 
-        # connect: "WeirdAPI" → custom description → help "n" → skip both fields
+        # connect: "WeirdAPI" → custom description → skip both fields
         connect_responses = iter(["WeirdAPI"])
-        custom_responses = iter(["it uses token auth", "n", "", ""])
+        custom_responses = iter(["it uses token auth", "", ""])
 
         with (
             patch(
@@ -2814,7 +2985,7 @@ class TestCustomDatasourceConnectFlow:
         )
 
         responses = iter(
-            ["My API Service", "I have an API key", "n", "my_secret_key"]
+            ["My API Service", "I have an API key", "my_secret_key"]
         )
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -2869,7 +3040,7 @@ class TestCustomDatasourceConnectFlow:
         )
 
         responses = iter(
-            ["My API Service", "I have an API key", "n", "bad_key", "n"]
+            ["My API Service", "I have an API key", "bad_key", "n"]
         )
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -2925,7 +3096,6 @@ class TestCustomDatasourceConnectFlow:
             [
                 "My API Service",
                 "I have an API key",
-                "n",
                 "bad_key",
                 "y",
                 "good_key",
@@ -2982,7 +3152,7 @@ class TestCustomDatasourceConnectFlow:
             )
         )
 
-        responses = iter(["My API Service", "I have an API key", "n", "my_key"])
+        responses = iter(["My API Service", "I have an API key", "my_key"])
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
         with (

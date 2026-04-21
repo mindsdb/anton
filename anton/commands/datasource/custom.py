@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
 from anton.utils.datasources import remove_engine_block
 from anton.utils.prompt import prompt_or_cancel
-from anton.commands.datasource.helpers import show_credential_help
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -118,7 +117,7 @@ async def handle_add_custom_datasource(
         tool_name = name
     else:
         tool_name = await prompt_or_cancel(
-            "(anton) What is the name of the tool or service?",
+            "(anton) Name of the tool or service?",
         )
         if not tool_name or not tool_name.strip():
             return None
@@ -127,28 +126,19 @@ async def handle_add_custom_datasource(
     if tool_name and not tool_name.isdigit():
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] '{tool_name}' isn't a built-in connector — "
-            f"setting it up as a custom datasource."
+            f"[anton.cyan](anton)[/] Setting up [bold]{tool_name}[/] as a custom datasource."
         )
-        console.print(
-            "  [anton.muted]Tell me how to connect: API base URL, auth method "
-            "(token, OAuth, basic auth), endpoints you care about. "
-            "Anton will figure out the integration from your description.[/]"
-        )
-        console.print()
 
     if known_service:
         user_answer = ""
         console.print("[anton.muted]        Working out the connection details…[/]")
     else:
         user_answer = await prompt_or_cancel(
-            f"(anton) How do you authenticate with {tool_name}? "
-            "Describe what credentials you have (don't paste actual values)",
+            f"(anton) How does {tool_name} authenticate? (short description, no secrets)",
         )
         if user_answer is None:
             return None
-        console.print()
-        console.print("[anton.muted]    Got it — working out the connection details…[/]")
+        console.print("[anton.muted]        Working out the connection details…[/]")
 
     llm_prompt = f"The user wants to connect to {repr(tool_name)}."
     if user_answer:
@@ -201,70 +191,33 @@ async def handle_add_custom_datasource(
     display_name = spec.display_name or name
     pip_pkg = spec.pip
 
-    # Show summary
-    console.print()
-    console.print("      [bold]── What I'll save ──────────────────────────[/]")
+    # Collect inline values and show a compact one-line summary.
     credentials: dict[str, str] = {}
+    summary_parts: list[str] = []
     for f, raw in zip(fields, spec.fields):
         inline_value = (raw.value or "").strip()
-        if f.secret and inline_value:
-            console.print(
-                f"        • [bold]{f.name:<14}[/] (secret — provided, stored securely)"
-            )
+        if inline_value:
             credentials[f.name] = inline_value
+        if f.secret and inline_value:
+            summary_parts.append(f"[bold]{f.name}[/] (secret, provided)")
         elif f.secret:
-            console.print(
-                f"        • [bold]{f.name:<14}[/] (secret — I'll ask for this)"
-            )
+            summary_parts.append(f"[bold]{f.name}[/] (secret)")
+        elif inline_value:
+            summary_parts.append(f"[bold]{f.name}[/]={inline_value}")
         else:
-            val_display = inline_value or "[anton.muted]<to be collected>[/]"
-            console.print(f"        • [bold]{f.name:<14}[/] {val_display}")
-            if inline_value:
-                credentials[f.name] = inline_value
+            summary_parts.append(f"[bold]{f.name}[/]")
+    console.print()
+    console.print("        [anton.muted]Fields:[/] " + ", ".join(summary_parts))
     console.print()
 
-    help_answer = await prompt_or_cancel(
-        "(anton) Do you need instructions on how to obtain these credentials?",
-        choices=["y", "n"], default="n",
-    )
-    if help_answer is None:
-        return None
-    if help_answer.strip().lower() == "y":
-        await show_credential_help(
-            console, session, display_name, None, fields,
-        )
-
-    # Prompt for any secret fields not provided inline
+    # Ask only for values we don't have yet — all optional, Enter to skip.
     for f, raw in zip(fields, spec.fields):
-        if not f.secret:
-            continue
-        if (raw.value or "").strip():
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name}", password=True)
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    # Prompt for any required non-secret fields not provided inline
-    for f, raw in zip(fields, spec.fields):
-        if f.secret:
-            continue
-        if not f.required:
-            continue
         if f.name in credentials:
             continue
-        value = await prompt_or_cancel(f"(anton) {f.name}")
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    # Offer to collect optional non-secret fields
-    for f, raw in zip(fields, spec.fields):
-        if f.secret or f.required or f.name in credentials:
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name} (optional — press Enter to skip)")
+        value = await prompt_or_cancel(
+            f"(anton) {f.name} (optional, Enter to skip)",
+            password=f.secret,
+        )
         if value is None:
             return None
         if value:
@@ -332,14 +285,5 @@ async def handle_add_custom_datasource(
             fields=fields,
             test_snippet=test_snippet,
         )
-
-    missing_required = [f.name for f in fields if f.required and f.name not in credentials]
-    if missing_required:
-        console.print(
-            "[anton.warning]    Cannot save — missing required fields: "
-            f"{', '.join(missing_required)}. Aborting.[/]"
-        )
-        console.print()
-        return None
 
     return engine_def, credentials
