@@ -19,6 +19,7 @@ class ScratchpadManager:
         coding_base_url: str,
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -28,6 +29,7 @@ class ScratchpadManager:
         self._coding_base_url = coding_base_url
         self._cells = cells
         self._workspace_path = workspace_path
+        self._extra_env = extra_env
         self._available_packages: list[str] = self.probe_packages()
 
     @property
@@ -58,6 +60,7 @@ class ScratchpadManager:
                 coding_api_key=self._coding_api_key,
                 coding_base_url=self._coding_base_url,
                 workspace_path=self._workspace_path,
+                extra_env=self._extra_env,
             )
             await pad.start()
             self._pads[name] = pad

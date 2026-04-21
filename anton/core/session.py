@@ -78,6 +78,7 @@ class ChatSessionConfig:
     session_id: str | None = None
     proactive_dashboards: bool = False
     tools: list[ToolDef] = field(default_factory=list)
+    ds_env: dict[str, str] | None = None
 
 
 class ChatSession:
@@ -125,6 +126,7 @@ class ChatSession:
             coding_api_key=coding_conn.api_key or "",
             coding_base_url=coding_conn.base_url or "",
             workspace_path=config.workspace.base if config.workspace else None,
+            extra_env=config.ds_env,
         )
 
         self.tool_registry = ToolRegistry()
