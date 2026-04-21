@@ -43,6 +43,7 @@ class ScratchpadRuntime(ABC):
         coding_base_url: str,
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.name = name
         self._coding_provider = coding_provider
@@ -52,6 +53,7 @@ class ScratchpadRuntime(ABC):
         self.cells: list[Cell] = cells if cells is not None else []
         self._workspace_path = workspace_path or Path("~/.anton").expanduser()
         self._installed_packages: set[str] = set()
+        self._extra_env: dict[str, str] = extra_env or {}
 
     @abstractmethod
     async def start(self) -> None:
@@ -248,4 +250,5 @@ class ScratchpadRuntimeFactory(Protocol):
         coding_api_key: str,
         coding_base_url: str,
         workspace_path: Path | None,
+        extra_env: dict[str, str] | None = None,
     ) -> ScratchpadRuntime: ...

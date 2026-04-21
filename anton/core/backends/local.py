@@ -681,6 +681,7 @@ def local_scratchpad_runtime_factory(
     coding_base_url: str,
     cells: list[Cell] | None,
     workspace_path: Path | None,
+    extra_env: dict[str, str] | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
