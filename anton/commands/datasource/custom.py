@@ -131,14 +131,14 @@ async def handle_add_custom_datasource(
 
     if known_service:
         user_answer = ""
-        console.print("[anton.muted]        Working out the connection details…[/]")
+        console.print("[anton.muted]        Figuring out the connection…[/]")
     else:
         user_answer = await prompt_or_cancel(
             f"(anton) How does {tool_name} authenticate? (short description, no secrets)",
         )
         if user_answer is None:
             return None
-        console.print("[anton.muted]        Working out the connection details…[/]")
+        console.print("[anton.muted]        Figuring out the connection…[/]")
 
     llm_prompt = f"The user wants to connect to {repr(tool_name)}."
     if user_answer:
@@ -215,7 +215,7 @@ async def handle_add_custom_datasource(
         if f.name in credentials:
             continue
         value = await prompt_or_cancel(
-            f"(anton) {f.name} (optional, Enter to skip)",
+            f"(anton) {f.name} (optional)",
             password=f.secret,
         )
         if value is None:

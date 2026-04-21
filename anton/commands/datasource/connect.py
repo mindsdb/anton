@@ -161,7 +161,7 @@ async def handle_connect_datasource(
             f"[anton.cyan](anton)[/] Editing [bold]\"{datasource_name}\"[/bold]"
             f" ({engine_def.display_name})."
         )
-        console.print("[anton.muted]        Press Enter to keep the current value.[/]")
+        console.print("[anton.muted]        Enter to keep current value.[/]")
         console.print()
 
         active_fields = engine_def.fields
@@ -229,9 +229,7 @@ async def handle_connect_datasource(
             f'        Credentials updated for [bold]"{datasource_name}"[/bold].'
         )
         console.print()
-        console.print(
-            "[anton.muted]        You can now ask me questions about your data.[/]"
-        )
+        console.print("[anton.muted]        Ready to query your data.[/]")
         console.print()
         if not from_tool_call:
             session._history.append(
@@ -264,7 +262,7 @@ async def handle_connect_datasource(
             slugs = ", ".join(f"{c['engine']}-{c['name']}" for c in saved_connections[:5])
             more = "" if len(saved_connections) <= 5 else f" (+{len(saved_connections) - 5} more, see /list)"
             console.print(
-                f"  [anton.muted]To reconnect a saved one, type its slug: {slugs}{more}[/]"
+                f"  [anton.muted]Or reconnect: {slugs}{more}[/]"
             )
         console.print()
 
@@ -305,12 +303,10 @@ async def handle_connect_datasource(
         _telemetry("ds_connect_success", engine=engine_def.engine)
         session._active_datasource = slug
         console.print(
-            f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].'
+            f'        Saved to Local Vault as [bold]"{slug}"[/bold].'
         )
         console.print()
-        console.print(
-            "[anton.muted]        You can now ask me questions about your data.[/]"
-        )
+        console.print("[anton.muted]        Ready to query your data.[/]")
         console.print()
         if not from_tool_call:
             session._history.append(
@@ -367,9 +363,8 @@ async def handle_connect_datasource(
         ]
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] Got everything for [bold]"
-            f"{engine_def.display_name}[/] from context: "
-            f"{', '.join(filled_names)}."
+            f"[anton.cyan](anton)[/] Got [bold]{engine_def.display_name}[/] "
+            f"details from context: {', '.join(filled_names)}."
         )
         console.print()
     else:
@@ -472,8 +467,8 @@ async def handle_connect_datasource(
             collector.fill(next_field.name, value.strip())
         else:
             console.print(
-                "[anton.warning]        Couldn't parse that. "
-                "Try 'key=value' or one value at a time.[/]"
+                "[anton.warning]        Couldn't parse. "
+                "Try 'key=value' or one value.[/]"
             )
             console.print()
 
@@ -485,9 +480,8 @@ async def handle_connect_datasource(
         slug = f"{engine_def.engine}-{auto_name}"
         console.print()
         console.print(
-            f"[anton.muted]Partial connection saved to Local Vault as "
-            f'[bold]"{slug}"[/bold]. '
-            f"Run [bold]/edit {slug}[/bold] to complete it when you're ready.[/]"
+            f'[anton.muted]Partial save: [bold]"{slug}"[/bold]. '
+            f"Run [bold]/edit {slug}[/bold] to finish.[/]"
         )
         console.print()
         return session
@@ -541,12 +535,10 @@ async def handle_connect_datasource(
     save_connection(vault, engine_def, conn_name, credentials)
     _telemetry("ds_connect_success", engine=engine_def.engine)
     session._active_datasource = slug
-    console.print(f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].')
+    console.print(f'        Saved to Local Vault as [bold]"{slug}"[/bold].')
 
     console.print()
-    console.print(
-        "[anton.muted]        You can now ask me questions about your data.[/]"
-    )
+    console.print("[anton.muted]        Ready to query your data.[/]")
     console.print()
 
     if not from_tool_call:
