@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from anton.core.memory.access_log import AccessLog
 from anton.core.memory.base import HippocampusProtocol
 from anton.core.memory.hippocampus import Engram, Hippocampus
 
@@ -113,6 +114,7 @@ class Cortex:
         project_hc: HippocampusProtocol,
         mode: str = "autopilot",
         llm_client: LLMClient | None = None,
+        access_log: AccessLog | None = None,
     ) -> None:
         """Initialize the executive with two hippocampal stores.
 
@@ -121,11 +123,13 @@ class Cortex:
             project_hc: Memory store for project-specific memories
             mode: Memory mode — autopilot|copilot|off (encoding gate)
             llm_client: For LLM-assisted operations (profile extraction, compaction)
+            access_log: Append-only log of memories delivered per session.
         """
         self.global_hc = global_hc
         self.project_hc = project_hc
         self.mode = mode
         self._llm = llm_client
+        self._access_log = access_log
         self._turn_count = 0
 
     # ~6000 chars ≈ ~1500 tokens — above this, use LLM to filter rules
@@ -138,7 +142,9 @@ If all rules are relevant, return them all. If none are relevant, return "NONE".
 Do NOT add, modify, or summarize rules — return them verbatim.
 """
 
-    async def build_memory_context(self, user_message: str = "") -> str:
+    async def build_memory_context(
+        self, user_message: str = "", session_id: str | None = None
+    ) -> str:
         """Assemble memories for the system prompt — the 'working memory' load.
 
         Like the dlPFC performing strategic retrieval: selects what enters
@@ -147,6 +153,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         Args:
             user_message: Current user message for cue-dependent retrieval.
                 When rules exceed the token budget, only relevant rules are loaded.
+            session_id: Current session ID — if provided and access_log is set,
+                every delivered memory is logged to access_log.jsonl.
         """
         sections: list[str] = []
 
@@ -163,6 +171,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             )
             if global_rules:
                 sections.append(f"## Your Memory — Global Rules\n{global_rules}")
+                self._log_delivered(
+                    self.global_hc, "rules", "global", session_id
+                )
 
         # 3. Project rules (with smart retrieval)
         project_rules = self.project_hc.recall_rules()
@@ -172,16 +183,25 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             )
             if project_rules:
                 sections.append(f"## Your Memory — Project Rules\n{project_rules}")
+                self._log_delivered(
+                    self.project_hc, "rules", "project", session_id
+                )
 
         # 4. Global lessons
         global_lessons = self.global_hc.recall_lessons(token_budget=1000)
         if global_lessons:
             sections.append(f"## Your Memory — Global Lessons\n{global_lessons}")
+            self._log_delivered(
+                self.global_hc, "lessons", "global", session_id, token_budget=1000
+            )
 
         # 5. Project lessons
         project_lessons = self.project_hc.recall_lessons(token_budget=1000)
         if project_lessons:
             sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
+            self._log_delivered(
+                self.project_hc, "lessons", "project", session_id, token_budget=1000
+            )
 
         # 6. Minds datasource context (auto-loaded if present)
         minds_topic = self.project_hc.recall_topic("minds-datasource")
@@ -192,6 +212,30 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             return ""
 
         return "\n\n" + "\n\n".join(sections)
+
+    def _log_delivered(
+        self,
+        hc: HippocampusProtocol,
+        kind: str,
+        scope: str,
+        session_id: str | None,
+        token_budget: int = 1000,
+    ) -> None:
+        """Write access log entries for delivered memories.
+
+        No-op if access_log or session_id is not set, or if hc is not
+        a concrete Hippocampus (protocol-only backends have no file access).
+        """
+        if self._access_log is None or not session_id:
+            return
+        if not isinstance(hc, Hippocampus):
+            return
+        if kind == "rules":
+            records = hc.list_rule_records()
+        else:
+            records = hc.list_lesson_records(token_budget=token_budget)
+        if records:
+            self._access_log.log_delivered(records, scope=scope, session_id=session_id)
 
     async def _retrieve_relevant_rules(self, all_rules: str, user_message: str) -> str:
         """Filter rules to only those relevant to the current user message.

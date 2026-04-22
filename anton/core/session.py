@@ -283,7 +283,9 @@ class ChatSession:
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
         if self._cortex is not None:
-            memory_section = await self._cortex.build_memory_context(user_message)
+            memory_section = await self._cortex.build_memory_context(
+                user_message, session_id=self._session_id
+            )
 
         sa_section = ""
         if self._self_awareness is not None and self._cortex is None:

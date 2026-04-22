@@ -387,6 +387,34 @@ class Hippocampus:
         """Read all lessons without budget constraint (for internal use)."""
         return self.recall_lessons(token_budget=999999)
 
+    def list_rule_records(self) -> list[dict]:
+        """Return all rule records as raw dicts (for access log)."""
+        return _read_jsonl(self._rules_path)
+
+    def list_lesson_records(self, token_budget: int = 1000) -> list[dict]:
+        """Return the lesson records that recall_lessons would deliver at this budget.
+
+        Mirrors the same ordering and cutoff as recall_lessons so the access log
+        reflects exactly what was delivered to context.
+        """
+        records = _read_jsonl(self._lessons_path)
+        if not records:
+            return []
+        entries = list(reversed(records))  # most recent first (same as recall_lessons)
+        char_budget = token_budget * 4
+        used = len("# Lessons")
+        result = []
+        for r in entries:
+            ts = r.get("created_at", "")[:10]
+            topic = r.get("topic", "")
+            topic_tag = f" topic:{topic}" if topic else ""
+            line = f"- {r['text']} <!--{topic_tag} ts:{ts} -->"
+            if used + len(line) + 1 > char_budget:
+                break
+            result.append(r)
+            used += len(line) + 1
+        return result
+
     def entry_count(self) -> int:
         """Count total entries across rules.jsonl and lessons.jsonl."""
         return len(_read_jsonl(self._rules_path)) + len(_read_jsonl(self._lessons_path))

@@ -970,6 +970,7 @@ async def _chat_loop(
 ) -> None:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.core.llm.client import LLMClient
+    from anton.core.memory.access_log import AccessLog
     from anton.core.memory.cortex import Cortex
     from anton.core.memory.hippocampus import Hippocampus
     from anton.workspace import Workspace
@@ -1003,6 +1004,7 @@ async def _chat_loop(
         project_hc=Hippocampus(project_memory_dir),
         mode=settings.memory_mode,
         llm_client=state["llm_client"],
+        access_log=AccessLog(project_memory_dir),
     )
 
     # Reconsolidation: migrate legacy memory formats on first run
