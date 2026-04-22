@@ -319,6 +319,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     kind=engram.kind,
                     confidence=engram.confidence,
                     source=engram.source,
+                    session_id=engram.session_id,
                 )
                 actions.append(f"Encoded {engram.kind} rule: {engram.text}")
 
@@ -327,6 +328,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     engram.text,
                     topic=engram.topic,
                     source=engram.source,
+                    session_id=engram.session_id,
                 )
                 actions.append(f"Encoded lesson: {engram.text}")
 
