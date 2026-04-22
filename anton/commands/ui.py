@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from rich.console import Console
@@ -54,7 +55,7 @@ THEME_COMMANDS = [
 ]
 
 SKILLS_COMMANDS = [
-    Command("/skill save [name]"),
+    Command("/skill save <name>"),
     Command("/skill list"),
     Command("/skill show <label>"),
     Command("/skill remove <label>")
@@ -157,7 +158,15 @@ def make_completer(command_sources: list[list]) -> Completer:
     commands = set()
     for source in command_sources:
         for item in source:
-            if isinstance(item, Command):
+            if not isinstance(item, Command):
+                continue
+            match = re.search(r'[\[<]([^>\]]+)[>\]]', item.command)
+            if match and "|" in match.group(1):
+                # split options [a|b|c] to separated commands
+                prefix = item.command[:match.start()]
+                for variant in match.group(1).split("|"):
+                    commands.add(prefix + variant)
+            else:
                 commands.add(item.command)
 
     class _Completer(Completer):
@@ -165,6 +174,7 @@ def make_completer(command_sources: list[list]) -> Completer:
             text = document.text_before_cursor
             if not text.startswith("/"):
                 return
+
             word_start = text.rfind(" ") + 1
             current_word = text[word_start:]
             seen = set()
@@ -172,7 +182,7 @@ def make_completer(command_sources: list[list]) -> Completer:
                 if not cmd.startswith(text) or cmd == text:
                     continue
                 next_word = cmd[word_start:].split(" ")[0]
-                if next_word and next_word not in seen:
+                if next_word and next_word[0] not in ("<", "[") and next_word not in seen:
                     seen.add(next_word)
                     yield Completion(next_word, start_position=-len(current_word))
 
