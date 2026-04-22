@@ -35,7 +35,7 @@ from anton.commands.setup import (
     handle_setup,
     handle_setup_models,
 )
-from anton.commands.ui import handle_explain, handle_theme, print_slash_help
+from anton.commands.ui import handle_explain, handle_theme, print_slash_help, SKILLS_COMMANDS
 from anton.utils.clipboard import (
     ensure_clipboard,
     format_clipboard_image_message,
@@ -80,6 +80,7 @@ from anton.core.datasources.datasource_registry import (
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style as PTStyle
+from anton.commands.ui import make_completer
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage
 
@@ -1126,10 +1127,15 @@ async def _chat_loop(
         }
     )
 
+    from anton.commands.ui import THEME_COMMANDS, COMMANDS
+    from anton.memory.manage import MEMORY_COMMANDS
+
     prompt_session: PromptSession[str] = PromptSession(
         mouse_support=False,
         bottom_toolbar=_bottom_toolbar,
         style=pt_style,
+        completer=make_completer([THEME_COMMANDS, SKILLS_COMMANDS, COMMANDS, MEMORY_COMMANDS]),
+        complete_while_typing=True,
     )
 
     memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
@@ -1322,9 +1328,10 @@ async def _chat_loop(
                         handle_skills_list(console)
                     else:
                         console.print()
+
+                        cmds = [cmd.command for cmd in SKILLS_COMMANDS]
                         console.print(
-                            "[anton.warning]Usage: /skill save [name] | "
-                            "/skill list | /skill show <label> | /skill remove <label>[/]"
+                            "[anton.warning]Usage: " + " | ".join(cmds)
                         )
                         console.print()
                     continue
