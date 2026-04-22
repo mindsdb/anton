@@ -145,13 +145,13 @@ def _migrate_md_to_jsonl(md_path: Path, jsonl_path: Path) -> None:
 
         # Extract metadata from <!-- confidence:X source:Y ts:Z topic:T -->
         meta: dict[str, str] = {}
-        meta_match = re.search(r"<!--(.*?)-->", entry)
+        meta_match = re.search(r"<!--(.*?)-->", entry, re.DOTALL)
         if meta_match:
             for part in meta_match.group(1).split():
                 if ":" in part:
                     k, v = part.split(":", 1)
                     meta[k.strip()] = v.strip()
-            entry = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", entry).strip()
+            entry = re.sub(r"\s*<!--.*?-->\s*$", "", entry, flags=re.DOTALL).strip()
 
         if not entry:
             continue
@@ -464,7 +464,7 @@ class Hippocampus:
             if not stripped.startswith("- "):
                 continue
             entry = stripped[2:]
-            entry = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", entry).strip()
+            entry = re.sub(r"\s*<!--.*?-->\s*$", "", entry, flags=re.DOTALL).strip()
             if entry:
                 texts.add(entry)
         return texts

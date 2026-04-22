@@ -505,13 +505,13 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 text = text[2:]
             # Extract metadata from comment before stripping it
             meta: dict[str, str] = {}
-            meta_match = re.search(r"<!--(.*?)-->", text)
+            meta_match = re.search(r"<!--(.*?)-->", text, re.DOTALL)
             if meta_match:
                 for part in meta_match.group(1).split():
                     if ":" in part:
                         k, v = part.split(":", 1)
                         meta[k.strip()] = v.strip()
-                text = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", text).strip()
+                text = re.sub(r"\s*<!--.*?-->\s*$", "", text, flags=re.DOTALL).strip()
 
             if not text:
                 continue
