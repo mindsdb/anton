@@ -441,3 +441,107 @@ class TestMindsSetupRecovery:
         assert "Connection failed because the request timed out." in printed
         assert "server is slow or unavailable" in printed
         assert "Recovery options:" in printed
+
+
+class TestRefreshKnowledge:
+    """Tests for minds_client.refresh_knowledge() — the /connect Minds memory write."""
+
+    def test_writes_minds_datasource_jsonl(self, tmp_path):
+        """refresh_knowledge() writes mind parameters to topics/minds-datasource.jsonl."""
+        import json
+        from unittest.mock import patch, MagicMock
+        from anton.minds_client import refresh_knowledge
+        from anton.core.memory.hippocampus import Hippocampus
+        from anton.core.memory.cortex import Cortex
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        hc = Hippocampus(mem_dir)
+        cortex = MagicMock()
+        cortex.project_hc = hc
+
+        settings = MagicMock()
+        settings.minds_api_key = "test-key"
+        settings.minds_mind_name = "my-mind"
+        settings.minds_url = "https://minds.example.com"
+        settings.minds_ssl_verify = True
+
+        mind_data = {
+            "parameters": {
+                "system_prompt": "You are a data assistant.",
+                "prompt_template": "Answer questions about {context}.",
+            }
+        }
+
+        with patch("anton.minds_client.get_mind", return_value=mind_data):
+            refresh_knowledge(settings, cortex)
+
+        topic_path = mem_dir / "topics" / "minds-datasource.jsonl"
+        assert topic_path.exists(), "minds-datasource.jsonl was not created"
+
+        records = [json.loads(l) for l in topic_path.read_text().splitlines() if l.strip()]
+        assert len(records) == 1
+        r = records[0]
+        assert "You are a data assistant." in r["text"]
+        assert "Answer questions about" in r["text"]
+        assert r["kind"] == "lesson"
+        assert r["topic"] == "minds-datasource"
+        assert r["id"].startswith("m_")
+
+    def test_overwrites_on_reconnect(self, tmp_path):
+        """Calling refresh_knowledge() twice replaces the old record — not appends."""
+        import json
+        from unittest.mock import patch, MagicMock
+        from anton.minds_client import refresh_knowledge
+        from anton.core.memory.hippocampus import Hippocampus
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        hc = Hippocampus(mem_dir)
+        cortex = MagicMock()
+        cortex.project_hc = hc
+
+        settings = MagicMock()
+        settings.minds_api_key = "test-key"
+        settings.minds_mind_name = "my-mind"
+        settings.minds_url = "https://minds.example.com"
+        settings.minds_ssl_verify = True
+
+        with patch("anton.minds_client.get_mind", return_value={
+            "parameters": {"system_prompt": "Version 1 prompt."}
+        }):
+            refresh_knowledge(settings, cortex)
+
+        with patch("anton.minds_client.get_mind", return_value={
+            "parameters": {"system_prompt": "Version 2 prompt — updated."}
+        }):
+            refresh_knowledge(settings, cortex)
+
+        topic_path = mem_dir / "topics" / "minds-datasource.jsonl"
+        records = [json.loads(l) for l in topic_path.read_text().splitlines() if l.strip()]
+        assert len(records) == 1, "Should overwrite, not append — only one record expected"
+        assert "Version 2" in records[0]["text"]
+        assert "Version 1" not in records[0]["text"]
+
+    def test_no_op_when_mind_has_no_parameters(self, tmp_path):
+        """refresh_knowledge() does nothing if the mind has no system_prompt or prompt_template."""
+        from unittest.mock import patch, MagicMock
+        from anton.minds_client import refresh_knowledge
+        from anton.core.memory.hippocampus import Hippocampus
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        hc = Hippocampus(mem_dir)
+        cortex = MagicMock()
+        cortex.project_hc = hc
+
+        settings = MagicMock()
+        settings.minds_api_key = "test-key"
+        settings.minds_mind_name = "my-mind"
+        settings.minds_url = "https://minds.example.com"
+        settings.minds_ssl_verify = True
+
+        with patch("anton.minds_client.get_mind", return_value={"parameters": {}}):
+            refresh_knowledge(settings, cortex)
+
+        assert not (mem_dir / "topics" / "minds-datasource.jsonl").exists()

@@ -42,3 +42,9 @@ pythonpath = ["."]
 markers = [
     "stub_only: test requires stub server (skipped when --live is passed)",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]
