@@ -1435,7 +1435,8 @@ async def _chat_loop(
                                 ttft = time.monotonic() - t0
                             display.append_text(event.text)
                         elif isinstance(event, StreamToolResult):
-                            display.show_tool_result(event.content)
+                            if event.name == "scratchpad" and event.action == "dump":
+                                display.show_tool_result(event.content)
                         elif isinstance(event, StreamToolUseStart):
                             display.on_tool_use_start(event.id, event.name)
                         elif isinstance(event, StreamToolUseDelta):

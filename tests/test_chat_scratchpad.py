@@ -250,8 +250,8 @@ class TestScratchpadDumpStreaming:
                 events.append(event)
 
             tool_results = [e for e in events if isinstance(e, StreamToolResult)]
-            assert len(tool_results) == 1
-            assert "## Scratchpad: main" in tool_results[0].content
+            assert len(tool_results) == 2  # One for the exec, one for the dump.
+            assert "## Scratchpad: main" in tool_results[1].content
 
             # The LLM should get a short summary, not the full dump
             history = session.history
