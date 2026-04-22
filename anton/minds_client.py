@@ -59,8 +59,10 @@ def minds_request(
         return resp.read()
 
 
-def normalize_minds_url(url: str) -> str:
+def normalize_minds_url(url: str | None) -> str:
     """Add https:// if no scheme present, strip trailing slash."""
+    if not url:
+        return ""
     url = url.strip()
     if url and not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
