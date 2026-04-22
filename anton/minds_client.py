@@ -170,10 +170,27 @@ def refresh_knowledge(settings: AntonSettings, cortex) -> None:
         return
 
     knowledge = "\n\n".join(parts)
-    topic_content = f"# Minds — {settings.minds_mind_name}\n\n{knowledge}\n"
-    topic_path = cortex.project_hc._topics_dir / "minds-datasource.md"
-    cortex.project_hc._topics_dir.mkdir(parents=True, exist_ok=True)
-    cortex.project_hc._encode_with_lock(topic_path, topic_content, mode="write")
+
+    from anton.core.memory.hippocampus import Hippocampus, _new_id, _now_iso
+
+    hc = cortex.project_hc
+    if not isinstance(hc, Hippocampus):
+        return
+
+    hc._topics_dir.mkdir(parents=True, exist_ok=True)
+    topic_path = hc._topics_dir / "minds-datasource.jsonl"
+    record = {
+        "id": _new_id(),
+        "text": knowledge,
+        "kind": "lesson",
+        "scope": "project",
+        "confidence": "high",
+        "topic": "minds-datasource",
+        "source": "llm",
+        "session_id": None,
+        "created_at": _now_iso(),
+    }
+    hc._write_jsonl(topic_path, [record])
 
 
 def list_datasources(

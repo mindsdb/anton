@@ -109,7 +109,7 @@ class TestMemorizeTool:
 
         # Verify the rule was written
         global_dir, project_dir = memory_dirs
-        rules_path = project_dir / "rules.md"
+        rules_path = project_dir / "rules.jsonl"
         assert rules_path.exists()
         content = rules_path.read_text()
         assert "Use httpx instead of requests" in content
@@ -132,7 +132,7 @@ class TestMemorizeTool:
         await asyncio.sleep(0)  # Let fire-and-forget encode task run
 
         global_dir, project_dir = memory_dirs
-        lessons_path = global_dir / "lessons.md"
+        lessons_path = global_dir / "lessons.jsonl"
         assert lessons_path.exists()
         content = lessons_path.read_text()
         assert "CoinGecko rate-limits at 50/min" in content

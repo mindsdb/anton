@@ -41,7 +41,8 @@ def needs_reconsolidation(project_dir: Path) -> bool:
 
     has_new = new_memory.is_dir() and any(
         f for f in new_memory.iterdir()
-        if f.name in ("rules.md", "lessons.md", "profile.md")
+        if f.name in ("rules.md", "lessons.md", "profile.md",
+                      "rules.jsonl", "lessons.jsonl", "profile.jsonl")
     )
 
     return has_legacy and not has_new
@@ -98,7 +99,7 @@ def reconsolidate(project_dir: Path) -> list[str]:
                 if len(line) > 5:  # Skip very short fragments
                     hc.encode_lesson(line, topic=slug, source="user")
 
-            actions.append(f"Migrated context/{path.name} → memory/lessons.md + topics/{slug}.md")
+            actions.append(f"Migrated context/{path.name} → memory/lessons.jsonl + topics/{slug}.jsonl")
 
     # --- Migrate .anton/learnings/*.md (LearningStore files) ---
     learnings_dir = project_dir / "learnings"
@@ -144,7 +145,7 @@ def reconsolidate(project_dir: Path) -> list[str]:
                 if len(line) > 5:
                     hc.encode_lesson(line, topic=slug, source="consolidation")
 
-            actions.append(f"Migrated learnings/{path.name} → memory/lessons.md + topics/{slug}.md")
+            actions.append(f"Migrated learnings/{path.name} → memory/lessons.jsonl + topics/{slug}.jsonl")
 
     if actions:
         actions.insert(0, f"Reconsolidated {len(actions)} legacy memory files into new format")

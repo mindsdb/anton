@@ -58,7 +58,7 @@ def handle_memory(
         topics: list[str] = []
         if hc._topics_dir.is_dir():
             topics = [
-                p.stem for p in sorted(hc._topics_dir.iterdir()) if p.suffix == ".md"
+                p.stem for p in sorted(hc._topics_dir.iterdir()) if p.suffix == ".jsonl"
             ]
 
         console.print(f"  [anton.cyan]{label}[/] [dim]({hc._dir})[/]")

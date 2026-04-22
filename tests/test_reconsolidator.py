@@ -60,7 +60,7 @@ class TestReconsolidate:
         assert any("context/stack.md" in a for a in actions)
 
         # Check new format
-        lessons = project_dir / "memory" / "lessons.md"
+        lessons = project_dir / "memory" / "lessons.jsonl"
         assert lessons.exists()
         content = lessons.read_text()
         assert "Python 3.11" in content
@@ -76,7 +76,7 @@ class TestReconsolidate:
         actions = reconsolidate(project_dir)
         assert any("learnings/api_design.md" in a for a in actions)
 
-        lessons = project_dir / "memory" / "lessons.md"
+        lessons = project_dir / "memory" / "lessons.jsonl"
         assert lessons.exists()
         content = lessons.read_text()
         assert "REST conventions" in content
@@ -91,7 +91,7 @@ class TestReconsolidate:
         (ctx / "notes.md").write_text("OK\n\nThis is a real fact about the project")
 
         reconsolidate(project_dir)
-        lessons = project_dir / "memory" / "lessons.md"
+        lessons = project_dir / "memory" / "lessons.jsonl"
         content = lessons.read_text()
         assert "OK" not in content.split("\n")  # "OK" alone shouldn't be a lesson
         assert "This is a real fact" in content
@@ -106,7 +106,7 @@ class TestReconsolidate:
         (ctx / "visible.md").write_text("This is visible content here")
 
         actions = reconsolidate(project_dir)
-        lessons = project_dir / "memory" / "lessons.md"
+        lessons = project_dir / "memory" / "lessons.jsonl"
         content = lessons.read_text()
         assert "secret" not in content
         assert "nested" not in content

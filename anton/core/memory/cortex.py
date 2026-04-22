@@ -460,16 +460,25 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
     async def _compact_file(self, hc: Hippocampus, path: Path, kind: str) -> None:
         """Compact a single memory file using LLM-assisted deduplication."""
-        if not path.is_file():
+        import re
+
+        from anton.core.memory.hippocampus import _new_id, _now_iso, _read_jsonl
+
+        records = _read_jsonl(path)
+        if len(records) < 8:
             return
 
-        content = path.read_text(encoding="utf-8")
-        entries = [
-            ln.strip() for ln in content.splitlines() if ln.strip().startswith("- ")
-        ]
-
-        if len(entries) < 8:
-            return
+        # Format records as markdown bullets for the LLM — include metadata in
+        # the comment so we can map kept entries back to their original records.
+        entries = []
+        for r in records:
+            ts = r.get("created_at", "")[:10]
+            conf = r.get("confidence", "medium")
+            src = r.get("source", "llm")
+            k = r.get("kind", kind)
+            entries.append(
+                f"- {r['text']} <!-- confidence:{conf} source:{src} ts:{ts} kind:{k} -->"
+            )
 
         try:
             result: _CompactionResult = await self._llm.generate_object_code(
@@ -478,38 +487,56 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 messages=[{"role": "user", "content": "\n".join(entries)}],
                 max_tokens=4096,
             )
-            kept = result.kept or entries
+            kept_entries = result.kept or entries
         except Exception:
             return  # Don't corrupt memory on failure
 
-        if not kept:
+        if not kept_entries:
             return
 
-        # Rebuild the file
-        if kind == "rules":
-            # Preserve section structure
-            always = [
-                e
-                for e in kept
-                if "always" in e.lower()
-                or not any(k in e.lower() for k in ("never", "when", "if "))
-            ]
-            never = [e for e in kept if "never" in e.lower()]
-            when_rules = [e for e in kept if "when" in e.lower() or "if " in e.lower()]
+        # Build a lookup from text → original record for exact matches
+        text_to_record: dict[str, dict] = {r["text"]: r for r in records}
 
-            lines = ["# Rules\n", "## Always"]
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in always)
-            lines.extend(["", "## Never"])
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in never)
-            lines.extend(["", "## When"])
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in when_rules)
-            new_content = "\n".join(lines) + "\n"
-        else:
-            lines = ["# Lessons"]
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in kept)
-            new_content = "\n".join(lines) + "\n"
+        kept_records: list[dict] = []
+        for entry in kept_entries:
+            # Strip "- " prefix and trailing metadata comment to get plain text
+            text = entry.strip()
+            if text.startswith("- "):
+                text = text[2:]
+            # Extract metadata from comment before stripping it
+            meta: dict[str, str] = {}
+            meta_match = re.search(r"<!--(.*?)-->", text)
+            if meta_match:
+                for part in meta_match.group(1).split():
+                    if ":" in part:
+                        k, v = part.split(":", 1)
+                        meta[k.strip()] = v.strip()
+                text = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", text).strip()
 
-        hc._encode_with_lock(path, new_content, mode="write")
+            if not text:
+                continue
+
+            if text in text_to_record:
+                # Exact match — preserve original record with all metadata
+                kept_records.append(text_to_record[text])
+            else:
+                # LLM merged or rewrote — create new record from returned text
+                kept_records.append({
+                    "id": _new_id(),
+                    "text": text,
+                    "kind": meta.get("kind", kind),
+                    "scope": records[0].get("scope", "project"),
+                    "confidence": meta.get("confidence", "medium"),
+                    "topic": records[0].get("topic", ""),
+                    "source": "consolidation",
+                    "session_id": None,
+                    "created_at": _now_iso(),
+                })
+
+        if not kept_records:
+            return
+
+        hc._write_jsonl(path, kept_records)
 
     async def maybe_update_identity(self, user_message: str) -> None:
         """Check if conversation reveals identity facts worth profiling.
