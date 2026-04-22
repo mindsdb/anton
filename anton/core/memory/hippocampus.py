@@ -383,6 +383,10 @@ class Hippocampus:
         ]
         self._write_jsonl(self._profile_path, records)
 
+    def _read_full_lessons(self) -> str:
+        """Read all lessons without budget constraint (for internal use)."""
+        return self.recall_lessons(token_budget=999999)
+
     def entry_count(self) -> int:
         """Count total entries across rules.jsonl and lessons.jsonl."""
         return len(_read_jsonl(self._rules_path)) + len(_read_jsonl(self._lessons_path))
