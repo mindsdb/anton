@@ -58,13 +58,14 @@ class TestAccessLogWrite:
         assert (mem_dir / "access_log.jsonl").exists()
 
     def test_log_entry_fields(self, mem_dir, access_log):
-        records = [{"id": "m_abc12345", "kind": "always", "topic": "db"}]
+        records = [{"id": "m_abc12345", "text": "Always do X.", "kind": "always", "topic": "db"}]
         access_log.log_delivered(records, scope="project", session_id=SESSION_A)
         entries = read_jsonl(mem_dir / "access_log.jsonl")
         assert len(entries) == 1
         e = entries[0]
         assert e["session_id"] == SESSION_A
         assert e["memory_id"] == "m_abc12345"
+        assert e["memory_text"] == "Always do X."
         assert e["memory_scope"] == "project"
         assert e["memory_kind"] == "always"
         assert e["memory_topic"] == "db"

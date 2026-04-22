@@ -53,6 +53,7 @@ class AccessLog:
             entry = {
                 "session_id": session_id,
                 "memory_id": r.get("id", ""),
+                "memory_text": r.get("text", ""),
                 "memory_scope": scope,
                 "memory_kind": r.get("kind", ""),
                 "memory_topic": r.get("topic", ""),
