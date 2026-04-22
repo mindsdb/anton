@@ -115,6 +115,7 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
                 confidence="high",
                 topic=entry.get("topic", ""),
                 source="user",
+                session_id=getattr(session, "_session_id", None),
             )
         )
 

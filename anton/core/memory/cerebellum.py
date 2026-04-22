@@ -222,10 +222,12 @@ class Cerebellum:
         cortex: "Cortex | None",
         llm: "LLMClient | None",
         max_lessons_per_flush: int = 3,
+        session_id: str | None = None,
     ) -> None:
         self._cortex = cortex
         self._llm = llm
         self._max_lessons = max_lessons_per_flush
+        self._session_id = session_id
         # Cells observed since the last flush. Indexed by insertion order.
         self._buffered: list[Cell] = []
         # Optional intent capture from pre-execute. Today we just trust the
@@ -374,6 +376,7 @@ class Cerebellum:
                 confidence="medium",
                 topic=lesson.topic,
                 source="consolidation",
+                session_id=self._session_id,
             )
             for lesson in lessons
         ]

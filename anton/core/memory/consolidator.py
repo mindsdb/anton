@@ -130,7 +130,7 @@ class Consolidator:
         return False
 
     async def replay_and_extract(
-        self, cells: list[Cell], llm_client: LLMClient
+        self, cells: list[Cell], llm_client: LLMClient, session_id: str | None = None
     ) -> list[Engram]:
         """Replay the scratchpad session and extract lessons.
 
@@ -187,6 +187,7 @@ class Consolidator:
                     confidence=item.confidence,
                     topic=item.topic,
                     source="consolidation",
+                    session_id=session_id,
                 )
             )
 

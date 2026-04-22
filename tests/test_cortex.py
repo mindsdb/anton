@@ -66,8 +66,9 @@ class TestGetScratchpadContext:
 
     def test_combines_scopes(self, cortex, dirs):
         g, p = dirs
-        (g / "rules.md").write_text("# Rules\n\n## Always\n\n## Never\n\n## When\n- If slow → batch\n")
-        (p / "lessons.md").write_text("# Lessons\n- Scratchpad times out at 30s\n")
+        import json
+        (g / "rules.jsonl").write_text(json.dumps({"id": "m_1", "text": "If slow → batch", "kind": "when", "scope": "global", "confidence": "medium", "topic": "", "source": "llm", "session_id": None, "created_at": "2026-04-21T10:00:00Z"}) + "\n")
+        (p / "lessons.jsonl").write_text(json.dumps({"id": "m_2", "text": "Scratchpad times out at 30s", "kind": "lesson", "scope": "project", "confidence": "medium", "topic": "scratchpad", "source": "llm", "session_id": None, "created_at": "2026-04-21T10:00:00Z"}) + "\n")
         result = cortex.get_scratchpad_context()
         assert "slow" in result
         assert "Scratchpad times out" in result
@@ -79,22 +80,22 @@ class TestEncode:
         engram = Engram(text="Use httpx", kind="always", scope="project", confidence="high")
         actions = await cortex.encode([engram])
         assert any("always rule" in a.lower() for a in actions)
-        assert (p / "rules.md").exists()
+        assert (p / "rules.jsonl").exists()
 
     async def test_encode_lesson_to_global(self, cortex, dirs):
         g, _ = dirs
         engram = Engram(text="CoinGecko rate limit", kind="lesson", scope="global", topic="api")
         actions = await cortex.encode([engram])
         assert any("lesson" in a.lower() for a in actions)
-        assert (g / "lessons.md").exists()
+        assert (g / "lessons.jsonl").exists()
 
     async def test_encode_profile(self, cortex, dirs):
         g, _ = dirs
         engram = Engram(text="Name: Jorge", kind="profile", scope="global", confidence="high")
         actions = await cortex.encode([engram])
         assert any("identity" in a.lower() for a in actions)
-        assert (g / "profile.md").exists()
-        assert "Name: Jorge" in (g / "profile.md").read_text()
+        assert (g / "profile.jsonl").exists()
+        assert "Name: Jorge" in (g / "profile.jsonl").read_text()
 
     async def test_off_mode_returns_disabled(self, dirs):
         g, p = dirs
@@ -143,7 +144,7 @@ class TestMaybeUpdateIdentity:
         # cortex has no LLM by default in fixture
         await cortex.maybe_update_identity("I'm Jorge")
         g, _ = dirs
-        assert not (g / "profile.md").exists()
+        assert not (g / "profile.jsonl").exists()
 
     async def test_off_mode_does_nothing(self, dirs):
         g, p = dirs
@@ -162,5 +163,5 @@ class TestMaybeUpdateIdentity:
         )
         cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot", llm_client=mock_llm)
         await cortex.maybe_update_identity("Hi, I'm Jorge")
-        assert (g / "profile.md").exists()
-        assert "Name: Jorge" in (g / "profile.md").read_text()
+        assert (g / "profile.jsonl").exists()
+        assert "Name: Jorge" in (g / "profile.jsonl").read_text()

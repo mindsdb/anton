@@ -139,6 +139,7 @@ class ChatSession:
         self._cerebellum = Cerebellum(
             cortex=self._cortex,
             llm=self._llm,
+            session_id=self._session_id,
         )
         # Scratchpad observers — list of objects with on_pre_execute /
         # on_post_execute. Fired by handle_scratchpad around pad.execute.
@@ -1367,7 +1368,7 @@ class ChatSession:
         from anton.core.memory.consolidator import Consolidator
 
         consolidator = Consolidator()
-        engrams = await consolidator.replay_and_extract(cells, self._llm)
+        engrams = await consolidator.replay_and_extract(cells, self._llm, session_id=self._session_id)
         if not engrams or self._cortex is None:
             return
 

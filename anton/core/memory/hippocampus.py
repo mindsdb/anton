@@ -10,17 +10,25 @@ like how the brain's hippocampus encodes at the level of individual memory trace
 without executive judgment about importance.
 
 Each Hippocampus instance manages one scope's files:
-  - profile.md  → identity (mPFC / Default Mode Network analogy)
-  - rules.md    → behavioral gates (Basal Ganglia / OFC analogy)
-  - lessons.md  → semantic facts (Anterior Temporal Lobe analogy)
-  - topics/*.md → domain expertise (Cortical Association Areas analogy)
+  - profile.jsonl  → identity (mPFC / Default Mode Network analogy)
+  - rules.jsonl    → behavioral gates (Basal Ganglia / OFC analogy)
+  - lessons.jsonl  → semantic facts (Anterior Temporal Lobe analogy)
+  - topics/*.jsonl → domain expertise (Cortical Association Areas analogy)
+
+Storage format: JSONL (one engram per line). Each line is a JSON object with
+fields: id, text, kind, scope, confidence, topic, source, session_id, created_at.
+
+Output contract: recall_* methods return the same markdown strings as before
+so cortex.py and all callers are unaffected by the format change.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -41,6 +49,136 @@ class Engram:
     confidence: Literal["high", "medium", "low"] = "medium"
     topic: str = ""
     source: Literal["user", "consolidation", "llm"] = "llm"
+    session_id: str | None = None
+    id: str | None = None
+    created_at: str | None = None
+
+
+# ── JSONL helpers ─────────────────────────────────────────────────────────────
+
+def _new_id() -> str:
+    """Generate a short unique engram ID."""
+    return "m_" + uuid.uuid4().hex[:8]
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _engram_to_record(engram: Engram) -> dict:
+    """Serialize an Engram to a JSONL record dict."""
+    return {
+        "id": engram.id or _new_id(),
+        "text": engram.text,
+        "kind": engram.kind,
+        "scope": engram.scope,
+        "confidence": engram.confidence,
+        "topic": engram.topic,
+        "source": engram.source,
+        "session_id": engram.session_id,
+        "created_at": engram.created_at or _now_iso(),
+    }
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    """Read all valid records from a JSONL file. Skips malformed lines."""
+    if not path.is_file():
+        return []
+    records = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass  # skip malformed lines, log could be added here
+    except (OSError, UnicodeDecodeError):
+        pass
+    return records
+
+
+# ── Migration ─────────────────────────────────────────────────────────────────
+
+def _migrate_md_to_jsonl(md_path: Path, jsonl_path: Path) -> None:
+    """One-time migration of a .md memory file to .jsonl format.
+
+    Parses markdown entries (lines starting with '- '), extracts metadata
+    from inline HTML comments, and writes JSONL. Renames the .md file to
+    .md.bak on success. If the .md file is missing or already migrated,
+    this is a no-op.
+    """
+    if not md_path.is_file():
+        return
+    if jsonl_path.is_file():
+        return  # already migrated
+
+    records = []
+    try:
+        content = md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+
+    current_kind: str = "lesson"
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        # Track section headers to infer kind for rules.md
+        if stripped.startswith("## Always"):
+            current_kind = "always"
+            continue
+        elif stripped.startswith("## Never"):
+            current_kind = "never"
+            continue
+        elif stripped.startswith("## When"):
+            current_kind = "when"
+            continue
+        elif stripped.startswith("## ") or stripped.startswith("# "):
+            current_kind = "lesson"
+            continue
+
+        if not stripped.startswith("- "):
+            continue
+
+        entry = stripped[2:]
+
+        # Extract metadata from <!-- confidence:X source:Y ts:Z topic:T -->
+        meta: dict[str, str] = {}
+        meta_match = re.search(r"<!--(.*?)-->", entry)
+        if meta_match:
+            for part in meta_match.group(1).split():
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    meta[k.strip()] = v.strip()
+            entry = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", entry).strip()
+
+        if not entry:
+            continue
+
+        records.append({
+            "id": _new_id(),
+            "text": entry,
+            "kind": meta.get("kind", current_kind),
+            "scope": "project",  # inferred; .md files don't store scope
+            "confidence": meta.get("confidence", "medium"),
+            "topic": meta.get("topic", ""),
+            "source": meta.get("source", "llm"),
+            "session_id": None,  # unknown origin for migrated records
+            "created_at": meta.get("ts") or _now_iso(),
+        })
+
+    if not records:
+        return
+
+    # Write JSONL
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n",
+        encoding="utf-8",
+    )
+    # Rename original to .md.bak
+    md_path.rename(md_path.with_suffix(".md.bak"))
 
 
 class Hippocampus:
@@ -50,157 +188,127 @@ class Hippocampus:
     region (pattern separation for writes), this class handles the low-level
     mechanics of memory storage without higher-order decisions about relevance
     or importance.
+
+    Storage: JSONL files. Output: same markdown strings as before so
+    cortex.py and all callers are unaffected by the format change.
     """
 
     def __init__(self, base_dir: Path) -> None:
-        """Initialize for a single scope.
-
-        Args:
-            base_dir: ~/.anton/memory/ (global) or <project>/.anton/memory/ (project)
-        """
         self._dir = base_dir
-        self._profile_path = base_dir / "profile.md"
-        self._rules_path = base_dir / "rules.md"
-        self._lessons_path = base_dir / "lessons.md"
+        self._profile_path = base_dir / "profile.jsonl"
+        self._rules_path = base_dir / "rules.jsonl"
+        self._lessons_path = base_dir / "lessons.jsonl"
         self._topics_dir = base_dir / "topics"
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Run one-time migration of any legacy .md files to .jsonl."""
+        _migrate_md_to_jsonl(self._dir / "profile.md", self._profile_path)
+        _migrate_md_to_jsonl(self._dir / "rules.md", self._rules_path)
+        _migrate_md_to_jsonl(self._dir / "lessons.md", self._lessons_path)
+        if self._topics_dir.is_dir():
+            for md_file in self._topics_dir.glob("*.md"):
+                if md_file.suffix == ".md":
+                    _migrate_md_to_jsonl(
+                        md_file,
+                        self._topics_dir / (md_file.stem + ".jsonl"),
+                    )
+
+    # ── Recall (read) methods ─────────────────────────────────────────────────
+    # All return the same markdown strings as before — output contract unchanged.
 
     def recall_identity(self) -> str:
-        """Load the always-on self-model (profile.md).
-
-        Brain analog: medial Prefrontal Cortex / Default Mode Network.
-        This is the identity substrate — always active, never "looked up",
-        it contextualizes all other processing. Global scope only.
-        """
-        if not self._profile_path.is_file():
+        """Load the always-on self-model (profile.jsonl → markdown)."""
+        records = _read_jsonl(self._profile_path)
+        if not records:
             return ""
-        try:
-            return self._profile_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        lines = ["# Profile"] + [f"- {r['text']}" for r in records]
+        return "\n".join(lines)
 
     def recall_rules(self) -> str:
-        """Load behavioral gates (rules.md) as formatted always/never/when.
+        """Load behavioral gates (rules.jsonl) as formatted Always/Never/When markdown."""
+        records = _read_jsonl(self._rules_path)
+        if not records:
+            return ""
 
-        Brain analog: Basal Ganglia (Go/No-Go pathways) + Orbitofrontal Cortex
-        (conditional behavioral rules). These aren't memories to recall —
-        they're constraints that shape action selection.
-        """
-        if not self._rules_path.is_file():
-            return ""
-        try:
-            return self._rules_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        sections: dict[str, list[str]] = {"always": [], "never": [], "when": []}
+        for r in records:
+            kind = r.get("kind", "when")
+            if kind in sections:
+                ts = r.get("created_at", "")[:10]
+                conf = r.get("confidence", "medium")
+                src = r.get("source", "llm")
+                meta = f"<!-- confidence:{conf} source:{src} ts:{ts} -->"
+                sections[kind].append(f"- {r['text']} {meta}")
+
+        parts = ["# Rules"]
+        for section, entries in sections.items():
+            parts.append(f"\n## {section.capitalize()}")
+            if entries:
+                parts.extend(entries)
+        return "\n".join(parts)
 
     def recall_lessons(self, token_budget: int = 1000) -> str:
-        """Load semantic knowledge (lessons.md), most recent first, within budget.
-
-        Brain analog: Anterior Temporal Lobe — the convergence hub for semantic
-        facts distilled from many episodes. Budget enforced at ~4 chars/token.
-        """
-        if not self._lessons_path.is_file():
-            return ""
-        try:
-            content = self._lessons_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
+        """Load semantic knowledge (lessons.jsonl), most recent first, within budget."""
+        records = _read_jsonl(self._lessons_path)
+        if not records:
             return ""
 
-        if not content:
-            return ""
+        # Most recent first (reverse file order)
+        entries = list(reversed(records))
 
-        # Extract individual entries (lines starting with "- ")
-        lines = [ln for ln in content.splitlines() if ln.strip()]
-        # Keep header, then entries in reverse order (most recent last → first)
-        header_lines = []
-        entry_lines = []
-        for ln in lines:
-            if ln.startswith("- ") or ln.startswith("  "):
-                entry_lines.append(ln)
-            else:
-                header_lines.append(ln)
-
-        # Reverse entries so most recent are first
-        entry_lines.reverse()
-
-        # Budget: ~4 chars per token
         char_budget = token_budget * 4
-        result_lines = list(header_lines)
-        used = sum(len(ln) for ln in result_lines)
+        result_lines = ["# Lessons"]
+        used = len(result_lines[0])
 
-        for ln in entry_lines:
-            if used + len(ln) + 1 > char_budget:
+        for r in entries:
+            ts = r.get("created_at", "")[:10]
+            topic = r.get("topic", "")
+            topic_tag = f" topic:{topic}" if topic else ""
+            line = f"- {r['text']} <!--{topic_tag} ts:{ts} -->"
+            if used + len(line) + 1 > char_budget:
                 break
-            result_lines.append(ln)
-            used += len(ln) + 1
+            result_lines.append(line)
+            used += len(line) + 1
 
         return "\n".join(result_lines)
 
     def recall_topic(self, slug: str) -> str:
-        """Load deep domain expertise on demand (topics/{slug}.md).
-
-        Brain analog: Cortical Association Areas — specialized regions activated
-        associatively when contextual cues indicate relevance.
-        """
+        """Load deep domain expertise on demand (topics/{slug}.jsonl → markdown)."""
         safe_slug = self._sanitize_slug(slug)
-        path = self._topics_dir / f"{safe_slug}.md"
-        if not path.is_file():
+        path = self._topics_dir / f"{safe_slug}.jsonl"
+        records = _read_jsonl(path)
+        if not records:
             return ""
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        lines = [f"# {slug}"] + [f"- {r['text']}" for r in records]
+        return "\n".join(lines)
 
     def recall_scratchpad_wisdom(self) -> str:
-        """Retrieve procedural knowledge relevant to scratchpad execution.
-
-        Returns all "when" rules + lessons with topic starting with "scratchpad-".
-        Injected into tool descriptions so the LLM sees them when composing code.
-        """
+        """Retrieve procedural knowledge relevant to scratchpad execution."""
         parts: list[str] = []
 
-        # Extract "when" rules
-        rules = self.recall_rules()
-        if rules:
-            in_when = False
-            for line in rules.splitlines():
-                if line.strip().startswith("## When"):
-                    in_when = True
-                    continue
-                elif line.strip().startswith("## "):
-                    in_when = False
-                    continue
-                if in_when and line.strip().startswith("- "):
-                    parts.append(line.strip())
+        # "when" rules from rules.jsonl
+        for r in _read_jsonl(self._rules_path):
+            if r.get("kind") == "when":
+                parts.append(f"- {r['text']}")
 
-        # Extract scratchpad-related lessons
-        lessons = self._read_full_lessons()
-        for line in lessons.splitlines():
-            if line.strip().startswith("- ") and "scratchpad" in line.lower():
-                stripped = line.strip()
-                if stripped not in parts:
-                    parts.append(stripped)
+        # lessons with scratchpad topic
+        for r in _read_jsonl(self._lessons_path):
+            if "scratchpad" in r.get("topic", "").lower() or "scratchpad" in r.get("text", "").lower():
+                entry = f"- {r['text']}"
+                if entry not in parts:
+                    parts.append(entry)
 
-        # Check topics/scratchpad-*.md files
+        # topics/scratchpad-*.jsonl files
         if self._topics_dir.is_dir():
             for path in sorted(self._topics_dir.iterdir()):
-                if path.name.startswith("scratchpad-") and path.suffix == ".md":
-                    try:
-                        content = path.read_text(encoding="utf-8").strip()
-                        if content:
-                            parts.append(content)
-                    except (OSError, UnicodeDecodeError):
-                        continue
+                if path.name.startswith("scratchpad-") and path.suffix == ".jsonl":
+                    for r in _read_jsonl(path):
+                        parts.append(r.get("text", ""))
 
-        return "\n".join(parts)
+        return "\n".join(p for p in parts if p)
 
-    def _read_full_lessons(self) -> str:
-        """Read lessons.md without budget constraint (for internal use)."""
-        if not self._lessons_path.is_file():
-            return ""
-        try:
-            return self._lessons_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+    # ── Encode (write) methods ────────────────────────────────────────────────
 
     def encode_rule(
         self,
@@ -208,197 +316,123 @@ class Hippocampus:
         kind: Literal["always", "never", "when"],
         confidence: str = "medium",
         source: str = "llm",
+        session_id: str | None = None,
     ) -> None:
-        """Write a new behavioral gate to rules.md.
-
-        Appends under the correct section (Always/Never/When).
-        Uses file locking for safety — like how the hippocampus
-        prevents interference between overlapping encoding events.
-        """
+        """Write a new behavioral gate to rules.jsonl."""
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        ts = time.strftime("%Y-%m-%d")
-        metadata = f"<!-- confidence:{confidence} source:{source} ts:{ts} -->"
-        entry = f"- {text} {metadata}\n"
+        existing = _read_jsonl(self._rules_path)
+        if text in {r["text"] for r in existing}:
+            return  # dedup
 
-        section_header = f"## {kind.capitalize()}"
-
-        # Read existing content or create skeleton
-        if self._rules_path.is_file():
-            content = self._rules_path.read_text(encoding="utf-8")
-        else:
-            content = "# Rules\n\n## Always\n\n## Never\n\n## When\n"
-
-        # Check for duplicate (exact entry match, ignoring metadata)
-        if text in self._extract_entry_texts(content):
-            return
-
-        # Find the section and append
-        lines = content.splitlines(keepends=True)
-        new_lines: list[str] = []
-        inserted = False
-
-        i = 0
-        while i < len(lines):
-            new_lines.append(lines[i])
-            if lines[i].strip() == section_header and not inserted:
-                # Skip to end of section (next ## or end of file)
-                i += 1
-                section_entries: list[str] = []
-                while i < len(lines) and not (
-                    lines[i].strip().startswith("## ")
-                    and lines[i].strip() != section_header
-                ):
-                    section_entries.append(lines[i])
-                    i += 1
-                # Add existing entries
-                new_lines.extend(section_entries)
-                # Ensure we have a blank line before the entry if needed
-                if section_entries and section_entries[-1].strip():
-                    new_lines.append("\n")
-                elif not section_entries:
-                    pass  # Section was empty, entry follows header
-                new_lines.append(entry)
-                inserted = True
-                continue
-            i += 1
-
-        if not inserted:
-            # Section didn't exist — add it
-            new_lines.append(f"\n{section_header}\n{entry}")
-
-        self._encode_with_lock(self._rules_path, "".join(new_lines), mode="write")
+        record = _engram_to_record(Engram(
+            text=text,
+            kind=kind,
+            scope="project",
+            confidence=confidence,
+            source=source,
+            session_id=session_id,
+        ))
+        self._append_jsonl(self._rules_path, record)
 
     def encode_lesson(
         self,
         text: str,
         topic: str = "",
         source: str = "llm",
+        session_id: str | None = None,
     ) -> None:
-        """Write a semantic fact to lessons.md.
-
-        If a topic is provided, also creates/appends to topics/{slug}.md.
-        """
+        """Write a semantic fact to lessons.jsonl (and topic file if applicable)."""
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        ts = time.strftime("%Y-%m-%d")
-        topic_tag = f" topic:{topic}" if topic else ""
-        entry = f"- {text} <!--{topic_tag} ts:{ts} -->\n"
+        existing = _read_jsonl(self._lessons_path)
+        if text in {r["text"] for r in existing}:
+            return  # dedup
 
-        # Append to lessons.md
-        if not self._lessons_path.is_file():
-            self._encode_with_lock(
-                self._lessons_path,
-                f"# Lessons\n{entry}",
-                mode="write",
-            )
-        else:
-            # Check for duplicate (exact entry match, ignoring metadata)
-            existing = self._lessons_path.read_text(encoding="utf-8")
-            if text in self._extract_entry_texts(existing):
-                return
-            self._encode_with_lock(self._lessons_path, entry, mode="append")
+        record = _engram_to_record(Engram(
+            text=text,
+            kind="lesson",
+            scope="project",
+            confidence="medium",
+            topic=topic,
+            source=source,
+            session_id=session_id,
+        ))
+        self._append_jsonl(self._lessons_path, record)
 
-        # Also write to topic file if topic is substantial
         if topic:
             self._topics_dir.mkdir(parents=True, exist_ok=True)
             slug = self._sanitize_slug(topic)
-            topic_path = self._topics_dir / f"{slug}.md"
-            if not topic_path.is_file():
-                self._encode_with_lock(
-                    topic_path,
-                    f"# {topic}\n{entry}",
-                    mode="write",
-                )
-            else:
-                existing = topic_path.read_text(encoding="utf-8")
-                if text not in self._extract_entry_texts(existing):
-                    self._encode_with_lock(topic_path, entry, mode="append")
+            topic_path = self._topics_dir / f"{slug}.jsonl"
+            topic_existing = _read_jsonl(topic_path)
+            if text not in {r["text"] for r in topic_existing}:
+                self._append_jsonl(topic_path, record)
 
     def rewrite_identity(self, entries: list[str]) -> None:
-        """Replace the identity snapshot (profile.md) — full rewrite, not append.
-
-        Unlike other memory operations, identity is a coherent snapshot, not
-        an append log. Like how your self-concept updates as a whole, not
-        by appending new facts to old ones.
-        """
+        """Replace the identity snapshot (profile.jsonl) — full rewrite."""
         self._dir.mkdir(parents=True, exist_ok=True)
-        content = "# Profile\n" + "\n".join(f"- {e}" for e in entries) + "\n"
-        self._encode_with_lock(self._profile_path, content, mode="write")
+        records = [
+            _engram_to_record(Engram(
+                text=e,
+                kind="profile",
+                scope="global",
+                confidence="high",
+                source="user",
+            ))
+            for e in entries
+        ]
+        self._write_jsonl(self._profile_path, records)
 
     def entry_count(self) -> int:
-        """Count total entries across rules.md and lessons.md."""
-        count = 0
-        for path in (self._rules_path, self._lessons_path):
-            if path.is_file():
-                try:
-                    content = path.read_text(encoding="utf-8")
-                    count += sum(
-                        1 for ln in content.splitlines() if ln.strip().startswith("- ")
-                    )
-                except (OSError, UnicodeDecodeError):
-                    continue
-        return count
+        """Count total entries across rules.jsonl and lessons.jsonl."""
+        return len(_read_jsonl(self._rules_path)) + len(_read_jsonl(self._lessons_path))
 
-    def _encode_with_lock(self, path: Path, text: str, mode: str = "append") -> None:
-        """Write with file locking (fcntl.flock on Unix, no-op on Windows).
+    # ── Internal helpers ──────────────────────────────────────────────────────
 
-        Prevents corruption from concurrent Anton sessions writing to
-        global memory — like synaptic tagging ensuring encoding fidelity
-        despite concurrent neural activity.
-        """
+    def _append_jsonl(self, path: Path, record: dict) -> None:
+        """Append one record to a JSONL file with file locking."""
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        if mode == "write":
-            # Atomic write via temp file + rename
-            tmp_path = path.with_suffix(path.suffix + ".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
+        line = json.dumps(record) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            if sys.platform != "win32":
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(line)
+                f.flush()
+            finally:
                 if sys.platform != "win32":
                     import fcntl
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            tmp_path.replace(path)
-        else:
-            # Append mode
-            with open(path, "a", encoding="utf-8") as f:
+    def _write_jsonl(self, path: Path, records: list[dict]) -> None:
+        """Atomic full-rewrite of a JSONL file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".jsonl.tmp")
+        content = "\n".join(json.dumps(r) for r in records) + "\n"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            if sys.platform != "win32":
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(content)
+                f.flush()
+            finally:
                 if sys.platform != "win32":
                     import fcntl
-
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        tmp_path.replace(path)
 
     @staticmethod
     def _extract_entry_texts(content: str) -> set[str]:
-        """Extract the set of normalized entry texts from a markdown memory file.
-
-        Strips the leading ``- ``, trailing metadata comments, and whitespace
-        so that dedup comparisons are exact-match on the *meaning* line only.
-        """
+        """Extract plain entry texts from a markdown memory file (used in tests)."""
         texts: set[str] = set()
         for line in content.splitlines():
             stripped = line.strip()
             if not stripped.startswith("- "):
                 continue
-            # Remove leading "- "
             entry = stripped[2:]
-            # Remove trailing <!-- ... --> metadata
-            entry = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", entry)
-            entry = entry.strip()
+            entry = re.sub(r"\s*<!--[\s\S]*?-->\s*$", "", entry).strip()
             if entry:
                 texts.add(entry)
         return texts
