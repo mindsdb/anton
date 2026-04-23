@@ -56,7 +56,6 @@ class EpisodicMemory:
         self._session_id = now.strftime("%Y%m%d_%H%M%S")
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / f"{self._session_id}.jsonl"
-        self._file.touch()
         return self._session_id
 
     def resume_session(self, session_id: str) -> str:
@@ -64,8 +63,6 @@ class EpisodicMemory:
         self._session_id = session_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / f"{self._session_id}.jsonl"
-        if not self._file.exists():
-            self._file.touch()
         return self._session_id
 
     def log(self, episode: Episode) -> None:
