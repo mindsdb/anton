@@ -259,7 +259,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 max_tokens=4096,
             )
             result = response.content.strip()
-            if result == "NONE":
+            if result.upper() == "NONE":
                 return mandatory
             if result:
                 returned = {line.lstrip("- ").strip() for line in result.splitlines() if line.strip()}

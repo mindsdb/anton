@@ -38,6 +38,15 @@ from anton.minds_client import test_llm
 
 
 
+def url_hostname(url: str) -> str:
+    """Return the lowercased hostname of *url*, or empty string on parse failure."""
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
 def _reexec() -> None:
     """Re-execute the current process from scratch using the original binary."""
     # Prefer the installed `anton` binary so the uv tool wrapper re-runs correctly.
@@ -528,7 +537,7 @@ async def _animate_onboard(
         if settings.minds_url and "mdb.ai" in settings.minds_url:
             provider_label = "Minds-Enterprise-Cloud"
             model_label = "smart_router"
-        elif "generativelanguage.googleapis.com" in base:
+        elif url_hostname(base) == "generativelanguage.googleapis.com":
             provider_label = "Google Gemini"
         elif base:
             provider_label = f"OpenAI-compatible ({base})"

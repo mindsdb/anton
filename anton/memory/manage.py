@@ -10,6 +10,7 @@ from rich.console import Console
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.config.settings import AntonSettings
+from anton.commands.ui import Command
 
 
 MEMORY_MODES = {
@@ -17,6 +18,32 @@ MEMORY_MODES = {
     "copilot": "Co-pilot — save obvious, confirm ambiguous",
     "off": "Off — never save (still reads existing)",
 }
+
+MEMORY_COMMANDS = [
+    Command("/memory", "status dashboard"),
+    None,
+    'Inspect',
+    Command("/memory rules", "show behavioral rules"),
+    Command("/memory rules delete <n>", "delete rule #n"),
+    Command("/memory rules edit <n>", "edit rule #n"),
+    None,
+    Command("/memory lessons", "show learned lessons"),
+    Command("/memory lessons delete <n>", "delete lesson #n"),
+    Command("/memory lessons edit <n>", "edit lesson #n"),
+    None,
+    Command("/memory identity", "show identity profile"),
+    Command("/memory identity delete <n>", "delete identity entry #n"),
+    Command("/memory identity edit <n>", "edit identity entry #n"),
+    None,
+    Command("/memory episodes", "show episodic sessions"),
+    Command("/memory episodes delete <n>", "delete session #n"),
+    None,
+    'Maintenance',
+    Command("/memory vacuum", "deduplicate and compact"),
+    Command("/memory reset [global|project|episodic]", "wipe a scope"),
+    None,
+    Command("/memory help", "show this message"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -125,33 +152,18 @@ class MemoryManage:
     async def help(self) -> None:
         """Show available /memory sub-commands."""
         c = self.console
+
         c.print()
         c.print("[anton.cyan]Memory commands[/]")
         c.print()
-        c.print("  [bold]/memory[/]                               — status dashboard")
-        c.print()
-        c.print("  [bold dim]Inspect[/]")
-        c.print("  [bold]/memory rules[/]                         — show behavioral rules")
-        c.print("  [bold]/memory rules delete <n>[/]              — delete rule #n")
-        c.print("  [bold]/memory rules edit <n>[/]                — edit rule #n")
-        c.print()
-        c.print("  [bold]/memory lessons[/]                       — show learned lessons")
-        c.print("  [bold]/memory lessons delete <n>[/]            — delete lesson #n")
-        c.print("  [bold]/memory lessons edit <n>[/]              — edit lesson #n")
-        c.print()
-        c.print("  [bold]/memory identity[/]                      — show identity profile")
-        c.print("  [bold]/memory identity delete <n>[/]           — delete identity entry #n")
-        c.print("  [bold]/memory identity edit <n>[/]             — edit identity entry #n")
-        c.print()
-        c.print("  [bold]/memory episodes[/]                      — show episodic sessions")
-        c.print("  [bold]/memory episodes delete <n>[/]           — delete session #n")
-        c.print()
-        c.print("  [bold dim]Maintenance[/]")
-        c.print("  [bold]/memory vacuum[/]                        — deduplicate and compact")
-        c.print("  [bold]/memory reset global|project|episodic[/] — wipe a scope")
-        c.print()
-        c.print("  [bold]/memory help[/]                          — show this message")
-        c.print()
+        width = max(len(cmd.command) for cmd in MEMORY_COMMANDS if isinstance(cmd, Command))
+        for cmd in MEMORY_COMMANDS:
+            if cmd is None:
+                c.print()
+            elif isinstance(cmd, Command):
+                c.print(f"  [bold]{cmd.command}[/]{' ' * (width - len(cmd.command) + 2)} — {cmd.description}")
+            else:
+                c.print(f"  [bold dim]{cmd}[/]")
 
     # ------------------------------------------------------------------
     # Inspect
