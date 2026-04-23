@@ -59,10 +59,12 @@ def minds_request(
         return resp.read()
 
 
-def normalize_minds_url(url: str) -> str:
-    """Add https:// if no scheme present, strip trailing slash."""
+def normalize_minds_url(url: str | None) -> str:
+    """Add https:// if no scheme present, strip trailing slash. Falls back to the default when empty."""
+    if not url or not url.strip():
+        return "https://mdb.ai"
     url = url.strip()
-    if url and not url.startswith("http://") and not url.startswith("https://"):
+    if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
     return url.rstrip("/")
 
