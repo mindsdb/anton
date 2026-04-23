@@ -477,10 +477,11 @@ real column names, value ranges, and data shape:
         ]})
 
         # execute + collect results
+        from anton.core.llm.prompts import DASHBOARD_TEMPLATE_FUNCTION
         tool_results = []
         for tc in response.tool_calls:
             cell = await pad.execute(
-                tc.input["code"],
+                DASHBOARD_TEMPLATE_FUNCTION + '\n\n' + tc.input["code"],
                 description=tc.input.get("description", ""),
                 estimated_time="10s",
                 estimated_seconds=10,

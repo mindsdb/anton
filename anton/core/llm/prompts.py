@@ -262,7 +262,310 @@ use the `generate_dashboard` tool — do NOT build HTML manually in scratchpad c
 # inner LLM loop. Kept separate so the main agent never loads it.
 # ---------------------------------------------------------------------------
 
-DASHBOARD_BUILDER_SYSTEM_PROMPT = """\
+DASHBOARD_TEMPLATE_FUNCTION = r'''
+def __get_dashboard_template():
+    from string import Template
+
+    default_script = """
+        <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    """
+    default_style = """
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background: #0d1117;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        transition: background 0.3s;
+        }
+
+        /* ── Topbar ── */
+        #topbar {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 24px;
+        height: 52px;
+        background: rgba(20, 20, 35, 0.85);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        flex-shrink: 0;
+        }
+
+        #topbar-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: #e0e0e0;
+        letter-spacing: 0.02em;
+        }
+
+        /* ── Theme picker button ── */
+        #theme-btn {
+        position: relative;
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        border: 1px solid rgba(255,255,255,0.15);
+        background: rgba(255,255,255,0.07);
+        color: #ccc;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.2s, border-color 0.2s, color 0.2s;
+        }
+        #theme-btn:hover { background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.35); color: #fff; }
+        #theme-btn.open  { background: rgba(123,140,255,0.2);  border-color: #7b8cff; color: #9aa8ff; }
+
+        /* ── Theme dropdown panel ── */
+        #theme-panel {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        width: 170px;
+        max-height: 320px;
+        overflow-y: auto;
+        background: rgba(22, 22, 36, 0.97);
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 10px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        padding: 6px;
+        display: none;
+        flex-direction: column;
+        gap: 2px;
+        }
+        #theme-panel.open { display: flex; }
+
+        #theme-panel::-webkit-scrollbar       { width: 4px; }
+        #theme-panel::-webkit-scrollbar-track { background: transparent; }
+        #theme-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+
+        .theme-item {
+        padding: 7px 12px;
+        border-radius: 6px;
+        font-size: 13px;
+        color: #bbb;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background 0.15s, color 0.15s;
+        }
+        .theme-item:hover  { background: rgba(255,255,255,0.08); color: #fff; }
+        .theme-item.active { background: rgba(123,140,255,0.2); color: #9aa8ff; font-weight: 600; }
+
+        /* ── Dashboard grid ── */
+        #dashboard {
+        flex: 1;
+        display: grid;
+        gap: 20px;
+        padding: 24px;
+        /* ADD GRID LAYOUT HERE — e.g.: grid-template-columns: repeat(2, 1fr); */
+        }
+
+        /* Default chart box size — override per-container as needed */
+        .chart-box {
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+        transition: background 0.3s;
+        min-height: 320px;
+        }
+    </style>
+    """
+    page_title = "Dashboard"
+    header_title = "Dashboard"
+    default_theme = "dark"
+    dashboard_main = ""
+    dashboard_init = ""
+    custom_js = ""
+
+    substitute_values = {
+        "page_title": page_title,
+        "header_title": header_title,
+        "default_theme": default_theme,
+        "dashboard_main": dashboard_main,
+        "dashboard_init": dashboard_init,
+        "default_style": default_style,
+        "default_script": default_script,
+        "custom_js": custom_js
+    }
+
+    template = Template("""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${page_title}</title>
+    ${default_script}
+    ${default_style}
+    </head>
+    <body>
+
+    <header id="topbar">
+        <span id="topbar-title">${header_title}</span>
+        <div style="position:relative">
+        <button id="theme-btn" title="Change theme">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
+            <path d="M12 2a10 10 0 0 1 0 20c-2.5 0-4-1.5-4-3 0-1 .5-2 .5-3S8 14 8 12c0-2.2 1.8-4 4-4"/>
+            </svg>
+        </button>
+        <div id="theme-panel"></div>
+        </div>
+    </header>
+
+    <main id="dashboard">
+
+        <!-- ADD CHART CONTAINERS HERE -->
+        <!-- Example:
+        <div id="chart-1" class="chart-box"></div>
+        <div id="chart-2" class="chart-box"></div>
+        -->
+        ${dashboard_main}
+
+    </main>
+
+    <script>
+        // ── Infrastructure (do not modify) ────────────────────────────────────────
+
+        const THEMES = [
+        'azul', 'bee-inspired', 'blue', 'caravan', 'carp', 'cool',
+        'dark', 'dark-blue', 'dark-bold', 'dark-digerati', 'dark-fresh-cut', 'dark-mushroom',
+        'eduardo', 'forest', 'fresh-cut', 'fruit', 'gray', 'green',
+        'helianthus', 'infographic', 'inspired', 'jazz', 'london',
+        'macarons', 'macarons2', 'mint', 'red', 'red-velvet', 'roma',
+        'royal', 'sakura', 'shine', 'tech-blue', 'vintage'
+        ];
+
+        const THEME_CDN = 'https://cdn.jsdelivr.net/npm/echarts@5/theme/';
+
+        const themeConfigs = {};
+        const _register = echarts.registerTheme.bind(echarts);
+        echarts.registerTheme = (name, config) => { themeConfigs[name] = config; _register(name, config); };
+
+        const chartInstances = {};
+
+        // Initialize (or reinitialize) a single chart container.
+        // id     — id of the container element
+        // option — ECharts option object
+        // theme  — active theme name (passed automatically by renderCharts)
+        function initChart(id, option, theme) {
+        if (chartInstances[id]) chartInstances[id].dispose();
+        const el = document.getElementById(id);
+        if (!el) return;
+        const instance = echarts.init(el, theme || null);
+
+        const bg = theme ? (themeConfigs[theme]?.backgroundColor || '#fff') : '#fff';
+        el.style.background = bg;
+        const isDark = isColorDark(bg);
+
+        instance.setOption(option);
+        instance.setOption({
+            tooltip: {
+            backgroundColor: isDark ? 'rgba(30,30,30,0.92)' : 'rgba(255,255,255,0.95)',
+            borderColor:     isDark ? '#444'                 : '#ddd',
+            textStyle:       { color: isDark ? '#e0e0e0' : '#333' }
+            }
+        });
+
+        chartInstances[id] = instance;
+        return instance;
+        }
+
+        function isColorDark(color) {
+        const tmp = document.createElement('div');
+        tmp.style.color = color;
+        document.body.appendChild(tmp);
+        const rgb = getComputedStyle(tmp).color;
+        document.body.removeChild(tmp);
+        const m = rgb.match(/\d+/g);
+        if (!m) return true;
+        const [r, g, b] = m.map(Number);
+        return (r * 299 + g * 587 + b * 114) / 1000 < 128;
+        }
+
+        function applyTheme(theme) {
+        const bg = theme ? (themeConfigs[theme]?.backgroundColor || '#fff') : '#fff';
+        document.body.style.background = isColorDark(bg) ? '#0d1117' : '#e8e8e8';
+        renderCharts(theme);
+        }
+
+        // Theme picker UI
+        const panel = document.getElementById('theme-panel');
+        const btn   = document.getElementById('theme-btn');
+
+        function buildPanel() {
+        [{ value: '', label: 'default' }, ...THEMES.map(t => ({ value: t, label: t }))].forEach(({ value, label }) => {
+            const item = document.createElement('div');
+            item.className = 'theme-item';
+            item.textContent = label;
+            item.dataset.theme = value;
+            item.addEventListener('click', () => {
+            panel.querySelectorAll('.theme-item').forEach(el => el.classList.toggle('active', el.dataset.theme === value));
+            closePanel();
+            applyTheme(value);
+            });
+            panel.appendChild(item);
+        });
+        }
+
+        const openPanel   = () => { panel.classList.add('open');    btn.classList.add('open'); };
+        const closePanel  = () => { panel.classList.remove('open'); btn.classList.remove('open'); };
+        btn.addEventListener('click', e => { e.stopPropagation(); panel.classList.contains('open') ? closePanel() : openPanel(); });
+        document.addEventListener('click', closePanel);
+        panel.addEventListener('click', e => e.stopPropagation());
+
+        window.addEventListener('resize', () => Object.values(chartInstances).forEach(c => c.resize()));
+
+        async function loadThemes() {
+        buildPanel();
+        await Promise.all(THEMES.map(name =>
+            fetch(`${THEME_CDN}${name}.js`)
+            .then(r => r.text())
+            .then(src => (new Function(src))())
+            .catch(() => {})
+        ));
+        const activeItem = panel.querySelector(`[data-theme="${DEFAULT_THEME}"]`);
+        if (activeItem) activeItem.classList.add('active');
+        applyTheme(DEFAULT_THEME);
+        }
+
+        const DEFAULT_THEME = '${default_theme}';
+
+        // ── Customizable section ──────────────────────────────────────────────────
+
+        ${custom_js}
+
+        // Called on load and every time the user switches the theme.
+        // Initialize all charts here using: initChart(id, option, theme)
+        function renderCharts(theme) {
+
+        // ADD CHART INITIALIZATION HERE
+        // initChart('chart-1', { ... }, theme);
+        // initChart('chart-2', { ... }, theme);
+        ${dashboard_init}
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+
+        loadThemes();
+    </script>
+
+    </body>
+    </html>
+
+    """)
+    return template, substitute_values
+'''
+
+DASHBOARD_BUILDER_SYSTEM_PROMPT = f"""\
 Your task is to produce ONE single self-contained HTML file with a dashboard \
 that fully meets the requirements described below.
 
@@ -369,8 +672,15 @@ assignment. Think dark-mode dashboard, not Jupyter default.\
 
 ## How to generate the HTML dashboard
 
+The scratchpad namespace contains a pre-defined function `__get_dashboard_template()` — \
+you can call it directly without importing or defining it. Its implementation:
+```python
+{DASHBOARD_TEMPLATE_FUNCTION}
+```
+
 You may use the 'scratchpad' tool multiple times before generating the dashboard — \
 for example, to fetch and analyze data, compute metrics, or prepare variables. \
+
 When you are ready to build the final HTML, use the 'scratchpad' tool with code \
 that MUST follow this exact structure:
 
@@ -379,8 +689,18 @@ def _build_dashboard(<var_1>, <var_2>, ...):
     # ALL logic goes inside this function.
     # Use ONLY the parameters listed in the signature — do NOT access
     # any names from the outer scratchpad scope.
+
+    # STRONGLY RECOMMENDED: unless user requirements conflict with the
+    # pre-defined template, use __get_dashboard_template() as the base:
+    #
+    #   template, substitute_values = __get_dashboard_template()
+    #   # update only the substitute_values keys you need to change
+    #   html = template.safe_substitute(**substitute_values)
+    #
+    # If you chose NOT to use __get_dashboard_template(), leave a
+    # comment explaining why (e.g. "# skipped template: user requested custom layout").
     ...
-    # write HTML to output_path here
+    # write html to output_path here
     print("[SUCCESS]")
 
 _build_dashboard(<var_1>, <var_2>, ...)
