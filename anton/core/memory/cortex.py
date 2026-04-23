@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from anton.core.memory.base import HippocampusProtocol
-from anton.core.memory.hippocampus import Engram, Hippocampus
+from anton.core.memory.base import Engram
+from anton.core.memory.hippocampus import Hippocampus
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
@@ -151,7 +152,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         sections: list[str] = []
 
         # 1. Identity (global only — identity is singular)
-        identity = self.global_hc.recall_identity()
+        identity = self.global_hc.recall_identities()
         if identity:
             sections.append(f"## Your Memory — Identity\n{identity}")
 
@@ -299,18 +300,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             hc = self.global_hc if engram.scope == "global" else self.project_hc
 
             if engram.kind == "profile":
-                # Profile entries accumulate, then rewrite
-                existing = hc.recall_identity()
-                entries = []
-                if existing:
-                    for line in existing.splitlines():
-                        stripped = line.strip()
-                        if stripped.startswith("- "):
-                            entries.append(stripped[2:])
-                        elif stripped and not stripped.startswith("#"):
-                            entries.append(stripped)
-                entries.append(engram.text)
-                hc.rewrite_identity(entries)
+                hc.rewrite_identity([engram.text])
+
                 actions.append(f"Updated identity: {engram.text}")
 
             elif engram.kind in ("always", "never", "when"):
@@ -488,29 +479,4 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         except Exception:
             return
 
-        # Merge with existing identity
-        existing = self.global_hc.recall_identity()
-        existing_entries: list[str] = []
-        if existing:
-            for line in existing.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("- "):
-                    existing_entries.append(stripped[2:])
-                elif stripped and not stripped.startswith("#"):
-                    existing_entries.append(stripped)
-
-        # Add new facts, avoiding duplicates
-        for fact in facts:
-            if isinstance(fact, str) and fact not in existing_entries:
-                # Check if this updates an existing fact (same key prefix)
-                key = fact.split(":")[0].strip().lower() if ":" in fact else ""
-                if key:
-                    existing_entries = [
-                        e
-                        for e in existing_entries
-                        if not e.lower().startswith(key + ":")
-                    ]
-                existing_entries.append(fact)
-
-        if existing_entries:
-            self.global_hc.rewrite_identity(existing_entries)
+        self.global_hc.rewrite_identity(facts)

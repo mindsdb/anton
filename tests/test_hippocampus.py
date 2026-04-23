@@ -21,17 +21,17 @@ def hc(mem_dir):
 
 class TestRecallIdentity:
     def test_empty_returns_empty(self, hc):
-        assert hc.recall_identity() == ""
+        assert hc.recall_identities() == ""
 
     def test_reads_profile(self, hc, mem_dir):
         (mem_dir / "profile.md").write_text("# Profile\n- Name: Jorge\n- TZ: PST")
-        result = hc.recall_identity()
+        result = hc.recall_identities()
         assert "Name: Jorge" in result
         assert "TZ: PST" in result
 
     def test_nonexistent_dir(self, tmp_path):
         hc = Hippocampus(tmp_path / "nonexistent")
-        assert hc.recall_identity() == ""
+        assert hc.recall_identities() == ""
 
 
 class TestRecallRules:
@@ -69,9 +69,7 @@ class TestRecallTopic:
         assert hc.recall_topic("nonexistent") == ""
 
     def test_reads_topic(self, hc, mem_dir):
-        topics = mem_dir / "topics"
-        topics.mkdir()
-        (topics / "api-coingecko.md").write_text("# CoinGecko\n- Rate limit: 50/min")
+        hc.encode_lesson("CoinGecko\n- Rate limit: 50/min", topic="api-coingecko")
         result = hc.recall_topic("api-coingecko")
         assert "Rate limit: 50/min" in result
 
@@ -96,9 +94,7 @@ class TestRecallScratchpadWisdom:
         assert "Unrelated fact" not in result
 
     def test_includes_scratchpad_topic_files(self, hc, mem_dir):
-        topics = mem_dir / "topics"
-        topics.mkdir()
-        (topics / "scratchpad-tips.md").write_text("Always re-import modules")
+        hc.encode_lesson("Always re-import modules", topic="scratchpad-tips")
         result = hc.recall_scratchpad_wisdom()
         assert "Always re-import" in result
 
@@ -158,9 +154,10 @@ class TestEncodeLesson:
 
     def test_creates_topic_file(self, hc, mem_dir):
         hc.encode_lesson("CoinGecko limits at 50/min", topic="api-coingecko")
-        topic_path = mem_dir / "topics" / "api-coingecko.md"
-        assert topic_path.exists()
-        assert "CoinGecko limits at 50/min" in topic_path.read_text()
+        # topic is written in lesson as metadata
+        lesson_path = mem_dir / "lessons.md"
+        assert lesson_path.exists()
+        assert "CoinGecko limits at 50/min" in lesson_path.read_text()
 
     def test_skips_duplicate(self, hc, mem_dir):
         hc.encode_lesson("Fact one")

@@ -171,9 +171,7 @@ def refresh_knowledge(settings: AntonSettings, cortex) -> None:
 
     knowledge = "\n\n".join(parts)
     topic_content = f"# Minds — {settings.minds_mind_name}\n\n{knowledge}\n"
-    topic_path = cortex.project_hc._topics_dir / "minds-datasource.md"
-    cortex.project_hc._topics_dir.mkdir(parents=True, exist_ok=True)
-    cortex.project_hc._encode_with_lock(topic_path, topic_content, mode="write")
+    cortex.project_hc.encode_lesson(topic_content, topic='minds-datasource')
 
 
 def list_datasources(

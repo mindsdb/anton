@@ -32,7 +32,6 @@ from anton.core.llm.provider import (
 )
 from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_limits
 from anton.commands.setup import (
-    handle_memory,
     handle_setup,
     handle_setup_models,
 )
@@ -82,6 +81,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
+from anton.memory.manage import MemoryManage
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -370,8 +370,8 @@ async def _handle_publish(
             return
         api_key = api_key.strip()
         settings.minds_api_key = api_key
-        if workspace:
-            workspace.set_secret("ANTON_MINDS_API_KEY", api_key)
+        # Key is not persisted yet — wait until publish succeeds to avoid
+        # locking the user out with a bad key on every subsequent /publish call.
         console.print()
 
     # 2. Find the HTML file to publish
@@ -479,9 +479,20 @@ async def _handle_publish(
                 ssl_verify=settings.minds_ssl_verify,
             )
         except Exception as e:
-            console.print(f"  [anton.error]Publish failed: {e}[/]")
+            import urllib.error
+            if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+                settings.minds_api_key = None
+                if workspace:
+                    workspace.set_secret("ANTON_MINDS_API_KEY", "")
+                console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+            else:
+                console.print(f"  [anton.error]Publish failed: {e}[/]")
             console.print()
             return
+
+    # Persist the key now that we know it works
+    if workspace:
+        workspace.set_secret("ANTON_MINDS_API_KEY", settings.minds_api_key)
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")
@@ -1132,6 +1143,7 @@ async def _chat_loop(
         style=pt_style,
     )
 
+    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
     try:
         while True:
             # Memory confirmation UX — show pending lessons before prompt
@@ -1263,7 +1275,7 @@ async def _chat_loop(
                     )
                     continue
                 elif cmd == "/memory":
-                    handle_memory(console, settings, cortex, episodic=episodic)
+                    await memory_manage.handle(cmd=stripped)
                     continue
                 elif cmd == "/connect":
                     arg = parts[1].strip() if len(parts) > 1 else ""
@@ -1435,7 +1447,8 @@ async def _chat_loop(
                                 ttft = time.monotonic() - t0
                             display.append_text(event.text)
                         elif isinstance(event, StreamToolResult):
-                            display.show_tool_result(event.content)
+                            if event.name == "scratchpad" and event.action == "dump":
+                                display.show_tool_result(event.content)
                         elif isinstance(event, StreamToolUseStart):
                             display.on_tool_use_start(event.id, event.name)
                         elif isinstance(event, StreamToolUseDelta):

@@ -52,7 +52,7 @@ def _translate_tool_choice(tool_choice: dict) -> dict | str:
     return "auto"
 
 
-def _translate_messages(system: str, messages: list[dict]) -> list[dict]:
+def _translate_messages(system: str, messages: list[dict], supports_vision: bool = True) -> list[dict]:
     """Convert Anthropic-style messages to OpenAI chat format.
 
     Handles:
@@ -79,7 +79,7 @@ def _translate_messages(system: str, messages: list[dict]) -> list[dict]:
             if role == "assistant":
                 result.extend(_translate_assistant_blocks(content))
             elif role == "user":
-                result.extend(_translate_user_blocks(content))
+                result.extend(_translate_user_blocks(content, supports_vision=supports_vision))
             else:
                 # Fallback: join text blocks
                 text = " ".join(
@@ -122,7 +122,7 @@ def _translate_assistant_blocks(blocks: list[dict]) -> list[dict]:
     return [msg]
 
 
-def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
+def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True) -> list[dict]:
     """Convert user content blocks (including tool_result and image) to OpenAI messages."""
     result: list[dict] = []
     content_parts: list[dict] = []  # Accumulates text + image_url blocks
@@ -148,7 +148,7 @@ def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
             )
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
-        elif block.get("type") == "image":
+        elif block.get("type") == "image" and supports_vision:
             # Anthropic image block -> OpenAI image_url block
             source = block.get("source", {})
             if source.get("type") == "base64":
@@ -214,11 +214,13 @@ class OpenAIProvider(LLMProvider):
         base_url: str | None = None,
         ssl_verify: bool = True,
         api_version: str | None = None,
+        supports_vision: bool = True,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url
         self._ssl_verify = ssl_verify
         self._api_version = api_version
+        self._supports_vision = supports_vision
 
         import httpx
 
@@ -262,7 +264,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        oai_messages = _translate_messages(system, messages)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -340,7 +342,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
     ) -> AsyncIterator[StreamEvent]:
-        oai_messages = _translate_messages(system, messages)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
