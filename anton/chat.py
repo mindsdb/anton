@@ -998,11 +998,19 @@ async def _chat_loop(
     global_memory_dir = Path.home() / ".anton" / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
 
+    from anton.core.memory.episodes import EpisodicMemory
+
+    episodes_dir = settings.workspace_path / ".anton" / "episodes"
+    episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
+    if episodic.enabled:
+        episodic.start_session()
+
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
         project_hc=Hippocampus(project_memory_dir),
         mode=settings.memory_mode,
         llm_client=state["llm_client"],
+        episodic=episodic if episodic.enabled else None,
     )
 
     # Reconsolidation: migrate legacy memory formats on first run
@@ -1017,13 +1025,6 @@ async def _chat_loop(
     # Background compaction if needed
     if cortex.needs_compaction():
         asyncio.create_task(cortex.compact_all())
-
-    from anton.core.memory.episodes import EpisodicMemory
-
-    episodes_dir = settings.workspace_path / ".anton" / "episodes"
-    episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
-    if episodic.enabled:
-        episodic.start_session()
 
     from anton.memory.history_store import HistoryStore
 

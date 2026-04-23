@@ -30,6 +30,7 @@ from anton.core.memory.hippocampus import Hippocampus
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
+    from anton.core.memory.episodes import EpisodicMemory
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,6 +115,7 @@ class Cortex:
         project_hc: HippocampusProtocol,
         mode: str = "autopilot",
         llm_client: LLMClient | None = None,
+        episodic: EpisodicMemory | None = None,
     ) -> None:
         """Initialize the executive with two hippocampal stores.
 
@@ -122,11 +124,14 @@ class Cortex:
             project_hc: Memory store for project-specific memories
             mode: Memory mode — autopilot|copilot|off (encoding gate)
             llm_client: For LLM-assisted operations (profile extraction, compaction)
+            episodic: For logging memory_read/memory_write events per session
         """
         self.global_hc = global_hc
         self.project_hc = project_hc
         self.mode = mode
         self._llm = llm_client
+        self._episodic = episodic
+        self._seen_texts: set[str] = set()
         self._turn_count = 0
 
     # ~6000 chars ≈ ~1500 tokens — above this, use LLM to filter rules
@@ -173,6 +178,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             )
             if project_rules:
                 sections.append(f"## Your Memory — Project Rules\n{project_rules}")
+                if self._episodic is not None:
+                    for engram in self.project_hc.get_rules():
+                        self._log_read_engram(engram)
 
         # 4. Global lessons
         global_lessons = self.global_hc.recall_lessons(token_budget=1000)
@@ -183,6 +191,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         project_lessons = self.project_hc.recall_lessons(token_budget=1000)
         if project_lessons:
             sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
+            if self._episodic is not None:
+                for engram in self.project_hc.get_lessons():
+                    self._log_read_engram(engram)
 
         # 6. Minds datasource context (auto-loaded if present)
         minds_topic = self.project_hc.recall_topic("minds-datasource")
@@ -311,6 +322,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     confidence=engram.confidence,
                     source=engram.source,
                 )
+                if engram.scope != "global":
+                    self._log_write_engram(engram)
                 actions.append(f"Encoded {engram.kind} rule: {engram.text}")
 
             elif engram.kind == "lesson":
@@ -319,9 +332,31 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     topic=engram.topic,
                     source=engram.source,
                 )
+                if engram.scope != "global":
+                    self._log_write_engram(engram)
                 actions.append(f"Encoded lesson: {engram.text}")
 
         return actions
+
+    def _log_write_engram(self, engram: Engram) -> None:
+        if self._episodic is None:
+            return
+        self._seen_texts.add(engram.text)
+        self._episodic.log_turn(
+            0, "memory_write", engram.text,
+            kind=engram.kind or "lesson",
+            topic=engram.topic or "",
+        )
+
+    def _log_read_engram(self, engram: Engram) -> None:
+        if engram.text in self._seen_texts:
+            return
+        self._seen_texts.add(engram.text)
+        self._episodic.log_turn(
+            0, "memory_read", engram.text,
+            kind=engram.kind or "lesson",
+            topic=engram.topic or "",
+        )
 
     def encoding_gate(self, engram: Engram) -> bool:
         """Whether this engram needs user confirmation before encoding.
