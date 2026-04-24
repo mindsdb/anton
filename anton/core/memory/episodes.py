@@ -250,10 +250,9 @@ class EpisodicMemory:
             lines.append(f"[{ep.ts}] ({ep.role}) {ep.content[:max_len]}")
         return "\n".join(lines)
 
-    def get_memory_episodes(
+    def get_memory_usage(
         self,
-        session_id: str,
-        roles: list[str],
+        session_id: str
     ) -> list[Episode]:
         """Return episodes for a session filtered by role, deduplicated by content.
 
@@ -272,7 +271,7 @@ class EpisodicMemory:
                     continue
                 try:
                     ep = Episode(**json.loads(line))
-                    if ep.role not in roles:
+                    if ep.role not in ["memory_write", "memory_read"]:
                         continue
                     if ep.content in seen:
                         continue

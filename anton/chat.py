@@ -58,6 +58,7 @@ from anton.commands.skills import (
     handle_skill_show,
     handle_skills_list,
 )
+from anton.commands.share import handle_share_export
 from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
 from anton.utils.prompt import (
     prompt_or_cancel,
@@ -1347,6 +1348,23 @@ async def _chat_loop(
                     continue
                 elif cmd == "/skills":
                     handle_skills_list(console)
+                    continue
+                elif cmd == "/share":
+                    sub_parts = parts[1].strip().split(maxsplit=1) if len(parts) > 1 else []
+                    sub = sub_parts[0] if sub_parts else ""
+                    rest = sub_parts[1] if len(sub_parts) > 1 else ""
+                    if sub == "export":
+                        await handle_share_export(
+                            console,
+                            session,
+                            workspace,
+                            state["llm_client"],
+                            episodic if episodic.enabled else None,
+                            summary_only="--summary" in rest,
+                        )
+                    else:
+                        console.print("[anton.warning]Usage: /share export [--summary][/]")
+                        console.print()
                     continue
                 elif cmd == "/resume":
                     session, resumed_id = await handle_resume(
