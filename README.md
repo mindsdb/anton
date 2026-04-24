@@ -7,15 +7,19 @@
     ▐   ▐
 ```
 
-# Meet Anton - an agent that gets real work done
+# Meet Anton - Your working partner
 
-Anton is a personal AI agent that helps you get actual-work done. Tell it what you need in plain language and it takes it from there - sending emails, calling APIs, connecting to data sources, building dashboards, and delivering results. No crazy setups, no plugins, no fuss.
+Anton is a self-improving AI coworker you can hand off any task to. An open, powerful alternative to Claude-Cowork.
+
+Anton lets any LLM complete work on its own. Describe the outcome and cadence, Anton learns, takes action and keeps you informed. Come back to the result.
 
 
 ![ezgif-24b9e7c74652f0dc](https://github.com/user-attachments/assets/c92f87c1-ff30-4272-92ba-49a8585d5954)
 
-## Quick start
-**macOS - Desktop App:**
+## Try Anton
+Anton can be installed as a desktop application or as a command-line tool (CLI).
+
+### Install Desktop App:
 
 <a href="https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg">
 <img width="64" alt="DesktopApp" src="https://github.com/user-attachments/assets/ed7c1e3a-3700-45cc-a9a8-efb57b43dcfd" />
@@ -23,13 +27,16 @@ Anton is a personal AI agent that helps you get actual-work done. Tell it what y
 
  Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
 
+### or - Install Command-Line App:
 
-**macOS / Linux - CLI:**
+Open your terminal and use the following command to install
+
+**macOS/Linux**: 
 ```bash
 curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" 
 ```
 
-**Windows CLI** (PowerShell):
+**Windows** (PowerShell):
 ```powershell
 irm https://raw.githubusercontent.com/mindsdb/anton/main/install.ps1 | iex
 ```
@@ -41,11 +48,9 @@ anton
 
 ## What can Anton do?
 
-Help you with work, Anton starts as a blank canvas that molds to your needs, you simply ask and anton figures things out live. It doesn't rely on pre-built plugins or predefined workflows - it writes code on the fly, calls APIs, and chains together whatever steps are needed to get the job done.
+From one-off tasks to scheduled workflows—reports, emails, and more—Anton handles it. Here are a few examples:
 
-Here are a few examples of what people are using it for:
-
-### 📊 Data analysis & dashboards
+### 📊 Data analysis & Reports
 ```
 I hold 50 AAPL, 200 NVDA, and 10 AMZN. Get today's prices, calculate my
 total portfolio value, show me the 30-day performance of each stock, and
@@ -110,25 +115,25 @@ Although you can use Anton with just public data, the real power happens when yo
 
 ```
 
-Tell Anton to connect and ask questions about your data. It will look for credentials in the vault (by their name), fetch the schema, and retrieve the necessary data. 
-```test
-YOU> Connect to STAPLECACHE company data. Check if there is a correlation between the discount given 
-and the review rating in the last 6 months?
+Tell Anton to connect and ask questions about your data. It will find credentials in the vault, fetch the schema, and retrieve what it needs.
+
+```terminal
+YOU> Connect to my Gmail and find emails from potential customers that haven’t been handled.
 
 ANTON>
-⎿ Scratchpad (connecting and fetching schema…) 
+⎿ Connecting and fetching emails...
    ~3s
 ```
 
 ---
 
-You can always ask Anton to explain what it did. Ask it to dump its scratchpad and you get a full notebook-style breakdown: every cell of code it ran, the outputs, and errors - so you can follow its reasoning step by step.
+You can always ask Anton to explain what it did. Ask it to dump its ineer workings, a full notebook-style breakdown: every cell of code it ran, the outputs, and errors - so you can follow its reasoning step by step.
 
 ---
 
 ## What's inside
 
-A big part of what makes Anton work is that it doesn’t need a huge collection of separate tools for web, DB, files etc. Most of the work is done through one core harness: The scratchpad, which can dynamically become whatever Anton needs for the task.
+A big part of what makes Anton work is that it doesn’t need a huge collection of separate tools for web, DB, files etc. Most of the work is done through one core harness: The execution scratchpad, which can dynamically become whatever Anton needs for the task.
 
 For the full architecture of Anton, file formats, and developer guide, see **[anton/README.md](anton/README.md)**.
 
