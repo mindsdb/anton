@@ -28,8 +28,9 @@ class _SessionMeta(BaseModel):
     )
     summary: str = Field(
         description=(
-            "A 2-3 sentence narrative of the analytical journey — "
-            "what was explored, key discoveries, and current state."
+            "A distilled narrative of the analytical session: the goal, key discoveries, "
+            "any corrections or dead ends, and where the analysis currently stands. "
+            "Each distinct finding appears exactly once. 2-4 sentences."
         )
     )
 
@@ -68,10 +69,15 @@ async def _generate_meta(
         conversation_text = _format_history_for_llm(history)
         result = await llm_client.generate_object_code(
             _SessionMeta,
-            system="You are summarizing an analytical session. Produce a filename-safe title slug and a concise summary.",
+            system=(
+                "You are producing a portable context distillation of an analytical session. "
+                "For the summary: cover the goal, key discoveries, any corrections or dead ends, "
+                "and where the analysis currently stands. Every distinct finding should appear once. "
+                "No filler, no repetition, no omissions of meaningful conclusions."
+            ),
             messages=[{
                 "role": "user",
-                "content": f"Summarize this analytical session:\n\n{conversation_text}",
+                "content": f"Distill this analytical session:\n\n{conversation_text}",
             }],
             max_tokens=300,
         )
