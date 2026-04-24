@@ -60,8 +60,17 @@ _INPUT_SCHEMA = {
 }
 
 
-def get_generate_dashboard_html_prompt() -> str:
-    rendered = VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT.format(output_context="")
+def get_generate_dashboard_html_prompt(
+    session: "ChatSession | None" = None,
+) -> str:
+    output_context = ""
+    if session is not None:
+        ctx = getattr(session, "_system_prompt_context", None)
+        if ctx is not None:
+            output_context = getattr(ctx, "output_context", "") or ""
+    rendered = VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT.format(
+        output_context=output_context
+    )
     html_template = _DASHBOARD_TEMPLATE_PATH.read_text(encoding="utf-8")
     return rendered.replace(_DASHBOARD_TEMPLATE_MARKER, html_template)
 
@@ -93,7 +102,7 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
         )
 
     if label_in == "generate_dashboard_html":
-        return get_generate_dashboard_html_prompt()
+        return get_generate_dashboard_html_prompt(session)
 
     store = getattr(session, "_skill_store", None)
     if store is None:
