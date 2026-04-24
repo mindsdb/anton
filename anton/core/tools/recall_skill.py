@@ -23,7 +23,7 @@ from anton.core.tools.tool_defs import ToolDef
 _DASHBOARD_TEMPLATE_PATH = (
     Path(__file__).resolve().parent.parent.parent
     / "templates"
-    / "template-dark-github.html"
+    / "template-dark.html"
 )
 _DASHBOARD_TEMPLATE_MARKER = "<!-- DASHBOARD_HTML_TEMPLATE -->"
 

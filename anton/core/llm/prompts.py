@@ -317,14 +317,14 @@ Template file contents:
 ## 3. Reading the template in scratchpad
 
 The template file ships inside the installed `anton` package at
-`anton/templates/template-dark-github.html`. Define the helper below in one of
+`anton/templates/template-dark.html`. Define the helper below in one of
 your first scratchpad cells so the final assembly cell can call it:
 
 ```python
 def __read_html_template():
     import anton
     from pathlib import Path
-    path = Path(anton.__file__).parent / "templates" / "template-dark-github.html"
+    path = Path(anton.__file__).parent / "templates" / "template-dark.html"
     return path.read_text(encoding="utf-8")
 ```
 
@@ -505,6 +505,14 @@ Rules for all cells:
   HTML`). Once the final file is on disk, the intermediate code is no longer
   useful in context; the marker is what lets `erase_scratchpad_history` clear
   these cells afterwards. The comment has no effect on execution.
+- **Append an approximate progress percentage to the end of every cell's
+  `one_line_description`** so the user sees the build advancing. Compute
+  `total = 6 + N` where `N = len(DashSpec.blocks)` (5 fixed cells + N block
+  cells + 1 final `__get_html()`). For the K-th cell (1-based) append
+  `" (~{{pct}}% done)"` with `pct = round(K / total * 100)`. Example for a
+  dashboard with 3 blocks (`total=9`): cell 1 → `"build page title (~11% done)"`,
+  cell 5 → `"build chart inits (~56% done)"`, final cell → `"assemble and save
+  dashboard (~100% done)"`.
 
 Cell layout — one function per marker in the template, plus one function per
 block from DashSpec:

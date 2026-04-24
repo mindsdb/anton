@@ -1,3 +1,4 @@
+<!-- V2 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -25,55 +26,34 @@
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
   padding: 24px;
+  max-width: 1440px;
+  margin: 0 auto;
   min-height: 100vh;
 }
 
-/* Header */
-.header { text-align: center; padding: 40px 20px 32px; border-bottom: 1px solid var(--border); margin-bottom: 32px; }
-.header .badge { display: inline-block; background: rgba(88,166,255,0.12); border: 1px solid rgba(88,166,255,0.3); color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; padding: 4px 12px; border-radius: 20px; margin-bottom: 16px; }
-.header h1 { font-size: 2.2rem; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 12px; }
-.header .subtitle { color: var(--muted); font-size: 1rem; max-width: 600px; margin: 0 auto; }
-.source-link { display: inline-block; margin-top: 12px; color: var(--accent); font-size: 0.85rem; text-decoration: none; opacity: 0.8; }
-.source-link:hover { opacity: 1; text-decoration: underline; }
-
-/* Grids */
-.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 24px; }
-.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 24px; }
-.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+/* Grid — single utility, agent sets --cols inline (default 2) */
+.grid { display: grid; gap: 20px; margin-bottom: 24px;
+        grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); }
 .col-span-2 { grid-column: span 2; }
-.col-span-3 { grid-column: span 3; }
 
 /* Card */
 .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
-.card-title { font-size: 0.7rem; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+.card-title { font-size: 0.75rem; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
 .card h2 { font-size: 1.1rem; font-weight: 600; color: var(--text); margin-bottom: 16px; }
 
-/* KPI */
-.kpi { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
-.kpi .kpi-icon  { font-size: 1.8rem; margin-bottom: 8px; }
-.kpi .kpi-value { font-size: 1.9rem; font-weight: 700; line-height: 1; margin-bottom: 4px; }
+/* KPI — use --c for accent color, e.g. style="--c: var(--accent3)" */
+.kpi { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; --c: var(--accent); }
+.kpi .kpi-value { font-size: 1.9rem; font-weight: 700; line-height: 1; margin-bottom: 4px; color: var(--c); }
 .kpi .kpi-label { font-size: 0.75rem; color: var(--muted); letter-spacing: 0.5px; }
-.kpi.blue   .kpi-value { color: var(--accent); }
-.kpi.green  .kpi-value { color: var(--accent3); }
-.kpi.orange .kpi-value { color: var(--accent4); }
-.kpi.red    .kpi-value { color: var(--accent2); }
-.kpi.purple .kpi-value { color: var(--purple); }
 
-/* Steps */
-.steps { display: flex; flex-direction: column; gap: 0; }
-.step { display: flex; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--border); }
-.step:last-child { border-bottom: none; }
-.step-num { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0; margin-top: 2px; }
-.step-num.s0 { background: rgba(247,129,102,0.2); color: var(--accent2); border: 1px solid rgba(247,129,102,0.4); }
-.step-num.s1 { background: rgba(210,153,34,0.2); color: var(--accent4); border: 1px solid rgba(210,153,34,0.4); }
-.step-num.s2 { background: rgba(88,166,255,0.2); color: var(--accent);  border: 1px solid rgba(88,166,255,0.4); }
-.step-num.s3 { background: rgba(63,185,80,0.2);  color: var(--accent3); border: 1px solid rgba(63,185,80,0.4); }
-.step-num.s4 { background: rgba(188,140,255,0.2); color: var(--purple); border: 1px solid rgba(188,140,255,0.4); }
-.step-content h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 4px; color: var(--text); }
-.step-content p  { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
-.step-content code { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 0.78rem; color: var(--accent3); font-family: 'Consolas', monospace; }
+/* Tags — use --c for color, e.g. <span class="tag" style="--c: var(--accent3)"> */
+.tag { display: inline-block; font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 4px;
+       --c: var(--accent);
+       color: var(--c);
+       background: color-mix(in oklab, var(--c) 15%, transparent);
+       border: 1px solid color-mix(in oklab, var(--c) 30%, transparent); }
 
 /* Tables */
 .data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -82,38 +62,23 @@ body {
 .data-table tr:last-child td { border-bottom: none; }
 .data-table tr:hover td { background: var(--bg3); }
 
-/* Tags */
-.tag { display: inline-block; font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
-.tag-red    { background: rgba(247,129,102,0.15); color: var(--accent2); border: 1px solid rgba(247,129,102,0.3); }
-.tag-yellow { background: rgba(210,153,34,0.15); color: var(--accent4); border: 1px solid rgba(210,153,34,0.3); }
-.tag-blue   { background: rgba(88,166,255,0.15); color: var(--accent);  border: 1px solid rgba(88,166,255,0.3); }
-.tag-green  { background: rgba(63,185,80,0.15);  color: var(--accent3); border: 1px solid rgba(63,185,80,0.3); }
-.tag-purple { background: rgba(188,140,255,0.15); color: var(--purple); border: 1px solid rgba(188,140,255,0.3); }
-
 /* Chart containers */
 .chart-container    { width: 100%; height: 320px; }
 .chart-container-lg { width: 100%; height: 380px; }
-.chart-container-sm { width: 100%; height: 200px; }
 
 /* Callouts */
 .insight-box { background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); border-left: 3px solid var(--accent); border-radius: 8px; padding: 14px 18px; margin-top: 16px; }
 .insight-box p { font-size: 0.83rem; color: var(--text); line-height: 1.6; }
-.insight-box strong { color: var(--accent); }
-
-.quote { background: var(--bg3); border-left: 3px solid var(--purple); border-radius: 0 8px 8px 0; padding: 14px 18px; margin: 0; }
-.quote p { font-size: 0.9rem; font-style: italic; color: var(--text); line-height: 1.6; }
-.quote .author { font-size: 0.75rem; color: var(--muted); margin-top: 8px; font-style: normal; }
 
 /* Section */
 section { margin-bottom: 32px; }
-section > .section-title { font-size: 0.7rem; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
+section > .section-title { font-size: 0.75rem; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
 section > .section-title::before { content: ''; display: inline-block; width: 3px; height: 14px; background: var(--accent); border-radius: 2px; }
 
 /* Responsive */
 @media (max-width: 900px) {
-  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
-  .col-span-2, .col-span-3 { grid-column: span 1; }
-  .header h1 { font-size: 1.6rem; }
+  .grid { grid-template-columns: 1fr; }
+  .col-span-2 { grid-column: span 1; }
 }
 
 /* AGENT: CUSTOM_STYLES */
@@ -122,8 +87,6 @@ section > .section-title::before { content: ''; display: inline-block; width: 3p
 </head>
 <body>
 
-<!-- AGENT: HEADER -->
-
 <!-- AGENT: CONTENT -->
 
 <script>
@@ -131,13 +94,13 @@ const githubDarkTheme = {
   color: ['#58a6ff', '#3fb950', '#d29922', '#f78166', '#bc8cff',
           '#79c0ff', '#ff7b72', '#e3b341', '#a5d6ff', '#56d364'],
   backgroundColor: 'transparent',
-  textStyle: { color: '#e6edf3', fontFamily: "'Segoe UI', system-ui, sans-serif" },
+  textStyle: { color: '#e6edf3', fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif" },
 
   title:    { textStyle: { color: '#e6edf3', fontWeight: 600 },
               subtextStyle: { color: '#8b949e' } },
 
-  line:    { itemStyle: { borderWidth: 0 }, lineStyle: { width: 2 }, symbolSize: 6, symbol: 'circle', smooth: false },
-  bar:     { itemStyle: { borderRadius: 2, borderWidth: 0 } },
+  line:    { itemStyle: { borderWidth: 0 }, lineStyle: { width: 2 }, symbol: 'none', smooth: false },
+  bar:     { itemStyle: { borderRadius: 0, borderWidth: 0 } },
   pie:     { itemStyle: { borderColor: '#0d1117', borderWidth: 1 } },
   scatter: { itemStyle: { borderWidth: 0 } },
   radar:   { itemStyle: { borderWidth: 2 }, lineStyle: { width: 2 }, symbolSize: 4, symbol: 'circle' },
@@ -151,27 +114,27 @@ const githubDarkTheme = {
 
   categoryAxis: {
     axisLine:  { show: true, lineStyle: { color: '#30363d' } },
-    axisTick:  { show: false, lineStyle: { color: '#30363d' } },
+    axisTick:  { show: false },
     axisLabel: { show: true, color: '#8b949e' },
-    splitLine: { show: false, lineStyle: { color: ['#21262d'], opacity: 0.5 } },
+    splitLine: { show: false, lineStyle: { color: '#21262d' } },
     splitArea: { show: false }
   },
   valueAxis: {
     axisLine:  { show: true, lineStyle: { color: '#30363d' } },
-    axisTick:  { show: false, lineStyle: { color: '#30363d' } },
+    axisTick:  { show: false },
     axisLabel: { show: true, color: '#8b949e' },
-    splitLine: { show: true, lineStyle: { color: ['#21262d'], opacity: 0.6 } },
+    splitLine: { show: true, lineStyle: { color: '#21262d' } },
     splitArea: { show: false }
   },
   logAxis: {
     axisLine:  { show: true, lineStyle: { color: '#30363d' } },
     axisLabel: { show: true, color: '#8b949e' },
-    splitLine: { show: true, lineStyle: { color: ['#21262d'], opacity: 0.6 } }
+    splitLine: { show: true, lineStyle: { color: '#21262d' } }
   },
   timeAxis: {
     axisLine:  { show: true, lineStyle: { color: '#30363d' } },
     axisLabel: { show: true, color: '#8b949e' },
-    splitLine: { show: true, lineStyle: { color: ['#21262d'], opacity: 0.6 } }
+    splitLine: { show: true, lineStyle: { color: '#21262d' } }
   },
 
   legend:  { textStyle: { color: '#8b949e' }, inactiveColor: '#484f58',
@@ -200,7 +163,17 @@ const githubDarkTheme = {
                handleColor: '#58a6ff', handleSize: '100%',
                borderColor: '#30363d',
                textStyle: { color: '#8b949e' } },
-  markPoint: { label: { color: '#e6edf3' },
+  markPoint: { symbol: 'roundRect', symbolSize: [60, 22],
+               itemStyle: { borderColor: '#30363d', borderWidth: 1 },
+               label: { position: 'inside', color: '#e6edf3', fontSize: 11, fontWeight: 600,
+                        textBorderColor: 'transparent', textBorderWidth: 0 },
+               emphasis: { label: { color: '#e6edf3' } } },
+  markLine:  { symbol: ['none', 'none'],
+               lineStyle: { color: '#8b949e', type: 'dashed', width: 1 },
+               label: { position: 'insideEndTop', color: '#e6edf3', fontSize: 11,
+                        textBorderColor: 'transparent', textBorderWidth: 0,
+                        backgroundColor: 'rgba(28,33,40,0.85)',
+                        padding: [3, 6], borderRadius: 3 },
                emphasis: { label: { color: '#e6edf3' } } }
 };
 echarts.registerTheme('github-dark', githubDarkTheme);
@@ -214,7 +187,18 @@ function initChart(id, options) {
   __charts.push(chart);
   return chart;
 }
-window.addEventListener('resize', () => __charts.forEach(c => c.resize()));
+
+/* Debounced resize via ResizeObserver — reacts to layout changes, not just window resize */
+let __resizeTimer;
+const __resizeAll = () => {
+  clearTimeout(__resizeTimer);
+  __resizeTimer = setTimeout(() => __charts.forEach(c => c.resize()), 80);
+};
+window.addEventListener('resize', __resizeAll);
+if (window.ResizeObserver) {
+  const __ro = new ResizeObserver(__resizeAll);
+  __ro.observe(document.body);
+}
 
 /* AGENT: CHART_DATA */
 
