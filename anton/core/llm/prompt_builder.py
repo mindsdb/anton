@@ -61,6 +61,18 @@ class ChatSystemPromptBuilder:
 
         return "\n\n".join(chunks)
 
+    # Built-in skills that are always available regardless of ~/.anton/skills/.
+    # Each entry must have "label" and "when_to_use".
+    _BUILTIN_SKILL_SUMMARIES: list[dict] = [
+        {
+            "label": "generate_dashboard_html",
+            "when_to_use": (
+                "when the user asks to build a dashboard, chart, report, "
+                "presentation, or any data visualization as a standalone HTML page"
+            ),
+        },
+    ]
+
     def _build_procedural_memory_section(
         self, skill_store: "SkillStore | None"
     ) -> str:
@@ -71,12 +83,17 @@ class ChatSystemPromptBuilder:
         the full procedure. Returns an empty string if no store is wired
         or no skills are saved — the caller skips the section entirely.
         """
-        if skill_store is None:
-            return ""
-        try:
-            summaries = skill_store.list_summaries()
-        except Exception:
-            return ""
+        summaries: list[dict] = list(self._BUILTIN_SKILL_SUMMARIES)
+        if skill_store is not None:
+            try:
+                user_summaries = skill_store.list_summaries()
+            except Exception:
+                user_summaries = []
+            # User skills override builtins with the same label.
+            builtin_labels = {s["label"] for s in summaries}
+            for s in user_summaries:
+                if s.get("label") not in builtin_labels:
+                    summaries.append(s)
         if not summaries:
             return ""
 

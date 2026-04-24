@@ -14,9 +14,18 @@ relying on the LLM to emit a marker or follow any convention.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anton.core.llm.prompts import VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
 from anton.core.tools.tool_defs import ToolDef
+
+_DASHBOARD_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "templates"
+    / "template-dark-github.html"
+)
+_DASHBOARD_TEMPLATE_MARKER = "<!-- DASHBOARD_HTML_TEMPLATE -->"
 
 if TYPE_CHECKING:
     from anton.core.session import ChatSession
@@ -51,6 +60,12 @@ _INPUT_SCHEMA = {
 }
 
 
+def get_generate_dashboard_html_prompt() -> str:
+    rendered = VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT.format(output_context="")
+    html_template = _DASHBOARD_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return rendered.replace(_DASHBOARD_TEMPLATE_MARKER, html_template)
+
+
 def _format_skill_response(skill, *, warning: str = "") -> str:
     """Render the recall payload sent back to the LLM as a tool result."""
     parts: list[str] = []
@@ -76,6 +91,9 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
             "ERROR: recall_skill requires a non-empty 'label' parameter. "
             "Pick one from the procedural memory list in your system prompt."
         )
+
+    if label_in == "generate_dashboard_html":
+        return get_generate_dashboard_html_prompt()
 
     store = getattr(session, "_skill_store", None)
     if store is None:

@@ -236,124 +236,317 @@ Output format:
 
 
 VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = """\
-LIST THE INSIGHTS (terse — one line each, not an essay):
-Before coding, list the insights you want to present/convey/highlight as `1 - <chart/infographic/etc>: <insight it conveys and why it matters>..`
-Example: `1 - Line chart of weekly signups: shows growth inflection after the March launch, flags whether momentum is sustained.`
-This is a checklist, not a brief — no narrative prose, no design discussion.
+# HTML dashboard / presentation output
 
-BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
+The dashboard is produced as a **single self-contained `.html` file**. You build
+it by filling placeholders in a shared HTML template with strings returned by
+small isolated functions, each living in its own scratchpad cell.
 
-  CRITICAL: The final dashboard MUST be a single .html file with ALL data, CSS, and JS inlined. \
-Do NOT reference external local files (like data.js) — browsers block local file:// cross-references \
-for security reasons and the dashboard will silently fail to load data.
-
-  SECURITY (critical): Dashboards may be published to the web. NEVER embed API keys, tokens, \
-passwords, connection strings, or any credentials in the HTML, JS, or inline data. Fetch data \
-in scratchpad cells using credentials from environment variables, then serialize only the \
-resulting data into the dashboard. If the user explicitly asks to embed a credential \
-(e.g. for a live-updating dashboard), warn them that publishing will expose it and get \
-confirmation before proceeding.
-
-  Build the parts in separate cells, then assemble at the end:
-
-  CELL 1 — Serialize data to a JS string variable (programmatic, no HTML):
-  Serialize all computed data (dataframes, metrics, KPIs) into a Python string. Build a \
-Python dict with keys like "kpis", "tables", "charts" — each containing the relevant data. \
-Convert DataFrames with df.to_dict(orient='records'). Use json.dumps(data, default=str) to \
-handle dates, Decimal, numpy types. Store as a Python variable: \
-`data_js = 'const D = ' + json_string + ';'` — do NOT write to a separate file.
-
-  CELL 2 — Build CSS + HTML structure as a Python string variable:
-  Write the HTML head (styles, CDN script tags) and body structure (header, KPIs, chart divs, \
-tabs, tables) as a Python string variable `html_body`. This cell builds the template.
-
-  CELL 3+ — Build JS chart rendering logic as Python string variables:
-  Write the JavaScript that initializes charts, populates tables, handles tabs, etc. \
-Split across multiple cells if needed to avoid token limits. Store as `js_charts` etc.
-
-  FINAL CELL — Assemble and write the HTML file:
-  Combine: `html = html_body.replace('</body>', f'<script>{{data_js}}{{js_charts}}</script></body>')` \
-or similar.
-
-  SELF-CONTAINED OUTPUT (critical):
-  Prefer inlining everything — CSS in `<style>`, JS in `<script>`, data as JS variables. \
-A single .html file is the most portable and publishable format. \
-If the dataset is very large (>100KB of JSON), you may write it to a separate .js file \
-in the SAME directory and reference it with a \
-relative `<script src="dashboard_data.js">` tag. The publisher will auto-bundle sibling \
-files referenced in the HTML. Never reference files outside the output directory.
-
-  WHY: (1) Browsers block local file:// cross-references across directories. \
-(2) Splitting the build across cells catches JS/CSS errors early — if a cell has a syntax issue \
-in a string, you'll see it before the final assembly. (3) Large datasets in single cells timeout. \
-(4) Self-contained files can be published to the web via /publish without missing assets.
-
-  PYTHON → JS STRING SAFETY (critical):
-  When building JS code inside Python strings, escape sequences get resolved by Python BEFORE \
-writing to the file. This means '\\n' in Python becomes a literal newline in the output, which \
-breaks JavaScript string literals. Rules:
-  - Use '\\\\n' in Python if you need a literal \\n in the JS output
-  - Use raw strings (r"...") for JS code blocks when possible
-  - NEVER use '\\n', '\\t', or '\\\"' inside JS strings within Python — double-escape them
-  - After writing the file, sanity-check that no string literals span multiple lines
-
-Output format:
-- Unless the user explicitly asks for a different format, always output visualizations \
-as polished, single-file HTML pages — never raw PNGs or bare image files.
 {output_context}
 
-Visual design:
-- Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), \
-clean typography (system sans-serif stack), generous padding, and responsive layout.
-- ALWAYS use Apache ECharts for interactive charts. Load it via CDN: \
-`<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`. \
-No Python dependencies needed — just write the HTML with inline JS. Use ECharts' built-in \
-dark theme: `echarts.init(dom, 'dark')`, then customize colors to match #0d1117 background.
-- NEVER use Plotly, matplotlib, or other charting libraries unless the user explicitly asks.
+## 1. General guidance
 
-Line smoothing (critical — smooth: true misrepresents volatile data):
-- DEFAULT: `smooth: false` on ALL line series. Straight segments between data points are \
-the honest representation — they show actual volatility, drawdowns, and inflection points.
-- EXCEPTION: Use `smooth: true` ONLY for cumulative/monotonic series (cumulative returns, \
-running totals, growth curves) where the trend matters more than point-to-point moves.
-- Decision heuristic: Does the line ever reverse direction meaningfully? If yes → smooth: false. \
-Is it a running sum, cumulative metric, or long-horizon trend? → smooth: true is acceptable.
-- Line widths: 2.5 for hero/primary lines, 1.5 for multi-line comparisons, 1 for secondary/reference lines.
+### Output
+- Always produce ONE `.html` file with CSS, JS, and data inlined — never reference
+  external local files (browsers block local `file://` cross-references).
+- If the data payload is very large (>100 KB), you may write it to a sibling
+  `.js` file in the same output directory; the publisher auto-bundles siblings.
+  Never reference files outside that directory.
 
-Chart readability (critical — labels must NEVER overlap):
-- Use `axisLabel: {{ rotate: -45 }}` or `{{ rotate: 45 }}` on crowded axes. \
-Set `grid: {{ containLabel: true }}` so labels never clip. Use `legend: {{ type: 'scroll', \
-bottom: 0 }}` to place scrollable legends below the chart. For pie/donut charts use \
-`label: {{ show: true, position: 'outside' }}` with `labelLayout: {{ hideOverlap: true }}`. \
-For bar charts with many categories, use horizontal bars (`yAxis` as category) or \
-abbreviate labels with `axisLabel: {{ formatter }}`. Always configure rich `tooltip` with \
-`formatter` functions for precise value display on hover. Use `dataZoom` for time series \
-so users can zoom into ranges.
+### Security
+- Dashboards may be published to the web. NEVER embed API keys, tokens, passwords,
+  or connection strings in the HTML, JS, or inline data. Fetch data in scratchpad
+  cells using credentials from environment variables, then serialize only the
+  resulting data into the dashboard. If the user explicitly asks to embed a
+  credential, warn them first and confirm.
 
-Multi-tab / multi-view dashboards (critical — charts fail silently on hidden containers):
-- ECharts, Chart.js, and Plotly all render nothing when called on a container with \
-`display: none` or 0×0 dimensions — no error, no warning, just a blank chart. \
-NEVER call `echarts.init()` inside `DOMContentLoaded` for tabs/pages that start hidden.
-- Initialize charts lazily, gated on first visibility: in the tab-click handler, \
-check a `Set` of already-rendered tabs and call the page's init function only on \
-first visit. Example pattern: \
-`const _rendered = new Set(['overview']); function showPage(name) {{ /* toggle classes */ \
-if (!_rendered.has(name)) {{ _rendered.add(name); initChartsFor(name); }} }}` \
-— only the default-visible page initializes on load.
+### Visual style
+- Dark theme by default: `#0d1117` background, `#e6edf3` text, clean sans-serif,
+  generous padding, responsive layout. Hero KPI cards on top (big numbers,
+  color-coded deltas), main narrative chart below, supporting charts after.
+- Think polished product page, not Jupyter default.
 
-Layout and composition:
-- For non-chart visualizations (tables, reports, dashboards), write clean HTML/CSS directly. \
-Use CSS grid or flexbox. Add subtle styling: rounded corners, soft shadows, hover effects.
-- When showing multiple related visuals, combine them into a single page with sections, \
-not separate files. Ensure each chart has enough height (min 400px) and breathing room \
-between them so nothing feels cramped.
-- Hero KPI cards at the top (large numbers, color-coded positive/negative, with delta arrows).
-- Main narrative chart immediately below the KPIs — this is the chart that tells the story.
-- Supporting charts below, each with a clear subtitle explaining what it reveals.
-- Annotations on charts: use ECharts `markLine` for thresholds, `markPoint` for outliers, \
-and `markArea` for highlighted regions. A chart without annotations is a missed opportunity.
-- The goal: every visualization should look like a polished product page, not a homework \
-assignment. Think dark-mode dashboard, not Jupyter default.\
+### Charts
+- Use Apache ECharts (CDN loaded in the template). Dark theme: `echarts.init(dom, 'dark')`.
+- NEVER use Plotly, matplotlib, or other libs unless the user explicitly asks.
+- **Line smoothing:** default `smooth: false` on all line series — straight
+  segments are the honest representation of volatile data. Use `smooth: true`
+  only for cumulative/monotonic series (running totals, growth curves).
+- **Readability:** use `axisLabel: {{ rotate: -45 }}` on crowded axes,
+  `grid: {{ containLabel: true }}` so labels never clip, `legend: {{ type: 'scroll', bottom: 0 }}`,
+  `labelLayout: {{ hideOverlap: true }}` on pies. Configure `tooltip.formatter` for
+  precise values. Use `dataZoom` for time series.
+- **Annotations:** use `markLine` for thresholds, `markPoint` for outliers,
+  `markArea` for highlighted regions — a chart without them is a missed opportunity.
+- **Hidden containers (critical):** ECharts renders nothing on a container with
+  `display: none` or 0×0 dimensions. For tabs/pages that start hidden,
+  initialize charts lazily on first visibility, not on `DOMContentLoaded`.
+
+### Python → JS string safety
+When you embed JS code inside a Python string, Python resolves escape sequences
+BEFORE the file is written. `'\\n'` becomes a real newline and breaks JS string
+literals. Use `'\\\\n'` for a literal `\\n`, prefer raw strings (`r"..."`) for JS
+blocks, and sanity-check the final file for stray multi-line string literals.
+
+## 2. HTML template
+
+Below is the shared HTML skeleton. It ships with a GitHub-dark CSS theme, the
+ECharts CDN, a pre-registered `github-dark` ECharts theme, and an `initChart`
+helper. You never modify it inline — your block functions produce strings that
+replace the `AGENT: XXX` markers via `template.replace(...)`. Markers in HTML
+contexts use `<!-- AGENT: XXX -->` syntax; markers inside `<style>` or
+`<script>` use `/* AGENT: XXX */` so they stay valid CSS/JS.
+
+Markers (each appears exactly once):
+
+| Marker | Location | What your function returns |
+|--------|----------|----------------------------|
+| `<!-- AGENT: PAGE_TITLE -->` | inside `<title>` | plain-text title (no tags) |
+| `/* AGENT: CUSTOM_STYLES */` | end of `<style>` | extra CSS — only if the base theme is insufficient, otherwise empty string |
+| `<!-- AGENT: HEADER -->` | top of `<body>` | `<div class="header">...</div>` with `.badge`, `<h1>`, `.subtitle`, optional `.source-link` |
+| `<!-- AGENT: CONTENT -->` | main body area | one or more `<section>` blocks holding charts, tables, KPIs |
+| `/* AGENT: CHART_DATA */` | in `<script>` | JS `const` declarations for datasets used by charts |
+| `/* AGENT: CHART_INITS */` | in `<script>` | `initChart('dom-id', {{ ...echarts option... }})` calls, one per chart container |
+
+Template file contents:
+
+```html
+<!-- DASHBOARD_HTML_TEMPLATE -->
+```
+
+## 3. Reading the template in scratchpad
+
+The template file ships inside the installed `anton` package at
+`anton/templates/template-dark-github.html`. Define the helper below in one of
+your first scratchpad cells so the final assembly cell can call it:
+
+```python
+def __read_html_template():
+    import anton
+    from pathlib import Path
+    path = Path(anton.__file__).parent / "templates" / "template-dark-github.html"
+    return path.read_text(encoding="utf-8")
+```
+
+Call `__read_html_template()` exactly once — from inside `__get_html()` — to
+obtain the template string, then apply the six `.replace(...)` substitutions
+described in section 5. Do NOT hold the template in a module-level variable;
+read it fresh inside the assembly function so each build is self-contained.
+
+## 4. DashSpec
+
+Before writing any HTML, produce a **DashSpec** — a short YAML plan that
+captures the page structure. Only after the spec is complete do you generate
+the HTML. The spec is an internal artifact: your own plan, not shown to the
+end user.
+
+**Why:**
+- Catch structural mistakes before HTML generation.
+- Make each block's purpose explicit before committing to code.
+- Keep generation deterministic: each spec block maps to one HTML fragment
+  (→ one scratchpad cell, one `__get_block_<id>()` function).
+
+### Format
+
+```yaml
+docType: dash-spec
+version: "0.1"
+
+meta:
+  title: string
+
+layout: string             # short prose: overall page layout
+
+header:  {{ ...block }}      # optional
+sidebar: {{ ...block }}      # optional
+blocks:  [ ...block ]      # main body
+```
+
+### Block shape
+
+```yaml
+id: string                 # snake_case, unique across the spec
+type: string               # short description of the block's role
+description: string        # what this block displays / contains
+class: string              # optional, CSS classes
+children: [ ...block ]     # optional, nested blocks
+```
+
+`type` is free-form — write a concise role label (e.g. `kpi_card`,
+`line_chart`, `filters_panel`, `nav_links`). No fixed vocabulary.
+
+### Rules
+
+1. Every block has `id`, `type`, and `description`. `class` and `children`
+   are optional.
+2. IDs are unique across the whole spec, snake_case.
+3. `description` explains intent, not appearance — what the block is for
+   and what data or content it holds.
+4. `layout` is a sentence or two describing the overall composition
+   (e.g. "Sidebar on the left, header on top, main grid on the right").
+5. Keep it shallow — nest with `children` only when it genuinely helps.
+6. Self-check before building: unique IDs, every block has `description`,
+   `layout` makes sense.
+
+### Example — Dashboard
+
+```yaml
+docType: dash-spec
+version: "0.1"
+
+meta:
+  title: "Q4 Sales Overview"
+
+layout: "Fixed header on top, sidebar on the left with navigation,
+  main content area on the right with a KPI row followed by two charts
+  and a products table."
+
+header:
+  id: top_bar
+  type: page_header
+  description: "Page title on the left, date range selector on the right."
+
+sidebar:
+  id: nav
+  type: navigation_panel
+  description: "Links to sibling dashboards: Overview, Regions, Products."
+
+blocks:
+  - id: kpi_row
+    type: kpi_group
+    description: "Three headline metrics for the quarter: total revenue,
+      order count, and average order value."
+    children:
+      - id: kpi_revenue
+        type: kpi_card
+        description: "Total revenue, computed as sum of monthly revenue."
+      - id: kpi_orders
+        type: kpi_card
+        description: "Total orders across the quarter."
+      - id: kpi_aov
+        type: kpi_card
+        description: "Average order value = revenue / orders."
+
+  - id: revenue_trend
+    type: line_chart
+    description: "Monthly revenue trajectory over the quarter, ECharts line."
+
+  - id: region_split
+    type: bar_chart
+    description: "Revenue by region, sorted descending, ECharts bar."
+
+  - id: top_products
+    type: data_table
+    class: "dense sortable"
+    description: "Top 10 products by revenue with SKU, name, and revenue columns."
+```
+
+### Example — Presentation
+
+```yaml
+docType: dash-spec
+version: "0.1"
+
+meta:
+  title: "Q4 Sales Review"
+
+layout: "Vertical stack of full-viewport slides, navigated by scroll or arrow keys."
+
+blocks:
+  - id: cover
+    type: title_slide
+    description: "Deck title and subtitle, centered."
+
+  - id: key_findings
+    type: bullet_slide
+    description: "Heading 'Key Findings' with three bullets summarizing
+      the quarter's headline takeaways."
+
+  - id: revenue_chart
+    type: chart_slide
+    description: "Full-slide ECharts line chart of monthly revenue,
+      with a short heading above."
+
+  - id: closing
+    type: quote_slide
+    description: "Closing quote that frames the next-quarter ask."
+```
+
+## 5. Build workflow
+
+### Step 1 — List insights
+Already required by the insights-first workflow at the top of this prompt: one
+line per chart/block in the form `<kind>: <insight it conveys and why it matters>`.
+This checklist is the input for DashSpec — no narrative prose, no design discussion.
+
+### Step 2 — Write DashSpec
+Produce the `DashSpec` YAML following the format in section 4. Do NOT embed
+data values in it — only structure and references. This is a plan, not a
+payload. Self-check before moving on: unique IDs, every block has
+`description`, `layout` makes sense.
+
+### Step 3 — Build the dashboard across scratchpad cells
+
+Each scratchpad cell defines exactly ONE isolated Python function whose name
+starts with double underscore (`__`). The function returns a string. This keeps
+the scratchpad namespace clean — no stray module-level variables.
+
+Rules for all cells:
+- One function per cell. Name it `__<role>` (double underscore prefix).
+- Return a string. Never print or write to files from these functions —
+  only the final `__get_html()` cell writes output.
+- If the function needs to use a variable declared in an earlier cell, **make a
+  copy** before mutating (`copy.deepcopy(x)` or `x.copy()`). Never modify
+  shared state — other functions rely on the original.
+- Keep each cell small. If a single block would push the cell past a few hundred
+  lines, split it into smaller helper blocks in separate cells.
+
+Cell layout — one function per marker in the template, plus one function per
+block from DashSpec:
+
+| Cell | Function | Target marker | Returns |
+|------|----------|---------------|---------|
+| 1 | `__get_page_title()` | `<!-- AGENT: PAGE_TITLE -->` | plain-text title, no tags |
+| 2 | `__make_custom_styles()` | `/* AGENT: CUSTOM_STYLES */` | extra CSS if needed; return `""` when the base theme is enough |
+| 3 | `__get_header()` | `<!-- AGENT: HEADER -->` | `<div class="header">` with `.badge`, `<h1>`, `.subtitle`, optional `.source-link` |
+| 4 | `__get_chart_data()` | `/* AGENT: CHART_DATA */` | JS `const` declarations for datasets, e.g. `const signups = [...];`. Serialize with `json.dumps(data, default=str)`; DataFrames → `df.to_dict(orient='records')` |
+| 5 | `__get_chart_inits()` | `/* AGENT: CHART_INITS */` | one `initChart('dom-id', {{ ...option... }});` call per chart container from the blocks |
+| 6..N | `__get_block_<id>()` | concatenated into `<!-- AGENT: CONTENT -->` | HTML fragment for that block — `<section>` with KPIs, chart `<div>` placeholders (the `initChart` call lives in cell 5, not here), tables, text |
+| Final | `__get_html()` | — | reads the template, replaces all markers, writes the file, returns the path |
+
+Rules for keeping functions coordinated:
+- Every chart needs a matching pair: a `<div id="...">` inside some `__get_block_<id>()` AND an `initChart('...', {{...}})` inside `__get_chart_inits()`. The DOM ids must match exactly.
+- `__get_chart_data()` names datasets referenced by `__get_chart_inits()`. Keep naming stable across the two.
+
+The final cell looks roughly like this:
+
+```python
+def __get_html():
+    template = __read_html_template()
+    content = (
+        __get_block_kpi_row()
+        + __get_block_main_chart()
+        + __get_block_detail_table()
+        # ...one line per block, in DashSpec order
+    )
+    html = (
+        template
+        .replace("<!-- AGENT: PAGE_TITLE -->", __get_page_title())
+        .replace("/* AGENT: CUSTOM_STYLES */", __make_custom_styles())
+        .replace("<!-- AGENT: HEADER -->",     __get_header())
+        .replace("<!-- AGENT: CONTENT -->",    content)
+        .replace("/* AGENT: CHART_DATA */",    __get_chart_data())
+        .replace("/* AGENT: CHART_INITS */",   __get_chart_inits())
+    )
+    path = "<output path>"  # see output_context
+    with open(path, "wt", encoding="utf-8") as f:
+        f.write(html)
+    return f"dashboard saved to {{path}}"
+```
+
+Splitting the work across cells catches syntax errors early (a broken string in
+one block fails fast), keeps each cell well under the scratchpad's 120-second
+timeout, and makes the final assembly trivially reviewable.\
 """
 
 
