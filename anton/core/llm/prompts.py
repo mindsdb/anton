@@ -302,7 +302,7 @@ Markers (each appears exactly once):
 | Marker | Location | What your function returns |
 |--------|----------|----------------------------|
 | `<!-- AGENT: PAGE_TITLE -->` | inside `<title>` | plain-text title (no tags) |
-| `/* AGENT: CUSTOM_STYLES */` | end of `<style>` | extra CSS — only if the base theme is insufficient, otherwise empty string |
+| `/* AGENT: CUSTOM_STYLES */` | end of `<style>` | extra CSS — feel free to add any rules, keyframes, or utility classes the dashboard needs (new `.card-*` variants, block-specific layouts, animations, custom gradients, etc.). Return `""` only when the base theme already covers everything. |
 | `<!-- AGENT: HEADER -->` | top of `<body>` | `<div class="header">...</div>` with `.badge`, `<h1>`, `.subtitle`, optional `.source-link` |
 | `<!-- AGENT: CONTENT -->` | main body area | one or more `<section>` blocks holding charts, tables, KPIs |
 | `/* AGENT: CHART_DATA */` | in `<script>` | JS `const` declarations for datasets used by charts |
@@ -329,9 +329,19 @@ def __read_html_template():
 ```
 
 Call `__read_html_template()` exactly once — from inside `__get_html()` — to
-obtain the template string, then apply the six `.replace(...)` substitutions
-described in section 5. Do NOT hold the template in a module-level variable;
-read it fresh inside the assembly function so each build is self-contained.
+obtain the template string, then apply only the `.replace(...)` substitutions
+that apply to your dashboard. You do NOT have to fill every marker — the
+section 2 markers are all valid HTML / CSS / JS comments in their respective
+contexts, so any you leave untouched remain as invisible comments in the
+output and don't affect rendering. A minimal dashboard may only replace
+`PAGE_TITLE` and `CONTENT`, or just `CONTENT` if a bare title is fine. Do NOT
+hold the template in a module-level variable; read it fresh inside the
+assembly function so each build is self-contained.
+
+The one exception is `<!-- AGENT: PAGE_TITLE -->`: it sits inside `<title>`,
+where HTML comments are treated as literal text. If you don't replace it, the
+browser tab shows the raw marker — so replace it whenever you care about the
+title.
 
 ## 4. DashSpec
 
@@ -344,7 +354,8 @@ end user.
 - Catch structural mistakes before HTML generation.
 - Make each block's purpose explicit before committing to code.
 - Keep generation deterministic: each spec block maps to one HTML fragment
-  (→ one scratchpad cell, one `__get_block_<id>()` function).
+  via its own `__get_block_<id>()` function. Related small functions can
+  share a scratchpad cell — see section 5 for packing rules.
 
 ### Format
 
@@ -441,43 +452,15 @@ blocks:
     description: "Top 10 products by revenue with SKU, name, and revenue columns."
 ```
 
-### Example — Presentation
-
-```yaml
-docType: dash-spec
-version: "0.1"
-
-meta:
-  title: "Q4 Sales Review"
-
-layout: "Vertical stack of full-viewport slides, navigated by scroll or arrow keys."
-
-blocks:
-  - id: cover
-    type: title_slide
-    description: "Deck title and subtitle, centered."
-
-  - id: key_findings
-    type: bullet_slide
-    description: "Heading 'Key Findings' with three bullets summarizing
-      the quarter's headline takeaways."
-
-  - id: revenue_chart
-    type: chart_slide
-    description: "Full-slide ECharts line chart of monthly revenue,
-      with a short heading above."
-
-  - id: closing
-    type: quote_slide
-    description: "Closing quote that frames the next-quarter ask."
-```
-
 ## 5. Build workflow
 
 ### Step 1 — List insights
-Already required by the insights-first workflow at the top of this prompt: one
-line per chart/block in the form `<kind>: <insight it conveys and why it matters>`.
-This checklist is the input for DashSpec — no narrative prose, no design discussion.
+Jot down a tight checklist of what the page must show — one line per block in
+the form `<kind>: <insight it conveys and why it matters>`
+(e.g. `kpi_card: total revenue to anchor the quarter at a glance`,
+`line_chart: monthly revenue trajectory to spot inflection points`,
+`quote_slide: closing quote that frames the next-quarter ask`). This
+checklist is the input for DashSpec.
 
 ### Step 2 — Write DashSpec
 Produce the `DashSpec` YAML following the format in section 4. Do NOT embed
@@ -487,51 +470,64 @@ payload. Self-check before moving on: unique IDs, every block has
 
 ### Step 3 — Build the dashboard across scratchpad cells
 
-Each scratchpad cell defines exactly ONE isolated Python function whose name
-starts with double underscore (`__`). The function returns a string. This keeps
-the scratchpad namespace clean — no stray module-level variables.
+Every piece of output is produced by a Python function whose name starts with
+double underscore (`__`). Each function returns a string. This keeps the
+scratchpad namespace clean — no stray module-level variables.
 
-Rules for all cells:
-- One function per cell. Name it `__<role>` (double underscore prefix).
+Rules:
+- One `__<role>` function per block / marker. Name it `__<role>` (double
+  underscore prefix), so no function — and no stray module-level variable —
+  leaks into the user-visible scratchpad namespace.
+- You do NOT need one scratchpad cell per function. Pack several related
+  small functions into the same cell when that's natural (e.g. three short
+  KPI-card blocks can share one cell). Break into more cells only when a
+  cell would otherwise grow past ~150 lines, or when functions need very
+  different imports / setup.
+- `__get_html()` is always its own final cell — don't bundle it with anything.
 - Return a string. Never print or write to files from these functions —
   only the final `__get_html()` cell writes output.
 - If the function needs to use a variable declared in an earlier cell, **make a
   copy** before mutating (`copy.deepcopy(x)` or `x.copy()`). Never modify
   shared state — other functions rely on the original.
-- Keep each cell small. If a single block would push the cell past a few hundred
-  lines, split it into smaller helper blocks in separate cells.
-- **Every cell in the dashboard build must start with a `# DELETABLE: <short
+- **Every cell in the page build must start with a `# DELETABLE: <short
   description>` comment on the very first line** (e.g. `# DELETABLE: build header
   HTML`). Once the final file is on disk, the intermediate code is no longer
   useful in context; the marker is what lets `erase_scratchpad_history` clear
   these cells afterwards. The comment has no effect on execution.
 - **Append an approximate progress percentage to the end of every cell's
-  `one_line_description`** so the user sees the build advancing. Compute
-  `total = 6 + N` where `N = len(DashSpec.blocks)` (5 fixed cells + N block
-  cells + 1 final `__get_html()`). For the K-th cell (1-based) append
-  `" (~{{pct}}% done)"` with `pct = round(K / total * 100)`. Example for a
-  dashboard with 3 blocks (`total=9`): cell 1 → `"build page title (~11% done)"`,
-  cell 5 → `"build chart inits (~56% done)"`, final cell → `"assemble and save
-  dashboard (~100% done)"`.
+  `one_line_description`** so the user sees the build advancing. Before the
+  first cell, decide how you'll pack the functions into cells and let
+  `total` be that cell count (always including the final `__get_html()`
+  cell). For the K-th cell (1-based) append `" (~{{pct}}% done)"` with
+  `pct = round(K / total * 100)`. Example with `total=6` cells: cell 1 →
+  `"build title + styles (~17% done)"`, cell 3 → `"build kpi + main blocks
+  (~50% done)"`, final cell → `"assemble and save dashboard (~100% done)"`.
+  If the plan changes mid-build, recompute `total` from the new plan —
+  percentages only need to trend upward, not be exact.
 
-Cell layout — one function per marker in the template, plus one function per
-block from DashSpec:
+Function layout — one function per marker in the template, plus one function
+per block from DashSpec. Cell packing is up to you (see the rules above).
 
-| Cell | Function | Target marker | Returns |
-|------|----------|---------------|---------|
-| 1 | `__get_page_title()` | `<!-- AGENT: PAGE_TITLE -->` | plain-text title, no tags |
-| 2 | `__make_custom_styles()` | `/* AGENT: CUSTOM_STYLES */` | extra CSS if needed; return `""` when the base theme is enough |
-| 3 | `__get_header()` | `<!-- AGENT: HEADER -->` | `<div class="header">` with `.badge`, `<h1>`, `.subtitle`, optional `.source-link` |
-| 4 | `__get_chart_data()` | `/* AGENT: CHART_DATA */` | JS `const` declarations for datasets, e.g. `const signups = [...];`. Serialize with `json.dumps(data, default=str)`; DataFrames → `df.to_dict(orient='records')` |
-| 5 | `__get_chart_inits()` | `/* AGENT: CHART_INITS */` | one `initChart('dom-id', {{ ...option... }});` call per chart container from the blocks |
-| 6..N | `__get_block_<id>()` | concatenated into `<!-- AGENT: CONTENT -->` | HTML fragment for that block — `<section>` with KPIs, chart `<div>` placeholders (the `initChart` call lives in cell 5, not here), tables, text |
-| Final | `__get_html()` | — | reads the template, replaces all markers, writes the file, returns the path |
+| Function | Target marker | Returns |
+|----------|---------------|---------|
+| `__get_page_title()` | `<!-- AGENT: PAGE_TITLE -->` | plain-text title, no tags |
+| `__make_custom_styles()` | `/* AGENT: CUSTOM_STYLES */` | any CSS rules, keyframes, or utility classes this dashboard needs — adding custom styles is encouraged whenever the base classes don't fit the design (new card variants, block-specific grids, animations, hover states, layered gradients, etc.). Reuse the theme CSS variables (`var(--bg)`, `var(--accent)`, etc.) for consistency. Return `""` only when nothing extra is required. |
+| `__get_header()` | `<!-- AGENT: HEADER -->` | `<div class="header">` with `.badge`, `<h1>`, `.subtitle`, optional `.source-link` |
+| `__get_chart_data()` | `/* AGENT: CHART_DATA */` | JS `const` declarations for datasets, e.g. `const signups = [...];`. Serialize with `json.dumps(data, default=str)`; DataFrames → `df.to_dict(orient='records')` |
+| `__get_chart_inits()` | `/* AGENT: CHART_INITS */` | one `initChart('dom-id', {{ ...option... }});` call per chart container from the blocks |
+| `__get_block_<id>()` (one per DashSpec block) | concatenated into `<!-- AGENT: CONTENT -->` | HTML fragment for that block — `<section>` with KPIs, chart `<div>` placeholders (the `initChart` call lives in `__get_chart_inits`, not here), tables, text |
+| `__get_html()` | — | reads the template, replaces all markers, writes the file, returns the path |
 
 Rules for keeping functions coordinated:
 - Every chart needs a matching pair: a `<div id="...">` inside some `__get_block_<id>()` AND an `initChart('...', {{...}})` inside `__get_chart_inits()`. The DOM ids must match exactly.
 - `__get_chart_data()` names datasets referenced by `__get_chart_inits()`. Keep naming stable across the two.
 
-The final cell looks roughly like this:
+The final cell looks roughly like the example below. Include only the
+`.replace(...)` calls (and their corresponding fixed cells) that your
+dashboard actually needs — skip `CUSTOM_STYLES` if the base theme is enough,
+skip `HEADER` if the design has no top banner, skip both `CHART_DATA` and
+`CHART_INITS` if there are no charts. The unmodified markers stay as inert
+comments in the output.
 
 ```python
 # DELETABLE: assemble template and write final HTML file
@@ -546,11 +542,11 @@ def __get_html():
     html = (
         template
         .replace("<!-- AGENT: PAGE_TITLE -->", __get_page_title())
-        .replace("/* AGENT: CUSTOM_STYLES */", __make_custom_styles())
-        .replace("<!-- AGENT: HEADER -->",     __get_header())
+        .replace("/* AGENT: CUSTOM_STYLES */", __make_custom_styles())  # omit if no custom CSS
+        .replace("<!-- AGENT: HEADER -->",     __get_header())          # omit if no header
         .replace("<!-- AGENT: CONTENT -->",    content)
-        .replace("/* AGENT: CHART_DATA */",    __get_chart_data())
-        .replace("/* AGENT: CHART_INITS */",   __get_chart_inits())
+        .replace("/* AGENT: CHART_DATA */",    __get_chart_data())      # omit if no charts
+        .replace("/* AGENT: CHART_INITS */",   __get_chart_inits())     # omit if no charts
     )
     path = "<output path>"  # see output_context
     with open(path, "wt", encoding="utf-8") as f:
