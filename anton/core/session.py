@@ -13,6 +13,7 @@ from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptC
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
+from anton.core.tools.erase_scratchpad_history import ERASE_SCRATCHPAD_HISTORY_TOOL
 from anton.core.llm.prompts import RESILIENCE_NUDGE
 from anton.core.llm.provider import (
     ContextOverflowError,
@@ -404,6 +405,11 @@ class ChatSession:
 
         # Procedural memory retrieval — always available, no-op if no skills.
         self.tool_registry.register_tool(RECALL_SKILL_TOOL)
+
+        # Context compaction for file-artifact workflows: the agent marks
+        # intermediate cells with `# DELETABLE: <desc>` and calls this after
+        # writing the final file to disk.
+        self.tool_registry.register_tool(ERASE_SCRATCHPAD_HISTORY_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

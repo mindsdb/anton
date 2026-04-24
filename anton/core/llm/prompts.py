@@ -500,6 +500,11 @@ Rules for all cells:
   shared state — other functions rely on the original.
 - Keep each cell small. If a single block would push the cell past a few hundred
   lines, split it into smaller helper blocks in separate cells.
+- **Every cell in the dashboard build must start with a `# DELETABLE: <short
+  description>` comment on the very first line** (e.g. `# DELETABLE: build header
+  HTML`). Once the final file is on disk, the intermediate code is no longer
+  useful in context; the marker is what lets `erase_scratchpad_history` clear
+  these cells afterwards. The comment has no effect on execution.
 
 Cell layout — one function per marker in the template, plus one function per
 block from DashSpec:
@@ -521,6 +526,7 @@ Rules for keeping functions coordinated:
 The final cell looks roughly like this:
 
 ```python
+# DELETABLE: assemble template and write final HTML file
 def __get_html():
     template = __read_html_template()
     content = (
@@ -546,7 +552,16 @@ def __get_html():
 
 Splitting the work across cells catches syntax errors early (a broken string in
 one block fails fast), keeps each cell well under the scratchpad's 120-second
-timeout, and makes the final assembly trivially reviewable.\
+timeout, and makes the final assembly trivially reviewable.
+
+### Step 4 — Reclaim context
+After the final `__get_html()` cell has returned the path, call the
+`erase_scratchpad_history` tool (no arguments). It walks every cell you
+marked `# DELETABLE: <desc>` and replaces its code with `# DELETED: <desc>`
+in both the live scratchpad and the message history — the dashboard HTML on
+disk is the artifact, so the intermediate code no longer needs to occupy
+context. Skipping this step is not an error, but it bloats later turns with
+code the user can reread from the file any time.\
 """
 
 
