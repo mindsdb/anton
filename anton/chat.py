@@ -58,7 +58,7 @@ from anton.commands.skills import (
     handle_skill_show,
     handle_skills_list,
 )
-from anton.commands.share import handle_share_export
+from anton.commands.share import handle_share_export, handle_share_import
 from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
 from anton.utils.prompt import (
     prompt_or_cancel,
@@ -1362,8 +1362,28 @@ async def _chat_loop(
                             episodic if episodic.enabled else None,
                             summary_only="--summary" in rest,
                         )
+                    elif sub == "import":
+                        if not rest:
+                            console.print("[anton.warning]Usage: /share import <file>[/]")
+                            console.print()
+                        else:
+                            session = await handle_share_import(
+                                console,
+                                session,
+                                workspace,
+                                settings,
+                                state,
+                                self_awareness,
+                                cortex,
+                                episodic if episodic.enabled else None,
+                                history_store,
+                                filepath=rest,
+                            )
+                            current_session_id = session._session_id
                     else:
-                        console.print("[anton.warning]Usage: /share export [--summary][/]")
+                        console.print(
+                            "[anton.warning]Usage: /share export [--summary] | /share import <file>[/]"
+                        )
                         console.print()
                     continue
                 elif cmd == "/resume":

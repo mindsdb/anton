@@ -7,12 +7,14 @@ import os
 import re
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 from rich.console import Console
 
 if TYPE_CHECKING:
+    from anton.config.settings import AntonSettings
     from anton.core.llm.client import LLMClient
     from anton.core.memory.episodes import EpisodicMemory
     from anton.core.session import ChatSession
@@ -208,3 +210,188 @@ async def handle_share_export(
             "[anton.muted]  No project memories were delivered in this session.[/]"
         )
     console.print()
+
+
+# ── import ────────────────────────────────────────────────────────────────────
+
+
+def _content_to_str(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        return " ".join(p for p in parts if p)
+    return str(content)
+
+
+def _replay_to_episodic(episodic: "EpisodicMemory", history: list[dict]) -> None:
+    turn = 0
+    for msg in history:
+        role = msg.get("role", "")
+        content = _content_to_str(msg.get("content", ""))
+        if role == "user":
+            turn += 1
+        if role in ("user", "assistant"):
+            episodic.log_turn(turn, role, content)
+
+
+def _build_provenance_suffix(payload: dict) -> str:
+    sess = payload.get("session", {})
+    title = sess.get("title", "")
+    exported_by = payload.get("exported_by", "unknown")
+    exported_at = payload.get("exported_at", "")[:10]
+    return (
+        "## Note\n"
+        f'This session was imported from a .anton file: "{title}", '
+        f"exported by {exported_by} on {exported_at}. "
+        "The full conversation history has been restored."
+    )
+
+
+async def handle_share_import(
+    console: Console,
+    session: "ChatSession",
+    workspace: "Workspace",
+    settings: "AntonSettings",
+    state: dict,
+    self_awareness,
+    cortex: "Cortex | None",
+    episodic: "EpisodicMemory | None",
+    history_store: "HistoryStore | None",
+    filepath: str,
+) -> "ChatSession":
+    from anton.chat_session import rebuild_session
+    from anton.core.llm.prompt_builder import SystemPromptContext
+    from anton.utils.prompt import prompt_or_cancel
+
+    # 1. parse & validate
+    path = Path(filepath).expanduser()
+    if not path.is_file():
+        console.print(f"[anton.warning]File not found: {filepath}[/]")
+        console.print()
+        return session
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        console.print("[anton.warning]Could not read file — may be corrupted.[/]")
+        console.print()
+        return session
+
+    version = payload.get("version")
+    if version != "0.1":
+        console.print(
+            f"[anton.warning]Unsupported version: {version}. Expected 0.1.[/]"
+        )
+        console.print()
+        return session
+
+    # 2. warn if active session
+    if session._history:
+        console.print(
+            "[anton.warning]You have an active session in progress. "
+            "Importing will create a new session — your current work is preserved in history.[/]"
+        )
+        console.print()
+        choice = await prompt_or_cancel(
+            "(anton) Continue?",
+            choices=["y", "n"],
+            choices_display="y/n",
+            default="n",
+        )
+        if choice is None or choice != "y":
+            console.print()
+            return session
+
+    # 3. start new episodic session
+    if episodic and episodic.enabled:
+        episodic.start_session()
+
+    new_session_id = episodic._session_id if (episodic and episodic.enabled) else None
+
+    # close old scratchpads
+    if session._scratchpads.list_pads():
+        await session._scratchpads.close_all()
+
+    # 4. create new session
+    new_session = rebuild_session(
+        settings=settings,
+        state=state,
+        self_awareness=self_awareness,
+        cortex=cortex,
+        workspace=workspace,
+        console=console,
+        episodic=episodic,
+        history_store=history_store,
+        session_id=new_session_id,
+    )
+
+    # 5. inject conversation history into LLM context
+    history = payload.get("session", {}).get("conversation_history", [])
+    new_session._history = list(history)
+    new_session._turn_count = sum(1 for m in history if m.get("role") == "user")
+
+    if history_store and new_session_id:
+        history_store.save(new_session_id, history)
+
+    # 6. replay to episodic file
+    if episodic and episodic.enabled:
+        _replay_to_episodic(episodic, history)
+
+    # 7. log memories to episodic
+    session_born = payload.get("memory", {}).get("session_born", [])
+    project_accessed = payload.get("memory", {}).get("project_accessed", [])
+
+    if episodic and episodic.enabled:
+        for m in session_born:
+            episodic.log_turn(
+                0, "memory_write", m["content"],
+                kind=m.get("kind", ""), topic=m.get("topic", ""),
+            )
+        for m in project_accessed:
+            episodic.log_turn(
+                0, "memory_read", m["content"],
+                kind=m.get("kind", ""), topic=m.get("topic", ""),
+            )
+
+    # 8. inject provenance suffix
+    suffix = _build_provenance_suffix(payload)
+    new_session._system_prompt_context = SystemPromptContext(
+        runtime_context=new_session._system_prompt_context.runtime_context,
+        prefix=new_session._system_prompt_context.prefix,
+        output_context=new_session._system_prompt_context.output_context,
+        suffix=suffix,
+    )
+
+    # 9. print briefing
+    sess = payload.get("session", {})
+    memory = payload.get("memory", {})
+    cells = payload.get("scratchpad", {}).get("cells", [])
+    n_turns = sum(1 for m in history if m.get("role") == "user")
+
+    console.print()
+    console.print(f"[bold][anton.cyan]Imported: {sess.get('title', 'Session')}[/][/]")
+    console.print(
+        f"  [bold]From:[/]    {payload.get('exported_by', '?')} · "
+        f"{payload.get('exported_at', '')[:10]}"
+    )
+    if sess.get("summary"):
+        console.print(f"  [bold]Summary:[/] {sess['summary']}")
+    if n_turns:
+        console.print(f"  [bold]Turns:[/]   {n_turns}")
+    if session_born or project_accessed:
+        console.print(
+            f"  [bold]Memory:[/]  {len(session_born)} session-born, "
+            f"{len(project_accessed)} project memories"
+        )
+    if cells:
+        console.print(f"  [bold]Code:[/]    {len(cells)} scratchpad cells")
+    console.print()
+    console.print("[anton.muted]Session restored. Continue where it left off.[/]")
+    console.print()
+
+    return new_session
