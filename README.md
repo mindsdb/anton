@@ -127,7 +127,7 @@ ANTON>
 
 ---
 
-You can always ask Anton to explain what it did. Ask it to dump its ineer workings, a full notebook-style breakdown: every cell of code it ran, the outputs, and errors - so you can follow its reasoning step by step.
+You can always ask Anton to explain what it did. You will get a full notebook-style breakdown: every cell of code it ran, the outputs, and errors - so you can follow its reasoning step by step.
 
 ---
 
