@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, Field
 
 from anton.core.llm.prompts import CONSOLIDATION_PROMPT
-from anton.core.memory.hippocampus import Engram
+from anton.core.memory.base import Engram
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient

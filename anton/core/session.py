@@ -126,6 +126,7 @@ class ChatSession:
             coding_model=config.llm_client.coding_model,
             coding_api_key=coding_conn.api_key or "",
             coding_base_url=coding_conn.base_url or "",
+            cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
         )
 
