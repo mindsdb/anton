@@ -369,7 +369,6 @@ async def handle_share_import(
 
     # 9. print briefing
     sess = payload.get("session", {})
-    memory = payload.get("memory", {})
     cells = payload.get("scratchpad", {}).get("cells", [])
     n_turns = sum(1 for m in history if m.get("role") == "user")
 
