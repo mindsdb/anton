@@ -106,7 +106,6 @@ class ChatSession:
             list(config.initial_history) if config.initial_history else []
         )
         self._pending_memory_confirmations: list = []
-        self._identity_buffer: list[str] = []
         self._turn_count = (
             sum(1 for m in self._history if m.get("role") == "user")
             if config.initial_history
@@ -785,11 +784,8 @@ class ChatSession:
         self._turn_count += 1
         self._persist_history()
         if self._cortex is not None and self._cortex.mode != "off":
-            self._identity_buffer.append(user_msg_str)
-            if self._turn_count % 5 == 0:
-                buffered = "\n\n".join(self._identity_buffer)
-                self._identity_buffer.clear()
-                asyncio.create_task(self._cortex.maybe_update_identity(buffered))
+            if self._turn_count % 5 == 0 and isinstance(user_input, str):
+                asyncio.create_task(self._cortex.maybe_update_identity(user_input))
             # Periodic memory vacuum (Systems Consolidation)
             self._cortex.maybe_vacuum()
 
