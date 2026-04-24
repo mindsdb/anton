@@ -74,7 +74,7 @@ class TestPromptBuilderReceivesStore:
         assert "## Procedural memory" in prompt
         assert "csv_summary" in prompt
 
-    def test_section_omitted_when_no_store(self):
+    def test_section_renders_builtins_when_no_store(self):
         builder = ChatSystemPromptBuilder()
         prompt = builder.build(
             current_datetime="2026-04-10",
@@ -82,7 +82,11 @@ class TestPromptBuilderReceivesStore:
             proactive_dashboards=False,
             skill_store=None,
         )
-        assert "Procedural memory" not in prompt
+        # Section is always present because of hardcoded built-in skills.
+        assert "## Procedural memory" in prompt
+        assert "`generate_dashboard_html`" in prompt
+        # No user skills leak when there's no store.
+        assert "csv_summary" not in prompt
 
 
 class TestDispatchRoundtrip:

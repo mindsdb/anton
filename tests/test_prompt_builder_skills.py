@@ -48,15 +48,20 @@ def _build_prompt(builder: ChatSystemPromptBuilder, **overrides) -> str:
 
 
 class TestProceduralMemorySection:
-    def test_no_store_omits_section(self):
+    def test_no_store_renders_only_builtins(self):
         builder = ChatSystemPromptBuilder()
         prompt = _build_prompt(builder, skill_store=None)
-        assert "Procedural memory" not in prompt
+        # Section is always present because at least one built-in skill exists.
+        assert "## Procedural memory" in prompt
+        assert "`generate_dashboard_html`" in prompt
 
-    def test_empty_store_omits_section(self, empty_store: SkillStore):
+    def test_empty_store_renders_only_builtins(self, empty_store: SkillStore):
         builder = ChatSystemPromptBuilder()
         prompt = _build_prompt(builder, skill_store=empty_store)
-        assert "Procedural memory" not in prompt
+        assert "## Procedural memory" in prompt
+        assert "`generate_dashboard_html`" in prompt
+        # No user-skill labels leak in from an empty store.
+        assert "`csv_summary`" not in prompt
 
     def test_populated_store_renders_section(self, populated_store: SkillStore):
         builder = ChatSystemPromptBuilder()
@@ -130,8 +135,8 @@ class TestProceduralMemorySection:
         assert "`bare`" in prompt
         # No crash, even with no when_to_use
 
-    def test_skip_section_when_store_raises(self, tmp_path: Path, monkeypatch):
-        """If the store blows up at read time, the section is omitted gracefully."""
+    def test_store_failure_falls_back_to_builtins(self, tmp_path: Path, monkeypatch):
+        """If the store blows up at read time, we still render the built-ins."""
         s = SkillStore(root=tmp_path / "skills_broken")
 
         def boom(self):
@@ -140,4 +145,5 @@ class TestProceduralMemorySection:
         monkeypatch.setattr(SkillStore, "list_summaries", boom)
         builder = ChatSystemPromptBuilder()
         prompt = _build_prompt(builder, skill_store=s)
-        assert "Procedural memory" not in prompt
+        assert "## Procedural memory" in prompt
+        assert "`generate_dashboard_html`" in prompt
