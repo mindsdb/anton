@@ -541,20 +541,33 @@ class ChatSession:
         if len(self._history) <= keep:
             return
         tail = list(self._history[-keep:])
-        while tail and tail[0].get("role") == "assistant":
-            tail.pop(0)
-        if tail:
-            first = tail[0]
-            content = first.get("content")
-            if first.get("role") == "user" and isinstance(content, list):
-                filtered = [
-                    b for b in content
-                    if not (isinstance(b, dict) and b.get("type") == "tool_result")
-                ]
-                if filtered:
-                    tail[0] = {**first, "content": filtered}
-                else:
-                    tail.pop(0)
+
+        # Strip leading messages that would leave tail in an invalid state:
+        # - assistant at head (API requires user first)
+        # - user whose only blocks are tool_result references (their
+        #   matching tool_use is in the dropped prefix, so they're orphaned)
+        # Repeat because dropping one can expose another. A user message
+        # with mixed content keeps its non-tool_result blocks.
+        while tail:
+            head = tail[0]
+            role = head.get("role")
+            if role == "assistant":
+                tail.pop(0)
+                continue
+            if role == "user":
+                content = head.get("content")
+                if isinstance(content, list):
+                    filtered = [
+                        b for b in content
+                        if not (isinstance(b, dict) and b.get("type") == "tool_result")
+                    ]
+                    if not filtered:
+                        tail.pop(0)
+                        continue
+                    if len(filtered) != len(content):
+                        tail[0] = {**head, "content": filtered}
+            break
+
         placeholder = {
             "role": "user",
             "content": "[Earlier conversation was truncated due to persistent context overflow.]",
