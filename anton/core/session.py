@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import json
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
@@ -124,6 +125,7 @@ class ChatSession:
             coding_model=config.llm_client.coding_model,
             coding_api_key=coding_conn.api_key or "",
             coding_base_url=coding_conn.base_url or "",
+            cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
         )
 
@@ -1025,6 +1027,11 @@ class ChatSession:
                                         description=description,
                                         cell=cell,
                                     )
+                                    yield StreamToolResult(
+                                        name=tc.name,
+                                        action="exec",
+                                        content=json.dumps(asdict(cell))
+                                    )
                                 if self._episodic is not None and cell is not None:
                                     self._episodic.log_turn(
                                         self._turn_count + 1,
@@ -1071,7 +1078,7 @@ class ChatSession:
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"
                             ):
-                                yield StreamToolResult(content=result_text)
+                                yield StreamToolResult(name=tc.name, action="dump", content=result_text)
                                 result_text = (
                                     "The full notebook has been displayed to the user above. "
                                     "Do not repeat it. Here is the content for your reference:\n\n"

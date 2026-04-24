@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncIterator
 
 import openai
+from openai import AsyncAzureOpenAI
 
 from .provider import (
     ContextOverflowError,
@@ -51,7 +52,7 @@ def _translate_tool_choice(tool_choice: dict) -> dict | str:
     return "auto"
 
 
-def _translate_messages(system: str, messages: list[dict]) -> list[dict]:
+def _translate_messages(system: str, messages: list[dict], supports_vision: bool = True) -> list[dict]:
     """Convert Anthropic-style messages to OpenAI chat format.
 
     Handles:
@@ -78,7 +79,7 @@ def _translate_messages(system: str, messages: list[dict]) -> list[dict]:
             if role == "assistant":
                 result.extend(_translate_assistant_blocks(content))
             elif role == "user":
-                result.extend(_translate_user_blocks(content))
+                result.extend(_translate_user_blocks(content, supports_vision=supports_vision))
             else:
                 # Fallback: join text blocks
                 text = " ".join(
@@ -121,7 +122,7 @@ def _translate_assistant_blocks(blocks: list[dict]) -> list[dict]:
     return [msg]
 
 
-def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
+def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True) -> list[dict]:
     """Convert user content blocks (including tool_result and image) to OpenAI messages."""
     result: list[dict] = []
     content_parts: list[dict] = []  # Accumulates text + image_url blocks
@@ -147,7 +148,7 @@ def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
             )
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
-        elif block.get("type") == "image":
+        elif block.get("type") == "image" and supports_vision:
             # Anthropic image block -> OpenAI image_url block
             source = block.get("source", {})
             if source.get("type") == "base64":
@@ -173,6 +174,16 @@ def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
             result.append({"role": "user", "content": content_parts})
 
     return result
+
+
+def _is_azure_endpoint(url: str | None) -> bool:
+    """Return True if the URL looks like an Azure OpenAI endpoint."""
+    if not url:
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    host = (parsed.netloc or parsed.path).lower()
+    return host.endswith(".openai.azure.com") or host.endswith(".cognitiveservices.azure.com")
 
 
 def build_chat_completion_kwargs(
@@ -202,21 +213,37 @@ class OpenAIProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         ssl_verify: bool = True,
+        api_version: str | None = None,
+        supports_vision: bool = True,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url
         self._ssl_verify = ssl_verify
+        self._api_version = api_version
+        self._supports_vision = supports_vision
 
         import httpx
 
-        kwargs = {}
-        if api_key:
-            kwargs["api_key"] = api_key
-        if base_url:
-            kwargs["base_url"] = base_url
-        if not ssl_verify:
-            kwargs["http_client"] = httpx.AsyncClient(verify=False)
-        self._client = openai.AsyncOpenAI(**kwargs)
+        if api_version and _is_azure_endpoint(base_url):
+            # Azure OpenAI: use the dedicated client which handles deployment
+            # URL construction and api-version automatically.
+            azure_kwargs: dict = {"api_version": api_version}
+            if api_key:
+                azure_kwargs["api_key"] = api_key
+            if base_url:
+                azure_kwargs["azure_endpoint"] = base_url
+            if not ssl_verify:
+                azure_kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            self._client = AsyncAzureOpenAI(**azure_kwargs)
+        else:
+            kwargs: dict = {}
+            if api_key:
+                kwargs["api_key"] = api_key
+            if base_url:
+                kwargs["base_url"] = base_url
+            if not ssl_verify:
+                kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            self._client = openai.AsyncOpenAI(**kwargs)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(
@@ -224,6 +251,7 @@ class OpenAIProvider(LLMProvider):
             api_key=self._api_key,
             base_url=self._base_url,
             ssl_verify=self._ssl_verify,
+            api_version=self._api_version,
         )
 
     async def complete(
@@ -236,7 +264,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        oai_messages = _translate_messages(system, messages)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -314,7 +342,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
     ) -> AsyncIterator[StreamEvent]:
-        oai_messages = _translate_messages(system, messages)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
 
         kwargs = build_chat_completion_kwargs(
             model=model,

@@ -6,6 +6,7 @@ from tests.conftest import make_mock_llm
 
 import pytest
 
+from anton.core.backends.base import Cell
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
 from anton.commands.session import handle_resume
@@ -250,8 +251,8 @@ class TestScratchpadDumpStreaming:
                 events.append(event)
 
             tool_results = [e for e in events if isinstance(e, StreamToolResult)]
-            assert len(tool_results) == 1
-            assert "## Scratchpad: main" in tool_results[0].content
+            assert len(tool_results) == 2  # One for the exec, one for the dump.
+            assert "## Scratchpad: main" in tool_results[1].content
 
             # The LLM should get a short summary, not the full dump
             history = session.history
@@ -399,3 +400,26 @@ class TestResumeSessionScratchpadCleanup:
 
         mock_mgr.close_all.assert_awaited_once()
         mock_mgr.cancel_all_running.assert_not_awaited()
+
+
+class TestChatSessionReplayedCells:
+    def test_scratchpad_manager_receives_config_cells(self, workspace):
+        """Hosts (e.g. Minds) pass ChatSessionConfig.cells for cross-turn replay; they must reach the manager."""
+        mock_llm = make_mock_llm()
+
+        replayed = [
+            Cell(code="print(1)", stdout="1", stderr="", error=None),
+            Cell(code="print(2)", stdout="2", stderr="", error=None),
+        ]
+
+        session = ChatSession(
+            ChatSessionConfig(
+                llm_client=mock_llm,
+                workspace=workspace,
+                cells=list(replayed),
+            )
+        )
+        assert session._scratchpads._cells is not None
+        assert len(session._scratchpads._cells) == 2
+        assert session._scratchpads._cells[0].code == "print(1)"
+        assert session._scratchpads._cells[1].code == "print(2)"

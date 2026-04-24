@@ -67,8 +67,9 @@ class StreamTaskProgress:
 @dataclass
 class StreamToolResult:
     """Tool result that should be displayed to the user (e.g. scratchpad dump)."""
-
+    name: str
     content: str
+    action: str | None = None  # Relevant only for scratchpad tool calls.
 
 
 @dataclass
@@ -145,6 +146,7 @@ class ProviderConnectionInfo:
     api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
     ssl_verify: bool | None = None
+    api_version: str | None = None  # Azure api-version query param
 
 
 class LLMProvider(ABC):

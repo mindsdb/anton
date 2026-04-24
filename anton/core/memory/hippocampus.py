@@ -18,6 +18,7 @@ Each Hippocampus instance manages one scope's files:
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 import sys
 import time
@@ -25,22 +26,45 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from anton.core.memory.base import Engram
 
-@dataclass
-class Engram:
-    """A single memory trace — the fundamental unit of memory.
 
-    Named for Karl Lashley's 'engram' — the physical substrate of a memory.
-    Each engram carries its content plus metadata about confidence, origin,
-    and topic for later retrieval and consolidation.
+def _extract_metadata(text: str) -> tuple[str, dict]:
+    """Find and remove the trailing metadata comment from an entry line.
+
+    Parses <!-- key:value ... --> annotations and returns structured
+    metadata as a dict whose keys match Engram fields. 'ts' maps to
+    'updated_at' and is parsed into a datetime; all other keys are kept
+    as strings.
+
+    Returns:
+        (clean_text, metadata_dict)
+        metadata_dict is empty when no comment is present.
     """
+    match = re.search(r"\s*<!--([^>]*)-->\s*$", text)
+    if not match:
+        return text.strip(), {}
 
-    text: str
-    kind: Literal["always", "never", "when", "lesson", "profile"]
-    scope: Literal["global", "project"]
-    confidence: Literal["high", "medium", "low"] = "medium"
-    topic: str = ""
-    source: Literal["user", "consolidation", "llm"] = "llm"
+    raw: dict[str, str] = dict(re.findall(r"(\w+):(\S+)", match.group(1)))
+    clean_text = text[: match.start()].strip()
+
+    meta: dict = {}
+
+    ts = raw.pop("ts", None)
+    if ts:
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+            try:
+                meta["updated_at"] = dt.datetime.strptime(ts, fmt)
+                break
+            except ValueError:
+                pass
+
+    for key in ("topic", "kind", "confidence", "source"):
+        if key in raw:
+            if raw[key]:
+                meta[key] = raw[key]
+
+    return clean_text, meta
 
 
 class Hippocampus:
@@ -62,9 +86,19 @@ class Hippocampus:
         self._profile_path = base_dir / "profile.md"
         self._rules_path = base_dir / "rules.md"
         self._lessons_path = base_dir / "lessons.md"
-        self._topics_dir = base_dir / "topics"
 
-    def recall_identity(self) -> str:
+    def clear(self) -> None:
+        for path in (self._profile_path, self._rules_path, self._lessons_path):
+            if path.is_file():
+                path.unlink()
+        topics_dir = self._dir / "topics"
+        if topics_dir.is_dir():
+            for f in topics_dir.glob("*.md"):
+                f.unlink()
+
+    # ---------- identity -------------------
+
+    def recall_identities(self) -> str:
         """Load the always-on self-model (profile.md).
 
         Brain analog: medial Prefrontal Cortex / Default Mode Network.
@@ -78,35 +112,106 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    def recall_rules(self) -> str:
-        """Load behavioral gates (rules.md) as formatted always/never/when.
+    def get_identities(self) -> list[Engram]:
+        """Load identity profile as Engrams."""
+        content = self.recall_identities()
+        engrams = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                text = stripped[2:]
+            elif stripped and not stripped.startswith("#"):
+                text = stripped
+            else:
+                continue
+            if text:
+                engrams.append(Engram(text=text))
+        return engrams
 
-        Brain analog: Basal Ganglia (Go/No-Go pathways) + Orbitofrontal Cortex
-        (conditional behavioral rules). These aren't memories to recall —
-        they're constraints that shape action selection.
+    def del_identity(self, id):
+        entries = self.get_identities()
+        entries_out = []
+        for entry in entries:
+            if entry.id != id:
+                entries_out.append(entry)
+
+        self.save_identities(entries_out)
+
+    def update_identity(self, id, text):
+        entries = self.get_identities()
+
+        for entry in entries:
+            if entry.id != id:
+                continue
+            entry.text = text
+            entry.updated_at = dt.datetime.now()
+
+            self.save_identities(entries)
+            return
+
+    def rewrite_identity(self, entries: list[str]) -> None:
+        """Merge new entries into the identity snapshot (profile.md) and rewrite.
+
+        Deduplicates by exact text and by key prefix (e.g. "Name:" replaces
+        any existing "Name: ..." entry). Unlike a pure append, identity stays
+        a coherent snapshot rather than growing unboundedly.
         """
-        if not self._rules_path.is_file():
-            return ""
-        try:
-            return self._rules_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
 
-    def recall_lessons(self, token_budget: int = 1000) -> str:
+        existing_entries = [
+            item.text
+            for item in self.get_identities()
+        ]
+
+        for fact in entries:
+            if isinstance(fact, str) and fact not in existing_entries:
+                # Check if this updates an existing fact (same key prefix)
+                key = fact.split(":")[0].strip().lower() if ":" in fact else ""
+                if key:
+                    existing_entries = [
+                        e
+                        for e in existing_entries
+                        if not e.lower().startswith(key + ":")
+                    ]
+                existing_entries.append(fact)
+
+        self.save_identities([
+            Engram(text)
+            for text in existing_entries
+        ])
+
+    def save_identities(self, entries: list[Engram]) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        content = "# Profile\n" + "\n".join(f"- {e.text}" for e in entries) + "\n"
+        self._encode_with_lock(self._profile_path, content, mode="write")
+
+
+    # ---------  lessons --------------
+
+    def recall_lessons(self, token_budget: int|None = 1000) -> str:
         """Load semantic knowledge (lessons.md), most recent first, within budget.
 
         Brain analog: Anterior Temporal Lobe — the convergence hub for semantic
         facts distilled from many episodes. Budget enforced at ~4 chars/token.
         """
+        return self._lessons_to_text(self.get_lessons(token_budget))
+
+
+    def get_lessons(self, token_budget: int = None) -> list[Engram]:
+        """Load semantic knowledge (lessons.md) as Engrams.
+
+        When token_budget is None (default) returns all entries in file order.
+        When token_budget is set, returns entries newest-first up to that limit
+        (~4 chars/token).
+        """
         if not self._lessons_path.is_file():
-            return ""
+            return []
         try:
             content = self._lessons_path.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
-            return ""
+            return []
 
         if not content:
-            return ""
+            return []
 
         # Extract individual entries (lines starting with "- ")
         lines = [ln for ln in content.splitlines() if ln.strip()]
@@ -119,41 +224,102 @@ class Hippocampus:
             else:
                 header_lines.append(ln)
 
+        entries = []
+        for text in entry_lines:
+            text, meta = _extract_metadata(text)
+            entries.append(Engram(text=text.removeprefix("- "), **meta))
+
+        if token_budget is None:
+            return entries
+
         # Reverse entries so most recent are first
-        entry_lines.reverse()
+        entries.reverse()
 
         # Budget: ~4 chars per token
         char_budget = token_budget * 4
-        result_lines = list(header_lines)
+        result_lines = []
         used = sum(len(ln) for ln in result_lines)
 
-        for ln in entry_lines:
-            if used + len(ln) + 1 > char_budget:
+        for ln in entries:
+            if used + len(ln.text) + 1 > char_budget:
                 break
             result_lines.append(ln)
-            used += len(ln) + 1
+            used += len(ln.text) + 1
 
-        return "\n".join(result_lines)
+        return result_lines
+
+    def del_lesson(self, id):
+        entries = self.get_lessons()
+        entries_out = []
+        for entry in entries:
+            if entry.id != id:
+                entries_out.append(entry)
+
+        if len(entries_out) != len(entries):
+            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries_out), mode="write")
+
+
+    def update_lesson(self, id, text):
+        entries = self.get_lessons()
+
+        for entry in entries:
+            if entry.id != id:
+                continue
+            entry.text = text
+            entry.updated_at = dt.datetime.now()
+
+            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries), mode="write")
+
+            break
+
+    @staticmethod
+    def _lessons_to_text(entries: list[Engram], header="Lessons") -> str:
+        """Serialize a list of Engram objects back to lessons.md line format.
+
+        Writes all non-None/non-empty Engram fields into a trailing
+        <!-- key:value --> comment. 'updated_at' is serialised as 'ts'.
+        """
+        lines = []
+        for entry in entries:
+            parts: list[str] = []
+
+            for key in ("confidence", "source", "topic"):
+                val = getattr(entry, key)
+                if val is not None and val != "":
+                    parts.append(f"{key}:{val}")
+
+            ts = (
+                entry.updated_at.strftime("%Y-%m-%d")
+                if entry.updated_at
+                else time.strftime("%Y-%m-%d")
+            )
+            parts.append(f"ts:{ts}")
+
+            lines.append(f"- {entry.text} <!-- {' '.join(parts)} -->\n")
+
+        if len(lines) == 0:
+            return ""
+        return f"# {header}\n" + "".join(lines)
 
     def recall_topic(self, slug: str) -> str:
-        """Load deep domain expertise on demand (topics/{slug}.md).
+        """Load deep domain expertise on demand by given slug.
 
         Brain analog: Cortical Association Areas — specialized regions activated
         associatively when contextual cues indicate relevance.
         """
-        safe_slug = self._sanitize_slug(slug)
-        path = self._topics_dir / f"{safe_slug}.md"
-        if not path.is_file():
-            return ""
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        slug = self._sanitize_slug(slug)
+
+        items = []
+        for item in self.get_lessons():
+            if item.topic == slug:
+                items.append(item)
+
+        return self._lessons_to_text(items, header=slug)
 
     def recall_scratchpad_wisdom(self) -> str:
         """Retrieve procedural knowledge relevant to scratchpad execution.
 
-        Returns all "when" rules + lessons with topic starting with "scratchpad-".
+        Returns all "when" rules + lessons whose text contains "scratchpad".
         Injected into tool descriptions so the LLM sees them when composing code.
         """
         parts: list[str] = []
@@ -173,34 +339,92 @@ class Hippocampus:
                     parts.append(line.strip())
 
         # Extract scratchpad-related lessons
-        lessons = self._read_full_lessons()
-        for line in lessons.splitlines():
-            if line.strip().startswith("- ") and "scratchpad" in line.lower():
-                stripped = line.strip()
-                if stripped not in parts:
-                    parts.append(stripped)
-
-        # Check topics/scratchpad-*.md files
-        if self._topics_dir.is_dir():
-            for path in sorted(self._topics_dir.iterdir()):
-                if path.name.startswith("scratchpad-") and path.suffix == ".md":
-                    try:
-                        content = path.read_text(encoding="utf-8").strip()
-                        if content:
-                            parts.append(content)
-                    except (OSError, UnicodeDecodeError):
-                        continue
+        for lesson in self.get_lessons():
+            if "scratchpad" in lesson.text.lower() or (lesson.topic and "scratchpad" in lesson.topic.lower()):
+                entry = f"- {lesson.text}"
+                if entry not in parts:
+                    parts.append(entry)
 
         return "\n".join(parts)
 
-    def _read_full_lessons(self) -> str:
-        """Read lessons.md without budget constraint (for internal use)."""
-        if not self._lessons_path.is_file():
+    # ---------- rules -------------------
+
+    def recall_rules(self) -> str:
+        """Load behavioral gates (rules.md) as formatted always/never/when.
+
+        Brain analog: Basal Ganglia (Go/No-Go pathways) + Orbitofrontal Cortex
+        (conditional behavioral rules). These aren't memories to recall —
+        they're constraints that shape action selection.
+        """
+        if not self._rules_path.is_file():
             return ""
         try:
-            return self._lessons_path.read_text(encoding="utf-8").strip()
+            return self._rules_path.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             return ""
+
+    def get_rules(self) -> list[Engram]:
+        """Load behavioral rules (rules.md) as Engrams, grouped by kind."""
+        if not self._rules_path.is_file():
+            return []
+        try:
+            content = self._rules_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+
+        current_kind = None
+        entries: list[Engram] = []
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                current_kind = stripped[3:].lower()
+            elif stripped.startswith("- ") and current_kind:
+                text, meta = _extract_metadata(stripped[2:])
+                if text and current_kind is not None:
+                    entries.append(Engram(text=text, kind=current_kind, **meta))
+
+        entries.sort(key=lambda x: x.kind)
+
+        return entries
+
+    def del_rule(self, id):
+        entries = self.get_rules()
+        entries_out = []
+        for entry in entries:
+            if entry.id != id:
+                entries_out.append(entry)
+
+        self.save_rules(entries_out)
+
+    def update_rule(self, id, text):
+        entries = self.get_rules()
+
+        for entry in entries:
+            if entry.id != id:
+                continue
+            entry.text = text
+            entry.updated_at = dt.datetime.now()
+
+            self.save_rules(entries)
+            return
+
+    def save_rules(self, rules: list[Engram]) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        sections: dict[str, list[Engram]] = {"always": [], "never": [], "when": []}
+        for rule in rules:
+            if rule.kind in sections:
+                sections[rule.kind].append(rule)
+
+        lines = ["# Rules\n"]
+        for section, entries in sections.items():
+            lines.append(f"\n## {section.capitalize()}\n")
+            for e in entries:
+                ts = e.updated_at.strftime("%Y-%m-%d") if e.updated_at else time.strftime("%Y-%m-%d")
+                meta = f"<!-- confidence:{e.confidence} source:{e.source} ts:{ts} -->"
+                lines.append(f"- {e.text} {meta}\n")
+
+        self._encode_with_lock(self._rules_path, "".join(lines), mode="write")
 
     def encode_rule(
         self,
@@ -217,57 +441,24 @@ class Hippocampus:
         """
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        ts = time.strftime("%Y-%m-%d")
-        metadata = f"<!-- confidence:{confidence} source:{source} ts:{ts} -->"
-        entry = f"- {text} {metadata}\n"
+        rules = self.get_rules()
 
-        section_header = f"## {kind.capitalize()}"
-
-        # Read existing content or create skeleton
-        if self._rules_path.is_file():
-            content = self._rules_path.read_text(encoding="utf-8")
-        else:
-            content = "# Rules\n\n## Always\n\n## Never\n\n## When\n"
+        new_rule = Engram(
+            text=text,
+            updated_at=dt.datetime.now(),
+            confidence=confidence,
+            kind=kind,
+            source=source,
+        )
 
         # Check for duplicate (exact entry match, ignoring metadata)
-        if text in self._extract_entry_texts(content):
-            return
+        for rule in rules:
+            if rule.text == new_rule.text:
+                return
 
-        # Find the section and append
-        lines = content.splitlines(keepends=True)
-        new_lines: list[str] = []
-        inserted = False
+        rules.append(new_rule)
 
-        i = 0
-        while i < len(lines):
-            new_lines.append(lines[i])
-            if lines[i].strip() == section_header and not inserted:
-                # Skip to end of section (next ## or end of file)
-                i += 1
-                section_entries: list[str] = []
-                while i < len(lines) and not (
-                    lines[i].strip().startswith("## ")
-                    and lines[i].strip() != section_header
-                ):
-                    section_entries.append(lines[i])
-                    i += 1
-                # Add existing entries
-                new_lines.extend(section_entries)
-                # Ensure we have a blank line before the entry if needed
-                if section_entries and section_entries[-1].strip():
-                    new_lines.append("\n")
-                elif not section_entries:
-                    pass  # Section was empty, entry follows header
-                new_lines.append(entry)
-                inserted = True
-                continue
-            i += 1
-
-        if not inserted:
-            # Section didn't exist — add it
-            new_lines.append(f"\n{section_header}\n{entry}")
-
-        self._encode_with_lock(self._rules_path, "".join(new_lines), mode="write")
+        self.save_rules(rules)
 
     def encode_lesson(
         self,
@@ -275,10 +466,7 @@ class Hippocampus:
         topic: str = "",
         source: str = "llm",
     ) -> None:
-        """Write a semantic fact to lessons.md.
-
-        If a topic is provided, also creates/appends to topics/{slug}.md.
-        """
+        """Append a semantic fact to lessons.md, tagged with optional topic metadata."""
         self._dir.mkdir(parents=True, exist_ok=True)
 
         ts = time.strftime("%Y-%m-%d")
@@ -299,32 +487,6 @@ class Hippocampus:
                 return
             self._encode_with_lock(self._lessons_path, entry, mode="append")
 
-        # Also write to topic file if topic is substantial
-        if topic:
-            self._topics_dir.mkdir(parents=True, exist_ok=True)
-            slug = self._sanitize_slug(topic)
-            topic_path = self._topics_dir / f"{slug}.md"
-            if not topic_path.is_file():
-                self._encode_with_lock(
-                    topic_path,
-                    f"# {topic}\n{entry}",
-                    mode="write",
-                )
-            else:
-                existing = topic_path.read_text(encoding="utf-8")
-                if text not in self._extract_entry_texts(existing):
-                    self._encode_with_lock(topic_path, entry, mode="append")
-
-    def rewrite_identity(self, entries: list[str]) -> None:
-        """Replace the identity snapshot (profile.md) — full rewrite, not append.
-
-        Unlike other memory operations, identity is a coherent snapshot, not
-        an append log. Like how your self-concept updates as a whole, not
-        by appending new facts to old ones.
-        """
-        self._dir.mkdir(parents=True, exist_ok=True)
-        content = "# Profile\n" + "\n".join(f"- {e}" for e in entries) + "\n"
-        self._encode_with_lock(self._profile_path, content, mode="write")
 
     def entry_count(self) -> int:
         """Count total entries across rules.md and lessons.md."""

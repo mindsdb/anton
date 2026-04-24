@@ -236,3 +236,86 @@ class TestFromSettingsOpenAI:
             assert isinstance(client, LLMClient)
             assert isinstance(client._planning_provider, OpenAIProvider)
             assert isinstance(client._coding_provider, OpenAIProvider)
+
+
+class TestAzureOpenAIProvider:
+    def test_uses_async_azure_openai_when_api_version_set(self):
+        """When api_version is provided, AsyncAzureOpenAI must be used."""
+        mock_azure_client = MagicMock()
+        with patch("anton.core.llm.openai.openai"), \
+             patch("anton.core.llm.openai.AsyncAzureOpenAI", return_value=mock_azure_client) as mock_cls:
+            provider = OpenAIProvider(
+                api_key="azure-key",
+                base_url="https://myresource.cognitiveservices.azure.com",
+                api_version="2024-12-01-preview",
+            )
+            mock_cls.assert_called_once()
+            call_kwargs = mock_cls.call_args.kwargs
+            assert call_kwargs["api_version"] == "2024-12-01-preview"
+            assert call_kwargs["api_key"] == "azure-key"
+            assert call_kwargs["azure_endpoint"] == "https://myresource.cognitiveservices.azure.com"
+            assert provider._client is mock_azure_client
+
+    def test_uses_async_openai_when_no_api_version(self):
+        """Without api_version, the standard AsyncOpenAI client must be used."""
+        mock_std_client = MagicMock()
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_openai.AsyncOpenAI.return_value = mock_std_client
+            provider = OpenAIProvider(api_key="sk-test", base_url="http://localhost:11434/v1")
+            mock_openai.AsyncOpenAI.assert_called_once()
+            assert provider._client is mock_std_client
+
+    def test_export_connection_info_includes_api_version(self):
+        with patch("anton.core.llm.openai.openai"), \
+             patch("anton.core.llm.openai.AsyncAzureOpenAI"):
+            provider = OpenAIProvider(
+                api_key="key",
+                base_url="https://res.openai.azure.com",
+                api_version="2024-12-01-preview",
+            )
+            info = provider.export_connection_info()
+            assert info.api_version == "2024-12-01-preview"
+            assert info.base_url == "https://res.openai.azure.com"
+
+    def test_from_settings_passes_api_version_to_provider(self):
+        """LLMClient.from_settings propagates openai_api_version to OpenAIProvider."""
+        with patch("anton.core.llm.openai.openai"), \
+             patch("anton.core.llm.openai.AsyncAzureOpenAI") as mock_azure_cls:
+            settings = AntonSettings(
+                planning_provider="openai-compatible",
+                coding_provider="openai-compatible",
+                planning_model="gpt-4.1-mini",
+                coding_model="gpt-4.1-mini",
+                openai_api_key="azure-key",
+                openai_base_url="https://myresource.cognitiveservices.azure.com",
+                openai_api_version="2024-12-01-preview",
+                _env_file=None,
+            )
+            client = LLMClient.from_settings(settings)
+            assert mock_azure_cls.called
+            call_kwargs = mock_azure_cls.call_args.kwargs
+            assert call_kwargs["api_version"] == "2024-12-01-preview"
+            assert isinstance(client._planning_provider, OpenAIProvider)
+
+    async def test_azure_provider_complete_calls_chat_completions(self):
+        """Azure provider routes complete() through chat.completions just like standard."""
+        mock_azure_client = AsyncMock()
+        mock_azure_client.chat.completions.create = AsyncMock(
+            return_value=_make_mock_response(content="azure response", prompt_tokens=8, completion_tokens=12)
+        )
+        with patch("anton.core.llm.openai.openai"), \
+             patch("anton.core.llm.openai.AsyncAzureOpenAI", return_value=mock_azure_client):
+            provider = OpenAIProvider(
+                api_key="azure-key",
+                base_url="https://myresource.cognitiveservices.azure.com",
+                api_version="2024-12-01-preview",
+            )
+            result = await provider.complete(
+                model="gpt-4.1-mini",
+                system="be helpful",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+            assert result.content == "azure response"
+            assert result.usage.input_tokens == 8
+            assert result.usage.output_tokens == 12
+            mock_azure_client.chat.completions.create.assert_awaited_once()

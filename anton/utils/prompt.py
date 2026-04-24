@@ -57,6 +57,7 @@ async def prompt_or_cancel(
     choices: list[str] | None = None,
     choices_display: str = "",
     allow_cancel: bool = True,
+    default_text: str = "",
 ) -> str | None:
     """Prompt for free-text input; return None if the user presses Esc.
 
@@ -120,7 +121,7 @@ async def prompt_or_cancel(
 
     while True:
         _esc = False
-        result = await pt_session.prompt_async(message)
+        result = await pt_session.prompt_async(message, default=default_text)
         if _esc:
             return None
         val = result.strip() if result else default

@@ -37,6 +37,11 @@ class EpisodicMemory:
         self._session_id: str | None = None
         self._file: Path | None = None
 
+    def clear(self) -> None:
+        if self._dir.is_dir():
+            for f in self._dir.glob("*.jsonl"):
+                f.unlink()
+
     @property
     def enabled(self) -> bool:
         return self._enabled
@@ -203,6 +208,27 @@ class EpisodicMemory:
                     return matches
 
         return matches
+
+    def get_episodes(self) -> list[Episode]:
+        """Return all episodes across all sessions, newest-first."""
+        if not self._dir.is_dir():
+            return []
+        result = []
+        for path in sorted(self._dir.glob("*.jsonl"), reverse=True):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        result.append(Episode(**json.loads(line)))
+            except Exception:
+                continue
+        return result
+
+    def del_episode(self, session_id: str) -> bool:
+        path = self._dir / f"{session_id}.jsonl"
+        if not path.is_file():
+            return False
+        path.unlink()
+        return True
 
     def recall_formatted(
         self,
