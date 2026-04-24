@@ -347,8 +347,9 @@ title.
 
 Before writing any HTML, produce a **DashSpec** — a short YAML plan that
 captures the page structure. Only after the spec is complete do you generate
-the HTML. The spec is an internal artifact: your own plan, not shown to the
-end user.
+the HTML. The spec lives inside a scratchpad cell (see Step 2 in section 5) —
+never written directly into the chat message — so it stays out of the user's
+view but remains accessible to every later cell in the build.
 
 **Why:**
 - Catch structural mistakes before HTML generation.
@@ -463,10 +464,31 @@ the form `<kind>: <insight it conveys and why it matters>`
 checklist is the input for DashSpec.
 
 ### Step 2 — Write DashSpec
-Produce the `DashSpec` YAML following the format in section 4. Do NOT embed
-data values in it — only structure and references. This is a plan, not a
-payload. Self-check before moving on: unique IDs, every block has
-`description`, `layout` makes sense.
+The `DashSpec` YAML is produced as your **first scratchpad cell** — never as
+a YAML code block in the chat response. Assign it to `__dash_spec` and print
+it back so the plan is captured in the tool result:
+
+```python
+# DELETABLE: draft dashboard spec
+__dash_spec = '''
+docType: dash-spec
+version: "0.1"
+
+meta:
+  title: "..."
+
+layout: "..."
+
+blocks:
+  - id: ...
+    type: ...
+    description: ...
+'''
+```
+
+Follow the format in section 4. Do NOT embed data values in the spec — only
+structure and references. Self-check before moving on: unique IDs, every block
+has `description`, `layout` makes sense.
 
 ### Step 3 — Build the dashboard across scratchpad cells
 
