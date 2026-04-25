@@ -20,6 +20,3 @@ class CoreSettings(BaseSettings):
     cell_install_timeout: int = 120  # pip/uv install timeout (s)
     cell_keep_recent: int = 5  # Recent cells preserved during compaction
 
-    # Remote scratchpad — when set, uses a remote Lightsail instance
-    # instead of a local venv. Set ANTON_REMOTE_SCRATCHPAD_URL to enable.
-    remote_scratchpad_url: str | None = None  # e.g. https://sp_a1b2c3d4.4nton.ai
