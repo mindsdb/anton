@@ -25,6 +25,7 @@ def em(episodes_dir: Path) -> EpisodicMemory:
 class TestStartSession:
     def test_creates_file(self, em: EpisodicMemory, episodes_dir: Path):
         sid = em.start_session()
+        em.log_turn(1, "user", "hello")
         assert (episodes_dir / f"{sid}.jsonl").exists()
 
     def test_filename_format(self, em: EpisodicMemory):
@@ -119,9 +120,8 @@ class TestLog:
             role="user",
             content="should not appear",
         ))
-        # File should exist but be empty (only created by start_session touch)
         path = episodes_dir / f"{sid}.jsonl"
-        assert path.read_text() == ""
+        assert not path.exists()
 
 class TestLogTurn:
     def test_convenience_method(self, em: EpisodicMemory, episodes_dir: Path):
@@ -259,6 +259,7 @@ class TestRecallFormatted:
 class TestSessionCount:
     def test_counts_files(self, em: EpisodicMemory):
         em.start_session()
+        em.log_turn(1, "user", "hello")
         # Create additional fake session files
         em._dir.mkdir(parents=True, exist_ok=True)
         (em._dir / "20260101_120000.jsonl").touch()
@@ -275,9 +276,8 @@ class TestDisabled:
         em = EpisodicMemory(episodes_dir, enabled=False)
         em.start_session()
         em.log_turn(1, "user", "should not log")
-        # File should be empty
         path = em._file
-        assert path.read_text() == ""
+        assert not path.exists()
 
     def test_recall_empty(self, episodes_dir: Path):
         em = EpisodicMemory(episodes_dir, enabled=False)

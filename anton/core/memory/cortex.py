@@ -30,6 +30,7 @@ from anton.core.memory.hippocampus import Hippocampus
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
+    from anton.core.memory.episodes import EpisodicMemory
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,6 +115,7 @@ class Cortex:
         project_hc: HippocampusProtocol,
         mode: str = "autopilot",
         llm_client: LLMClient | None = None,
+        episodic: EpisodicMemory | None = None,
     ) -> None:
         """Initialize the executive with two hippocampal stores.
 
@@ -122,11 +124,14 @@ class Cortex:
             project_hc: Memory store for project-specific memories
             mode: Memory mode — autopilot|copilot|off (encoding gate)
             llm_client: For LLM-assisted operations (profile extraction, compaction)
+            episodic: For logging memory_read/memory_write events per session
         """
         self.global_hc = global_hc
         self.project_hc = project_hc
         self.mode = mode
         self._llm = llm_client
+        self._episodic = episodic
+        self._seen_texts: set[str] = set()
         self._turn_count = 0
 
     # ~6000 chars ≈ ~1500 tokens — above this, use LLM to filter rules
@@ -157,22 +162,24 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             sections.append(f"## Your Memory — Identity\n{identity}")
 
         # 2. Global rules (with smart retrieval)
-        global_rules = self.global_hc.recall_rules()
-        if global_rules:
-            global_rules = await self._retrieve_relevant_rules(
-                global_rules, user_message
-            )
-            if global_rules:
-                sections.append(f"## Your Memory — Global Rules\n{global_rules}")
+        global_engrams = self.global_hc.get_rules()
+        if global_engrams:
+            global_engrams = await self._retrieve_relevant_rules(global_engrams, user_message)
+            if global_engrams:
+                sections.append(
+                    f"## Your Memory — Global Rules\n{self._format_rules_engrams(global_engrams)}"
+                )
 
         # 3. Project rules (with smart retrieval)
-        project_rules = self.project_hc.recall_rules()
-        if project_rules:
-            project_rules = await self._retrieve_relevant_rules(
-                project_rules, user_message
-            )
-            if project_rules:
-                sections.append(f"## Your Memory — Project Rules\n{project_rules}")
+        project_engrams = self.project_hc.get_rules()
+        if project_engrams:
+            project_engrams = await self._retrieve_relevant_rules(project_engrams, user_message)
+            if project_engrams:
+                sections.append(
+                    f"## Your Memory — Project Rules\n{self._format_rules_engrams(project_engrams)}"
+                )
+                for engram in project_engrams:
+                    self._log_read_engram(engram)
 
         # 4. Global lessons
         global_lessons = self.global_hc.recall_lessons(token_budget=1000)
@@ -183,6 +190,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         project_lessons = self.project_hc.recall_lessons(token_budget=1000)
         if project_lessons:
             sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
+            if self._episodic is not None:
+                for engram in self.project_hc.get_lessons():
+                    self._log_read_engram(engram)
 
         # 6. Minds datasource context (auto-loaded if present)
         minds_topic = self.project_hc.recall_topic("minds-datasource")
@@ -194,8 +204,24 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         return "\n\n" + "\n\n".join(sections)
 
-    async def _retrieve_relevant_rules(self, all_rules: str, user_message: str) -> str:
-        """Filter rules to only those relevant to the current user message.
+    @staticmethod
+    def _format_rules_engrams(engrams: list[Engram]) -> str:
+        """Format rule engrams to section display format (## Always / Never / When)."""
+        by_kind: dict[str, list[Engram]] = {}
+        for e in engrams:
+            by_kind.setdefault((e.kind or "always").lower(), []).append(e)
+        parts: list[str] = []
+        for section in ("always", "never", "when"):
+            items = by_kind.get(section, [])
+            if items:
+                parts.append(f"## {section.capitalize()}")
+                parts.extend(f"- {e.text}" for e in items)
+        return "\n".join(parts)
+
+    async def _retrieve_relevant_rules(
+        self, engrams: list[Engram], user_message: str
+    ) -> list[Engram]:
+        """Filter rule engrams to those relevant to the current user message.
 
         Brain analog: dlPFC cue-dependent recall — the prefrontal cortex
         selects which memories to activate based on current goals, rather
@@ -206,41 +232,21 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         If rules are under budget or no LLM is available, returns as-is.
         """
         if not user_message or self._llm is None:
-            return all_rules
-        if len(all_rules) <= self._RULES_BUDGET_CHARS:
-            return all_rules
+            return engrams
 
-        # Split rules into mandatory (Always/Never) and filterable (When)
-        lines = all_rules.splitlines()
-        mandatory_lines: list[str] = []
-        when_lines: list[str] = []
-        current_section = ""
+        if len(self._format_rules_engrams(engrams)) <= self._RULES_BUDGET_CHARS:
+            return engrams
 
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("## Always"):
-                current_section = "always"
-                mandatory_lines.append(line)
-            elif stripped.startswith("## Never"):
-                current_section = "never"
-                mandatory_lines.append(line)
-            elif stripped.startswith("## When"):
-                current_section = "when"
-                mandatory_lines.append(line)  # keep the header
-            elif stripped.startswith("## ") or stripped.startswith("# "):
-                current_section = ""
-                mandatory_lines.append(line)
-            elif current_section == "when":
-                when_lines.append(line)
-            else:
-                mandatory_lines.append(line)
+        mandatory = [e for e in engrams if (e.kind or "").lower() in ("always", "never")]
+        when_engrams = [e for e in engrams if (e.kind or "").lower() == "when"]
 
-        # If When section is small, no need to filter
-        when_text = "\n".join(when_lines).strip()
-        if not when_text or len(when_text) < 1000:
-            return all_rules
+        if not when_engrams:
+            return engrams
 
-        # Filter only the When rules
+        when_text = "\n".join(f"- {e.text}" for e in when_engrams)
+        if len(when_text) < 1000:
+            return engrams
+
         try:
             response = await self._llm.code(
                 system=self._RULES_RETRIEVAL_PROMPT,
@@ -254,19 +260,18 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             )
             result = response.content.strip()
             if result.upper() == "NONE":
-                filtered_when = ""
-            elif result:
-                filtered_when = result
+                return mandatory
+            if result:
+                returned = {line.lstrip("- ").strip() for line in result.splitlines() if line.strip()}
+                filtered_when = [e for e in when_engrams if e.text in returned]
+                if not filtered_when:
+                    filtered_when = when_engrams
             else:
-                filtered_when = when_text
+                filtered_when = when_engrams
         except Exception:
-            filtered_when = when_text
+            filtered_when = when_engrams
 
-        # Reassemble: mandatory sections + filtered When rules
-        output = "\n".join(mandatory_lines)
-        if filtered_when:
-            output += "\n" + filtered_when
-        return output
+        return mandatory + filtered_when
 
     def get_scratchpad_context(self) -> str:
         """Retrieve procedural knowledge for scratchpad tool injection.
@@ -311,6 +316,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     confidence=engram.confidence,
                     source=engram.source,
                 )
+                if engram.scope != "global":
+                    self._log_write_engram(engram)
                 actions.append(f"Encoded {engram.kind} rule: {engram.text}")
 
             elif engram.kind == "lesson":
@@ -319,9 +326,31 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     topic=engram.topic,
                     source=engram.source,
                 )
+                if engram.scope != "global":
+                    self._log_write_engram(engram)
                 actions.append(f"Encoded lesson: {engram.text}")
 
         return actions
+
+    def _log_write_engram(self, engram: Engram) -> None:
+        if self._episodic is None:
+            return
+        self._seen_texts.add(engram.text)
+        self._episodic.log_turn(
+            0, "memory_write", engram.text,
+            kind=engram.kind or "lesson",
+            topic=engram.topic or "",
+        )
+
+    def _log_read_engram(self, engram: Engram) -> None:
+        if self._episodic is None or engram.text in self._seen_texts:
+            return
+        self._seen_texts.add(engram.text)
+        self._episodic.log_turn(
+            0, "memory_read", engram.text,
+            kind=engram.kind or "lesson",
+            topic=engram.topic or "",
+        )
 
     def encoding_gate(self, engram: Engram) -> bool:
         """Whether this engram needs user confirmation before encoding.

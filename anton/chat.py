@@ -58,6 +58,7 @@ from anton.commands.skills import (
     handle_skill_show,
     handle_skills_list,
 )
+from anton.commands.share import handle_share_export, handle_share_import
 from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
 from anton.utils.prompt import (
     prompt_or_cancel,
@@ -1011,11 +1012,19 @@ async def _chat_loop(
     global_memory_dir = Path.home() / ".anton" / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
 
+    from anton.core.memory.episodes import EpisodicMemory
+
+    episodes_dir = settings.workspace_path / ".anton" / "episodes"
+    episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
+    if episodic.enabled:
+        episodic.start_session()
+
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
         project_hc=Hippocampus(project_memory_dir),
         mode=settings.memory_mode,
         llm_client=state["llm_client"],
+        episodic=episodic if episodic.enabled else None,
     )
 
     # Reconsolidation: migrate legacy memory formats on first run
@@ -1030,13 +1039,6 @@ async def _chat_loop(
     # Background compaction if needed
     if cortex.needs_compaction():
         asyncio.create_task(cortex.compact_all())
-
-    from anton.core.memory.episodes import EpisodicMemory
-
-    episodes_dir = settings.workspace_path / ".anton" / "episodes"
-    episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
-    if episodic.enabled:
-        episodic.start_session()
 
     from anton.memory.history_store import HistoryStore
 
@@ -1346,6 +1348,43 @@ async def _chat_loop(
                     continue
                 elif cmd == "/skills":
                     handle_skills_list(console)
+                    continue
+                elif cmd == "/share":
+                    sub_parts = parts[1].strip().split(maxsplit=1) if len(parts) > 1 else []
+                    sub = sub_parts[0] if sub_parts else ""
+                    rest = sub_parts[1] if len(sub_parts) > 1 else ""
+                    if sub == "export":
+                        await handle_share_export(
+                            console,
+                            session,
+                            workspace,
+                            state["llm_client"],
+                            episodic if episodic.enabled else None,
+                            summary_only="--summary" in rest,
+                        )
+                    elif sub == "import":
+                        if not rest:
+                            console.print("[anton.warning]Usage: /share import <file>[/]")
+                            console.print()
+                        else:
+                            session = await handle_share_import(
+                                console,
+                                session,
+                                workspace,
+                                settings,
+                                state,
+                                self_awareness,
+                                cortex,
+                                episodic if episodic.enabled else None,
+                                history_store,
+                                filepath=rest,
+                            )
+                            current_session_id = session._session_id
+                    else:
+                        console.print(
+                            "[anton.warning]Usage: /share export [--summary] | /share import <file>[/]"
+                        )
+                        console.print()
                     continue
                 elif cmd == "/resume":
                     session, resumed_id = await handle_resume(

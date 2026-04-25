@@ -64,8 +64,9 @@ async def handle_resume(
     console.print()
 
     choices = [str(i) for i in range(1, len(sessions) + 1)] + ["q"]
+    choices_display = f"1-{len(sessions)}/q" if len(sessions) > 1 else "1/q"
     choice = await prompt_or_cancel(
-        "(anton) Select session (or q to cancel)", choices=choices, default="q"
+        "(anton) Select session (or q to cancel)", choices=choices, choices_display=choices_display, default="q"
     )
     if choice is None or choice == "q":
         console.print()

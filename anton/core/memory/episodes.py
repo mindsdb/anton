@@ -56,7 +56,6 @@ class EpisodicMemory:
         self._session_id = now.strftime("%Y%m%d_%H%M%S")
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / f"{self._session_id}.jsonl"
-        self._file.touch()
         return self._session_id
 
     def resume_session(self, session_id: str) -> str:
@@ -64,8 +63,6 @@ class EpisodicMemory:
         self._session_id = session_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / f"{self._session_id}.jsonl"
-        if not self._file.exists():
-            self._file.touch()
         return self._session_id
 
     def log(self, episode: Episode) -> None:
@@ -161,13 +158,16 @@ class EpisodicMemory:
             except Exception:
                 continue
 
-            # Parse all episodes in this file for context lookups
+            # Parse all episodes in this file for context lookups.
+            # memory_read/memory_write are system events, not conversation turns.
             all_episodes: list[Episode] = []
             for line in lines:
                 if not line.strip():
                     continue
                 try:
-                    all_episodes.append(Episode(**json.loads(line)))
+                    ep = Episode(**json.loads(line))
+                    if ep.role not in ("memory_read", "memory_write"):
+                        all_episodes.append(ep)
                 except Exception:
                     continue
 
@@ -218,7 +218,9 @@ class EpisodicMemory:
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
                     if line.strip():
-                        result.append(Episode(**json.loads(line)))
+                        ep = Episode(**json.loads(line))
+                        if ep.role not in ("memory_read", "memory_write"):
+                            result.append(ep)
             except Exception:
                 continue
         return result
@@ -247,6 +249,39 @@ class EpisodicMemory:
             )
             lines.append(f"[{ep.ts}] ({ep.role}) {ep.content[:max_len]}")
         return "\n".join(lines)
+
+    def get_memory_usage(
+        self,
+        session_id: str
+    ) -> list[Episode]:
+        """Return episodes for a session filtered by role, deduplicated by content.
+
+        Used by /share export to collect the memory payload for a session.
+        """
+        if not self._dir.is_dir():
+            return []
+        path = self._dir / f"{session_id}.jsonl"
+        if not path.is_file():
+            return []
+        result: list[Episode] = []
+        seen: set[str] = set()
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    ep = Episode(**json.loads(line))
+                    if ep.role not in ["memory_write", "memory_read"]:
+                        continue
+                    if ep.content in seen:
+                        continue
+                    seen.add(ep.content)
+                    result.append(ep)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return result
 
     def session_count(self) -> int:
         """Count the number of session files."""
