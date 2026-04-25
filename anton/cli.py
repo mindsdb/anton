@@ -759,9 +759,9 @@ def _setup_other_provider(settings, ws) -> None:
         )
         _setup_anthropic(settings, ws)
 
-    settings.minds_url = None
+    settings.minds_url = "https://mdb.ai"
     settings.minds_api_key = None
-    ws.set_secret("ANTON_MINDS_URL", "")
+    ws.set_secret("ANTON_MINDS_URL", "https://mdb.ai")
     ws.set_secret("ANTON_MINDS_API_KEY", "")
 
 

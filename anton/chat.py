@@ -262,27 +262,65 @@ async def _handle_connect(
     # (silenced: was printing "Testing LLM endpoints..." and "not available" messages)
     llm_ok = test_llm(minds_url, api_key, verify=ssl_verify)
 
-    if llm_ok:
-        console.print(
-            "[anton.success]LLM endpoints available — using Minds server as LLM provider.[/]"
-        )
+    def _has_configured_byok() -> bool:
+        if settings.planning_provider == "anthropic":
+            return bool(
+                settings.anthropic_api_key
+                or os.environ.get("ANTHROPIC_API_KEY")
+                or os.environ.get("ANTON_ANTHROPIC_API_KEY")
+            )
+        if settings.planning_provider == "openai":
+            return bool(
+                settings.openai_api_key
+                or os.environ.get("OPENAI_API_KEY")
+                or os.environ.get("ANTON_OPENAI_API_KEY")
+            )
+        if settings.planning_provider == "openai-compatible":
+            # ANTON_OPENAI_API_KEY is only persisted by explicit BYOK setup; Minds-as-LLM
+            # derives openai_api_key at runtime in model_post_init without persisting it.
+            return bool(os.environ.get("ANTON_OPENAI_API_KEY"))
+        return False
+
+    def _switch_to_minds_as_llm() -> None:
         settings.planning_provider = "openai-compatible"
         settings.coding_provider = "openai-compatible"
         settings.planning_model = "_reason_"
         settings.coding_model = "_code_"
-        # openai_api_key and openai_base_url are derived at runtime from
-        # minds_api_key and minds_url via model_post_init — no need to persist them.
         settings.model_post_init(None)
         global_ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         global_ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
         global_ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
         global_ws.set_secret("ANTON_CODING_MODEL", "_code_")
+
+    if llm_ok:
+        use_minds_as_llm = True
+        if _has_configured_byok():
+            current_label = f"{settings.planning_provider} / {settings.planning_model}"
+            console.print()
+            console.print("[anton.cyan]Minds server also supports LLM endpoints.[/]")
+            console.print("    [bold]1[/]  Use Minds server as LLM provider")
+            console.print(
+                f"    [bold]2[/]  Keep current LLM provider ([anton.muted]{current_label}[/])"
+            )
+            console.print()
+            choice = await prompt_or_cancel(
+                "(anton) Select LLM provider",
+                choices=["1", "2"],
+                default="2",
+            )
+            use_minds_as_llm = choice == "1"
+
+        if use_minds_as_llm:
+            console.print(
+                "[anton.success]Using Minds server as LLM provider.[/]"
+            )
+            _switch_to_minds_as_llm()
+        else:
+            console.print(
+                f"[anton.muted]Keeping current LLM provider: {settings.planning_provider} / {settings.planning_model}[/]"
+            )
     else:
-        # Check if Anthropic key is already configured
-        has_anthropic = settings.anthropic_api_key or os.environ.get(
-            "ANTHROPIC_API_KEY"
-        )
-        if not has_anthropic:
+        if not _has_configured_byok():
             anthropic_key = Prompt.ask("Anthropic API key (for LLM)", console=console)
             if anthropic_key.strip():
                 anthropic_key = anthropic_key.strip()
