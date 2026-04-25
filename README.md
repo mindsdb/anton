@@ -7,36 +7,30 @@
     ▐   ▐
 ```
 
-# Meet Anton - Your working partner
+# Meet Anton 
 
-Anton is a self-improving AI coworker you can hand off any task to. An open, powerful alternative to Claude-Cowork.
-
-You simply describe the outcome and cadence, Anton learns, takes action and keeps you informed. Come back to the result.
+Anton is a self-improving AI agent you can hand off any task to; Create and send reports, clear your inbox, send emails, manage your calendar, CRM,  book flights, etc. An open, powerful alternative to Claude-Cowork that you can run anywhere and use with any model you want — OpenRouter (200+ models), NVIDIA Nemotron, z.ai/GLM, Kimi/Moonshot, MiniMax, OpenAI, Anthropic or your own endpoint.
 
 
-![ezgif-24b9e7c74652f0dc](https://github.com/user-attachments/assets/c92f87c1-ff30-4272-92ba-49a8585d5954)
+## Quick Install
+Anton can be installed as a desktop application or as a command-line tool.
 
-## Try Anton
-Anton can be installed as a desktop application or as a command-line tool (CLI).
+### Desktop App:
 
-### Install Desktop App:
+- **macOS**: Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
 
-<a href="https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg">
-<img width="64" alt="DesktopApp" src="https://github.com/user-attachments/assets/ed7c1e3a-3700-45cc-a9a8-efb57b43dcfd" />
-</a>
-
- Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
-
-### or - Install Command-Line App:
+- **Windows**: Click [here to download](https://downloads.mindsdb.com/anton/windows/anton-2.0.2.exe)  the Anton Desktop App for Windows.
+ 
+### or - Command-Line App:
 
 Open your terminal and use the following command to install
 
-**macOS/Linux**: 
+- **macOS/Linux**: 
 ```bash
 curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" 
 ```
 
-**Windows** (PowerShell):
+- **Windows** (PowerShell):
 ```powershell
 irm https://raw.githubusercontent.com/mindsdb/anton/main/install.ps1 | iex
 ```
@@ -49,7 +43,17 @@ anton
 
 ## What can Anton do?
 
-From one-off tasks to scheduled workflows—reports, emails, and more—Anton handles it. Here are a few examples:
+### 🔧 Ask for anything that requires action
+
+- **Send emails** - connect accounts, draft messages or even send them on your behalf.
+- **Manage Calendarss** - Summarize your day, create meetings, block time, etc. All just by asking.
+- **Automated reporting** - pull from multiple databases, crunch numbers, deliver a report on a schedule.
+- **Workflow automation** - monitor a source, react to changes, take action.
+- **Research & synthesis** - scrape the web, summarize findings, build a reference document.
+- **Data pipeline prototyping** - connect sources, transform data, load into a destination.
+- **System administration** - audit configurations, generate reports, fix issues.
+
+The pattern is always the same: you describe the outcome, Anton figures out the steps. From one-off tasks to scheduled workflows — Anton handles it. Here are a few examples:
 
 ### 📊 Data analysis & Reports
 ```
@@ -61,14 +65,8 @@ any other information that might be useful. Give me a complete dashboard.
 What happens next is the interesting part. At first, Anton doesn't have any particular skill related to this question. However, it figures it out live: scrapes live prices, writes code on the fly, crunches the numbers, and builds you a full dashboard - all in one conversation, with no setup.
 
 
-```text
-anton> Dashboard is open in your browser.
-Summary: Concentration risk is your #1 issue. If you're comfortable being a high-conviction NVDA...
-```
+![ezgif-24b9e7c74652f0dc](https://github.com/user-attachments/assets/c92f87c1-ff30-4272-92ba-49a8585d5954)
 
-<p align="center"> 
-        <img width="800" alt="Anton's response" src="https://github.com/user-attachments/assets/6dc6ee81-2a2c-4358-be05-bfe884c32685" />
-</p>
 
 ### 📬 Email cleanup
 ```
@@ -85,17 +83,7 @@ Set up a WhatsApp integration so I can message you from my phone.
 Anton doesn't wait for someone to build a connector. It writes the integration code itself, sets it up, and gets it running - so you can chat with it from WhatsApp, Telegram, or whatever channel you need.
 
 
-### 🔧 Ask for anything that requires action
 
-- **Send emails** - connect accounts, draft messages or even send them on your behalf.
-- **Manage Calendarss** - Summarize your day, create meetings, block time, etc. All just by asking.
-- **Automated reporting** - pull from multiple databases, crunch numbers, deliver a report on a schedule.
-- **Workflow automation** - monitor a source, react to changes, take action.
-- **Research & synthesis** - scrape the web, summarize findings, build a reference document.
-- **Data pipeline prototyping** - connect sources, transform data, load into a destination.
-- **System administration** - audit configurations, generate reports, fix issues.
-
-The pattern is always the same: you describe the outcome, Anton figures out the steps.
 
 ---
 
@@ -106,8 +94,8 @@ The pattern is always the same: you describe the outcome, Anton figures out the 
 
 ---
 
-#### Connect your data
-Although you can use Anton with just public data, the real power happens when you combine that with your own data. This can be anything: files, databases, application APIs,... etc. Open the Local Vault with `/connect` command, then follow the prompts to add your secrets. Anton only has access to secret names - secret values remain hidden.
+#### Connect your data and apps
+Anton can connect an interact with files, databases, applications, APIs,... etc..
 
 ```powershell
 /connect
@@ -128,15 +116,11 @@ ANTON>
 
 ---
 
-You can always ask Anton to explain what it did. You will get a full notebook-style breakdown: every cell of code it ran, the outputs, and errors - so you can follow its reasoning step by step.
-
----
-
 ## What's inside
 
 A big part of what makes Anton work is that it doesn’t need a huge collection of separate tools for web, DB, files etc. Most of the work is done through one core harness: The execution scratchpad, which can dynamically become whatever Anton needs for the task.
 
-For the full architecture of Anton, file formats, and developer guide, see **[anton/README.md](anton/README.md)**.
+For the full architecture of Anton, and developer guide, see **[anton/README.md](anton/README.md)**.
 
 ---
 
@@ -155,14 +139,6 @@ Override the working folder:
 ```bash
 anton --folder /path/to/workspace
 ```
-
----
-
-## Memory systems
-Anton provides two human-readable memory systems:
-
-- **Semantic memory** - rules, lessons, identity and domain expertise stored as markdown at global and project scope.  
-- **Episodic memory** - a timestamped archive of every conversation (JSONL in `.anton/episodes/`). Anton can recall prior sessions with the `recall` tool.
 
 ---
 
