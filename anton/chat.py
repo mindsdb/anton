@@ -270,7 +270,11 @@ async def _handle_connect(
                 or os.environ.get("ANTON_ANTHROPIC_API_KEY")
             )
         if settings.planning_provider == "openai":
-            return True
+            return bool(
+                settings.openai_api_key
+                or os.environ.get("OPENAI_API_KEY")
+                or os.environ.get("ANTON_OPENAI_API_KEY")
+            )
         if settings.planning_provider == "openai-compatible":
             # ANTON_OPENAI_API_KEY is only persisted by explicit BYOK setup; Minds-as-LLM
             # derives openai_api_key at runtime in model_post_init without persisting it.
