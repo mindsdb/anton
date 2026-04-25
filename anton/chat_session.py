@@ -64,10 +64,10 @@ def get_runtime_factory(settings: AntonSettings):
     core = CoreSettings()
     if core.remote_scratchpad_url and settings.minds_api_key:
         from functools import partial
-        from anton.core.backends.remote import remote_scratchpad_runtime_factory
+        from anton.core.backends.remote import remote_lightsail_scratchpad_runtime_factory
 
         return partial(
-            remote_scratchpad_runtime_factory,
+            remote_lightsail_scratchpad_runtime_factory,
             endpoint_url=core.remote_scratchpad_url,
             api_key=settings.minds_api_key,
         )

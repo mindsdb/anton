@@ -40,41 +40,12 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
             cells=cells,
             workspace_path=workspace_path,
         )
-        self._cloudflare_endpoint = endpoint_url.rstrip("/")  # https://sp-xxx.4nton.ai
-        self._direct_endpoint: str | None = None  # resolved to http://IP:port
+        self._endpoint_url = endpoint_url
         self._api_key = api_key
 
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
-
-    async def _resolve_endpoint(self) -> str:
-        """Resolve the Cloudflare endpoint to a direct IP endpoint.
-
-        Calls /resolve on the Cloudflare Worker which returns the instance's
-        direct IP. Caches the result for subsequent calls.
-        """
-        if self._direct_endpoint:
-            return self._direct_endpoint
-
-        import aiohttp
-
-        url = f"{self._cloudflare_endpoint}/resolve"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Failed to resolve remote scratchpad ({resp.status}): {text}")
-                data = await resp.json()
-
-        endpoint = data.get("endpoint", "")
-        if not endpoint:
-            raise RuntimeError(f"No endpoint returned from /resolve: {data}")
-
-        self._direct_endpoint = endpoint.rstrip("/")
-        return self._direct_endpoint
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -87,8 +58,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         """POST to the remote service and return parsed JSON."""
         import aiohttp
 
-        endpoint = await self._resolve_endpoint()
-        url = f"{endpoint}{path}"
+        url = f"{self._endpoint_url}{path}"
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, json=body or {}, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=300)
@@ -102,8 +72,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         """GET from the remote service and return parsed JSON."""
         import aiohttp
 
-        endpoint = await self._resolve_endpoint()
-        url = f"{endpoint}{path}"
+        url = f"{self._endpoint_url}{path}"
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 url, params=params, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=30)
@@ -117,8 +86,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         """POST to an SSE endpoint and yield parsed events."""
         import aiohttp
 
-        endpoint = await self._resolve_endpoint()
-        url = f"{endpoint}{path}"
+        url = f"{self._endpoint_url}{path}"
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, json=body, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=600)
@@ -228,6 +196,58 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
             pass
 
 
+class RemoteLightsailScratchpadRuntime(RemoteScratchpadRuntime):
+    def __init__(
+        self,
+        name: str,
+        *,
+        endpoint_url: str,
+        api_key: str,
+        coding_provider: str = "",
+        coding_model: str = "",
+        coding_api_key: str = "",
+        coding_base_url: str = "",
+        cells: list[Cell] | None = None,
+        workspace_path: Path | None = None,
+    ) -> None:
+        super().__init__(
+            name,
+            endpoint_url=endpoint_url,
+            api_key=api_key,
+            coding_provider=coding_provider,
+            coding_model=coding_model,
+            coding_api_key=coding_api_key,
+            coding_base_url=coding_base_url,
+            cells=cells,
+            workspace_path=workspace_path,
+        )
+        self._endpoint_url = self._resolve_endpoint(endpoint_url.rstrip("/"))
+
+    async def _resolve_endpoint(self, endpoint_url: str) -> str:
+        """Resolve the Cloudflare endpoint to a direct IP endpoint.
+
+        Calls /resolve on the Cloudflare Worker which returns the instance's
+        direct IP. Caches the result for subsequent calls.
+        """
+        import aiohttp
+
+        url = f"{endpoint_url}/resolve"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    raise RuntimeError(f"Failed to resolve remote scratchpad ({resp.status}): {text}")
+                data = await resp.json()
+
+        endpoint = data.get("endpoint", "")
+        if not endpoint:
+            raise RuntimeError(f"No endpoint returned from /resolve: {data}")
+
+        return endpoint.rstrip("/")
+
+
 def remote_scratchpad_runtime_factory(
     *,
     name: str,
@@ -246,6 +266,31 @@ def remote_scratchpad_runtime_factory(
     when building the factory for a specific user.
     """
     return RemoteScratchpadRuntime(
+        name=name,
+        endpoint_url=endpoint_url,
+        api_key=api_key,
+        coding_provider=coding_provider,
+        coding_model=coding_model,
+        coding_api_key=coding_api_key,
+        coding_base_url=coding_base_url,
+        cells=cells,
+        workspace_path=workspace_path,
+    )
+
+
+def remote_lightsail_scratchpad_runtime_factory(
+    *,
+    name: str,
+    coding_provider: str,
+    coding_model: str,
+    coding_api_key: str,
+    coding_base_url: str,
+    cells: list[Cell] | None,
+    workspace_path: Path | None,
+    endpoint_url: str = "",
+    api_key: str = "",
+) -> ScratchpadRuntime:
+    return RemoteLightsailScratchpadRuntime(
         name=name,
         endpoint_url=endpoint_url,
         api_key=api_key,
