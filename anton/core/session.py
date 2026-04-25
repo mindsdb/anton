@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 import json
 from typing import TYPE_CHECKING
@@ -125,6 +125,7 @@ class ChatSession:
             coding_model=config.llm_client.coding_model,
             coding_api_key=coding_conn.api_key or "",
             coding_base_url=coding_conn.base_url or "",
+            cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
         )
 
@@ -150,6 +151,11 @@ class ChatSession:
             ExplainabilityStore(config.workspace.base) if config.workspace is not None else None
         )
         self._active_explainability: ExplainabilityCollector | None = None
+        # Per-turn guard: set to True by the recovery helpers or the
+        # proactive pressure check after they summarize history; reset
+        # at the start of each turn. Prevents double-summarization when
+        # the post-recovery response still reports high pressure.
+        self._compacted_this_turn = False
 
     @property
     def history(self) -> list[dict]:
@@ -523,6 +529,143 @@ class ChatSession:
                 compacted = True
         return compacted
 
+    def hard_truncate_history(self, keep: int = 4) -> None:
+        """Last-resort history truncation for persistent context overflow.
+
+        Summarize-and-compact can fall flat when a single message is huge,
+        or when the system prompt plus tools already exhaust context. This
+        throws away everything except the last `keep` messages, preserving
+        tool_use/tool_result pairing and the API rule that the first
+        message must be from the user.
+        """
+        if len(self._history) <= keep:
+            return
+        tail = list(self._history[-keep:])
+
+        # Strip leading messages that would leave tail in an invalid state:
+        # - assistant at head (API requires user first)
+        # - user whose only blocks are tool_result references (their
+        #   matching tool_use is in the dropped prefix, so they're orphaned)
+        # Repeat because dropping one can expose another. A user message
+        # with mixed content keeps its non-tool_result blocks.
+        while tail:
+            head = tail[0]
+            role = head.get("role")
+            if role == "assistant":
+                tail.pop(0)
+                continue
+            if role == "user":
+                content = head.get("content")
+                if isinstance(content, list):
+                    filtered = [
+                        b for b in content
+                        if not (isinstance(b, dict) and b.get("type") == "tool_result")
+                    ]
+                    if not filtered:
+                        tail.pop(0)
+                        continue
+                    if len(filtered) != len(content):
+                        tail[0] = {**head, "content": filtered}
+            break
+
+        placeholder = {
+            "role": "user",
+            "content": "[Earlier conversation was truncated due to persistent context overflow.]",
+        }
+        separator = {"role": "assistant", "content": "Understood."}
+        self._history = [placeholder, separator, *tail]
+
+    async def plan_with_recovery(
+        self,
+        *,
+        system: str,
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+        messages_factory: Callable[[], list[dict]] | None = None,
+    ):
+        """Call _llm.plan with three-tier ContextOverflowError recovery.
+
+        Attempts, in order: normal → summarize+compact → hard-truncate.
+        A fourth overflow propagates to the caller.
+
+        `messages_factory` is re-invoked before each attempt so callers
+        that build synthetic message lists (e.g. verification with an
+        appended prompt) see the latest post-compaction history.
+        """
+        factory = messages_factory if messages_factory is not None else (lambda: self._history)
+
+        kwargs: dict = {"system": system}
+        if tools is not None:
+            kwargs["tools"] = tools
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+
+        try:
+            return await self._llm.plan(messages=factory(), **kwargs)
+        except ContextOverflowError:
+            pass
+
+        await self._summarize_history()
+        self._compact_scratchpads()
+        self._compacted_this_turn = True
+        try:
+            return await self._llm.plan(messages=factory(), **kwargs)
+        except ContextOverflowError:
+            pass
+
+        self.hard_truncate_history()
+        return await self._llm.plan(messages=factory(), **kwargs)
+
+    async def plan_stream_with_recovery(
+        self,
+        *,
+        system: str,
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+        messages_factory: Callable[[], list[dict]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Streaming analogue of plan_with_recovery.
+
+        Yields all events from the underlying plan_stream call. On
+        ContextOverflowError, yields StreamContextCompacted, shrinks
+        history (summarize+compact, then hard-truncate on a repeat
+        overflow), and restarts the stream. A fourth overflow propagates.
+        """
+        factory = messages_factory if messages_factory is not None else (lambda: self._history)
+
+        kwargs: dict = {"system": system}
+        if tools is not None:
+            kwargs["tools"] = tools
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+
+        try:
+            async for event in self._llm.plan_stream(messages=factory(), **kwargs):
+                yield event
+            return
+        except ContextOverflowError:
+            pass
+
+        await self._summarize_history()
+        self._compact_scratchpads()
+        self._compacted_this_turn = True
+        yield StreamContextCompacted(
+            message="Context was getting long — older history has been summarized."
+        )
+        try:
+            async for event in self._llm.plan_stream(messages=factory(), **kwargs):
+                yield event
+            return
+        except ContextOverflowError:
+            pass
+
+        self.hard_truncate_history()
+        yield StreamContextCompacted(
+            message="Context still exceeded limits — older history was hard-truncated."
+        )
+        async for event in self._llm.plan_stream(messages=factory(), **kwargs):
+            yield event
+
     def _schedule_cerebellum_flush(self) -> None:
         """Fire the cerebellum's batched diff pass without blocking the turn.
 
@@ -554,26 +697,19 @@ class ChatSession:
         user_msg_str = user_input if isinstance(user_input, str) else ""
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
+        self._compacted_this_turn = False
 
-        try:
-            response = await self._llm.plan(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            )
-        except ContextOverflowError:
+        response = await self.plan_with_recovery(system=system, tools=tools)
+
+        # Proactive compaction — gated so we never double-summarize within
+        # a single turn (the recovery helper may already have compacted).
+        if (
+            not self._compacted_this_turn
+            and response.usage.context_pressure > self._context_pressure_threshold
+        ):
             await self._summarize_history()
             self._compact_scratchpads()
-            response = await self._llm.plan(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            )
-
-        # Proactive compaction
-        if response.usage.context_pressure > self._context_pressure_threshold:
-            await self._summarize_history()
-            self._compact_scratchpads()
+            self._compacted_this_turn = True
 
         # Handle tool calls
         tool_round = 0
@@ -598,10 +734,7 @@ class ChatSession:
                         ),
                     }
                 )
-                response = await self._llm.plan(
-                    system=system,
-                    messages=self._history,
-                )
+                response = await self.plan_with_recovery(system=system)
                 break
 
             # Build assistant message with content blocks
@@ -648,25 +781,17 @@ class ChatSession:
             self._history.append({"role": "user", "content": tool_results})
 
             # Get follow-up from LLM
-            try:
-                response = await self._llm.plan(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                )
-            except ContextOverflowError:
-                await self._summarize_history()
-                self._compact_scratchpads()
-                response = await self._llm.plan(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                )
+            response = await self.plan_with_recovery(system=system, tools=tools)
 
-            # Proactive compaction during tool loop
-            if response.usage.context_pressure > self._context_pressure_threshold:
+            # Proactive compaction during tool loop — gated to at most
+            # once per turn.
+            if (
+                not self._compacted_this_turn
+                and response.usage.context_pressure > self._context_pressure_threshold
+            ):
                 await self._summarize_history()
                 self._compact_scratchpads()
+                self._compacted_this_turn = True
 
         # Text-only response
         reply = response.content or ""
@@ -799,38 +924,14 @@ class ChatSession:
         """Stream one LLM call, handle tool loops, yield all events."""
         tools = self._build_tools()
         system = await self._build_system_prompt(user_message)
-
-        # Guard against summarizing an already-summarized history within the same
-        # turn (e.g. ContextOverflowError on first call + pressure > threshold on
-        # the tool-loop follow-up would previously produce a summary of a summary).
-        _compacted_this_turn = False
+        self._compacted_this_turn = False
 
         response: StreamComplete | None = None
 
-        try:
-            async for event in self._llm.plan_stream(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            ):
-                yield event
-                if isinstance(event, StreamComplete):
-                    response = event
-        except ContextOverflowError:
-            await self._summarize_history()
-            self._compact_scratchpads()
-            _compacted_this_turn = True
-            yield StreamContextCompacted(
-                message="Context was getting long — older history has been summarized."
-            )
-            async for event in self._llm.plan_stream(
-                system=system,
-                messages=self._history,
-                tools=tools,
-            ):
-                yield event
-                if isinstance(event, StreamComplete):
-                    response = event
+        async for event in self.plan_stream_with_recovery(system=system, tools=tools):
+            yield event
+            if isinstance(event, StreamComplete):
+                response = event
 
         if response is None:
             return
@@ -857,44 +958,24 @@ class ChatSession:
                 }
             )
             response = None
-            try:
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                ):
-                    yield event
-                    if isinstance(event, StreamComplete):
-                        response = event
-            except ContextOverflowError:
-                if not _compacted_this_turn:
-                    await self._summarize_history()
-                    self._compact_scratchpads()
-                    _compacted_this_turn = True
-                yield StreamContextCompacted(
-                    message="Context was getting long — older history has been summarized."
-                )
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                    tools=tools,
-                ):
-                    yield event
-                    if isinstance(event, StreamComplete):
-                        response = event
+            async for event in self.plan_stream_with_recovery(system=system, tools=tools):
+                yield event
+                if isinstance(event, StreamComplete):
+                    response = event
 
             if response is None:
                 return
             llm_response = response.response
 
-        # Proactive compaction
+        # Proactive compaction — gated via _compacted_this_turn so we
+        # never double-summarize within a single turn.
         if (
-            not _compacted_this_turn
+            not self._compacted_this_turn
             and llm_response.usage.context_pressure > self._context_pressure_threshold
         ):
             await self._summarize_history()
             self._compact_scratchpads()
-            _compacted_this_turn = True
+            self._compacted_this_turn = True
             yield StreamContextCompacted(
                 message="Context was getting long — older history has been summarized."
             )
@@ -929,10 +1010,7 @@ class ChatSession:
                             ),
                         }
                     )
-                    async for event in self._llm.plan_stream(
-                        system=system,
-                        messages=self._history,
-                    ):
+                    async for event in self.plan_stream_with_recovery(system=system):
                         yield event
                     break
 
@@ -1115,42 +1193,23 @@ class ChatSession:
 
                 # Stream follow-up
                 response = None
-                try:
-                    async for event in self._llm.plan_stream(
-                        system=system,
-                        messages=self._history,
-                        tools=tools,
+                async for event in self.plan_stream_with_recovery(
+                    system=system, tools=tools
+                ):
+                    # Capture reasoning elapsed on first text or tool event
+                    if _reasoning_t0 and isinstance(
+                        event, (StreamTextDelta, StreamComplete)
                     ):
-                        # Capture reasoning elapsed on first text or tool event
-                        if _reasoning_t0 and isinstance(
-                            event, (StreamTextDelta, StreamComplete)
-                        ):
-                            _reasoning_elapsed = _time.monotonic() - _reasoning_t0
-                            _reasoning_t0 = 0  # only fire once
-                            yield StreamTaskProgress(
-                                phase="reasoning_done",
-                                message="",
-                                eta_seconds=_reasoning_elapsed,
-                            )
-                        yield event
-                        if isinstance(event, StreamComplete):
-                            response = event
-                except ContextOverflowError:
-                    if not _compacted_this_turn:
-                        await self._summarize_history()
-                        self._compact_scratchpads()
-                        _compacted_this_turn = True
-                    yield StreamContextCompacted(
-                        message="Context was getting long — older history has been summarized."
-                    )
-                    async for event in self._llm.plan_stream(
-                        system=system,
-                        messages=self._history,
-                        tools=tools,
-                    ):
-                        yield event
-                        if isinstance(event, StreamComplete):
-                            response = event
+                        _reasoning_elapsed = _time.monotonic() - _reasoning_t0
+                        _reasoning_t0 = 0  # only fire once
+                        yield StreamTaskProgress(
+                            phase="reasoning_done",
+                            message="",
+                            eta_seconds=_reasoning_elapsed,
+                        )
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        response = event
 
                 if response is None:
                     return
@@ -1175,45 +1234,27 @@ class ChatSession:
                         }
                     )
                     response = None
-                    try:
-                        async for event in self._llm.plan_stream(
-                            system=system,
-                            messages=self._history,
-                            tools=tools,
-                        ):
-                            yield event
-                            if isinstance(event, StreamComplete):
-                                response = event
-                    except ContextOverflowError:
-                        if not _compacted_this_turn:
-                            await self._summarize_history()
-                            self._compact_scratchpads()
-                            _compacted_this_turn = True
-                        yield StreamContextCompacted(
-                            message="Context was getting long — older history has been summarized."
-                        )
-                        async for event in self._llm.plan_stream(
-                            system=system,
-                            messages=self._history,
-                            tools=tools,
-                        ):
-                            yield event
-                            if isinstance(event, StreamComplete):
-                                response = event
+                    async for event in self.plan_stream_with_recovery(
+                        system=system, tools=tools
+                    ):
+                        yield event
+                        if isinstance(event, StreamComplete):
+                            response = event
 
                     if response is None:
                         return
                     llm_response = response.response
 
-                # Proactive compaction during tool loop
+                # Proactive compaction during tool loop — gated to at
+                # most once per turn.
                 if (
-                    not _compacted_this_turn
+                    not self._compacted_this_turn
                     and llm_response.usage.context_pressure
                     > self._context_pressure_threshold
                 ):
                     await self._summarize_history()
                     self._compact_scratchpads()
-                    _compacted_this_turn = True
+                    self._compacted_this_turn = True
                     yield StreamContextCompacted(
                         message="Context was getting long — older history has been summarized."
                     )
@@ -1247,10 +1288,7 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing incomplete task..."
                 )
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                ):
+                async for event in self.plan_stream_with_recovery(system=system):
                     yield event
                 # Consolidation still runs after diagnosis
                 break
@@ -1258,32 +1296,36 @@ class ChatSession:
             # Ask the LLM to self-assess completion.
             # Use a copy of history with a trailing user message so models
             # that don't support assistant-prefill won't reject the request.
-            verify_messages = list(self._history) + [
-                {
-                    "role": "user",
-                    "content": (
-                        "SYSTEM: Evaluate whether the task the user originally requested "
-                        "has been fully completed based on the conversation above."
-                    ),
-                }
-            ]
-            verification = await self._llm.plan(
-                system=(
-                    "You are a task-completion verifier. Given the conversation, determine "
-                    "whether the user's original request has been fully completed.\n\n"
-                    "Respond with EXACTLY one of these lines, followed by a brief reason:\n"
-                    "STATUS: COMPLETE — <reason>\n"
-                    "STATUS: INCOMPLETE — <reason>\n"
-                    "STATUS: STUCK — <reason>\n\n"
-                    "COMPLETE = the task is done or the response fully answers the question.\n"
-                    "INCOMPLETE = more work can be done to finish the task.\n"
-                    "STUCK = a blocker prevents completion (missing info, permissions, etc).\n\n"
-                    "Be strict: if the user asked for X and only part of X was delivered, "
-                    "that is INCOMPLETE, not COMPLETE. But if the user asked a question "
-                    "and the assistant answered it, that is COMPLETE even without tool use."
-                ),
-                messages=verify_messages,
+            # Factory is re-invoked on each recovery attempt so the verifier
+            # sees the latest post-compaction history.
+            def build_verify_messages() -> list[dict]:
+                return list(self._history) + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "SYSTEM: Evaluate whether the task the user originally requested "
+                            "has been fully completed based on the conversation above."
+                        ),
+                    }
+                ]
+            verifier_system = (
+                "You are a task-completion verifier. Given the conversation, determine "
+                "whether the user's original request has been fully completed.\n\n"
+                "Respond with EXACTLY one of these lines, followed by a brief reason:\n"
+                "STATUS: COMPLETE — <reason>\n"
+                "STATUS: INCOMPLETE — <reason>\n"
+                "STATUS: STUCK — <reason>\n\n"
+                "COMPLETE = the task is done or the response fully answers the question.\n"
+                "INCOMPLETE = more work can be done to finish the task.\n"
+                "STUCK = a blocker prevents completion (missing info, permissions, etc).\n\n"
+                "Be strict: if the user asked for X and only part of X was delivered, "
+                "that is INCOMPLETE, not COMPLETE. But if the user asked a question "
+                "and the assistant answered it, that is COMPLETE even without tool use."
+            )
+            verification = await self.plan_with_recovery(
+                system=verifier_system,
                 max_tokens=256,
+                messages_factory=build_verify_messages,
             )
 
             status_text = (verification.content or "").strip().upper()
@@ -1306,10 +1348,7 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing blocked task..."
                 )
-                async for event in self._llm.plan_stream(
-                    system=system,
-                    messages=self._history,
-                ):
+                async for event in self.plan_stream_with_recovery(system=system):
                     yield event
                 break
 
@@ -1335,10 +1374,8 @@ class ChatSession:
 
             # Re-enter tool loop: get next LLM response with tools available
             response = None
-            async for event in self._llm.plan_stream(
-                system=system,
-                messages=self._history,
-                tools=tools,
+            async for event in self.plan_stream_with_recovery(
+                system=system, tools=tools
             ):
                 yield event
                 if isinstance(event, StreamComplete):

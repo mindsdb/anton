@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import re
-import shutil
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
-from anton.utils.datasources import remove_engine_block
-from anton.utils.prompt import prompt_or_cancel
+from anton.connect_collector import extract_variables
 from anton.commands.datasource.helpers import show_credential_help
+from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
+from anton.utils.datasources import persist_custom_engine
+from anton.utils.prompt import prompt_or_cancel
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -46,8 +45,11 @@ class _CustomDatasourceField(BaseModel):
         ),
     )
     required: bool = Field(
-        default=True,
-        description="True if the connection cannot be tested without this field.",
+        default=False,
+        description=(
+            "Always False for custom datasources — all fields are optional "
+            "by design. Never set this to True."
+        ),
     )
     description: str = Field(
         default="",
@@ -90,6 +92,112 @@ class _CustomDatasourceSpec(BaseModel):
     )
 
 
+async def collect_custom_credentials(
+    console: "Console",
+    session: "ChatSession",
+    registry: "DatasourceRegistry",
+    display_name: str,
+    fields: list[DatasourceField],
+    credentials: dict[str, str],
+    *,
+    edit_existing: bool = False,
+) -> bool:
+    """Collect or edit custom datasource credentials sequentially."""
+    fields_by_name = {f.name: f for f in fields}
+    slug_hint = re.sub(r"[^\w]", "_", display_name.lower()).strip("_")
+    known_engine_slugs = [e.engine for e in registry.all_engines()]
+    skipped: set[str] = set()
+
+    def _label_for(f: DatasourceField) -> str:
+        return (f.description or "").strip() or f.name
+
+    def _looks_structured(text: str) -> bool:
+        return "=" in text or "://" in text or "\n" in text
+
+    if edit_existing:
+        for current in fields:
+            while True:
+                current_value = credentials.get(current.name, "")
+                label = f"(anton) {_label_for(current)}"
+                if current.secret and current_value:
+                    label = f"{label} [••••••••]"
+                    value = await prompt_or_cancel(label, password=True)
+                elif current_value:
+                    value = await prompt_or_cancel(label, default=current_value)
+                else:
+                    value = await prompt_or_cancel(label, password=current.secret)
+
+                if value is None:
+                    return False
+
+                stripped = value.strip()
+                if not stripped:
+                    break
+
+                lowered = stripped.lower()
+                if lowered == "skip":
+                    return True
+                if lowered == "help":
+                    await show_credential_help(
+                        console, session, display_name, current, fields,
+                    )
+                    continue
+
+                credentials[current.name] = stripped
+                break
+        return True
+
+    while True:
+        remaining = [
+            f for f in fields
+            if f.name not in credentials and f.name not in skipped
+        ]
+        if not remaining:
+            break
+        current = remaining[0]
+        value = await prompt_or_cancel(
+            f"(anton) {_label_for(current)}",
+            password=current.secret,
+        )
+        if value is None:
+            return False
+        stripped = value.strip()
+        if not stripped:
+            skipped.add(current.name)
+            continue
+        lowered = stripped.lower()
+        if lowered == "skip":
+            break
+        if lowered == "help":
+            await show_credential_help(
+                console, session, display_name, current, fields,
+            )
+            continue
+        if len(remaining) > 1 and _looks_structured(stripped):
+            extracted = await extract_variables(
+                stripped,
+                expected_fields=fields,
+                current_engine=slug_hint,
+                current_engine_display=display_name,
+                known_engine_slugs=known_engine_slugs,
+                session=session,
+            )
+            if extracted.variables:
+                filled_here: list[str] = []
+                for k, val in extracted.variables.items():
+                    if k in fields_by_name and val:
+                        credentials[k] = val
+                        filled_here.append(k)
+                if filled_here:
+                    console.print(
+                        f"[anton.muted]        Got: {', '.join(filled_here)}[/]"
+                    )
+                    continue
+        credentials[current.name] = stripped
+
+    return True
+
+
 async def handle_add_custom_datasource(
     console: "Console",
     name: str,
@@ -105,24 +213,28 @@ async def handle_add_custom_datasource(
         tool_name = name
     else:
         tool_name = await prompt_or_cancel(
-            "(anton) What is the name of the tool or service?",
+            "(anton) Name of the tool or service?",
         )
         if not tool_name or not tool_name.strip():
             return None
         tool_name = tool_name.strip()
 
+    if tool_name and not tool_name.isdigit():
+        console.print()
+        console.print(
+            f"[anton.cyan](anton)[/] Setting up [bold]{tool_name}[/] as a custom datasource."
+        )
+
     if known_service:
         user_answer = ""
-        console.print("[anton.muted]        Working out the connection details…[/]")
+        console.print("[anton.muted]        Figuring out the connection…[/]")
     else:
         user_answer = await prompt_or_cancel(
-            f"(anton) How do you authenticate with {tool_name}? "
-            "Describe what credentials you have (don't paste actual values)",
+            f"(anton) How does {tool_name} authenticate? (short description, no secrets)",
         )
-        if not user_answer or not user_answer.strip():
+        if user_answer is None:
             return None
-        console.print()
-        console.print("[anton.muted]    Got it — working out the connection details…[/]")
+        console.print("[anton.muted]        Figuring out the connection…[/]")
 
     llm_prompt = f"The user wants to connect to {repr(tool_name)}."
     if user_answer:
@@ -133,6 +245,10 @@ async def handle_add_custom_datasource(
         "\n\nReturn the connection spec following the schema you've been given. "
         "For test_snippet, write Python that uses os.environ['DS_<FIELDNAME>'] "
         "vars (uppercase, DS_ prefix) and prints 'ok' on success."
+        "\n\nIMPORTANT: Every field in the generated spec must have required=False. "
+        "Never set required=True for any field in a custom datasource. "
+        "All fields are optional by design — the user will provide whatever "
+        "they have and Anton will ask for more only if needed."
     )
 
     try:
@@ -157,7 +273,7 @@ async def handle_add_custom_datasource(
         fields.append(
             DatasourceField(
                 name=f.name,
-                required=f.required,
+                required=False,
                 secret=f.secret,
                 description=f.description,
             )
@@ -171,140 +287,62 @@ async def handle_add_custom_datasource(
     display_name = spec.display_name or name
     pip_pkg = spec.pip
 
-    # Show summary
-    console.print()
-    console.print("      [bold]── What I'll save ──────────────────────────[/]")
+    # Collect inline values and show a compact one-line summary.
     credentials: dict[str, str] = {}
+    summary_parts: list[str] = []
     for f, raw in zip(fields, spec.fields):
         inline_value = (raw.value or "").strip()
-        if f.secret and inline_value:
-            console.print(
-                f"        • [bold]{f.name:<14}[/] (secret — provided, stored securely)"
-            )
+        if inline_value:
             credentials[f.name] = inline_value
+        if f.secret and inline_value:
+            summary_parts.append(f"[bold]{f.name}[/] (secret, provided)")
         elif f.secret:
-            console.print(
-                f"        • [bold]{f.name:<14}[/] (secret — I'll ask for this)"
-            )
+            summary_parts.append(f"[bold]{f.name}[/] (secret)")
+        elif inline_value:
+            summary_parts.append(f"[bold]{f.name}[/]={inline_value}")
         else:
-            val_display = inline_value or "[anton.muted]<to be collected>[/]"
-            console.print(f"        • [bold]{f.name:<14}[/] {val_display}")
-            if inline_value:
-                credentials[f.name] = inline_value
+            summary_parts.append(f"[bold]{f.name}[/]")
+    console.print()
+    console.print("        [anton.muted]Fields:[/] " + ", ".join(summary_parts))
     console.print()
 
-    help_answer = await prompt_or_cancel(
-        "(anton) Do you need instructions on how to obtain these credentials?",
-        choices=["y", "n"], default="n",
-    )
-    if help_answer is None:
-        return None
-    if help_answer.strip().lower() == "y":
-        await show_credential_help(
-            console, session, display_name, None, fields,
-        )
-
-    # Prompt for any secret fields not provided inline
-    for f, raw in zip(fields, spec.fields):
-        if not f.secret:
-            continue
-        if (raw.value or "").strip():
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name}", password=True)
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    # Prompt for any required non-secret fields not provided inline
-    for f, raw in zip(fields, spec.fields):
-        if f.secret:
-            continue
-        if not f.required:
-            continue
-        if f.name in credentials:
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name}")
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    # Offer to collect optional non-secret fields
-    for f, raw in zip(fields, spec.fields):
-        if f.secret or f.required or f.name in credentials:
-            continue
-        value = await prompt_or_cancel(f"(anton) {f.name} (optional — press Enter to skip)")
-        if value is None:
-            return None
-        if value:
-            credentials[f.name] = value
-
-    if not credentials:
-        console.print("[anton.warning]        No credentials collected. Aborting.[/]")
-        console.print()
+    # Sequential collection — one field at a time, consistent with the
+    # built-in connect flow. Enter skips the current field; 'skip' stops
+    # collection; 'help' shows credential guidance; structured input with
+    # multiple values is parsed via LLM extraction.
+    if not await collect_custom_credentials(
+        console,
+        session,
+        registry,
+        display_name,
+        fields,
+        credentials,
+    ):
         return None
 
-    # Build engine slug and write definition to ~/.anton/datasources.md
-    slug = re.sub(r"[^\w]", "_", display_name.lower()).strip("_")
-    field_lines = "\n".join(
-        f"  - {{ name: {f.name}, required: {str(f.required).lower()}, "
-        f'secret: {str(f.secret).lower()}, description: "{f.description}" }}'
-        for f in fields
+    # Custom datasources never have required fields.
+    for f in fields:
+        f.required = False
+
+    engine_def = persist_custom_engine(
+        registry,
+        display_name,
+        fields,
+        test_snippet=test_snippet,
+        pip=pip_pkg,
     )
-    test_snippet_yaml = ""
-    if test_snippet:
-        indented = "\n".join(f"  {line}" for line in test_snippet.splitlines())
-        test_snippet_yaml = f"test_snippet: |\n{indented}\n"
-
-    yaml_block = (
-        f"\n---\n\n## {display_name}\n"
-        "```yaml\n"
-        f"engine: {slug}\n"
-        f"display_name: {display_name}\n"
-        + (f"pip: {pip_pkg}\n" if pip_pkg else "")
-        + f"fields:\n{field_lines}\n"
-        + test_snippet_yaml
-        + "```\n"
-    )
-    user_ds_path = Path("~/.anton/datasources.md").expanduser()
-    tmp_path = user_ds_path.with_suffix(".tmp")
-
-    existing = (
-        user_ds_path.read_text(encoding="utf-8") if user_ds_path.is_file() else ""
-    )
-    existing = remove_engine_block(existing, slug)
-
-    tmp_path.write_text(existing + yaml_block, encoding="utf-8")
-
-    parsed = registry.validate_file(tmp_path)
-    if slug in parsed:
-        shutil.move(str(tmp_path), str(user_ds_path))
-    else:
-        tmp_path.unlink(missing_ok=True)
+    if engine_def is None:
         console.print(
             "[anton.warning]Could not validate engine definition — "
             "credentials saved but engine not written to datasources.md.[/]"
         )
-
-    registry.reload()
-    engine_def = registry.get(slug)
-    if engine_def is None:
         engine_def = DatasourceEngine(
-            engine=slug,
+            engine=re.sub(r"[^\w]", "_", display_name.lower()).strip("_"),
             display_name=display_name,
             pip=pip_pkg,
             fields=fields,
             test_snippet=test_snippet,
+            custom=True,
         )
-
-    missing_required = [f.name for f in fields if f.required and f.name not in credentials]
-    if missing_required:
-        console.print(
-            "[anton.warning]    Cannot save — missing required fields: "
-            f"{', '.join(missing_required)}. Aborting.[/]"
-        )
-        console.print()
-        return None
 
     return engine_def, credentials
