@@ -40,6 +40,7 @@ COMMANDS = [
     "Chat Tools",
     Command("/paste",     "Attach an image from your clipboard"),
     Command("/resume",    "Continue a previous session"),
+    Command("/remote",    "Set up or manage remote scratchpad"),
     Command("/publish",   "Publish an HTML report to the web"),
     Command("/unpublish", "Remove a published report"),
     Command("/explain",   "Show explainability details for the latest answer"),

@@ -330,6 +330,180 @@ def _extract_html_title(path, re_module) -> str:
         return ""
 
 
+async def _handle_remote(
+    console: Console,
+    settings,
+    workspace,
+) -> None:
+    """Handle /remote command — provision or check status of remote scratchpad."""
+    # import asyncio
+    # import json
+    # import os
+    # import time
+    # from urllib.request import Request, urlopen
+
+    # from rich.live import Live
+    # from rich.spinner import Spinner
+
+    console.print()
+
+    from pathlib import Path as _P
+    from anton.workspace import Workspace as _W
+    _global_ws = _W(_P.home())
+
+    # Ensure minds API key — same flow as /publish
+    if not settings.minds_api_key:
+        import webbrowser
+        from anton.utils.prompt import prompt_or_cancel
+
+        console.print("  [anton.muted]To use remote scratchpad you need a free Minds account.[/]")
+        console.print()
+        has_key = await prompt_or_cancel(
+            "  Do you have an mdb.ai API key?",
+            choices=["y", "n"],
+            choices_display="y/n",
+            default="y",
+        )
+        if has_key is None:
+            console.print()
+            return
+        if has_key.lower() == "n":
+            webbrowser.open(
+                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "?client_id=public-client&response_type=code&scope=openid"
+                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+            )
+            console.print()
+
+        api_key_input = await prompt_or_cancel("  API key", password=True)
+        if api_key_input is None or not api_key_input.strip():
+            console.print()
+            return
+        api_key_input = api_key_input.strip()
+        settings.minds_api_key = api_key_input
+
+        _global_ws.set_secret("ANTON_MINDS_API_KEY", api_key_input)
+        console.print()
+
+    # If an API key is provided, set the backend to remote
+    if settings.minds_api_key:
+        _global_ws.set_secret("ANTON_BACKEND", "remote")
+
+    # TODO: This code was used for provisioning remote scratchpads via
+    # 4nton.ai, but is no longer used. Should it be removed?
+    # provision_url = settings.publish_url.rstrip("/") + "/provision"
+    # api_key = settings.minds_api_key
+
+    # # Check current status via GET /provision
+    # with Live(Spinner("dots", text="  Checking remote scratchpad...", style="anton.cyan"), console=console, transient=True):
+    #     try:
+    #         req = Request(
+    #             provision_url,
+    #             headers={
+    #                 "Authorization": f"Bearer {api_key}",
+    #                 "User-Agent": "anton/1.0",
+    #             },
+    #         )
+    #         with urlopen(req, timeout=15) as resp:
+    #             result = json.loads(resp.read().decode())
+    #     except Exception as e:
+    #         console.print(f"  [anton.error]Failed to check status: {e}[/]")
+    #         console.print()
+    #         return
+
+    # status = result.get("status", "none")
+    # endpoint = result.get("endpoint", "")
+
+    # # Already running — save and confirm
+    # if status == "running":
+    #     console.print(f"  [anton.success]Remote scratchpad is running[/]")
+    #     console.print(f"  [anton.muted]{endpoint}[/]")
+    #     console.print()
+    #     from pathlib import Path as _P
+    #     from anton.workspace import Workspace as _W
+    #     _W(_P.home()).set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
+    #     os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
+    #     return
+
+    # # Not provisioned — start provisioning
+    # if status in ("none", "stopped"):
+    #     action = "Waking up" if status == "stopped" else "Provisioning"
+    #     console.print(f"  [anton.muted]{action} remote scratchpad...[/]")
+
+    #     with Live(Spinner("dots", text=f"  {action}...", style="anton.cyan"), console=console, transient=True):
+    #         try:
+    #             req = Request(
+    #                 provision_url,
+    #                 data=b"{}",
+    #                 method="POST",
+    #                 headers={
+    #                     "Authorization": f"Bearer {api_key}",
+    #                     "Content-Type": "application/json",
+    #                     "User-Agent": "anton/1.0",
+    #                 },
+    #             )
+    #             with urlopen(req, timeout=30) as resp:
+    #                 result = json.loads(resp.read().decode())
+    #         except Exception as e:
+    #             console.print(f"  [anton.error]Provisioning failed: {e}[/]")
+    #             console.print()
+    #             return
+
+    #     endpoint = result.get("endpoint", endpoint)
+    #     status = result.get("status", "")
+
+    # # Poll until ready — 5s intervals, 3 min max
+    # # Use /resolve to get the direct IP, then poll /health on it
+    # if status in ("provisioning", "starting"):
+    #     max_wait = 180
+    #     poll_interval = 5
+    #     start_time = time.time()
+    #     direct_endpoint = None
+
+    #     with Live(Spinner("dots", text="  Waiting for instance to be ready...", style="anton.cyan"), console=console, transient=True):
+    #         while time.time() - start_time < max_wait:
+    #             await asyncio.sleep(poll_interval)
+    #             try:
+    #                 # First resolve the direct IP via Cloudflare Worker
+    #                 if not direct_endpoint:
+    #                     req = Request(
+    #                         f"{endpoint}/resolve",
+    #                         headers={"Authorization": f"Bearer {api_key}", "User-Agent": "anton/1.0"},
+    #                     )
+    #                     with urlopen(req, timeout=5) as resp:
+    #                         resolve_data = json.loads(resp.read().decode())
+    #                     if resolve_data.get("status") == "running":
+    #                         direct_endpoint = resolve_data.get("endpoint", "")
+
+    #                 # Then check health directly
+    #                 if direct_endpoint:
+    #                     req = Request(
+    #                         f"{direct_endpoint}/health",
+    #                         headers={"Authorization": f"Bearer {api_key}", "User-Agent": "anton/1.0"},
+    #                     )
+    #                     with urlopen(req, timeout=5) as resp:
+    #                         health = json.loads(resp.read().decode())
+    #                     if health.get("status") == "ok":
+    #                         break
+    #             except Exception:
+    #                 pass
+    #         else:
+    #             console.print("  [anton.warning]Instance is still setting up (3+ minutes).[/]")
+    #             console.print("  [anton.muted]Run /remote again in a few minutes.[/]")
+    #             console.print()
+    #             return
+
+    # Save and confirm
+    console.print(f"  [anton.success]Remote scratchpad ready![/]")
+    # console.print(f"  [link={endpoint}]{endpoint}[/link]")
+    console.print()
+
+    from pathlib import Path as _P
+    from anton.workspace import Workspace as _W
+    # _W(_P.home()).set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
+    # os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
+
+
 async def _handle_publish(
     console: Console,
     settings,
@@ -374,6 +548,9 @@ async def _handle_publish(
         settings.minds_api_key = api_key
         # Key is not persisted yet — wait until publish succeeds to avoid
         # locking the user out with a bad key on every subsequent /publish call.
+        from pathlib import Path as _P
+        from anton.workspace import Workspace as _W
+        _W(_P.home()).set_secret("ANTON_MINDS_API_KEY", api_key)
         console.print()
 
     # 2. Find the HTML file to publish
@@ -1051,8 +1228,11 @@ async def _chat_loop(
     runtime_context = build_runtime_context(settings)
 
     output_path = f"{settings.output_dir.rstrip('/')}/"
+    from anton.chat_session import get_runtime_factory
+
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
+        runtime_factory=get_runtime_factory(settings),
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
@@ -1365,6 +1545,21 @@ async def _chat_loop(
                 elif cmd == "/theme":
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     handle_theme(console, arg)
+                    continue
+                elif cmd == "/remote":
+                    await _handle_remote(console, settings, workspace)
+                    # Rebuild session so scratchpad uses remote/local factory
+                    session = rebuild_session(
+                        settings=settings,
+                        state=state,
+                        self_awareness=self_awareness,
+                        cortex=cortex,
+                        workspace=workspace,
+                        console=console,
+                        episodic=episodic,
+                        history_store=history_store,
+                        session_id=current_session_id,
+                    )
                     continue
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""

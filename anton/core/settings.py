@@ -19,3 +19,4 @@ class CoreSettings(BaseSettings):
     cell_inactivity_after_progress: int = 60  # Grace window after progress() call (s)
     cell_install_timeout: int = 120  # pip/uv install timeout (s)
     cell_keep_recent: int = 5  # Recent cells preserved during compaction
+
