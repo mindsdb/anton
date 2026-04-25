@@ -9,10 +9,16 @@ from typing import TYPE_CHECKING
 from anton.connect_collector import ConnectionCollector, extract_variables
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
-from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
+from anton.utils.datasources import (
+    find_matching_connection,
+    parse_connection_slug,
+    register_secret_vars,
+    restore_namespaced_env,
+    save_connection,
+)
 from anton.utils.prompt import prompt_or_cancel
-from anton.commands.datasource.helpers import show_credential_help
-from anton.commands.datasource.custom import handle_add_custom_datasource
+from anton.commands.datasource.helpers import prompt_field_value, show_credential_help
+from anton.commands.datasource.custom import collect_custom_credentials, handle_add_custom_datasource
 from anton.commands.datasource.verify import run_connection_test
 
 _PROMPT_RECONNECT_CANCEL = "(reconnect/cancel)"
@@ -161,7 +167,7 @@ async def handle_connect_datasource(
             f"[anton.cyan](anton)[/] Editing [bold]\"{datasource_name}\"[/bold]"
             f" ({engine_def.display_name})."
         )
-        console.print("[anton.muted]        Press Enter to keep the current value.[/]")
+        console.print("[anton.muted]        Enter to keep current value.[/]")
         console.print()
 
         active_fields = engine_def.fields
@@ -176,42 +182,8 @@ async def handle_connect_datasource(
 
         credentials: dict[str, str] = dict(existing)
         for f in active_fields:
-            current = existing.get(f.name, "")
-            field_label = f"(anton) {f.name}"
-            if not f.required:
-                field_label += " (optional)"
-
-            if f.secret:
-                masked = "••••••••" if current else ""
-                label = f"{field_label} [{masked}]" if masked else field_label
-                value = await prompt_or_cancel(label, password=True)
-                if value is None:
-                    return session
-                if value:
-                    credentials[f.name] = value
-            elif current:
-                value = await prompt_or_cancel(
-                    f"{field_label}",
-                    default=current,
-                )
-                if value is None:
-                    return session
-                credentials[f.name] = value if value else current
-            elif f.default:
-                value = await prompt_or_cancel(
-                    f"{field_label}",
-                    default=f.default,
-                )
-                if value is None:
-                    return session
-                if value:
-                    credentials[f.name] = value
-            else:
-                value = await prompt_or_cancel(field_label)
-                if value is None:
-                    return session
-                if value:
-                    credentials[f.name] = value
+            if not await prompt_field_value(f, credentials):
+                return session
 
         if engine_def.test_snippet:
             if not await run_connection_test(
@@ -229,9 +201,7 @@ async def handle_connect_datasource(
             f'        Credentials updated for [bold]"{datasource_name}"[/bold].'
         )
         console.print()
-        console.print(
-            "[anton.muted]        You can now ask me questions about your data.[/]"
-        )
+        console.print("[anton.muted]        Ready to query your data.[/]")
         console.print()
         if not from_tool_call:
             session._history.append(
@@ -245,129 +215,38 @@ async def handle_connect_datasource(
             )
         return session
 
-    console.print()
-    all_engines = registry.all_engines()
-    popular_engines = [e for e in all_engines if e.popular and not e.custom]
-    other_engines = [e for e in all_engines if not e.popular and not e.custom]
-    custom_engines = [e for e in all_engines if e.custom]
-    display_engines = popular_engines + other_engines + custom_engines
-
     saved_connections = vault.list_connections()
-    seen_engines: set[str] = set()
-    recent_engine_entries: list[tuple[str, str]] = []
-    for c in saved_connections:
-        if c["engine"] not in seen_engines:
-            seen_engines.add(c["engine"])
-            engine_obj = registry.get(c["engine"])
-            label = engine_obj.display_name if engine_obj else c["engine"]
-            recent_engine_entries.append((c["engine"], label))
-
-    def print_sections() -> None:
-        console.print(
-            "[anton.cyan](anton)[/] Select a data source to create a new connection:\n"
-        )
-        console.print("       [bold]  Primary")
-        console.print(
-            "         [bold]  0.[/bold] Custom datasource"
-            " (connect anything via API, SQL, or MCP)\n"
-        )
-        if popular_engines:
-            console.print("       [bold]  Most popular")
-            for i, e in enumerate(popular_engines, 1):
-                console.print(f"          [bold]{i:>2}.[/bold] {e.display_name}")
-            console.print()
-        if recent_engine_entries:
-            start = len(popular_engines) + 1
-            console.print("       [bold]  Recently used data sources")
-            for i, (_, label) in enumerate(recent_engine_entries, start):
-                console.print(f"          [bold]{i:>2}.[/bold] {label}")
-            console.print()
-
-    def print_all() -> None:
-        console.print(
-            "[anton.cyan](anton)[/] All data sources (★ = popular):\n"
-        )
-        console.print("       [bold]  Primary")
-        console.print(
-            "         [bold]  0.[/bold] Custom datasource"
-            " (connect anything via API, SQL, or MCP)\n"
-        )
-        for i, e in enumerate(display_engines, 1):
-            star = " ★" if e.popular else ""
-            console.print(f"          [bold]{i:>2}.[/bold] {e.display_name}{star}")
-        console.print()
-
-    async def get_create_new_answer() -> str | None:
-        print_sections()
-        console.print(
-            "       [anton.muted]Don't see yours? Type a datasource name (e.g., GitHub, Gmail, Jira, ...)\n"
-            "       It can be virtually any datasource — we'll figure out the details together.[/]"
-        )
-        console.print()
-        ans = await prompt_or_cancel(
-            "(anton) Enter a number or type a datasource name",
-        )
-        if ans is None:
-            return None
-        if ans.strip().lower() == "all":
-            console.print()
-            print_all()
-            ans = await prompt_or_cancel(
-                "(anton) Enter a number or type a name",
-            )
-        return ans
 
     if prefill:
-        answer = prefill
-    elif saved_connections:
-        console.print()
-        console.print("[anton.cyan](anton)[/] What would you like to do?\n")
-        console.print("          [bold]  1.[/bold] Use an existing connection")
-        console.print("          [bold]  2.[/bold] Create a new connection")
-        console.print()
-        top_choice = await prompt_or_cancel(
-            "(anton) Enter a number", choices=["1", "2"]
-        )
-        if top_choice is None:
-            return session
-
-        if top_choice == "1":
-            console.print()
-            console.print("[anton.cyan](anton)[/] Your saved connections:\n")
-            for i, c in enumerate(saved_connections, 1):
-                conn_slug = f"{c['engine']}-{c['name']}"
-                engine_obj = registry.get(c["engine"])
-                engine_label = engine_obj.display_name if engine_obj else c["engine"]
-                console.print(
-                    f"          [bold]{i:>2}.[/bold] {conn_slug}"
-                    f" [dim]— {engine_label}[/]"
-                )
-            console.print()
-            pick = await prompt_or_cancel(
-                "(anton) Enter a number",
-                choices=[str(i) for i in range(1, len(saved_connections) + 1)],
-            )
-            if pick is None:
-                return session
-            picked_conn = saved_connections[int(pick) - 1]
-            picked_slug = f"{picked_conn['engine']}-{picked_conn['name']}"
-            return await _reconnect_to_saved(
-                console, session, vault, registry, picked_slug, picked_conn,
-                from_tool_call=from_tool_call,
-            )
-
-        answer = await get_create_new_answer()
-        if answer is None:
+        stripped_answer = prefill.strip()
+        if not stripped_answer:
             return session
     else:
-        answer = await get_create_new_answer()
+        console.print()
+        console.print(
+            "[anton.cyan](anton)[/] What would you like to connect?"
+        )
+        console.print(
+            "  [anton.muted]Examples: PostgreSQL, MySQL, Snowflake, BigQuery, "
+            "Gmail, GitHub, HubSpot, Salesforce, Jira, REST API.[/]"
+        )
+        if saved_connections:
+            slugs = ", ".join(f"{c['engine']}-{c['name']}" for c in saved_connections[:5])
+            more = "" if len(saved_connections) <= 5 else f" (+{len(saved_connections) - 5} more, see /list)"
+            console.print(
+                f"  [anton.muted]Or reconnect: {slugs}{more}[/]"
+            )
+        console.print()
+
+        answer = await prompt_or_cancel("(anton) Connect to")
         if answer is None:
             return session
 
-    stripped_answer = answer.strip()
-    known_slugs = {
-        f"{c['engine']}-{c['name']}": c for c in vault.list_connections()
-    }
+        stripped_answer = answer.strip()
+        if not stripped_answer:
+            return session
+
+    known_slugs = {f"{c['engine']}-{c['name']}": c for c in saved_connections}
     if stripped_answer in known_slugs:
         conn = known_slugs[stripped_answer]
         return await _reconnect_to_saved(
@@ -375,141 +254,49 @@ async def handle_connect_datasource(
             from_tool_call=from_tool_call,
         )
 
-    engine_def = None
-    custom_source = False
-    llm_recognised = False
-    saved_start = len(popular_engines) + 1
-    max_num = len(popular_engines) + len(recent_engine_entries)
+    engine_def = registry.find_by_name(stripped_answer)
 
-    if stripped_answer.isdigit() or (stripped_answer.lstrip("-").isdigit()):
-        pick_num = int(stripped_answer)
-        if pick_num == 0:
-            custom_source = True
-        elif 1 <= pick_num <= len(popular_engines):
-            engine_def = popular_engines[pick_num - 1]
-        elif recent_engine_entries and saved_start <= pick_num <= max_num:
-            picked_engine_slug, _ = recent_engine_entries[pick_num - saved_start]
-            engine_def = registry.get(picked_engine_slug)
-            if engine_def is None:
-                custom_source = True
-        else:
-            console.print(
-                f"[anton.warning](anton)[/] '{stripped_answer}' is out of range. "
-                f"Please enter 0\u2013{max_num}.[/]"
-            )
-            console.print()
-            return session
-
-    if engine_def is None and not custom_source:
-        engine_def = registry.find_by_name(stripped_answer)
-        if engine_def is None:
-            needle = stripped_answer.lower()
-            candidates = [
-                e
-                for e in all_engines
-                if needle in e.display_name.lower() or needle in e.engine.lower()
-            ]
-            if len(candidates) == 1:
-                engine_def = candidates[0]
-            elif len(candidates) > 1:
-                console.print()
-                console.print(
-                    f"[anton.warning](anton)[/] '{stripped_answer}' matches multiple engines — "
-                    "which one did you mean?"
-                )
-                console.print()
-                for i, e in enumerate(candidates, 1):
-                    console.print(f"        {i}. {e.display_name}")
-                console.print()
-                pick = await prompt_or_cancel("(anton) Enter a number")
-                if pick is None:
-                    return session
-                pick = (pick or "").strip()
-                try:
-                    engine_def = candidates[int(pick) - 1]
-                except (ValueError, IndexError):
-                    console.print("[anton.warning]Invalid choice. Aborting.[/]")
-                    console.print()
-                    return session
-
-        if engine_def is None:
-            engine_names = [e.display_name for e in all_engines]
-            try:
-                console.print()
-                console.print("[anton.muted]        Looking up datasource…[/]")
-                llm_resp = await session._llm.plan(
-                    system="You are a datasource identification assistant.",
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": (
-                                f"The user typed: {stripped_answer!r}\n"
-                                f"Known datasources: {engine_names!r}\n\n"
-                                "If the user input clearly matches one of the known datasources, "
-                                "reply with EXACTLY: MATCH:<display_name>\n"
-                                "If it does NOT match any known datasource but you recognise it "
-                                "as a real service/tool, reply with EXACTLY: CUSTOM\n"
-                                "If you don't recognise it at all, reply with EXACTLY: UNKNOWN\n"
-                                "Reply with only one of those three forms, nothing else."
-                            ),
-                        }
-                    ],
-                    max_tokens=64,
-                )
-                llm_text = (llm_resp.content or "").strip()
-            except Exception:
-                llm_text = "UNKNOWN"
-
-            llm_recognised = llm_text == "CUSTOM" or llm_text.startswith("MATCH:")
-
-            if llm_text.startswith("MATCH:"):
-                matched_name = llm_text[len("MATCH:"):].strip()
-                matched_engine = next(
-                    (e for e in all_engines if e.display_name == matched_name), None
-                )
-                if matched_engine is not None:
-                    if matched_name.lower() != stripped_answer.lower():
-                        confirm = await prompt_or_cancel(
-                            f'(anton) Did you mean "{matched_name}"?',
-                            choices=["y", "n"], default="y",
-                        )
-                        if confirm is not None and confirm.strip().lower() == "y":
-                            engine_def = matched_engine
-                    else:
-                        engine_def = matched_engine
-
-            if engine_def is None:
-                custom_source = True
-
-    if custom_source:
-        _telemetry("ds_connect_attempt", engine=stripped_answer if not stripped_answer.isdigit() else "custom")
+    if engine_def is None:
+        _telemetry("ds_connect_attempt", engine=stripped_answer)
         result = await handle_add_custom_datasource(
-            console, stripped_answer if not stripped_answer.isdigit() else "", registry, session,
-            known_service=llm_recognised,
+            console, stripped_answer, registry, session, known_service=False,
         )
         if result is None:
             return session
         engine_def, credentials = result
         if engine_def.test_snippet:
+            async def _retry_custom_credentials() -> bool:
+                console.print("[anton.muted]        Let's update those details.[/]")
+                return await collect_custom_credentials(
+                    console,
+                    session,
+                    registry,
+                    engine_def.display_name,
+                    engine_def.fields,
+                    credentials,
+                    edit_existing=True,
+                )
+
             if not await run_connection_test(
-                console, scratchpads, vault, engine_def, credentials, engine_def.fields
+                console,
+                scratchpads,
+                vault,
+                engine_def,
+                credentials,
+                engine_def.fields,
+                retry_edit_callback=_retry_custom_credentials,
             ):
                 _telemetry("ds_connect_failed", engine=engine_def.engine)
                 return session
         conn_name = uuid.uuid4().hex[:8]
-        vault.save(engine_def.engine, conn_name, credentials)
+        slug = save_connection(vault, engine_def, conn_name, credentials)
         _telemetry("ds_connect_success", engine=engine_def.engine)
-        slug = f"{engine_def.engine}-{conn_name}"
-        restore_namespaced_env(vault)
         session._active_datasource = slug
-        register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
         console.print(
-            f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].'
+            f'        Saved to Local Vault as [bold]"{slug}"[/bold].'
         )
         console.print()
-        console.print(
-            "[anton.muted]        You can now ask me questions about your data.[/]"
-        )
+        console.print("[anton.muted]        Ready to query your data.[/]")
         console.print()
         if not from_tool_call:
             session._history.append(
@@ -524,20 +311,18 @@ async def handle_connect_datasource(
         return session
 
     assert engine_def is not None
-    _telemetry("ds_connect_attempt", engine=engine_def.engine)
+    # _telemetry("ds_connect_attempt", engine=engine_def.engine)
     active_fields = engine_def.fields
     chosen_method = None
     if engine_def.auth_method == "choice" and engine_def.auth_methods:
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] How would you like to authenticate with "
-            f"[bold]{engine_def.display_name}[/]?"
+            f"[anton.cyan](anton)[/] Auth method for [bold]{engine_def.display_name}[/]:"
         )
-        console.print()
         for i, am in enumerate(engine_def.auth_methods, 1):
             console.print(f"        {i}. {am.display}")
         console.print()
-        choice_str = await prompt_or_cancel("(anton) Enter a number")
+        choice_str = await prompt_or_cancel("(anton) Choose")
         if choice_str is None:
             return session
         choice_str = (choice_str or "").strip()
@@ -568,59 +353,63 @@ async def handle_connect_datasource(
         ]
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] Got everything for [bold]"
-            f"{engine_def.display_name}[/] from context: "
-            f"{', '.join(filled_names)}."
+            f"[anton.cyan](anton)[/] Got [bold]{engine_def.display_name}[/] "
+            f"details from context: {', '.join(filled_names)}."
         )
         console.print()
     else:
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] To connect [bold]"
-            f"{engine_def.display_name}[/], I'll need the following:"
+            f"[anton.cyan](anton)[/] [bold]{engine_def.display_name}[/] needs:"
         )
-        console.print()
-
-        if required_fields:
-            console.print("        [bold]Required[/]      " + "─" * 39)
-            for f in required_fields:
-                marker = (
-                    "[green]✓[/] " if collector.collected.get(f.name) else "• "
-                )
-                console.print(
-                    f"        {marker}[bold]{f.name:<12}[/] "
-                    f"[anton.muted]— {f.description}[/]"
-                )
-
-        if optional_fields:
-            console.print()
-            console.print("        [bold]Optional[/]      " + "─" * 39)
-            for f in optional_fields:
-                marker = (
-                    "[green]✓[/] " if collector.collected.get(f.name) else "• "
-                )
-                console.print(
-                    f"        {marker}[bold]{f.name:<12}[/] "
-                    f"[anton.muted]— {f.description}[/]"
-                )
-
-        console.print()
-
-        if not collector.collected:
-            help_answer = await prompt_or_cancel(
-                "(anton) Do you need instructions on how to obtain these credentials?",
-                choices_display="y/n", default="n",
+        for f in required_fields:
+            marker = "[green]✓[/] " if collector.collected.get(f.name) else "• "
+            console.print(
+                f"        {marker}[bold]{f.name}[/] "
+                f"[anton.muted]— {f.description}[/]"
             )
-            if help_answer is None:
+        for f in optional_fields:
+            marker = "[green]✓[/] " if collector.collected.get(f.name) else "• "
+            console.print(
+                f"        {marker}[bold]{f.name}[/] "
+                f"[anton.muted]— {f.description} (optional)[/]"
+            )
+        console.print()
+
+    while not collector.is_complete:
+        next_field = collector.next_field
+        remaining_count = len(collector.missing_required)
+        use_sequential = next_field is not None and next_field.required
+
+        if use_sequential and next_field is not None:
+            pretty = next_field.name.replace("_", " ").title()
+            label = f"(anton) {pretty}"
+            if next_field.secret:
+                value = await prompt_or_cancel(label, password=True)
+            elif next_field.default:
+                value = await prompt_or_cancel(label, default=next_field.default)
+            else:
+                value = await prompt_or_cancel(label)
+            if value is None:
                 return session
-            normalized = help_answer.strip().lower()
-            if normalized == "y":
+            if not value:
+                partial = True
+                break
+            stripped = value.strip()
+            lowered = stripped.lower()
+            if lowered == "skip":
+                partial = True
+                break
+            if lowered == "help":
                 await show_credential_help(
-                    console, session, engine_def.display_name, None, active_fields,
+                    console, session, engine_def.display_name, next_field, active_fields,
                 )
-            elif normalized and normalized != "n":
+                continue
+            if remaining_count > 1 and (
+                "=" in stripped or "://" in stripped or "\n" in stripped
+            ):
                 extracted = await extract_variables(
-                    help_answer,
+                    stripped,
                     expected_fields=collector.active_fields,
                     current_engine=engine_def.engine,
                     current_engine_display=engine_def.display_name,
@@ -629,7 +418,7 @@ async def handle_connect_datasource(
                 )
                 if extracted.is_redirect:
                     redirect_text = _build_redirect_message(
-                        collector, help_answer, extracted.redirect_engine
+                        collector, stripped, extracted.redirect_engine
                     )
                     session._pending_connect_redirect = redirect_text
                     if not from_tool_call:
@@ -644,45 +433,26 @@ async def handle_connect_datasource(
                             f"[anton.muted]        Got: {', '.join(filled)}[/]"
                         )
                         console.print()
-
-    while not collector.is_complete:
-        collector.format_status(console)
-        console.print()
-
-        next_field = collector.next_field
-        only_one_required = (
-            next_field is not None
-            and next_field.required
-            and len(collector.missing_required) == 1
-        )
-
-        if only_one_required and next_field is not None:
-            label = f"(anton) {next_field.name}"
-            if next_field.secret:
-                value = await prompt_or_cancel(label, password=True)
-            elif next_field.default:
-                value = await prompt_or_cancel(label, default=next_field.default)
-            else:
-                value = await prompt_or_cancel(label)
-            if value is None:
-                return session
-            if not value:
-                partial = True
-                break
+                        continue
             collector.fill(next_field.name, value)
             continue
 
+        collector.format_status(console)
+        console.print()
+
         missing_names = ", ".join(f.name for f in collector.missing_required)
-        prompt_label = (
-            f"(anton) Provide values for {missing_names} "
-            f"(one at a time, or 'key=value key2=value2', or 'skip')"
-        )
+        prompt_label = f"(anton) {missing_names} (value, 'key=value …', 'help', or 'skip')"
         value = await prompt_or_cancel(prompt_label)
         if value is None:
             return session
         if value.strip().lower() == "skip":
             partial = True
             break
+        if value.strip().lower() == "help":
+            await show_credential_help(
+                console, session, engine_def.display_name, None, active_fields,
+            )
+            continue
         if not value.strip():
             continue
 
@@ -719,8 +489,8 @@ async def handle_connect_datasource(
             collector.fill(next_field.name, value.strip())
         else:
             console.print(
-                "[anton.warning]        Couldn't parse that. "
-                "Try 'key=value' or one value at a time.[/]"
+                "[anton.warning]        Couldn't parse. "
+                "Try 'key=value' or one value.[/]"
             )
             console.print()
 
@@ -732,9 +502,8 @@ async def handle_connect_datasource(
         slug = f"{engine_def.engine}-{auto_name}"
         console.print()
         console.print(
-            f"[anton.muted]Partial connection saved to Local Vault as "
-            f'[bold]"{slug}"[/bold]. '
-            f"Run [bold]/edit {slug}[/bold] to complete it when you're ready.[/]"
+            f'[anton.muted]Partial save: [bold]"{slug}"[/bold]. '
+            f"Run [bold]/edit {slug}[/bold] to finish.[/]"
         )
         console.print()
         return session
@@ -747,64 +516,40 @@ async def handle_connect_datasource(
             session._pending_connect_status = "test_failed"
             return session
 
-    conn_name = registry.derive_name(engine_def, credentials)
-    if not conn_name:
+    existing_name = find_matching_connection(vault, engine_def, credentials)
+    if existing_name is not None:
+        conn_name = existing_name
+        is_update = True
+    else:
         conn_name = uuid.uuid4().hex[:8]
+        while vault.load(engine_def.engine, conn_name) is not None:
+            conn_name = uuid.uuid4().hex[:8]
+        is_update = False
 
     slug = f"{engine_def.engine}-{conn_name}"
 
-    if vault.load(engine_def.engine, conn_name) is not None:
-        console.print()
-        console.print(
-            f'[anton.warning](anton)[/] A connection [bold]"{slug}"[/bold] already exists.'
-        )
-        console.print()
-        choice = await prompt_or_cancel(
-            f"(anton) {_PROMPT_RECONNECT_CANCEL}",
-        )
-        if choice is None or choice.strip().lower() != "reconnect":
-            console.print("[anton.muted]Cancelled.[/]")
-            console.print()
-            return session
-        restore_namespaced_env(vault)
-        register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
-        console.print()
-        console.print(
-            f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
-        )
-        console.print()
-        if not from_tool_call:
-            session._history.append(
-                {
-                    "role": "assistant",
-                    "content": (
-                        f'I\'ve reconnected to the {engine_def.display_name} connection "{slug}" '
-                        f"in the Local Vault. I can now query this data source when needed."
-                    ),
-                }
-            )
-        return session
-
-    vault.save(engine_def.engine, conn_name, credentials)
+    save_connection(vault, engine_def, conn_name, credentials)
     _telemetry("ds_connect_success", engine=engine_def.engine)
-    restore_namespaced_env(vault)
     session._active_datasource = slug
-    register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
-    console.print(f'        Credentials saved to Local Vault as [bold]"{slug}"[/bold].')
+    if is_update:
+        console.print(
+            f'        Updated existing connection [bold]"{slug}"[/bold].'
+        )
+    else:
+        console.print(f'        Saved to Local Vault as [bold]"{slug}"[/bold].')
 
     console.print()
-    console.print(
-        "[anton.muted]        You can now ask me questions about your data.[/]"
-    )
+    console.print("[anton.muted]        Ready to query your data.[/]")
     console.print()
 
     if not from_tool_call:
+        verb = "updated" if is_update else "saved"
         session._history.append(
             {
                 "role": "assistant",
                 "content": (
-                    f'I\'ve saved a {engine_def.display_name} connection named "{slug}" '
-                    f"to the Local Vault. I can now query this data source when needed."
+                    f'I\'ve {verb} the {engine_def.display_name} connection "{slug}" '
+                    f"in the Local Vault. I can now query this data source when needed."
                 ),
             }
         )

@@ -177,3 +177,94 @@ class TestContextCompaction:
         session._summarize_history.assert_not_called()
         compacted = [e for e in events if isinstance(e, StreamContextCompacted)]
         assert len(compacted) == 0
+
+
+class TestHardTruncateHistory:
+    def _make_session(self) -> ChatSession:
+        return ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+
+    def test_noop_when_history_short(self):
+        session = self._make_session()
+        session._history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        before = list(session._history)
+        session.hard_truncate_history(keep=4)
+        assert session._history == before
+
+    def test_preserves_pair_boundaries(self):
+        session = self._make_session()
+        session._history = [
+            {"role": "user", "content": "old 1"},
+            {"role": "assistant", "content": "old reply"},
+            {"role": "user", "content": "old 2"},
+            {"role": "assistant", "content": "another old reply"},
+            {"role": "user", "content": "recent"},
+            {"role": "assistant", "content": "recent reply"},
+        ]
+        session.hard_truncate_history(keep=2)
+        # placeholder + separator + tail
+        assert len(session._history) == 4
+        assert session._history[0]["role"] == "user"
+        assert "truncated" in session._history[0]["content"]
+        assert session._history[1]["role"] == "assistant"
+        assert session._history[-2] == {"role": "user", "content": "recent"}
+        assert session._history[-1] == {"role": "assistant", "content": "recent reply"}
+
+    def test_drops_orphaned_tool_result_and_exposed_assistant(self):
+        """Regression: when the tail starts with assistant → user(tool_result only)
+        → assistant → user, dropping the orphaned tool_result must not leave
+        two consecutive assistant messages at the head of the final history.
+        """
+        session = self._make_session()
+        session._history = [
+            {"role": "user", "content": "very old"},
+            {"role": "assistant", "content": "very old reply"},
+            # These four are the tail (keep=4):
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "x", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+            ]},
+            {"role": "assistant", "content": "I analyzed the tool result"},
+            {"role": "user", "content": "thanks"},
+        ]
+        session.hard_truncate_history(keep=4)
+
+        # No two consecutive same-role messages anywhere in the result.
+        roles = [m["role"] for m in session._history]
+        for i in range(len(roles) - 1):
+            assert roles[i] != roles[i + 1], (
+                f"consecutive same-role at {i}: {roles}"
+            )
+        # First message must be user (API rule).
+        assert roles[0] == "user"
+        # The final real user message should still be present.
+        assert session._history[-1] == {"role": "user", "content": "thanks"}
+
+    def test_filters_tool_result_from_mixed_head(self):
+        """A user message with mixed text + tool_result content at the
+        head keeps its text blocks; only the orphaned tool_result is stripped.
+        """
+        session = self._make_session()
+        session._history = [
+            {"role": "user", "content": "very old"},
+            {"role": "assistant", "content": "very old reply"},
+            # Tail starts here (keep=3):
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "x", "content": "data"},
+                {"type": "text", "text": "plus my follow-up question"},
+            ]},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "ok"},
+        ]
+        session.hard_truncate_history(keep=3)
+
+        # First non-placeholder user message retains its text block only.
+        tail_head = session._history[2]
+        assert tail_head["role"] == "user"
+        assert tail_head["content"] == [
+            {"type": "text", "text": "plus my follow-up question"},
+        ]
