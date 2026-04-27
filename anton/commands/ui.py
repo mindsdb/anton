@@ -40,8 +40,7 @@ COMMANDS = [
     "Chat Tools",
     Command("/paste",     "Attach an image from your clipboard"),
     Command("/resume",    "Continue a previous session"),
-    Command("/share export",           "Export current session as a portable .anton file"),
-    Command("/share export --summary", "Export distilled context only (no full history)"),
+    Command("/share",     "Share sessions: export / import / status / history"),
     Command("/publish",   "Publish an HTML report to the web"),
     Command("/unpublish", "Remove a published report"),
     Command("/explain",   "Show explainability details for the latest answer"),
@@ -61,6 +60,14 @@ SKILLS_COMMANDS = [
     Command("/skill list"),
     Command("/skill show <label>"),
     Command("/skill remove <label>")
+]
+
+SHARE_COMMANDS = [
+    Command("/share export"),
+    Command("/share export --summary"),
+    Command("/share import"),
+    Command("/share status"),
+    Command("/share history"),
 ]
 
 

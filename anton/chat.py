@@ -36,7 +36,7 @@ from anton.commands.setup import (
     handle_setup_models,
 )
 from anton.commands.ui import handle_explain, handle_theme, print_slash_help, make_completer
-from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, COMMANDS
+from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, SHARE_COMMANDS, COMMANDS
 
 from anton.utils.clipboard import (
     ensure_clipboard,
@@ -1145,7 +1145,7 @@ async def _chat_loop(
         mouse_support=False,
         bottom_toolbar=_bottom_toolbar,
         style=pt_style,
-        completer=make_completer([THEME_COMMANDS, SKILLS_COMMANDS, COMMANDS, MEMORY_COMMANDS]),
+        completer=make_completer([THEME_COMMANDS, SKILLS_COMMANDS, SHARE_COMMANDS, COMMANDS, MEMORY_COMMANDS]),
         complete_while_typing=True,
     )
 
@@ -1385,9 +1385,8 @@ async def _chat_loop(
                     elif sub == "history":
                         handle_share_history(console, workspace)
                     else:
-                        console.print(
-                            "[anton.warning]Usage: /share export [--summary] | /share import <file> | /share status | /share history[/]"
-                        )
+                        usage = " | ".join(c.command for c in SHARE_COMMANDS)
+                        console.print(f"[anton.warning]Usage: {usage}[/]")
                         console.print()
                     continue
                 elif cmd == "/resume":
