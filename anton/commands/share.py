@@ -350,6 +350,32 @@ async def handle_share_import(
                 kind=m.get("kind", ""), topic=m.get("topic", ""),
             )
 
+    # 7b. write session_born memories to project hippocampus
+    if cortex:
+        for m in session_born:
+            kind = m.get("kind", "")
+            content = m.get("content", "")
+            topic = m.get("topic", "")
+            if kind in ("always", "never", "when"):
+                cortex.project_hc.encode_rule(content, kind=kind, source="import")
+            elif kind == "lesson":
+                cortex.project_hc.encode_lesson(content, topic=topic, source="import")
+            # profile kind: skip — never import personal memories
+
+    # 7c. restore scratchpad cells into new session
+    from anton.core.backends.base import Cell as _Cell  # noqa: PLC0415
+    cells_data = payload.get("scratchpad", {}).get("cells", [])
+    for cell_data in cells_data:
+        pad_name = cell_data.get("pad", "main")
+        pad = await new_session._scratchpads.get_or_create(pad_name)
+        pad.cells.append(_Cell(
+            code=cell_data.get("code", ""),
+            stdout=cell_data.get("stdout", ""),
+            stderr=cell_data.get("stderr", ""),
+            error=cell_data.get("error"),
+            description=cell_data.get("description", ""),
+        ))
+
     # 8. inject provenance suffix
     suffix = _build_provenance_suffix(payload)
     new_session._system_prompt_context = SystemPromptContext(
