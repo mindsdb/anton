@@ -11,7 +11,7 @@ on:
     inputs:
       tag:
         description: "Release tag the caller just created (e.g. v2.0.5)"
-        required: false
+        required: true
         type: string
 
 jobs:
@@ -21,14 +21,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Verify release tag matches __version__
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_call'
         run: |
           PKG_VERSION=$(grep -oE '__version__\s*=\s*"[^"]+"' anton/__init__.py | grep -oE '"[^"]+"' | tr -d '"')
           if [ -z "${PKG_VERSION}" ]; then
             echo "::error::Could not parse __version__ from anton/__init__.py"
             exit 1
           fi
-          TAG="${{ github.event.release.tag_name }}"
+          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
           if [ "v${PKG_VERSION}" != "${TAG}" ]; then
             echo "::error::Release tag ${TAG} does not match anton.__version__=${PKG_VERSION}"
             exit 1
