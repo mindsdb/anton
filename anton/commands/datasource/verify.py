@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
+from anton.commands.datasource.helpers import prompt_field_value
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry
 from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
@@ -23,6 +24,7 @@ async def run_connection_test(
     engine_def: "DatasourceEngine",
     credentials: dict[str, str],
     retry_fields: "list[DatasourceField]",
+    retry_edit_callback: "Callable[[], Awaitable[bool]] | None" = None,
 ) -> bool:
     """Inject flat DS_* vars, run engine_def.test_snippet, restore env.
 
@@ -81,14 +83,13 @@ async def run_connection_test(
             if retry is None or retry.strip().lower() != "y":
                 return False
             console.print()
-            for f in retry_fields:
-                if not f.secret:
-                    continue
-                value = await prompt_or_cancel(f"(anton) {f.name}", password=True)
-                if value is None:
+            if retry_edit_callback is not None:
+                if not await retry_edit_callback():
                     return False
-                if value:
-                    credentials[f.name] = value
+                continue
+            for f in retry_fields:
+                if not await prompt_field_value(f, credentials):
+                    return False
             continue
 
         console.print("[anton.success]        ✓ Connected successfully![/]")

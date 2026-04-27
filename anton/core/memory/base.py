@@ -104,6 +104,10 @@ class HippocampusProtocol(Protocol):
         """Merge new entries into the identity snapshot and rewrite."""
         ...
 
+    def clear_identity(self) -> None:
+        """Delete the identity snapshot file if present."""
+        ...
+
     # --- update / delete ---
 
     def del_rule(self, id: str) -> None:

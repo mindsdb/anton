@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 from textwrap import dedent
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,6 +36,7 @@ from anton.cli import app as cli_app
 from anton.core.datasources.data_vault import DataVault, LocalDataVault, _slug_env_prefix
 from anton.core.datasources.datasource_registry import (
     DatasourceEngine,
+    DatasourceField,
     DatasourceRegistry,
     _parse_file,
 )
@@ -620,7 +622,7 @@ class TestHandleConnectDatasource:
         session = make_session()
         console = MagicMock()
         vault = LocalDataVault(vault_dir=vault_dir)
-        responses = iter(["PostgreSQL", "n", "skip"])
+        responses = iter(["PostgreSQL", "skip"])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -656,7 +658,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -740,12 +741,12 @@ class TestHandleConnectDatasource:
         assert getattr(session, "_pending_connect_status", None) == "test_failed"
 
     @pytest.mark.asyncio
-    async def test_fully_prefilled_known_variables_skips_help_prompt(
+    async def test_fully_prefilled_known_variables_skips_prompts(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):
-        """When known_variables covers every required field, skip the
-        'Do you need instructions?' prompt entirely and go straight to
-        test + save. The user has already provided everything.
+        """When known_variables covers every required field, skip all
+        credential prompts and go straight to test + save. The user has
+        already provided everything.
         """
         session = make_session()
         console = MagicMock()
@@ -791,12 +792,11 @@ class TestHandleConnectDatasource:
         assert saved["password"] == "s3cr3t"
 
     @pytest.mark.asyncio
-    async def test_credentials_pasted_at_help_prompt(
+    async def test_credentials_pasted_at_first_prompt(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):
-        """Pasting credentials at the 'Do you need instructions?' prompt
-        should extract them instead of forcing a re-prompt or re-asking
-        for every field.
+        """Pasting credentials at the first credential prompt should extract
+        them instead of forcing a re-prompt or re-asking for every field.
         """
         session = make_session()
         console = MagicMock()
@@ -831,8 +831,8 @@ class TestHandleConnectDatasource:
             "password: s3cr3t"
         )
         # Only two user inputs needed: the engine pick, then the paste
-        # at the help prompt. The collector becomes complete immediately
-        # after extraction, so no further prompts are issued.
+        # at the first credential prompt. The collector becomes complete
+        # immediately after extraction, so no further prompts are issued.
         responses = iter(["PostgreSQL", pasted])
 
         with (
@@ -894,7 +894,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -946,28 +945,31 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
                 "alice",
                 "wrongpassword",
                 "y",
-                "correctpassword",
+                # Retry re-prompts every field: empty = keep current for
+                # host/port/database/user/schema/ssl; new value for password.
+                "",       # host
+                "",       # port
+                "",       # database
+                "",       # user
+                "correctpassword",  # password
+                "",       # schema (optional)
+                "",       # ssl (optional)
             ]
         )
 
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
-            ),
-            patch(
-                "anton.commands.datasource.verify.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
         ):
             await handle_connect_datasource(console, session._scratchpads, session)
 
@@ -992,7 +994,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -1036,7 +1037,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -1055,8 +1055,10 @@ class TestHandleConnectDatasource:
         ):
             await handle_connect_datasource(console, session._scratchpads, session)
 
-        # name_from=database → name="prod_db" → prefix DS_POSTGRESQL_PROD_DB
-        assert os.environ.get("DS_POSTGRESQL_PROD_DB__HOST") == "db.example.com"
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
+        assert os.environ.get(f"{prefix}__HOST") == "db.example.com"
 
     @pytest.mark.asyncio
     async def test_auth_method_choice_selects_fields(
@@ -1070,7 +1072,7 @@ class TestHandleConnectDatasource:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["HubSpot", "1", "n", "pat-na1-abc123"])
+        responses = iter(["HubSpot", "1", "pat-na1-abc123"])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -1122,7 +1124,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "host=db.example.com port=5432 database=prod_db user=alice",
                 "s3cr3t",  # only password remains → single-field prompt
             ]
@@ -1147,6 +1148,409 @@ class TestHandleConnectDatasource:
         assert saved["database"] == "prod_db"
         assert saved["user"] == "alice"
         assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_non_registry_name_routes_to_custom_with_soft_message(
+        self, registry, vault_dir, make_session
+    ):
+        """Non-registry input routes to custom; soft entry message is printed;
+        empty description does not cancel the flow."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        # Empty description → flow should not exit (treat as skip, not cancel).
+        # LLM raises RuntimeError (default mock for unknown schemas) → custom
+        # flow aborts cleanly, nothing saved.
+        custom_calls = iter([""])
+
+        with (
+            patch(
+                "anton.commands.datasource.connect.LocalDataVault",
+                return_value=vault,
+            ),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=registry,
+            ),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(return_value="GitHub"),
+            ),
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *_: next(custom_calls)),
+            ),
+        ):
+            result = await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        printed = " ".join(str(c) for c in console.print.call_args_list)
+        assert "GitHub" in printed
+        assert "custom datasource" in printed
+        assert vault.list_connections() == []
+        assert result is session
+
+    @pytest.mark.asyncio
+    async def test_cancel_at_description_prompt_exits_cleanly(
+        self, registry, vault_dir, make_session
+    ):
+        """Cancelling (None) at the description prompt in custom flow exits
+        without saving anything."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        with (
+            patch(
+                "anton.commands.datasource.connect.LocalDataVault",
+                return_value=vault,
+            ),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=registry,
+            ),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(return_value="SomeUnknownService"),
+            ),
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            result = await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        assert vault.list_connections() == []
+        assert result is session
+
+    @pytest.mark.asyncio
+    async def test_no_proactive_help_prompt_for_builtin(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """Built-in connect flow must not ask 'need instructions on how
+        to obtain credentials?'. After the engine pick, the next prompt
+        is a credential prompt, not a y/n help prompt.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "db.example.com",
+                "5432",
+                "prod_db",
+                "alice",
+                "s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=_prompt,
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        joined = " | ".join(seen_labels).lower()
+        assert "instructions" not in joined
+        assert "need help" not in joined
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        assert re.fullmatch(r"[0-9a-f]{8}", conns[0]["name"])
+
+    @pytest.mark.asyncio
+    async def test_help_keyword_triggers_credential_help(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """Typing 'help' at a credential prompt should invoke
+        show_credential_help (LLM-backed guide) and then keep prompting
+        for the same field, rather than treating 'help' as a literal value.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        help_calls: list[str] = []
+
+        async def _fake_help(console_arg, session_arg, service_name, current_field, all_fields):
+            help_calls.append(service_name)
+
+        # Five required fields missing → first prompt is the bulk prompt.
+        # Type 'help' → show_credential_help fires, loop continues, next
+        # input is the actual paste that extracts all five.
+        from anton.connect_collector import _ExtractionResult
+        session._llm.generate_object = AsyncMock(
+            return_value=_ExtractionResult(
+                variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                    "password": "s3cr3t",
+                },
+            )
+        )
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "help",
+                "host=db.example.com port=5432 database=prod_db user=alice password=s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch(
+                "anton.commands.datasource.connect.show_credential_help",
+                new=_fake_help,
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        assert help_calls == ["PostgreSQL"]
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_help_keyword_at_single_field_prompt(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """When only one required field remains, typing 'help' there
+        triggers field-specific help and does not get saved as the value.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        help_calls: list[tuple[str, str]] = []
+
+        async def _fake_help(console_arg, session_arg, service_name, current_field, all_fields):
+            help_calls.append((service_name, current_field.name if current_field else ""))
+
+        # Pre-fill everything except password → the while-loop hits the
+        # single-field branch for 'password'. First response is 'help',
+        # second is the actual password.
+        responses = iter(["PostgreSQL", "help", "s3cr3t"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch(
+                "anton.commands.datasource.connect.show_credential_help",
+                new=_fake_help,
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                known_variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                },
+            )
+
+        assert help_calls == [("PostgreSQL", "password")]
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_sequential_prompting_uses_title_case_labels(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """With >2 required fields missing, built-in flow prompts one at a
+        time with short Title-Case labels (no bulk '(anton) a, b, c …'
+        prompt listing every field)."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "db.example.com",
+                "5432",
+                "prod_db",
+                "alice",
+                "s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=_prompt,
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        # First label is "Connect to" engine picker; then every required
+        # field is prompted individually — no bulk compact prompts.
+        assert seen_labels[1] == "(anton) Host"
+        assert seen_labels[2] == "(anton) Port"
+        assert seen_labels[3] == "(anton) Database"
+        assert seen_labels[4] == "(anton) User"
+        assert seen_labels[5] == "(anton) Password"
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_sequential_accepts_multi_field_paste(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """A key=value paste at the first sequential prompt is routed
+        through extract_variables and fills every matching field in one
+        shot (consistent with prior bulk behavior)."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        from anton.connect_collector import _ExtractionResult
+        session._llm.generate_object = AsyncMock(
+            return_value=_ExtractionResult(
+                variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                },
+            )
+        )
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "host=db.example.com port=5432 database=prod_db user=alice",
+                "s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+        assert saved["port"] == "5432"
+        assert saved["database"] == "prod_db"
+        assert saved["user"] == "alice"
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_sequential_skip_keyword_saves_partial(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """Typing 'skip' at a sequential per-field prompt marks the
+        connection as partial and stops collection, just like in the
+        prior bulk flow."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        # Fill two fields, then 'skip' at the third prompt (database).
+        responses = iter(
+            [
+                "PostgreSQL",
+                "db.example.com",
+                "5432",
+                "skip",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        # Partial save — auto-named, only host + port filled.
+        saved = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert saved is not None
+        assert saved.get("host") == "db.example.com"
+        assert saved.get("port") == "5432"
+        assert "database" not in saved
+        session._scratchpads.get_or_create.assert_not_called()
 
 
 class TestCredentialScrubbing:
@@ -1213,7 +1617,6 @@ class TestCredentialScrubbing:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.host.com",
                 "5432",
                 "mydb",
@@ -1232,8 +1635,10 @@ class TestCredentialScrubbing:
         ):
             await handle_connect_datasource(MagicMock(), session._scratchpads, session)
 
-        # name_from=database → name="mydb" → DS_POSTGRESQL_MYDB__PASSWORD
-        namespaced_pw_var = "DS_POSTGRESQL_MYDB__PASSWORD"
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
+        namespaced_pw_var = f"{prefix}__PASSWORD"
         assert namespaced_pw_var in _DS_SECRET_VARS
         monkeypatch.setenv(namespaced_pw_var, secret_pw)
         result = scrub_credentials(f"error: auth failed with {secret_pw}")
@@ -1568,16 +1973,16 @@ class TestEditDatasourceFlow:
                 "alice",
                 "newpass",
                 "",
+                "",
             ]
         )
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(prompt_values))
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_values)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
         ):
             await handle_connect_datasource(
                 console,
@@ -1623,16 +2028,16 @@ class TestEditDatasourceFlow:
                 "alice",
                 "",  # password — Enter = keep original
                 "",  # schema
+                "",  # ssl
             ]
         )
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(prompt_values))
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_values)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
         ):
             await handle_connect_datasource(
                 console,
@@ -1739,7 +2144,6 @@ class TestEnvActivationCollisionFree:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -1759,7 +2163,10 @@ class TestEnvActivationCollisionFree:
             await handle_connect_datasource(console, session._scratchpads, session)
 
         assert "DS_ACCESS_TOKEN" not in os.environ
-        assert os.environ.get("DS_POSTGRESQL_PROD_DB__HOST") == "db.example.com"
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
+        assert os.environ.get(f"{prefix}__HOST") == "db.example.com"
 
     @pytest.mark.asyncio
     async def test_two_same_type_connections_no_collision(
@@ -2187,14 +2594,14 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect to mydb", "n", "localhost"])
+        responses = iter(["I want to connect to mydb", "localhost"])
 
         with (
             patch(
                 "anton.commands.datasource.custom.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
-            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+            patch("anton.utils.datasources.Path") as mock_path_cls,
         ):
             self._mock_ds_path(mock_path_cls, tmp_path)
             result = await handle_add_custom_datasource(
@@ -2227,14 +2634,14 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "n", "mysecret"])
+        responses = iter(["I want to connect", "mysecret"])
 
         with (
             patch(
                 "anton.commands.datasource.custom.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
-            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+            patch("anton.utils.datasources.Path") as mock_path_cls,
         ):
             self._mock_ds_path(mock_path_cls, tmp_path)
             result = await handle_add_custom_datasource(
@@ -2246,8 +2653,11 @@ class TestAddCustomDatasourceFlow:
         assert credentials["api_key"] == "mysecret"
 
     @pytest.mark.asyncio
-    async def test_incomplete_custom_datasource_not_saved(self, tmp_path, make_session):
-        """Empty responses for all required fields causes a hard stop (None)."""
+    async def test_all_fields_skipped_returns_empty_credentials(
+        self, tmp_path, make_session
+    ):
+        """Skipping every field (empty input) is now valid — all custom fields
+        are optional, so empty credentials is a successful save."""
         session = make_session()
         session._llm = self._make_llm(
             self._make_spec(
@@ -2272,22 +2682,653 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "n", "", ""])
+        responses = iter(["I want to connect", "", ""])
 
         with (
             patch(
                 "anton.commands.datasource.custom.prompt_or_cancel",
                 new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
             ),
-            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+            patch("anton.utils.datasources.Path") as mock_path_cls,
         ):
             self._mock_ds_path(mock_path_cls, tmp_path)
             result = await handle_add_custom_datasource(
                 console, "mydb", registry, session
             )
 
-        # Must return None — caller must not call vault.save()
-        assert result is None
+        assert result is not None
+        _, credentials = result
+        assert credentials == {}
+
+    @pytest.mark.asyncio
+    async def test_no_proactive_help_prompt(self, tmp_path, make_session):
+        """Simplified custom flow must not ask 'need instructions on how
+        to obtain credentials?'. Prompts should be: description + one
+        prompt per missing field (all optional).
+        """
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "hostname",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        # description + host value + api_key value
+        responses = iter(["uses an API key", "localhost", "secret123"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=_prompt,
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        joined = " | ".join(seen_labels).lower()
+        assert "instructions" not in joined
+        assert "need help" not in joined
+        assert credentials["host"] == "localhost"
+        assert credentials["api_key"] == "secret123"
+        # Exactly 3 prompts: description, host, api_key.
+        assert len(seen_labels) == 3
+
+    @pytest.mark.asyncio
+    async def test_all_inline_values_issue_no_field_prompts(
+        self, tmp_path, make_session
+    ):
+        """When the LLM spec returns inline values for every field, no
+        per-field prompt is issued — only the description prompt runs.
+        """
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "db.internal",
+                        "secret": False,
+                        "required": False,
+                        "description": "hostname",
+                    },
+                    {
+                        "name": "token",
+                        "value": "tok-inline-123",
+                        "secret": True,
+                        "required": False,
+                        "description": "auth token",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        # Only the description prompt should fire.
+        responses = iter(["connects via header token"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=_prompt,
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        assert credentials == {"host": "db.internal", "token": "tok-inline-123"}
+        assert len(seen_labels) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_values_do_not_hard_stop(self, tmp_path, make_session):
+        """Skipping every field still returns a valid (empty) credentials
+        dict — no 'Cannot save — missing required fields' abort.
+        """
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "hostname",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        # description + skip both fields
+        responses = iter(["no idea", "", ""])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        assert credentials == {}
+        printed = " ".join(str(c) for c in console.print.call_args_list).lower()
+        assert "cannot save" not in printed
+        assert "missing required" not in printed
+
+    @pytest.mark.asyncio
+    async def test_sequential_prompts_use_descriptions(self, tmp_path, make_session):
+        """After spec generation, fields are collected one at a time and the
+        prompt labels use the field description (not snake_case name)."""
+        from anton.commands.datasource import _CustomDatasourceSpec
+        from anton.connect_collector import _ExtractionResult
+
+        spec = self._make_spec(
+            [
+                {
+                    "name": "base_url",
+                    "value": "",
+                    "secret": False,
+                    "required": False,
+                    "description": "API base URL",
+                },
+                {
+                    "name": "access_token",
+                    "value": "",
+                    "secret": True,
+                    "required": False,
+                    "description": "Access Token",
+                },
+            ]
+        )
+
+        session = make_session()
+
+        async def _gen(schema_class, **kwargs):
+            if schema_class is _ExtractionResult:
+                return _ExtractionResult()
+            if schema_class is _CustomDatasourceSpec:
+                return spec
+            raise RuntimeError(f"unexpected schema {schema_class.__name__}")
+
+        session._llm.generate_object = AsyncMock(side_effect=_gen)
+
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+        registry.all_engines = MagicMock(return_value=[])
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        # description + base_url + access_token
+        responses = iter(["uses a token", "https://api.example.com", "tok-abc"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=_prompt,
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        assert credentials == {
+            "base_url": "https://api.example.com",
+            "access_token": "tok-abc",
+        }
+        # First label is the discovery description; next two are per-field.
+        assert seen_labels[1] == "(anton) API base URL"
+        assert seen_labels[2] == "(anton) Access Token"
+
+    @pytest.mark.asyncio
+    async def test_help_during_collection_shows_guide(self, tmp_path, make_session):
+        """Typing 'help' at a custom field prompt invokes show_credential_help
+        with the current field, then collection continues."""
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        help_calls: list[tuple[str, str]] = []
+
+        async def _fake_help(console_arg, session_arg, service_name, current_field, all_fields):
+            help_calls.append(
+                (service_name, current_field.name if current_field else "")
+            )
+
+        # description + 'help' (shows guide) + real value
+        responses = iter(["uses a key", "help", "real-key"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch(
+                "anton.commands.datasource.custom.show_credential_help",
+                new=_fake_help,
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert help_calls == [("MyDB", "api_key")]
+        assert result is not None
+        _, credentials = result
+        assert credentials["api_key"] == "real-key"
+
+    @pytest.mark.asyncio
+    async def test_optional_empty_input_skips_and_continues(
+        self, tmp_path, make_session
+    ):
+        """Empty input on an optional field skips it and the loop continues
+        to the next field — no hard stop, no re-prompt."""
+        session = make_session()
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "hostname",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ]
+            )
+        )
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+
+        # description + empty (skip host) + real api_key value
+        responses = iter(["no idea", "", "secret123"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        assert credentials == {"api_key": "secret123"}
+
+    @pytest.mark.asyncio
+    async def test_structured_multi_value_fills_multiple_fields(
+        self, tmp_path, make_session
+    ):
+        """Structured input (contains '=') at a field prompt when multiple
+        fields are still missing is routed through extract_variables and
+        fills every matching field in one shot."""
+        from anton.commands.datasource import (
+            _CustomDatasourceField,
+            _CustomDatasourceSpec,
+        )
+        from anton.connect_collector import _ExtractionResult
+
+        spec = _CustomDatasourceSpec(
+            display_name="MyDB",
+            pip="",
+            test_snippet="",
+            fields=[
+                _CustomDatasourceField(
+                    name="host",
+                    value="",
+                    secret=False,
+                    required=False,
+                    description="hostname",
+                ),
+                _CustomDatasourceField(
+                    name="port",
+                    value="",
+                    secret=False,
+                    required=False,
+                    description="port",
+                ),
+            ],
+        )
+
+        session = make_session()
+
+        async def _gen(schema_class, **kwargs):
+            if schema_class is _ExtractionResult:
+                return _ExtractionResult(
+                    variables={"host": "db.example.com", "port": "5432"},
+                )
+            if schema_class is _CustomDatasourceSpec:
+                return spec
+            raise RuntimeError(f"unexpected schema {schema_class.__name__}")
+
+        session._llm.generate_object = AsyncMock(side_effect=_gen)
+
+        console = MagicMock()
+        registry = self._make_registry(tmp_path)
+        registry.all_engines = MagicMock(return_value=[])
+
+        # description + structured paste at first field prompt
+        responses = iter(["uses host+port", "host=db.example.com port=5432"])
+
+        with (
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            result = await handle_add_custom_datasource(
+                console, "mydb", registry, session
+            )
+
+        assert result is not None
+        _, credentials = result
+        assert credentials == {"host": "db.example.com", "port": "5432"}
+        # Only two user prompts: description + the structured paste.
+        # (If extraction hadn't filled both fields, a second per-field
+        # prompt would have fired and next() would have raised StopIteration.)
+
+
+class TestCustomDatasourceRequiredFieldsPolicy:
+    """Verify that custom engines never expose required=True fields at any layer."""
+
+    # ── helpers ─────────────────────────────────────────────────────────────
+
+    def _custom_md(self, tmp_path, *, required_value: str = "true"):
+        md = tmp_path / "custom_datasources.md"
+        md.write_text(
+            dedent(
+                f"""\
+            ## My Custom API
+
+            ```yaml
+            engine: my_custom_api
+            display_name: My Custom API
+            fields:
+              - name: api_key
+                required: {required_value}
+                secret: true
+                description: API key
+              - name: base_url
+                required: {required_value}
+                secret: false
+                description: base URL
+            ```
+        """
+            )
+        )
+        return md
+
+    def _make_spec(self, fields: list[dict], display_name: str = "MyDB"):
+        from anton.commands.datasource import (
+            _CustomDatasourceField,
+            _CustomDatasourceSpec,
+        )
+        return _CustomDatasourceSpec(
+            display_name=display_name,
+            pip="",
+            test_snippet="",
+            fields=[_CustomDatasourceField(**f) for f in fields],
+        )
+
+    def _make_registry(self, tmp_path):
+        reg = MagicMock()
+        reg.validate_file.return_value = {"mydb": MagicMock()}
+        reg.reload.return_value = None
+        reg.get.return_value = None
+        return reg
+
+    # ── load-time: custom file ───────────────────────────────────────────────
+
+    def test_custom_file_required_true_forced_false_on_load(self, tmp_path):
+        """Custom datasources.md with required: true → all fields required=False after load."""
+        md = self._custom_md(tmp_path, required_value="true")
+        engines = _parse_file(md, custom=True)
+        assert "my_custom_api" in engines
+        engine = engines["my_custom_api"]
+        assert all(not f.required for f in engine.fields), (
+            "Custom engine fields must all be required=False after load"
+        )
+
+    def test_builtin_file_required_true_preserved_on_load(self, datasources_md):
+        """Built-in datasources.md with required: true → fields keep required=True."""
+        engines = _parse_file(datasources_md, custom=False)
+        pg = engines.get("postgresql")
+        assert pg is not None
+        required_fields = [f for f in pg.fields if f.required]
+        assert required_fields, "Built-in postgresql must still have required fields"
+
+    def test_custom_load_with_auth_methods_fields_also_forced(self, tmp_path):
+        """Custom engine with auth_methods: all nested fields also required=False."""
+        md = tmp_path / "custom_auth.md"
+        md.write_text(
+            dedent(
+                """\
+            ## Custom Auth Service
+
+            ```yaml
+            engine: custom_auth_service
+            display_name: Custom Auth Service
+            auth_method: choice
+            auth_methods:
+              - name: token
+                display: API Token
+                fields:
+                  - name: token
+                    required: true
+                    secret: true
+                    description: access token
+              - name: basic
+                display: Basic Auth
+                fields:
+                  - name: username
+                    required: true
+                    description: username
+            fields: []
+            ```
+        """
+            )
+        )
+        engines = _parse_file(md, custom=True)
+        engine = engines["custom_auth_service"]
+        for method in engine.auth_methods:
+            for f in method.fields:
+                assert not f.required, (
+                    f"auth_method field {f.name!r} must be required=False for custom engine"
+                )
+
+    # ── save-time: Pydantic default & field construction ────────────────────
+
+    def test_custom_field_pydantic_default_is_false(self):
+        """_CustomDatasourceField defaults required=False without explicit setting."""
+        from anton.commands.datasource import _CustomDatasourceField
+        f = _CustomDatasourceField(name="token")
+        assert f.required is False
+
+    def test_field_constructor_forces_required_false(self):
+        """Even if LLM sets required=True in spec, DatasourceField is built with False."""
+        from anton.commands.datasource import _CustomDatasourceField
+        llm_field = _CustomDatasourceField(
+            name="host", required=True, secret=False, description="hostname"
+        )
+        # Simulate what handle_add_custom_datasource does
+        real_field = DatasourceField(
+            name=llm_field.name,
+            required=False,
+            secret=llm_field.secret,
+            description=llm_field.description,
+        )
+        assert real_field.required is False
+
+    # ── ConnectionCollector: all-optional → immediately complete ────────────
+
+    def test_collector_all_optional_fields_is_complete_with_zero_filled(self):
+        """ConnectionCollector with all required=False reports is_complete immediately."""
+        from anton.connect_collector import ConnectionCollector
+        engine = DatasourceEngine(
+            engine="test_engine",
+            display_name="Test Engine",
+            fields=[
+                DatasourceField(name="api_key", required=False, secret=True),
+                DatasourceField(name="base_url", required=False, secret=False),
+            ],
+        )
+        collector = ConnectionCollector(engine_def=engine)
+        assert collector.is_complete is True
+        assert collector.missing_required == []
+
+    # ── end-to-end: skip all fields → vault save succeeds ───────────────────
+
+    @pytest.mark.asyncio
+    async def test_skip_all_fields_saves_empty_credentials(
+        self, vault_dir, make_session, tmp_path
+    ):
+        """User skips every field with Enter → custom datasource saved with empty creds."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        spec_with_fields = self._make_spec(
+            [
+                {"name": "api_key", "value": "", "secret": True, "required": True,
+                 "description": "API key"},
+                {"name": "base_url", "value": "", "secret": False, "required": True,
+                 "description": "base URL"},
+            ],
+            display_name="WeirdAPI",
+        )
+        session._llm.generate_object = AsyncMock(return_value=spec_with_fields)
+
+        registry = self._make_registry(tmp_path)
+        registry.find_by_name = MagicMock(return_value=None)
+        registry.all_engines = MagicMock(return_value=[])
+
+        # connect: "WeirdAPI" → custom description → skip both fields
+        connect_responses = iter(["WeirdAPI"])
+        custom_responses = iter(["it uses token auth", "", ""])
+
+        with (
+            patch(
+                "anton.commands.datasource.connect.LocalDataVault",
+                return_value=vault,
+            ),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=registry,
+            ),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(connect_responses)),
+            ),
+            patch(
+                "anton.commands.datasource.custom.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(custom_responses)),
+            ),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            mock_path_cls.return_value.expanduser.return_value = (
+                tmp_path / "datasources.md"
+            )
+            result = await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        conns = vault.list_connections()
+        assert len(conns) == 1, "Custom datasource must be saved even with empty credentials"
+        saved = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert saved == {}, "Empty credentials dict should be saved"
+        assert result is session
 
 
 class TestCustomDatasourceConnectFlow:
@@ -2359,7 +3400,7 @@ class TestCustomDatasourceConnectFlow:
         )
 
         responses = iter(
-            ["0", "My API Service", "I have an API key", "n", "my_secret_key"]
+            ["My API Service", "I have an API key", "my_secret_key"]
         )
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -2371,7 +3412,7 @@ class TestCustomDatasourceConnectFlow:
             ),
             patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
-            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+            patch("anton.utils.datasources.Path") as mock_path_cls,
         ):
             self._mock_ds_path(mock_path_cls, tmp_path)
             result = await handle_connect_datasource(
@@ -2414,7 +3455,7 @@ class TestCustomDatasourceConnectFlow:
         )
 
         responses = iter(
-            ["0", "My API Service", "I have an API key", "n", "bad_key", "n"]
+            ["My API Service", "I have an API key", "bad_key", "n"]
         )
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -2427,7 +3468,7 @@ class TestCustomDatasourceConnectFlow:
             patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
-            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+            patch("anton.utils.datasources.Path") as mock_path_cls,
         ):
             self._mock_ds_path(mock_path_cls, tmp_path)
             result = await handle_connect_datasource(
@@ -2468,10 +3509,8 @@ class TestCustomDatasourceConnectFlow:
 
         responses = iter(
             [
-                "0",
                 "My API Service",
                 "I have an API key",
-                "n",
                 "bad_key",
                 "y",
                 "good_key",
@@ -2488,7 +3527,7 @@ class TestCustomDatasourceConnectFlow:
             patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
-            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+            patch("anton.utils.datasources.Path") as mock_path_cls,
         ):
             self._mock_ds_path(mock_path_cls, tmp_path)
             result = await handle_connect_datasource(
@@ -2501,6 +3540,296 @@ class TestCustomDatasourceConnectFlow:
         assert saved is not None
         assert saved.get("api_key") == "good_key"
         assert result._history
+
+    @pytest.mark.asyncio
+    async def test_custom_retry_reenter_returns_to_field_editing(
+        self, vault_dir, make_session, make_cell, tmp_path, make_pad
+    ):
+        """After custom test failure + retry, field prompts are shown again for editing."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad(side_effect=[
+            make_cell(stdout="", stderr="invalid credentials"),
+            make_cell(stdout="ok"),
+        ])
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "Host",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ],
+                test_snippet="print('ok')",
+            )
+        )
+
+        responses = iter(
+            [
+                "My API Service",
+                "host + api key",
+                "bad-host",
+                "bad-key",
+                "y",
+                "good-host",
+                "good-key",
+            ]
+        )
+
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=self._make_registry(tmp_path),
+            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        prompts = [c.args[0] for c in poc.call_args_list if c.args]
+        assert prompts.count("(anton) Host") == 2
+        assert any("(anton) API key" in p for p in prompts)
+
+    @pytest.mark.asyncio
+    async def test_custom_retry_edited_value_used_for_next_attempt(
+        self, vault_dir, make_session, make_cell, tmp_path, make_pad
+    ):
+        """Edited retry value is used by the next connection test attempt."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        seen_hosts: list[str] = []
+        attempt = {"n": 0}
+
+        async def _exec(_code):
+            attempt["n"] += 1
+            seen_hosts.append(os.environ.get("DS_HOST", ""))
+            if attempt["n"] == 1:
+                return make_cell(stdout="", stderr="invalid host")
+            return make_cell(stdout="ok")
+
+        pad = make_pad()
+        pad.execute = AsyncMock(side_effect=_exec)
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "Host",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ],
+                test_snippet="print('ok')",
+            )
+        )
+
+        responses = iter(
+            [
+                "My API Service",
+                "host + api key",
+                "bad-host",
+                "bad-key",
+                "y",
+                "good-host",
+                "",
+            ]
+        )
+
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=self._make_registry(tmp_path),
+            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert saved is not None
+        assert saved.get("host") == "good-host"
+        assert seen_hosts == ["bad-host", "good-host"]
+
+    @pytest.mark.asyncio
+    async def test_custom_retry_does_not_immediately_retest_unchanged_values(
+        self, vault_dir, make_session, make_cell, tmp_path, make_pad
+    ):
+        """Retry path prompts for edits before issuing the next test attempt."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        state = {"attempt": 0, "retry_confirmed": False, "retry_prompt_seen": False}
+
+        async def _exec(_code):
+            state["attempt"] += 1
+            if state["attempt"] == 2:
+                assert state["retry_prompt_seen"] is True
+            if state["attempt"] == 1:
+                return make_cell(stdout="", stderr="invalid")
+            return make_cell(stdout="ok")
+
+        def _prompt(label, **kwargs):
+            if label == "(anton) Connect to":
+                return "My API Service"
+            if "How does" in label:
+                return "host + api key"
+            if label == "(anton) Host" and not state["retry_confirmed"]:
+                return "bad-host"
+            if label == "(anton) API key":
+                return "bad-key"
+            if label == "(anton) Would you like to re-enter your credentials?":
+                state["retry_confirmed"] = True
+                return "y"
+            if label == "(anton) Host" and state["retry_confirmed"]:
+                state["retry_prompt_seen"] = True
+                return "good-host"
+            if "(anton) API key" in label and state["retry_confirmed"]:
+                return "good-key"
+            raise AssertionError(f"Unexpected prompt: {label}")
+
+        pad = make_pad()
+        pad.execute = AsyncMock(side_effect=_exec)
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "host",
+                        "value": "",
+                        "secret": False,
+                        "required": False,
+                        "description": "Host",
+                    },
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    },
+                ],
+                test_snippet="print('ok')",
+            )
+        )
+
+        poc = AsyncMock(side_effect=_prompt)
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=self._make_registry(tmp_path),
+            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        assert state["attempt"] == 2
+        assert state["retry_prompt_seen"] is True
+
+    @pytest.mark.asyncio
+    async def test_custom_retry_reuses_existing_inferred_spec(
+        self, vault_dir, make_session, make_cell, tmp_path, make_pad
+    ):
+        """Retry path reuses discovered custom spec/fields without rediscovery."""
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad(side_effect=[
+            make_cell(stdout="", stderr="invalid key"),
+            make_cell(stdout="ok"),
+        ])
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        session._llm = self._make_llm(
+            self._make_spec(
+                [
+                    {
+                        "name": "api_key",
+                        "value": "",
+                        "secret": True,
+                        "required": False,
+                        "description": "API key",
+                    }
+                ],
+                test_snippet="print('ok')",
+            )
+        )
+
+        responses = iter(
+            [
+                "My API Service",
+                "api key",
+                "bad-key",
+                "y",
+                "good-key",
+            ]
+        )
+
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch(
+                "anton.commands.datasource.connect.DatasourceRegistry",
+                return_value=self._make_registry(tmp_path),
+            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
+            patch("anton.utils.datasources.Path") as mock_path_cls,
+        ):
+            self._mock_ds_path(mock_path_cls, tmp_path)
+            await handle_connect_datasource(
+                console, session._scratchpads, session
+            )
+
+        assert session._llm.generate_object.await_count == 1
 
     @pytest.mark.asyncio
     async def test_custom_without_test_snippet_saves(
@@ -2528,7 +3857,7 @@ class TestCustomDatasourceConnectFlow:
             )
         )
 
-        responses = iter(["0", "My API Service", "I have an API key", "n", "my_key"])
+        responses = iter(["My API Service", "I have an API key", "my_key"])
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
         with (
@@ -2539,7 +3868,7 @@ class TestCustomDatasourceConnectFlow:
             ),
             patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.custom.prompt_or_cancel", new=poc),
-            patch("anton.commands.datasource.custom.Path") as mock_path_cls,
+            patch("anton.utils.datasources.Path") as mock_path_cls,
         ):
             self._mock_ds_path(mock_path_cls, tmp_path)
             await handle_connect_datasource(console, session._scratchpads, session)
@@ -2577,7 +3906,7 @@ class TestEditDatasourceWithTestSnippet:
 
         # Keep all non-secret fields; enter bad password; decline retry.
         responses = iter(
-            ["", "", "", "", "bad-pass", "", "n"]
+            ["", "", "", "", "bad-pass", "", "", "n"]
         )  # field values, then retry?
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -2585,6 +3914,7 @@ class TestEditDatasourceWithTestSnippet:
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
             patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
         ):
             result = await handle_connect_datasource(
@@ -2620,16 +3950,16 @@ class TestEditDatasourceWithTestSnippet:
                 "",  # user
                 "new-pass",  # password (updated)
                 "",  # schema
+                "",  # ssl
             ]
         )
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(prompt_responses))
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_responses)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
         ):
             result = await handle_connect_datasource(
                 console,

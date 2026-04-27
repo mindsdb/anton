@@ -184,6 +184,10 @@ class Hippocampus:
         content = "# Profile\n" + "\n".join(f"- {e.text}" for e in entries) + "\n"
         self._encode_with_lock(self._profile_path, content, mode="write")
 
+    def clear_identity(self) -> None:
+        if self._profile_path.is_file():
+            self._profile_path.unlink()
+
 
     # ---------  lessons --------------
 

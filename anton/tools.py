@@ -1,12 +1,52 @@
 """Extra tools for the open source terminal agent."""
 
 from __future__ import annotations
+
+import re
+import uuid
 from typing import TYPE_CHECKING
 
 from anton.core.tools.tool_defs import ToolDef
 
+
 if TYPE_CHECKING:
+    from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
     from anton.core.session import ChatSession
+
+
+SECRET_NAME_TOKENS = (
+    "password", "secret", "token", "api_key", "key",
+    "auth", "credential", "private",
+)
+SCRUBBED_VALUE_RE = re.compile(r"^\[DS_\w+\]$")
+
+
+def looks_secret(field_name: str) -> bool:
+    """Heuristic: treat fields whose name suggests a secret as `secret=True`."""
+    lower = field_name.lower()
+    return any(tok in lower for tok in SECRET_NAME_TOKENS)
+
+
+def _resolve_active_fields(
+    engine_def: "DatasourceEngine", known_variables: dict[str, str]
+) -> list["DatasourceField"]:
+    """Pick the active field set for an engine based on provided variables.
+
+    For engines with ``auth_method == "choice"``, match by largest overlap
+    with ``known_variables`` so a YOLO save with (e.g.) ``private_key``
+    targets the key-pair auth method rather than password auth.
+    """
+    if engine_def.auth_method == "choice" and engine_def.auth_methods:
+        best = engine_def.auth_methods[0]
+        best_score = -1
+        for am in engine_def.auth_methods:
+            am_names = {f.name for f in am.fields}
+            score = sum(1 for k in known_variables if k in am_names)
+            if score > best_score:
+                best_score = score
+                best = am
+        return list(best.fields)
+    return list(engine_def.fields)
 
 
 async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str:
@@ -25,6 +65,23 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     if console is None:
         return "Cannot connect datasource — no console available."
 
+    dropped_scrubbed = [
+        k for k, v in known_variables.items() if SCRUBBED_VALUE_RE.match(v)
+    ]
+    if dropped_scrubbed:
+        known_variables = {
+            k: v
+            for k, v in known_variables.items()
+            if not SCRUBBED_VALUE_RE.match(v)
+        }
+        console.print()
+        console.print(
+            f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
+            f"for {', '.join(dropped_scrubbed)} — those [DS_...] strings are "
+            f"scrub-markers, not real credentials. Pass the actual secret "
+            f"values instead."
+        )
+
     # ── Telemetry: connection attempt ────────────────────────────────
     _settings = getattr(session, "_settings", None)
     if _settings is None:
@@ -38,6 +95,140 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         from anton.analytics import send_event
         send_event(_settings, "ds_connect_attempt", engine=engine)
 
+    from anton.core.datasources.data_vault import LocalDataVault
+    vault = session._data_vault or LocalDataVault()
+
+    if known_variables:
+        from anton.core.datasources.datasource_registry import (
+            DatasourceEngine,
+            DatasourceField,
+            DatasourceRegistry,
+        )
+        from anton.utils.datasources import (
+            find_matching_connection,
+            persist_custom_engine,
+            save_connection,
+        )
+        from anton.commands.datasource.verify import run_connection_test
+        registry = DatasourceRegistry()
+        engine_def = registry.find_by_name(engine)
+        if engine_def is None:
+            adhoc_fields = [
+                DatasourceField(
+                    name=k,
+                    required=False,
+                    secret=looks_secret(k),
+                    description="",
+                )
+                for k in known_variables
+            ]
+            engine_def = persist_custom_engine(
+                registry, engine, adhoc_fields
+            )
+            if engine_def is None:
+                engine_def = DatasourceEngine(
+                    engine=engine,
+                    display_name=engine,
+                    fields=adhoc_fields,
+                    custom=True,
+                )
+        if engine_def is not None:
+            active_fields = _resolve_active_fields(engine_def, known_variables)
+            active_names = {f.name for f in active_fields}
+            fields_to_save = {
+                k: v for k, v in known_variables.items() if k in active_names
+            }
+            filtered_out = sorted(
+                k for k in known_variables if k not in active_names
+            )
+            for f in active_fields:
+                if f.required and f.default and not fields_to_save.get(f.name):
+                    fields_to_save[f.name] = f.default
+            missing_required = [
+                f.name
+                for f in active_fields
+                if f.required and not fields_to_save.get(f.name)
+            ]
+
+            if filtered_out:
+                console.print()
+                console.print(
+                    f"[anton.warning](anton)[/] Ignoring keys that don't "
+                    f"belong to [bold]{engine_def.display_name}[/]: "
+                    f"{', '.join(filtered_out)}."
+                )
+
+            if fields_to_save and not missing_required:
+                test_credentials = dict(fields_to_save)
+                if engine_def.test_snippet:
+                    ok = await run_connection_test(
+                        console,
+                        session._scratchpads,
+                        vault,
+                        engine_def,
+                        test_credentials,
+                        active_fields,
+                    )
+                    if not ok:
+                        if _settings:
+                            from anton.analytics import send_event
+                            send_event(_settings, "ds_connect_failed", engine=engine)
+                        return (
+                            f"Connection test failed for '{engine}'. Nothing "
+                            f"was saved. Either retry with corrected "
+                            f"known_variables or explain the issue to the user."
+                        )
+
+                conn_name = find_matching_connection(
+                    vault, engine_def, test_credentials
+                )
+                if conn_name is None:
+                    conn_name = uuid.uuid4().hex[:8]
+                    while vault.load(engine_def.engine, conn_name) is not None:
+                        conn_name = uuid.uuid4().hex[:8]
+                existing = vault.load(engine_def.engine, conn_name) or {}
+                merged = {**existing, **test_credentials}
+                slug = save_connection(vault, engine_def, conn_name, merged)
+                session._active_datasource = slug
+                if _settings:
+                    from anton.analytics import send_event
+                    send_event(_settings, "ds_connect_success", engine=engine)
+
+                if existing:
+                    changed = [
+                        k for k, v in test_credentials.items()
+                        if existing.get(k) != v
+                    ]
+                    preserved = [k for k in existing if k not in test_credentials]
+                    if changed:
+                        _msg = (
+                            f"Updated connection `{slug}` in vault. "
+                            f"Fields changed: {', '.join(sorted(changed))}."
+                        )
+                    else:
+                        _msg = (
+                            f"Connection `{slug}` already matched the provided "
+                            f"values — nothing changed."
+                        )
+                    if preserved:
+                        _msg += (
+                            f" Preserved existing fields: "
+                            f"{', '.join(sorted(preserved))}."
+                        )
+                    _msg += (
+                        " Future turns can reference this connection by its "
+                        "slug. Access credentials via DS_<FIELD> environment "
+                        "variables in scratchpad code — never embed raw values."
+                    )
+                    return _msg
+                return (
+                    f"Saved connection `{slug}` to vault with fields: "
+                    f"{', '.join(sorted(test_credentials.keys()))}. "
+                    f"Future turns can reference this connection by its slug. "
+                    f"Access credentials via DS_<FIELD> environment variables "
+                    f"in scratchpad code — never embed raw values."
+                )
+
     console.print()
     console.print(
         f"[anton.prompt]anton>[/] I can help with that \u2014 let's connect [bold]{engine}[/] to Anton."
@@ -45,8 +236,6 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
 
     from anton.commands.datasource import handle_connect_datasource
 
-    from anton.core.datasources.data_vault import LocalDataVault
-    vault = session._data_vault or LocalDataVault()
     before = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
 
     # Clear any stale status from a previous run
@@ -115,23 +304,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
             from anton.analytics import send_event
             send_event(_settings, "ds_connect_failed", engine=engine)
         return (
-            f"CONNECTION TEST FAILED: The connection test for '{engine}' did not "
-            f"succeed and the user declined to re-enter credentials. Nothing was "
-            f"saved.\n\n"
-            f"You have exactly TWO mutually exclusive options — pick ONE, do NOT "
-            f"mix them:\n\n"
-            f"OPTION A — Retry silently (only if you suspect a transient issue "
-            f"like a network glitch or first-connection cold start):\n"
-            f"  Emit ZERO text in your response. Output ONLY a tool_use block "
-            f"calling connect_new_datasource again with the same known_variables. "
-            f"The user will only see the final result — clean and uncluttered.\n\n"
-            f"OPTION B — Give up and troubleshoot (if you believe the failure is "
-            f"real — bad credentials, wrong host, firewall, etc.):\n"
-            f"  Respond with TEXT ONLY, NO tool calls. Briefly explain what "
-            f"likely went wrong and ask the user what to do.\n\n"
-            f"CRITICAL: Mixing text + a retry tool call in the same response "
-            f"produces a confusing two-message stack for the user (failure text "
-            f"followed by success text). Pick A or B, never both."
+            f"Connection test failed for '{engine}'. Nothing was saved. "
+            f"Either retry with corrected known_variables or explain the "
+            f"issue to the user."
         )
 
     # Default: user cancelled (pressed Escape) at some point
@@ -146,15 +321,27 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
 CONNECT_DATASOURCE_TOOL = ToolDef(
     name = "connect_new_datasource",
     description = (
-        "Connect a new data source to Anton's Local Vault. Call this when the user "
-        "asks a question that requires data from a source that isn't connected yet "
-        "(e.g. email, database, CRM, API). This starts an interactive connection flow "
-        "where the user enters their credentials.\n\n"
-        "Pass the datasource type/name (e.g. 'gmail', 'postgres', 'salesforce', 'hubspot'). "
-        "Anton will match it to the right connector and guide the user through setup.\n\n"
-        "If the user has ALREADY mentioned credential values in the conversation "
-        "(e.g. 'connect to dynamodb, my access key is AKIA... and region is us-east-1'), "
-        "pass them as `known_variables` so the user is not asked again.\n\n"
+        "Connect a data source to Anton's Local Vault. Two modes:\n\n"
+        "(a) Non-interactive: call this tool IMMEDIATELY when the user shares "
+        "credentials in chat (host, password, API token, service account JSON, "
+        "etc.). Pass all extracted values as known_variables. The tool saves "
+        "to the vault without any prompts and returns a confirmation. This "
+        "ensures credentials are persisted before being used anywhere — never "
+        "reference chat-supplied credentials directly in scratchpad code; always "
+        "go through the vault.\n\n"
+        "(b) Interactive: call with just engine and no known_variables when the "
+        "user has no credentials in context yet. Anton runs the same flow as "
+        "/connect, prompting for fields one at a time.\n\n"
+        "Supported engines: see the built-in registry (PostgreSQL, MySQL, Snowflake, "
+        "BigQuery, Redshift, Databricks, MariaDB, MSSQL, Oracle, HubSpot, Salesforce, "
+        "Shopify, Gmail, and more). Unknown engines (not in the built-in registry) "
+        "are also saved silently as ad-hoc connections when known_variables are "
+        "provided — no prompts, no auth-method interrogation. A minimal engine "
+        "definition is appended to ~/.anton/datasources.md so future sessions "
+        "recognize it. Reference credentials via DS_<ENGINE>_<NAME>__<FIELD> env "
+        "vars like any other connection.\n\n"
+        "Partial credentials are fine — save what the user provided. Ask for missing "
+        "pieces in a later turn only if needed. Never invent values.\n\n"
         "Do NOT print any message before calling this tool — it handles the user-facing output."
     ),
     input_schema = {

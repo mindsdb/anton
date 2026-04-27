@@ -7,9 +7,61 @@ from typing import TYPE_CHECKING
 from rich.markdown import Markdown
 from rich.padding import Padding
 
+from anton.utils.prompt import prompt_or_cancel
+
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.chat import ChatSession
+    from anton.core.datasources.datasource_registry import DatasourceField
+
+
+async def prompt_field_value(
+    field: "DatasourceField",
+    credentials: dict[str, str],
+) -> bool:
+    """Prompt for one datasource field, respecting secret/required/default.
+
+    Shared by the `/edit` flow and the failed-test retry flow. Updates
+    ``credentials`` in place. Returns ``False`` if the user cancelled
+    (Esc), ``True`` otherwise. An empty response keeps the current value
+    when one exists, otherwise leaves the field unset.
+    """
+    current = credentials.get(field.name, "")
+    field_label = f"(anton) {field.name}"
+    if not field.required:
+        field_label += " (optional)"
+
+    if field.secret:
+        masked = "••••••••" if current else ""
+        label = f"{field_label} [{masked}]" if masked else field_label
+        value = await prompt_or_cancel(label, password=True)
+        if value is None:
+            return False
+        if value:
+            credentials[field.name] = value
+        return True
+
+    if current:
+        value = await prompt_or_cancel(field_label, default=current)
+        if value is None:
+            return False
+        credentials[field.name] = value if value else current
+        return True
+
+    if field.default:
+        value = await prompt_or_cancel(field_label, default=field.default)
+        if value is None:
+            return False
+        if value:
+            credentials[field.name] = value
+        return True
+
+    value = await prompt_or_cancel(field_label)
+    if value is None:
+        return False
+    if value:
+        credentials[field.name] = value
+    return True
 
 
 async def show_credential_help(

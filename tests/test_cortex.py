@@ -96,12 +96,57 @@ class TestEncode:
         assert (g / "profile.md").exists()
         assert "Name: Jorge" in (g / "profile.md").read_text()
 
+    async def test_encode_profile_with_project_scope_routes_to_global(self, cortex, dirs):
+        g, p = dirs
+        engram = Engram(text="Name: Jorge", kind="profile", scope="project")
+        await cortex.encode([engram])
+        assert (g / "profile.md").exists()
+        assert "Name: Jorge" in (g / "profile.md").read_text()
+        assert not (p / "profile.md").exists()
+
     async def test_off_mode_returns_disabled(self, dirs):
         g, p = dirs
         cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="off")
         engram = Engram(text="test", kind="lesson", scope="global")
         actions = await cortex.encode([engram])
         assert any("disabled" in a.lower() for a in actions)
+
+
+class TestOrphanedIdentityMigration:
+    def test_migrates_project_identity_to_global_on_init(self, dirs):
+        g, p = dirs
+        # Simulate orphaned state from the old bug: identity entries in project scope.
+        Hippocampus(p).rewrite_identity(["Name: Jorge", "TZ: PST"])
+        assert (p / "profile.md").exists()
+
+        Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot")
+
+        assert (g / "profile.md").exists()
+        merged = (g / "profile.md").read_text()
+        assert "Name: Jorge" in merged
+        assert "TZ: PST" in merged
+        assert not (p / "profile.md").exists()
+
+    def test_migration_does_not_overwrite_fresh_global_entries(self, dirs):
+        # Orphaned project data is likely stale (old bug wrote it, user may
+        # have since corrected to global). Global must win on key conflicts.
+        g, p = dirs
+        Hippocampus(g).rewrite_identity(["Name: Alejandro"])
+        Hippocampus(p).rewrite_identity(["Name: Alec", "TZ: PST"])
+
+        Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot")
+
+        merged = (g / "profile.md").read_text()
+        assert "Name: Alejandro" in merged
+        assert "Name: Alec" not in merged
+        assert "TZ: PST" in merged  # non-conflicting keys still migrate
+        assert not (p / "profile.md").exists()
+
+    def test_migration_noop_when_project_identity_empty(self, dirs):
+        g, p = dirs
+        Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot")
+        assert not (g / "profile.md").exists()
+        assert not (p / "profile.md").exists()
 
 
 class TestEncodingGate:
