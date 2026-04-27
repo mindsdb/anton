@@ -24,6 +24,10 @@ jobs:
         if: github.event_name == 'release'
         run: |
           PKG_VERSION=$(grep -oE '__version__\s*=\s*"[^"]+"' anton/__init__.py | grep -oE '"[^"]+"' | tr -d '"')
+          if [ -z "${PKG_VERSION}" ]; then
+            echo "::error::Could not parse __version__ from anton/__init__.py"
+            exit 1
+          fi
           TAG="${{ github.event.release.tag_name }}"
           if [ "v${PKG_VERSION}" != "${TAG}" ]; then
             echo "::error::Release tag ${TAG} does not match anton.__version__=${PKG_VERSION}"
