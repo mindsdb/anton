@@ -311,11 +311,11 @@ def handle_share_history(
         summary = sess.get("summary", "")
 
         if imp:
-            date = imp.get("date", "")[:10]
+            date = imp.get("date", "")[:16].replace("T", " ")
             who = imp.get("user", "?")
             label = f"imported by {who} · {date}"
         else:
-            date = data.get("exported_at", "")[:10]
+            date = data.get("exported_at", "")[:16].replace("T", " ")
             who = data.get("exported_by", "?")
             label = f"exported by {who} · {date}"
 
