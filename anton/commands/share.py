@@ -273,6 +273,60 @@ def handle_share_status(
     console.print()
 
 
+# ── history ──────────────────────────────────────────────────────────────────
+
+
+def handle_share_history(
+    console: Console,
+    workspace: "Workspace",
+) -> None:
+    output_dir = workspace.base / ".anton" / "output"
+
+    console.print()
+
+    files = []
+    if output_dir.exists():
+        files = sorted(output_dir.glob("*.anton"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+    if not files:
+        console.print("[anton.muted]No exported sessions found.[/]")
+        console.print()
+        return
+
+    console.print(f"[bold]Exported sessions[/]  ({len(files)} files)")
+    console.print()
+
+    for p in files:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            console.print(f"  [anton.warning]{p.name}[/] — corrupted or unreadable")
+            console.print()
+            continue
+
+        sess = data.get("session", {})
+        imp = data.get("imported", {})
+
+        title = sess.get("title") or p.stem
+        summary = sess.get("summary", "")
+
+        if imp:
+            date = imp.get("date", "")[:10]
+            who = imp.get("user", "?")
+            label = f"imported by {who} · {date}"
+        else:
+            date = data.get("exported_at", "")[:10]
+            who = data.get("exported_by", "?")
+            label = f"exported by {who} · {date}"
+
+        console.print(f"  [bold]{title}[/]  [anton.muted]{label}[/]")
+        if summary:
+            short = summary[:120] + "…" if len(summary) > 120 else summary
+            console.print(f"  {short}")
+        console.print(f"  [anton.muted]→ {p}[/]")
+        console.print()
+
+
 # ── import ────────────────────────────────────────────────────────────────────
 
 

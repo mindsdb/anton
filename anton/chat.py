@@ -58,7 +58,7 @@ from anton.commands.skills import (
     handle_skill_show,
     handle_skills_list,
 )
-from anton.commands.share import handle_share_export, handle_share_import, handle_share_status
+from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
 from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
 from anton.utils.prompt import (
     prompt_or_cancel,
@@ -1382,6 +1382,8 @@ async def _chat_loop(
                             current_session_id = session._session_id
                     elif sub == "status":
                         handle_share_status(console, session, workspace)
+                    elif sub == "history":
+                        handle_share_history(console, workspace)
                     else:
                         console.print(
                             "[anton.warning]Usage: /share export [--summary] | /share import <file> | /share status | /share history[/]"
