@@ -1554,7 +1554,7 @@ async def _chat_loop(
                     handle_theme(console, arg)
                     continue
                 elif cmd == "/remote":
-                    await _handle_remote(console, settings, workspace)
+                    await _handle_remote(console, settings)
                     # Rebuild session so scratchpad uses remote/local factory
                     session = rebuild_session(
                         settings=settings,
