@@ -81,6 +81,7 @@ from anton.core.datasources.datasource_registry import (
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
@@ -1174,6 +1175,13 @@ async def _chat_loop(
     pt_style = PTStyle.from_dict(
         {
             "bottom-toolbar": "noreverse nounderline bg:default",
+            "completion-menu": "bg:#08131c #7aa3b8",
+            "completion-menu.completion": "bg:#08131c #9cc5d9",
+            "completion-menu.completion.current": "bg:#0a3340 #32d9ff bold",
+            "completion-menu.meta.completion": "bg:#08131c #5b7d8f",
+            "completion-menu.meta.completion.current": "bg:#0a3340 #9adff0",
+            "scrollbar.background": "bg:#08131c",
+            "scrollbar.button": "bg:#11404c",
         }
     )
 
@@ -1183,6 +1191,8 @@ async def _chat_loop(
         style=pt_style,
         completer=make_completer([THEME_COMMANDS, SKILLS_COMMANDS, COMMANDS, MEMORY_COMMANDS]),
         complete_while_typing=True,
+        complete_style=CompleteStyle.COLUMN,
+        reserve_space_for_menu=8,
     )
 
     memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
