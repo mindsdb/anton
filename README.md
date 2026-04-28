@@ -181,5 +181,34 @@ ANTON_ANALYTICS_ENABLED=false
 
 ---
 
+## Releasing
+
+Anton uses an automated release flow. The single source of truth for the package version is [`anton/__init__.py`](anton/__init__.py) (`__version__`).
+
+### How to ship a new version
+
+1. Open a PR that bumps `__version__` in [`anton/__init__.py`](anton/__init__.py) (e.g. `2.0.4` → `2.0.5`). Follow [SemVer](https://semver.org/).
+2. Get it reviewed and merge to `main`.
+3. That's it. On merge, [`.github/workflows/release.yml`](.github/workflows/release.yml) automatically:
+   - Creates the matching git tag (`v2.0.5`).
+   - Publishes a GitHub release with auto-generated notes.
+   - Triggers [`tests_e2e_release.yml`](.github/workflows/tests_e2e_release.yml) to run live e2e tests against the released version.
+
+### What you should NOT do
+
+- **Don't create GitHub releases manually.** The `v*` tag namespace is locked via a repo ruleset — only the release workflow can create them. Manual attempts will be rejected by GitHub.
+- **Don't push `v*` tags directly.** Same protection applies.
+- **Don't edit `__version__` outside a dedicated bump PR.** Keep version bumps small and reviewable so the auto-release diff is easy to audit.
+
+### Editing CI / workflows
+
+Anything under [`.github/`](.github/) is owned by `@mindsdb/devops` via [CODEOWNERS](.github/CODEOWNERS). PRs touching workflows, actions, or release configuration require their review before merge.
+
+### Hotfixes / out-of-band releases
+
+If you genuinely need to release outside the normal flow (e.g. an admin hotfix), coordinate with `@mindsdb/devops` to bypass the tag ruleset. The e2e workflow's version-match guard will still verify the release tag matches `anton.__version__` and fail loudly on mismatch.
+
+---
+
 ## License
 AGPL-3.0 license
