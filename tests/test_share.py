@@ -21,6 +21,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from rich.console import Console
 
+
+class RecordingConsole:
+    """Minimal console stub that captures print() calls for test assertions."""
+
+    def __init__(self):
+        self._lines: list[str] = []
+
+    def print(self, *args, **kwargs):
+        self._lines.append(" ".join(str(a) for a in args))
+
+    def getvalue(self) -> str:
+        return "\n".join(self._lines)
+
 from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
 from anton.core.backends.base import Cell
 from anton.core.backends.manager import ScratchpadManager
@@ -31,10 +44,6 @@ from tests.conftest import make_mock_llm
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
-
-@pytest.fixture()
-def console() -> Console:
-    return Console(quiet=True)
 
 
 @pytest.fixture()
@@ -117,7 +126,7 @@ def _build_exporter_session(
 
 async def _do_import(
     tmp_path: Path,
-    console: Console,
+    console,
     workspace,
     anton_file: Path,
     *,
@@ -182,8 +191,9 @@ async def _do_import(
 
 
 class TestShareRoundtrip:
-    async def test_full_roundtrip(self, tmp_path, console, workspace):
+    async def test_full_roundtrip(self, tmp_path, workspace):
         """Export a live session, import it, compare state point by point."""
+        console = RecordingConsole()
 
         # ── 1. build exporter session ──────────────────────────────────────
         session, episodic, original_sid = _build_exporter_session(tmp_path, workspace)
@@ -241,3 +251,24 @@ class TestShareRoundtrip:
             source="import",
         )
         mock_hc.encode_rule.assert_not_called()
+
+        # ── 4. status ─────────────────────────────────────────────────────
+
+        status_console = RecordingConsole()
+        handle_share_status(status_console, new_session, workspace)
+        status_out = status_console.getvalue()
+
+        assert "revenue-region-yoy" in status_out, "Title from export must appear in status"
+        assert "Analyzed revenue. APAC leads YoY." in status_out, "Summary must appear in status"
+        assert "No data sources" in status_out, "No datasources in HISTORY, so should say none referenced"
+
+        # ── 5. history ─────────────────────────────────────────────────────
+
+        history_console = RecordingConsole()
+        handle_share_history(history_console, workspace)
+        history_out = history_console.getvalue()
+
+        assert "Exported sessions" in history_out, "Header must appear"
+        assert "revenue-region-yoy" in history_out, "Title must appear in history listing"
+        assert "Analyzed revenue. APAC leads YoY." in history_out, "Summary must appear in history listing"
+        assert "imported by" in history_out, "After roundtrip the file has imported metadata"
