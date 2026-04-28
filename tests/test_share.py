@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from rich.console import Console
 
-from anton.commands.share import handle_share_export, handle_share_import
+from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
 from anton.core.backends.base import Cell
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.memory.episodes import EpisodicMemory
@@ -202,7 +202,7 @@ class TestShareRoundtrip:
         mock_cortex = MagicMock()
         mock_cortex.project_hc = mock_hc
 
-        result, new_episodic = await _do_import(
+        new_session, new_episodic = await _do_import(
             tmp_path / "recipient", console, workspace, anton_file,
             cortex=mock_cortex,
         )
@@ -210,13 +210,13 @@ class TestShareRoundtrip:
         # ── 3. compare ─────────────────────────────────────────────────────
 
         # conversation history: EQUAL
-        assert result._history == HISTORY, "Conversation history must be fully preserved"
-        assert result._turn_count == 2
+        assert new_session._history == HISTORY, "Conversation history must be fully preserved"
+        assert new_session._turn_count == 2
 
         # session_id: comes from a fresh start_session(), not copied from the .anton file
         # (the .anton file's session.id is the original exporter's ID)
         # We verify the new session got its ID from the new episodic, not the payload
-        assert result._session_id == new_episodic._session_id
+        assert new_session._session_id == new_episodic._session_id
 
         # memory in new episodic: session_born → memory_write
         mem_eps = new_episodic.get_memory_usage()
@@ -231,8 +231,8 @@ class TestShareRoundtrip:
 
         # scratchpad: one cell in .anton file, and it is restored into the runtime
         assert len(payload["scratchpad"]["cells"]) == 1
-        assert "main" in result._scratchpads._pads
-        assert len(result._scratchpads._pads["main"].cells) == 1
+        assert "main" in new_session._scratchpads._pads
+        assert len(new_session._scratchpads._pads["main"].cells) == 1
 
         # hippocampus: session_born (kind=lesson) written to project_hc
         mock_hc.encode_lesson.assert_called_once_with(
