@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import PrivateAttr, ValidationInfo, field_validator
-from pydantic_settings import BaseSettings
+from pydantic import PrivateAttr, ValidationInfo, field_validator, model_validator
 
 from anton.core.settings import CoreSettings
 
@@ -73,13 +72,21 @@ class AntonSettings(CoreSettings):
 
     # Publish service
     publish_url: str = "https://4nton.ai"
+    remote_scratchpad_url: str | None = None
 
-    backend: str = "local"  # local | remote
+    backend: str = "local"  # local | remote | remote_lightsail
+    default_remote_backend: str = "remote"  # remote | remote_lightsail
+
+    @model_validator(mode="after")
+    def _set_default_remote_scratchpad_url(self) -> AntonSettings:
+        if self.remote_scratchpad_url is None:
+            self.remote_scratchpad_url = self.minds_url
+        return self
 
     @field_validator("backend", mode="after")
     @classmethod
     def _validate_backend(cls, v: str, info: ValidationInfo) -> str:
-        if v == "remote" and not info.data.get("minds_api_key"):
+        if v in ("remote", "remote_lightsail") and not info.data.get("minds_api_key"):
             raise ValueError("Minds API key is required for remote backend")
         return v
 

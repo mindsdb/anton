@@ -59,14 +59,23 @@ def get_runtime_factory(settings: AntonSettings):
     If backend is set to "remote" (and minds_api_key available),
     returns a remote factory. Otherwise returns the local factory.
     """
-    print(settings.backend)
     if settings.backend == "remote":
         from functools import partial
         from anton.core.backends.remote import remote_scratchpad_runtime_factory
 
         return partial(
             remote_scratchpad_runtime_factory,
-            endpoint_url=settings.minds_url,
+            endpoint_url=settings.remote_scratchpad_url,
+            api_key=settings.minds_api_key,
+        )
+
+    elif settings.backend == "remote_lightsail":
+        from functools import partial
+        from anton.core.backends.remote import remote_lightsail_scratchpad_runtime_factory
+
+        return partial(
+            remote_lightsail_scratchpad_runtime_factory,
+            endpoint_url=settings.remote_scratchpad_url,
             api_key=settings.minds_api_key,
         )
 
