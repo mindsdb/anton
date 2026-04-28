@@ -20,7 +20,6 @@ class Command:
 COMMANDS = [
     "LLM Provider",
     Command("/llm",    "Change LLM provider or API key"),
-    Command("/minds",  "Connect to Minds server"),
     None,
     "Data Connections",
     Command("/connect",   "Connect a database or API to your Local Vault"),
