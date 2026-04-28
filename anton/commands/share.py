@@ -1,11 +1,14 @@
 """Slash-command handlers for /share."""
 from __future__ import annotations
 
+import ast
 import getpass
 import json
 import os
 import re
 import tempfile
+import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -99,7 +102,7 @@ async def handle_share_export(
         console.print("[anton.muted]Episodic memory not enabled — memory snapshot will be empty.[/]")
         return
 
-    history = [] if summary_only else list(session._history)
+    history = [] if summary_only else [asdict(ep) for ep in episodic.get_conversation()]
 
     msg_count = len(session._history)
     if not summary_only and msg_count > 100:
@@ -328,28 +331,64 @@ def handle_share_history(
 # ── import ────────────────────────────────────────────────────────────────────
 
 
-def _content_to_str(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ]
-        return " ".join(p for p in parts if p)
-    return str(content)
+def _episodic_to_api_history(episodes: list[dict]) -> list[dict]:
+    """Convert episodic episode list to Anthropic API message format for HistoryStore.
 
+    Processes episodes sequentially:
+      user -> {"role":"user","content":text}
+      tool_call -> {"role":"assistant","content":[tool_use block]}  (generates id)
+      scratchpad -> skipped (content captured in tool_result)
+      tool_result -> {"role":"user","content":[tool_result block]}  (uses id from preceding tool_call)
+      assistant -> {"role":"assistant","content":text}
+    """
+    history: list[dict] = []
+    i = 0
+    while i < len(episodes):
+        ep = episodes[i]
+        role = ep.get("role", "")
 
-def _replay_to_episodic(episodic: "EpisodicMemory", history: list[dict]) -> None:
-    turn = 0
-    for msg in history:
-        role = msg.get("role", "")
-        content = _content_to_str(msg.get("content", ""))
         if role == "user":
-            turn += 1
-        if role in ("user", "assistant"):
-            episodic.log_turn(turn, role, content)
+            history.append({"role": "user", "content": ep["content"]})
+            i += 1
+
+        elif role == "tool_call":
+            tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
+            tool_name = ep.get("meta", {}).get("tool", "unknown")
+            content_str = ep.get("content", "{}")
+            try:
+                tool_input = json.loads(content_str)
+            except Exception:
+                try:
+                    tool_input = ast.literal_eval(content_str)
+                except Exception:
+                    tool_input = {"raw": content_str}
+
+            history.append({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": tool_id, "name": tool_name, "input": tool_input}],
+            })
+            i += 1
+
+            # Skip optional scratchpad episode
+            if i < len(episodes) and episodes[i].get("role") == "scratchpad":
+                i += 1
+
+            # Consume matching tool_result
+            if i < len(episodes) and episodes[i].get("role") == "tool_result":
+                history.append({
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": episodes[i]["content"]}],
+                })
+                i += 1
+
+        elif role == "assistant":
+            history.append({"role": "assistant", "content": ep["content"]})
+            i += 1
+
+        else:
+            i += 1
+
+    return history
 
 
 async def import_v0_1(
@@ -420,17 +459,23 @@ async def import_v0_1(
         session_id=new_session_id,
     )
 
-    # inject conversation history into LLM context
-    history = payload.get("session", {}).get("conversation_history", [])
-    new_session._history = list(history)
-    new_session._turn_count = sum(1 for m in history if m.get("role") == "user")
+    # conversation_history is stored in episodic format (has "ts"/"turn" fields)
+    # or legacy Anthropic API format (has "role"/"content" only)
+    raw_history = payload.get("session", {}).get("conversation_history", [])
+
+    if episodic and episodic.enabled and new_session_id:
+        from anton.core.memory.episodes import Episode  # noqa: PLC0415
+
+        for ep_data in raw_history:
+            ep = Episode(**ep_data)
+            episodic.log(ep)
+    api_history = _episodic_to_api_history(raw_history)
+
+    new_session._history = api_history
+    new_session._turn_count = sum(1 for m in api_history if m.get("role") == "user")
 
     if history_store and new_session_id:
-        history_store.save(new_session_id, history)
-
-    # replay to episodic file
-    if episodic and episodic.enabled:
-        _replay_to_episodic(episodic, history)
+        history_store.save(new_session_id, api_history)
 
     # log memories to episodic
     session_born = payload.get("memory", {}).get("session_born", [])
@@ -477,7 +522,7 @@ async def import_v0_1(
     # print briefing
     sess = payload.get("session", {})
     cells = payload.get("scratchpad", {}).get("cells", [])
-    n_turns = sum(1 for m in history if m.get("role") == "user")
+    n_turns = new_session._turn_count
 
     console.print()
     console.print(f"[bold][anton.cyan]Imported: {sess.get('title', 'Session')}[/][/]")

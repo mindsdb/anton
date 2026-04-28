@@ -1042,7 +1042,7 @@ class ChatSession:
                         self._episodic.log_turn(
                             self._turn_count + 1,
                             "tool_call",
-                            str(tc.input)[:2000],
+                            str(tc.input),
                             tool=tc.name,
                         )
 
@@ -1113,7 +1113,7 @@ class ChatSession:
                                     self._episodic.log_turn(
                                         self._turn_count + 1,
                                         "scratchpad",
-                                        (cell.stdout or "")[:2000],
+                                        (cell.stdout or ""),
                                         description=description,
                                     )
                         elif tc.name == "connect_new_datasource" or (
@@ -1168,7 +1168,7 @@ class ChatSession:
                         self._episodic.log_turn(
                             self._turn_count + 1,
                             "tool_result",
-                            result_text[:2000],
+                            result_text,
                             tool=tc.name,
                         )
                     result_text = scrub_credentials(result_text)
