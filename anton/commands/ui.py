@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from rich.console import Console
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
 
 from anton.explainability import ExplainabilityStore
 
@@ -155,7 +156,7 @@ def handle_explain(console: Console, workspace_path) -> None:
 
 def make_completer(command_sources: list[list]) -> Completer:
     """Return a Completer that suggests slash commands extracted from *sources*."""
-    commands = set()
+    command_meta: dict[str, str] = {}
     for source in command_sources:
         for item in source:
             if not isinstance(item, Command):
@@ -165,16 +166,34 @@ def make_completer(command_sources: list[list]) -> Completer:
                 # split options [a|b|c] to separated commands
                 prefix = item.command[:match.start()]
                 for variant in match.group(1).split("|"):
-                    commands.add(prefix + variant)
+                    cmd = prefix + variant
+                    command_meta.setdefault(cmd, item.description or "")
             else:
-                commands.add(item.command)
+                command_meta.setdefault(item.command, item.description or "")
+
+    commands = sorted(command_meta.keys())
 
     class _Completer(Completer):
-        def get_completions(self, document, complete_event):
+        def get_completions(self, document: Document, complete_event):
             text = document.text_before_cursor
             if not text.startswith("/"):
                 return
 
+            # First token: show full command list with descriptions.
+            if " " not in text.strip():
+                prefix = text.strip()
+                for cmd in commands:
+                    if not cmd.startswith(prefix):
+                        continue
+                    yield Completion(
+                        cmd,
+                        start_position=-len(prefix),
+                        display=cmd,
+                        display_meta=command_meta.get(cmd, ""),
+                    )
+                return
+
+            # Subsequent tokens: preserve old token-level completion behavior.
             word_start = text.rfind(" ") + 1
             current_word = text[word_start:]
             seen = set()
@@ -189,4 +208,3 @@ def make_completer(command_sources: list[list]) -> Completer:
                     yield Completion(next_word, start_position=-len(current_word))
 
     return _Completer()
-
