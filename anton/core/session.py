@@ -4,7 +4,8 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 import json
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, List
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -23,6 +24,7 @@ from anton.core.llm.provider import (
     StreamTextDelta,
     StreamToolResult,
     TokenLimitExceeded,
+    ToolCall,
 )
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
@@ -53,6 +55,19 @@ if TYPE_CHECKING:
     from anton.memory.history_store import HistoryStore
     from anton.workspace import Workspace
 
+
+def _extract_datasources(tool_call: ToolCall) -> List[str]:
+    """Return unique datasource slugs referenced in scratchpad code via DS_*__ env vars."""
+    if tool_call.name != "scratchpad":
+        return []
+    code = tool_call.input.get("code", "") if isinstance(tool_call.input, dict) else ""
+    if not code:
+        return []
+    seen = set()
+
+    for m in re.compile(r"\bDS_([A-Z0-9_]+?)__").finditer(code):
+        seen.add(m.group(1).lower())
+    return list(seen)
 
 @dataclass
 class ChatSessionConfig:
@@ -1044,6 +1059,7 @@ class ChatSession:
                             "tool_call",
                             str(tc.input),
                             tool=tc.name,
+                            datasources=_extract_datasources(tc)
                         )
 
                     _tool_t0 = _time.monotonic()
