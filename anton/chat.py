@@ -386,7 +386,8 @@ async def _handle_remote(
 
     # Save and confirm
     console.print(f"  [anton.success]Remote scratchpad ready![/]")
-    console.print(f"  [link={settings.remote_scratchpad_url}]{settings.remote_scratchpad_url}[/link]")
+    remote_scratchpad_url = _global_ws.get_secret("ANTON_REMOTE_SCRATCHPAD_URL")
+    console.print(f"  [link={remote_scratchpad_url}]{remote_scratchpad_url}[/link]")
     console.print()
 
 
