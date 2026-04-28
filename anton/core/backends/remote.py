@@ -221,7 +221,14 @@ class RemoteLightsailScratchpadRuntime(RemoteScratchpadRuntime):
             cells=cells,
             workspace_path=workspace_path,
         )
-        self._endpoint_url = self._resolve_endpoint(endpoint_url.rstrip("/"))
+        self._lightsail_endpoint_resolved = False
+
+    async def start(self) -> None:
+        """Resolve worker URL to a direct instance endpoint, then start the scratchpad."""
+        if not self._lightsail_endpoint_resolved:
+            self._endpoint_url = await self._resolve_endpoint(self._endpoint_url.rstrip("/"))
+            self._lightsail_endpoint_resolved = True
+        await super().start()
 
     async def _resolve_endpoint(self, endpoint_url: str) -> str:
         """Resolve the Cloudflare endpoint to a direct IP endpoint.
