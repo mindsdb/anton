@@ -56,6 +56,21 @@ PROFILE_MEMORY       = {"content": "User prefers camel-case",              "kind
 SCRATCHPAD_CELL      = Cell(code="df.head()", stdout="   col1\n0  1\n", stderr="", error=None, description="Preview data")
 
 
+class _SimpleHistoryStore:
+    """Minimal in-memory history store for tests."""
+    def __init__(self):
+        self._data: dict = {}
+
+    def save(self, sid: str, history: list) -> None:
+        self._data[sid] = list(history)
+
+    def load(self, sid: str):
+        return self._data.get(sid)
+
+    def list_sessions(self, limit: int = 20):
+        return []
+
+
 def _build_exporter_session(
     tmp_path: Path,
     workspace,
@@ -66,6 +81,14 @@ def _build_exporter_session(
     episodes_dir = tmp_path / "episodes"
     episodic = EpisodicMemory(episodes_dir)
     sid = episodic.start_session()
+
+    # log conversation turns to episodic (mirrors what session.py does during turn())
+    turn = 0
+    for msg in HISTORY:
+        role = msg["role"]
+        if role == "user":
+            turn += 1
+        episodic.log_turn(turn, role, msg["content"])
 
     # log memories that the export should pick up
     episodic.log_turn(0, "memory_write", **SESSION_BORN_MEMORY)
@@ -108,6 +131,7 @@ async def _do_import(
     can inspect restored cells via result._scratchpads._pads[name].cells.
     """
     mock_llm = make_mock_llm()
+    history_store = _SimpleHistoryStore()
 
     # episodic for the new session (recipient side)
     new_episodic = EpisodicMemory(tmp_path / "new_episodes")
@@ -140,7 +164,7 @@ async def _do_import(
         return mgr_self._pads[name]
 
     with patch.object(ScratchpadManager, "get_or_create", _mock_get_or_create):
-        with patch("anton.chat_session.rebuild_session", side_effect=_fake_rebuild):
+        with patch("anton.commands.session.rebuild_session", side_effect=_fake_rebuild):
             result = await handle_share_import(
                 console,
                 current_session,
@@ -150,7 +174,7 @@ async def _do_import(
                 None,                     # self_awareness
                 cortex,
                 new_episodic,
-                None,                     # history_store
+                history_store,
                 filepath=str(anton_file),
             )
 

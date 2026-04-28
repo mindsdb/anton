@@ -279,12 +279,15 @@ class EpisodicMemory:
         Used by /share export to collect the memory payload for a session.
         """
         seen: set[str] = set()
+        result: list[Episode] = []
         for ep in self.get_items():
             if ep.role not in ["memory_write", "memory_read"]:
                 continue
             if ep.content in seen:
                 continue
-            yield ep
+            seen.add(ep.content)
+            result.append(ep)
+        return result
 
     def session_count(self) -> int:
         """Count the number of session files."""
