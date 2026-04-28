@@ -195,7 +195,7 @@ class TestShareRoundtrip:
         assert result._session_id == new_episodic._session_id
 
         # memory in new episodic: session_born → memory_write
-        mem_eps = new_episodic.get_memory_usage(result._session_id)
+        mem_eps = new_episodic.get_memory_usage()
         writes = [e for e in mem_eps if e.role == "memory_write"]
         reads  = [e for e in mem_eps if e.role == "memory_read"]
 
