@@ -47,6 +47,10 @@ class EpisodicMemory:
     def enabled(self, value: bool) -> None:
         self._enabled = value
 
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
     def start_session(self) -> str:
         """Create a new JSONL file for this session and return the session ID."""
         now = datetime.now(timezone.utc)
@@ -199,22 +203,6 @@ class EpisodicMemory:
                     return matches
 
         return matches
-
-    def get_episodes(self) -> list[Episode]:
-        """Return all episodes across all sessions, newest-first."""
-        if not self._dir.is_dir():
-            return []
-        result = []
-        for path in sorted(self._dir.glob("*.jsonl"), reverse=True):
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        ep = Episode(**json.loads(line))
-                        if ep.role not in ("memory_read", "memory_write"):
-                            result.append(ep)
-            except Exception:
-                continue
-        return result
 
     def get_conversation(self) -> list[Episode]:
         """Yield conversation episodes for the current session (excludes memory entries)."""

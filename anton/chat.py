@@ -1149,7 +1149,7 @@ async def _chat_loop(
         complete_while_typing=True,
     )
 
-    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic, history_store=history_store, session=session)
+    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic, history_store=history_store)
     try:
         while True:
             # Memory confirmation UX — show pending lessons before prompt

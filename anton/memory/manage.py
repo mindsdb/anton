@@ -104,14 +104,13 @@ class MemoryManage:
         cortex: "Cortex | None",
         episodic: "EpisodicMemory | None" = None,
         history_store: "HistoryStore | None" = None,
-        session: "ChatSession | None" = None,
     ) -> None:
         self.console = console
         self.settings = settings
         self.cortex = cortex
         self.episodic = episodic
         self.history_store = history_store
-        self.session = session
+        self.session = None
 
         self.SUBCOMMANDS: dict[str, object] = {
             "help":        self.help,
@@ -334,8 +333,8 @@ class MemoryManage:
         table.add_column("answer")
 
         for turn, data in turns.items():
-            q = data["user"].replace('\n', ' ')
-            a = data["assistant"].replace('\n', ' ')
+            q = data.get("user", "").replace('\n', ' ')
+            a = data.get("assistant", "").replace('\n', ' ')
             q_short = (q[:60] + "...") if len(q) > 63 else q
             a_short = (a[:60] + "...") if len(a) > 63 else a
             table.add_row(str(turn), q_short, a_short)

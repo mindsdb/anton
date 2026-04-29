@@ -26,12 +26,6 @@ class HistoryStore:
     def __init__(self, episodes_dir: Path) -> None:
         self._dir = episodes_dir
 
-    @classmethod
-    def from_episodes(cls, episodes_dir: Path):
-        ...
-        history = cls(episodes_dir)
-        return history
-
     def save(self, session_id: str, history: list[dict]) -> None:
         """Atomically write history to ``{session_id}_history.json``.
 
@@ -138,8 +132,8 @@ class HistoryStore:
         from dataclasses import asdict
         episodes = [asdict(ep) for ep in episodic.get_conversation()]
         history = self.episodes_to_api_history(episodes)
-        if episodic._session_id:
-            self.save(episodic._session_id, history)
+        if episodic.session_id:
+            self.save(episodic.session_id, history)
         return history
 
     def list_sessions(self, limit: int = 20) -> list[dict]:
