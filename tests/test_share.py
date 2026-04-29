@@ -37,7 +37,9 @@ class RecordingConsole:
 from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
 from anton.core.backends.base import Cell
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.memory.cortex import Cortex
 from anton.core.memory.episodes import EpisodicMemory
+from anton.core.memory.hippocampus import Hippocampus
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.memory.history_store import HistoryStore
 from tests.conftest import make_mock_llm
@@ -189,13 +191,14 @@ class TestShareRoundtrip:
         payload = json.loads(anton_file.read_text())
 
         # ── 2. import into fresh session ───────────────────────────────────
-        mock_hc = MagicMock()
-        mock_cortex = MagicMock()
-        mock_cortex.project_hc = mock_hc
+        cortex = Cortex(
+            global_hc=Hippocampus(tmp_path / "global_memory"),
+            project_hc=Hippocampus(tmp_path / "project_memory"),
+        )
 
         new_session, new_episodic = await _do_import(
-            tmp_path / "recipient", console, workspace, anton_file,
-            cortex=mock_cortex,
+            tmp_path, console, workspace, anton_file,
+            cortex=cortex,
         )
 
         # ── 3. compare ─────────────────────────────────────────────────────
@@ -226,12 +229,11 @@ class TestShareRoundtrip:
         assert len(new_session._scratchpads._pads["main"].cells) == 1
 
         # hippocampus: session_born (kind=lesson) written to project_hc
-        mock_hc.encode_lesson.assert_called_once_with(
-            SESSION_BORN_MEMORY["content"],
-            topic=SESSION_BORN_MEMORY["topic"],
-            source="import",
-        )
-        mock_hc.encode_rule.assert_not_called()
+        lessons_text = (tmp_path / "project_memory" / "lessons.md").read_text()
+        assert SESSION_BORN_MEMORY["content"] in lessons_text
+
+        rules_text = (tmp_path / "project_memory" / "rules.md").read_text()
+        assert PROJECT_MEMORY["content"] in rules_text
 
         # ── 4. status ─────────────────────────────────────────────────────
 
