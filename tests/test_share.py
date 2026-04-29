@@ -62,16 +62,12 @@ HISTORY = [
 
 SESSION_BORN_MEMORY  = {"content": "Always use CTEs for readability", "kind": "lesson", "topic": "sql"}
 PROJECT_MEMORY       = {"content": "Never use SELECT * in production",  "kind": "never",  "topic": ""}
-PROFILE_MEMORY       = {"content": "User prefers camel-case",              "kind": "profile", "topic": ""}
 SCRATCHPAD_CELL      = Cell(code="df.head()", stdout="   col1\n0  1\n", stderr="", error=None, description="Preview data")
 
 
-
-def _build_exporter_session(
+def _build_session(
     tmp_path: Path,
-    workspace,
-    *,
-    include_profile_memory: bool = False,
+    workspace
 ) -> tuple[ChatSession, EpisodicMemory, str]:
     """Return (session, episodic, session_id) ready for export."""
     episodes_dir = tmp_path / "episodes"
@@ -89,8 +85,6 @@ def _build_exporter_session(
     # log memories that the export should pick up
     episodic.log_turn(0, "memory_write", **SESSION_BORN_MEMORY)
     episodic.log_turn(0, "memory_read",  **PROJECT_MEMORY)
-    if include_profile_memory:
-        episodic.log_turn(0, "memory_write", **PROFILE_MEMORY)
 
     mock_llm = make_mock_llm()
     session = ChatSession(ChatSessionConfig(
@@ -161,7 +155,7 @@ async def _do_import(
 
     with patch.object(ScratchpadManager, "get_or_create", _mock_get_or_create):
         with patch("anton.commands.session.rebuild_session", side_effect=_fake_rebuild):
-            result = await handle_share_import(
+            new_session = await handle_share_import(
                 console,
                 current_session,
                 workspace,
@@ -174,7 +168,7 @@ async def _do_import(
                 filepath=str(anton_file),
             )
 
-    return result, new_episodic
+    return new_session, new_episodic
 
 
 class TestShareRoundtrip:
@@ -183,7 +177,7 @@ class TestShareRoundtrip:
         console = RecordingConsole()
 
         # ── 1. build exporter session ──────────────────────────────────────
-        session, episodic, original_sid = _build_exporter_session(tmp_path, workspace)
+        session, episodic, original_sid = _build_session(tmp_path, workspace)
         mock_llm = make_mock_llm()
 
         with patch("anton.commands.share._generate_meta",

@@ -19,7 +19,6 @@ from rich.console import Console
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
     from anton.core.llm.client import LLMClient
-    from anton.core.memory.episodes import EpisodicMemory
     from anton.core.session import ChatSession
     from anton.workspace import Workspace
 
@@ -485,7 +484,7 @@ async def import_v0_1(
 
     # restore memories to cortex
     if cortex:
-        for m in session_born:
+        for m in session_born + project_accessed:
             kind = m.get("kind", "")
             content = m.get("content", "")
             topic = m.get("topic", "")
