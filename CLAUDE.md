@@ -1,7 +1,6 @@
 # CLAUDE.md — anton
 
 Python AI agent. Read this before touching any code in this repo.
-For workspace-level context (architecture, subsystems, cross-project relationships) see `antonworld/.claude/CLAUDE.md`.
 
 ---
 
