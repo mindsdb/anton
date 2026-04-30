@@ -181,13 +181,82 @@ ANTON_ANALYTICS_ENABLED=false
 
 ---
 
+## Dev guidelines
+
+We use three long-lived branches: `dev` → `staging` → `main`.
+
+```
+feature/*  ──▶  dev  ──▶  staging  ──(soak ~1 day)──▶  main
+                                                        ▲
+                            hotfix/*  ──────────────────┘  (and back-merged to dev)
+```
+
+### Branch policy
+
+- Anything you're working on that you feel is ready for production gets merged into `dev`. That's the integration line.
+- **All non-hotfix PRs target `dev`.** Don't open feature PRs against `staging` or `main`.
+- `staging` is for soak — never merge feature branches into it directly. It only receives the scheduled `dev → staging` promotion.
+- `main` is the release line. The only things that land on `main` are the scheduled `staging → main` promotion and hotfixes.
+
+### Hotfixes
+
+- Production-only fixes target `main` directly.
+- Every hotfix that lands on `main` **must** also be merged back into `dev` so the branches don't drift. If `staging` is mid-soak when the hotfix ships, bring it into `staging` too — otherwise the next promotion will overwrite it.
+
+### Promotion cadence
+
+Twice a week, on a fixed schedule:
+
+1. Bump the version in `dev`, then merge `dev → staging`. Leave it for ~1 day for soak tests.
+2. The day after the soak, merge `staging → main`. The release workflow tags and publishes from `main` automatically (see [Releasing](#releasing)).
+
+Net rhythm: two `dev → staging` promotions and two `staging → main` promotions per week, each promotion offset by a soak day.
+
+---
+
+## Versioning
+
+Anton versions follow a calendar-derived scheme:
+
+```
+<MAJOR>.<YY>.<MONTH>.<DAY>.<PATCH>
+```
+
+| Field | Meaning | When it bumps |
+| --- | --- | --- |
+| `MAJOR` | Milestone or breaking-change signal | Only when we hit an announced milestone (e.g. a launch, a major rewrite, a public "X.0" event) **or** ship a breaking change. Intentional and announced — never bumped automatically. |
+| `YY` | Last two digits of the calendar year | Auto-bumps on the first release of each January. |
+| `MONTH` | Month of the release (1–12) | Each release. No zero-padding. |
+| `DAY` | Day of the release (1–31) | Each release. No zero-padding. |
+| `PATCH` | Hotfix counter for the specific dated release | `0` for scheduled releases. `1`, `2`, … for hotfixes patching that release. |
+
+**Rules**
+
+- Always write all 5 components in [`anton/__init__.py`](anton/__init__.py) (`__version__ = "2.26.4.30.0"`). PyPI may canonicalize a trailing `.0` away — that's fine.
+- The version bump happens on the `staging → main` promotion (see [Dev guidelines](#dev-guidelines)). The version *is* the actual ship date.
+- Hotfix back-merges to `dev`/`staging` carry the fix only — never the `__version__` bump.
+
+**Worked example**
+
+```
+2026-04-30   2.26.4.30.0     ← cutover release
+2026-07-15   3.26.7.15.0     ← announced milestone or breaking change → MAJOR bumps
+2026-12-20   3.26.12.20.0
+2027-01-05   3.27.1.5.0      ← YY auto-bumps; MAJOR stays
+hotfix       3.26.7.15.1     ← patches the 3.26.7.15.0 release
+```
+
+**Cutover note.** Anton was on `2.0.4` under the old SemVer scheme. The first CalVer release is `2.26.4.30.0` — keeping `MAJOR=2` (no announced milestone or break warrants a bump) and letting `YY=26` carry the year. PEP 440 sees `2.0.4 < 2.26.4.30.0` so nothing rolls backward.
+
+---
+
 ## Releasing
 
-Anton uses an automated release flow. The single source of truth for the package version is [`anton/__init__.py`](anton/__init__.py) (`__version__`).
+Anton uses an automated release flow. The single source of truth for the package version is [`anton/__init__.py`](anton/__init__.py) (`__version__`); the format is documented in [Versioning](#versioning).
 
 ### How to ship a new version
 
-1. Open a PR that bumps `__version__` in [`anton/__init__.py`](anton/__init__.py) (e.g. `2.0.4` → `2.0.5`). Follow [SemVer](https://semver.org/).
+1. On the scheduled `staging → main` promotion, bump `__version__` in [`anton/__init__.py`](anton/__init__.py) to today's date (see [Versioning](#versioning) for the format).
 2. Get it reviewed and merge to `main`.
 3. That's it. On merge, [`.github/workflows/release.yml`](.github/workflows/release.yml) automatically:
    - Creates the matching git tag (`v2.0.5`).
