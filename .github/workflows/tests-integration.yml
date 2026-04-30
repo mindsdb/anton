@@ -6,6 +6,10 @@ on:
       deploy-env:
         required: true
         type: string
+      runs-on:
+        required: false
+        type: string
+        default: mdb-dev
 
 defaults:
   run:
@@ -13,7 +17,7 @@ defaults:
 
 jobs:
   integration-tests:
-    runs-on: mdb-dev
+    runs-on: ${{ inputs.runs-on }}
     environment:
       name: ${{ inputs.deploy-env }}
       url: ${{ vars.MDB_ENV_URL }}
