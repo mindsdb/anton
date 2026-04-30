@@ -28,6 +28,10 @@ dev = [
 clipboard = [
     "Pillow>=12.2.0",
 ]
+server = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+]
 
 [project.scripts]
 anton = "anton.cli:app"

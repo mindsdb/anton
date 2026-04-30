@@ -1190,6 +1190,35 @@ def version() -> None:
     console.print(f"Anton v{__version__}")
 
 
+@app.command("serve")
+def serve(
+    ctx: typer.Context,
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Bind host (default: loopback only)"),
+    port: int = typer.Option(8765, "--port", "-p", help="Bind port"),
+    reload: bool = typer.Option(False, "--reload", help="Enable autoreload (dev only)"),
+) -> None:
+    """Run Anton as an HTTP server (OpenAI Responses API).
+
+    Requires the [server] extra: pip install 'anton[server]'.
+    """
+    settings = _get_settings(ctx)
+    _ensure_workspace(settings)
+    _ensure_api_key(settings)
+
+    from anton.server.installer import ensure_server_deps
+    ensure_server_deps(console)
+
+    import uvicorn
+    from anton.server.app import create_app
+
+    fastapi_app = create_app(settings)
+    console.print(
+        f"[anton.success]Anton serving[/] [anton.cyan]http://{host}:{port}[/] "
+        f"[anton.muted](workspace: {settings.workspace_path})[/]"
+    )
+    uvicorn.run(fastapi_app, host=host, port=port, reload=reload)
+
+
 @app.command("connect")
 def connect_data_source(
     ctx: typer.Context,

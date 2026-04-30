@@ -151,6 +151,20 @@ netsh advfirewall firewall add rule name="Anton Scratchpad" dir=out action=allow
 
 ---
 
+## Run Anton as a server
+
+Anton can run as an HTTP service exposing an OpenAI-compatible Responses API, so the desktop app (or any client) can talk to a local — or remote — Anton over the wire:
+
+```bash
+anton serve   # binds 127.0.0.1:8765 by default
+```
+
+The server packages (`fastapi`, `uvicorn`) are an optional extra so the base install stays lean — `anton serve` checks for them on first run and offers to install them automatically.
+
+See **[anton/server/README.md](anton/server/README.md)** for install paths, endpoints, conversation/history behavior, and configuration.
+
+---
+
 ## How Anton differs from coding agents
 Anton is a *doing* agent: code is a means, not the end. Where coding agents focus on producing code for a codebase, Anton focuses on delivering the outcome - a cleaned inbox, a live dashboard, a working integration, an automated workflow - and will write whatever code is necessary to achieve that goal.
 
