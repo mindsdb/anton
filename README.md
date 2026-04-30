@@ -15,6 +15,7 @@ Minds is a FastAPI-based service that provides an OpenAI-compatible chat complet
 - UUID-based primary keys with automatic generation
 - MindsDB SDK integration for AI model management and data operations
 
+
 ## Getting Started
 
 ### Prerequisites

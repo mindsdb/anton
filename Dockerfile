@@ -1,5 +1,5 @@
 # Builder image with tools for building pip packages
-FROM python:3.13.2 AS builder
+FROM python:3.13 AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 
 # Final image
-FROM python:3.13.2-slim AS final
+FROM python:3.13-slim AS final
 
 WORKDIR /minds
 

@@ -28,6 +28,8 @@ jobs:
   build:
     runs-on: mdb-dev
     needs: [run-unit-tests, linter]
+    outputs:
+      image: ${{ steps.build.outputs.image }}
     env:
       AWS_REGION: us-east-1
     steps:
@@ -39,7 +41,8 @@ jobs:
           repository: mindsdb/github-actions
           path: github-actions
       - uses: ./github-actions/setup-env
-      - uses: ./github-actions/build-push-ecr
+      - id: build
+        uses: ./github-actions/build-push-ecr
         with:
           module-name: ${{ env.CI_REPOSITORY_SLUG }}
           build-for-environment: staging
@@ -47,6 +50,8 @@ jobs:
   build-anton-scratchpad:
     runs-on: mdb-dev
     needs: [run-unit-tests, linter]
+    outputs:
+      image: ${{ steps.build.outputs.image }}
     env:
       AWS_REGION: us-east-1
     steps:
@@ -58,11 +63,35 @@ jobs:
           repository: mindsdb/github-actions
           path: github-actions
       - uses: ./github-actions/setup-env
-      - uses: ./github-actions/build-push-ecr
+      - id: build
+        uses: ./github-actions/build-push-ecr
         with:
           module-name: minds-anton-scratchpad
           build-for-environment: staging
           extra-build-args: -f Dockerfile.scratchpad
+
+  scan:
+    runs-on: mdb-dev
+    needs: [ build ]
+    name: Scan Minds Image
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mindsdb/github-actions/snyk-docker-scan@main
+        with:
+          image: ${{ needs.build.outputs.image }}
+          snyk-token: ${{ secrets.SNYK_TOKEN }}
+          
+  scan-anton-scratchpad:
+    runs-on: mdb-dev
+    needs: [ build-anton-scratchpad ]
+    name: Scan Scratchpad Image
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mindsdb/github-actions/snyk-docker-scan@main
+        with:
+          image: ${{ needs.build-anton-scratchpad.outputs.image }}
+          snyk-token: ${{ secrets.SNYK_TOKEN }}
+          dockerfile: Dockerfile.scratchpad
 
   migrate:
     runs-on: mdb-dev
