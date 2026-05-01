@@ -1,7 +1,10 @@
-"""OpenAI-compatible request/response models for Anton's /v1/responses endpoint.
+"""Request/response models for Anton's HTTP server.
 
-Matches the shape used by anton_servicesrepo/scratchpad_service/chat_models.py
-so the same client code works against either backend.
+Mirrors the shapes used by anton_servicesrepo/scratchpad_service so the same
+client code works against either backend. Two surfaces here:
+
+- Responses API  (/v1/responses)
+- Scratchpad API (/v1/scratchpad/*)
 """
 
 from __future__ import annotations
@@ -79,3 +82,33 @@ class StreamingResponseEvent(str, Enum):
     output_text_delta = "response.output_text.delta"
     completed = "response.completed"
     failed = "response.failed"
+
+
+# ---------------------------------------------------------------------------
+# Scratchpad API
+# ---------------------------------------------------------------------------
+
+
+class ScratchpadStartRequest(BaseModel):
+    name: str = "default"
+    coding_provider: str = ""
+    coding_model: str = ""
+    coding_api_key: str = ""
+    coding_base_url: str = ""
+
+
+class ScratchpadExecRequest(BaseModel):
+    name: str = "default"
+    code: str
+    description: str = ""
+    estimated_time: str = ""
+    estimated_seconds: int = 0
+
+
+class ScratchpadInstallRequest(BaseModel):
+    name: str = "default"
+    packages: list[str]
+
+
+class ScratchpadPadRequest(BaseModel):
+    name: str = "default"

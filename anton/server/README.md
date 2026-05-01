@@ -56,9 +56,13 @@ Anton serving http://127.0.0.1:8765 (workspace: /Users/you/projects/foo)
 ```json
 {
   "status": "ok",
-  "version": "2.0.5",
+  "version": "2.26.4.30.0",
   "workspace": "/Users/you/projects/foo",
-  "sessions": ["20260429_171205"]
+  "sessions": ["20260429_171205"],
+  "pads": ["default"],
+  "pad_count": 1,
+  "max_pads": 5,
+  "last_activity": 1714499500.123
 }
 ```
 
@@ -120,6 +124,73 @@ data: {"type":"response.completed","sequence_number":N,"response":{...full final
 }
 ```
 
+### Scratchpad endpoints (`/v1/scratchpad/*`)
+
+Direct control over named `LocalScratchpadRuntime` instances — the same surface the hosted service exposes under `/scratchpad/*`, just under a `/v1/` prefix here. Pads are keyed by `name`; `"default"` is used when the field is omitted.
+
+| Method | Path | Body / query | Purpose |
+| --- | --- | --- | --- |
+| POST | `/v1/scratchpad/start` | `ScratchpadStartRequest` | Create + start a named pad. |
+| POST | `/v1/scratchpad/execute` | `ScratchpadExecRequest` | Run code, return the final `Cell`. |
+| POST | `/v1/scratchpad/execute-stream` | `ScratchpadExecRequest` | Run code, stream progress + final `Cell` over SSE. |
+| POST | `/v1/scratchpad/install` | `ScratchpadInstallRequest` | `pip install` packages into the pad's venv. |
+| POST | `/v1/scratchpad/reset` | `{name}` | Kill the runtime, clear cells, restart. |
+| POST | `/v1/scratchpad/cancel` | `{name}` | Cancel the currently running cell. |
+| GET | `/v1/scratchpad/view` | `?name=...` | Cells + outputs as text. |
+| GET | `/v1/scratchpad/notebook` | `?name=...` | Markdown notebook-style summary. |
+| GET | `/v1/scratchpad/cells` | `?name=...` | All cells as structured data. |
+| POST | `/v1/scratchpad/close` | `{name}` | Stop the pad, keep persistent state. |
+| POST | `/v1/scratchpad/cleanup` | `{name}` | Stop + delete the pad's venv. |
+| GET | `/v1/scratchpad/list` | — | Names of all active pads. |
+
+**Request shapes**
+
+```json
+// /v1/scratchpad/start
+{
+  "name": "default",
+  "coding_provider": "",
+  "coding_model": "",
+  "coding_api_key": "",
+  "coding_base_url": ""
+}
+```
+
+The four `coding_*` fields are optional — leave them blank and the server fills in from your `AntonSettings` (`coding_provider`, `coding_model`, the relevant API key, `openai_base_url`). The hosted variant requires them per request; this matches that signature so the same client works against either.
+
+```json
+// /v1/scratchpad/execute  and  /v1/scratchpad/execute-stream
+{
+  "name": "default",
+  "code": "df.head()",
+  "description": "peek at the data",
+  "estimated_time": "~1s",
+  "estimated_seconds": 1
+}
+```
+
+```json
+// /v1/scratchpad/install
+{ "name": "default", "packages": ["pandas", "numpy"] }
+```
+
+```json
+// reset / cancel / close / cleanup
+{ "name": "default" }
+```
+
+**Streaming `/v1/scratchpad/execute-stream`**
+
+```
+data: {"type":"progress","message":"running cell..."}
+data: {"type":"progress","message":"finalizing output"}
+data: {"type":"cell","cell":{...full final Cell...}}
+```
+
+Errors mid-stream are emitted as `{"type":"error","error":"..."}` events, after which the SSE stream closes.
+
+**Pool semantics.** Up to `ANTON_SERVER_MAX_PADS` pads (default 5) live concurrently. Calling `start` for a name beyond the cap returns `500` with the message *"Maximum concurrent scratchpads reached. Close an existing pad first."* — close one with `/v1/scratchpad/close` to free the slot.
+
 ---
 
 ## Conversations & history
@@ -137,6 +208,7 @@ The server uses your existing Anton config (the same `.anton/.env` and global `~
 | Env var | Default | Notes |
 | --- | --- | --- |
 | `ANTON_SERVER_MAX_SESSIONS` | `3` | Max concurrent live ChatSession instances. |
+| `ANTON_SERVER_MAX_PADS` | `5` | Max concurrent live `LocalScratchpadRuntime` instances. |
 
 ---
 
@@ -150,12 +222,12 @@ If you bind to a non-loopback address (`--host 0.0.0.0`), put a reverse proxy wi
 
 ## What's not here yet
 
-The hosted service exposes a few extra endpoints; only `/v1/responses` is ported so far:
+The hosted service exposes a few extra endpoints not yet ported:
 
 - `/v1/chat/completions` — OpenAI Chat Completions shape
 - `/v1/conversations` — explicit create / list / get / patch / delete
 - `/v1/sessions` — list/close live sessions
-- `/scratchpad/*` — direct scratchpad control
+- `/files/*` — read/list workspace output files
 
 Coming next as the antontron client surfaces real needs. The eventual goal is to merge this with `anton_servicesrepo/scratchpad_service` so there is one server, runnable both locally and on a remote instance.
 
