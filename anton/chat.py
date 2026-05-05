@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from anton.clipboard import (
+    PastedImageRegistry,
     cleanup_old_uploads,
     grab_clipboard,
     is_clipboard_supported,
@@ -39,10 +40,14 @@ from anton.commands.ui import handle_explain, handle_theme, print_slash_help, ma
 from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, COMMANDS
 
 from anton.utils.clipboard import (
+    ImageRefLexer,
+    attach_image_path_detector,
+    build_image_ref_message,
     ensure_clipboard,
     format_clipboard_image_message,
     format_file_message,
     human_size,
+    make_image_paste_bindings,
 )
 from anton.chat_session import build_runtime_context, rebuild_session
 from anton.commands.session import handle_resume
@@ -1205,8 +1210,12 @@ async def _chat_loop(
             "completion-menu.meta.completion.current": "bg:#0a3340 #9adff0",
             "scrollbar.background": "bg:#08131c",
             "scrollbar.button": "bg:#11404c",
+            "image-ref": "fg:#32d9ff bold",
         }
     )
+
+    image_registry = PastedImageRegistry()
+    image_paste_bindings = make_image_paste_bindings(image_registry, console)
 
     prompt_session: PromptSession[str] = PromptSession(
         mouse_support=False,
@@ -1216,7 +1225,10 @@ async def _chat_loop(
         complete_while_typing=True,
         complete_style=CompleteStyle.COLUMN,
         reserve_space_for_menu=8,
+        key_bindings=image_paste_bindings,
+        lexer=ImageRefLexer(),
     )
+    attach_image_path_detector(prompt_session.default_buffer, image_registry)
 
     memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
     try:
@@ -1276,8 +1288,16 @@ async def _chat_loop(
             # list[dict] (multimodal content blocks for images).
             message_content: str | list[dict] | None = None
 
+            # Expand any [Image #N] placeholders into multimodal blocks. After
+            # this, the registry only keeps entries that were actually sent.
+            expanded, ref_ids = build_image_ref_message(user_input, image_registry)
+            if isinstance(expanded, list):
+                message_content = expanded
+                stripped = ""
+            image_registry.prune_unused(ref_ids)
+
             # Empty input → check clipboard for an image
-            if not stripped:
+            if not stripped and message_content is None:
                 if is_clipboard_supported():
                     clip = grab_clipboard()
                     if clip.image:

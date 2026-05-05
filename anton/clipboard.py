@@ -7,17 +7,22 @@ shared with the drag-and-drop logic in chat.py.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-import platform
+import re
+import json
+import time
 import shlex
 import shutil
+import hashlib
+import platform
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+IMAGE_EXTENSION_REGEX = re.compile(r"\.(png|jpe?g|gif|webp|bmp)$", re.IGNORECASE)
+IMAGE_REF_REGEX = re.compile(r"\[Image #(\d+)\]")
 
 
 @dataclass
@@ -49,6 +54,105 @@ class UploadedFile:
     height: int
     size_bytes: int
     format: str
+
+
+@dataclass
+class PastedImage:
+    """An image attached via drag-and-drop, addressable by [Image #id] in the prompt."""
+
+    id: int
+    path: Path
+    size_bytes: int
+    format: str  # uppercase, e.g. "PNG", "JPEG"
+
+
+class PastedImageRegistry:
+    """Per-chat-session registry mapping pasted-image IDs to file metadata."""
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self._items: dict[int, PastedImage] = {}
+
+    def add(self, path: Path) -> PastedImage:
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        ext = path.suffix.lstrip(".").lower()
+        fmt = {"jpg": "JPEG"}.get(ext, ext.upper() or "PNG")
+        item = PastedImage(
+            id=self._next_id,
+            path=path,
+            size_bytes=size_bytes,
+            format=fmt,
+        )
+        self._items[self._next_id] = item
+        self._next_id += 1
+        return item
+
+    def get(self, ref_id: int) -> PastedImage | None:
+        return self._items.get(ref_id)
+
+    def prune_unused(self, kept_ids: set[int]) -> None:
+        for rid in list(self._items.keys()):
+            if rid not in kept_ids:
+                self._items.pop(rid, None)
+
+
+def format_image_ref(ref_id: int) -> str:
+    return f"[Image #{ref_id}]"
+
+
+def is_image_path(token: str) -> bool:
+    return bool(IMAGE_EXTENSION_REGEX.search(token))
+
+
+def replace_image_paths_in_pasted(text: str, registry: PastedImageRegistry) -> tuple[str, list[PastedImage]]:
+    """Find image file paths in pasted text, register them, replace each with [Image #N].
+
+    Returns ``(rewritten_text, registered_images)``. Paths that don't exist or
+    aren't absolute are left untouched. Multiple representations of the same
+    path (quoted, escaped) are handled.
+    """
+    registered: list[PastedImage] = []
+    out_lines: list[str] = []
+
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\n").rstrip("\r")
+        suffix = line[len(body):]
+
+        try:
+            tokens = shlex.split(body)
+        except ValueError:
+            tokens = []
+
+        for token in tokens:
+            if len(token) < 2 or not is_image_path(token):
+                continue
+            candidate = Path(token)
+            try:
+                if not (candidate.is_absolute() and candidate.is_file()):
+                    continue
+            except OSError:
+                continue
+            item = registry.add(candidate)
+            registered.append(item)
+            ref = format_image_ref(item.id)
+            path_str = str(candidate)
+            for rep in (
+                f"'{path_str}'",
+                f'"{path_str}"',
+                path_str.replace(" ", "\\ "),
+                path_str,
+            ):
+                if rep and rep in body:
+                    body = body.replace(rep, ref, 1)
+                    break
+
+        out_lines.append(body + suffix)
+
+    return "".join(out_lines), registered
+
 
 def _linux_clipboard_tool() -> str | None:
     """Pick a Linux clipboard CLI tool (wl-paste/xclip), or None if absent."""
