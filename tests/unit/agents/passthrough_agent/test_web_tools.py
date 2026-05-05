@@ -19,8 +19,11 @@ import pytest
 from minds.agents.passthrough_agent.agent import (
     _ANTHROPIC_WEB_FETCH_BETA_HEADER,
     PassthroughAgent,
+    _chat_messages_to_responses_input,
+    _chat_tool_choice_to_responses,
     _is_generic_web_tool,
     _only_web_tools,
+    _responses_response_to_chat_completion,
     _translate_tools_for_anthropic,
     _translate_tools_for_openai,
 )
@@ -129,55 +132,239 @@ def test_translate_anthropic_unknown_type_silently_skipped():
 # ---------------------------------------------------------------------------
 
 
-def test_translate_openai_web_search_strips_from_tools_and_signals():
-    # web_search is NOT a valid chat-completions tools[] entry — strip it
-    # and signal the caller to set web_search_options.
-    chat_tools, wants = _translate_tools_for_openai([{"type": "web_search"}])
-    assert chat_tools == []
-    assert wants is True
+def test_translate_openai_web_search_emits_native_tool():
+    # On the Responses API, {"type":"web_search"} is a valid tools[] entry.
+    assert _translate_tools_for_openai([{"type": "web_search"}]) == [{"type": "web_search"}]
 
 
-def test_translate_openai_fetch_signals_web_search():
-    # OpenAI bundles fetching into web_search; fetch alone still triggers
-    # the same web_search_options signal.
-    chat_tools, wants = _translate_tools_for_openai([{"type": "fetch"}])
-    assert chat_tools == []
-    assert wants is True
+def test_translate_openai_fetch_collapses_to_web_search():
+    # OpenAI's web_search bundles fetching; fetch alone still emits a single
+    # web_search tool (no separate fetch tool exists).
+    assert _translate_tools_for_openai([{"type": "fetch"}]) == [{"type": "web_search"}]
 
 
-def test_translate_openai_both_web_tools_signals_once():
-    chat_tools, wants = _translate_tools_for_openai([{"type": "web_search"}, {"type": "fetch"}])
-    assert chat_tools == []
-    assert wants is True
+def test_translate_openai_both_web_tools_dedupe():
+    assert _translate_tools_for_openai([{"type": "web_search"}, {"type": "fetch"}]) == [{"type": "web_search"}]
     # Order swapped — same result.
-    chat_tools, wants = _translate_tools_for_openai([{"type": "fetch"}, {"type": "web_search"}])
-    assert chat_tools == []
-    assert wants is True
+    assert _translate_tools_for_openai([{"type": "fetch"}, {"type": "web_search"}]) == [{"type": "web_search"}]
 
 
-def test_translate_openai_function_tools_pass_through_unchanged():
-    function_tool = {
-        "type": "function",
-        "function": {"name": "lookup", "parameters": {}},
-    }
-    chat_tools, wants = _translate_tools_for_openai([function_tool])
-    assert chat_tools == [function_tool]
-    assert wants is False
+def test_translate_openai_function_tool_flattened_to_responses_shape():
+    # Chat-completions function tool: {"type":"function","function":{name,description,parameters}}
+    # → Responses shape: {"type":"function","name":...,"description":...,"parameters":...}
+    out = _translate_tools_for_openai(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Look it up",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                },
+            }
+        ]
+    )
+    assert out == [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Look it up",
+            "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+        }
+    ]
 
 
-def test_translate_openai_mixed_strips_web_keeps_function():
-    function_tool = {
-        "type": "function",
-        "function": {"name": "lookup", "parameters": {}},
-    }
-    chat_tools, wants = _translate_tools_for_openai([{"type": "web_search"}, function_tool])
-    assert chat_tools == [function_tool]
-    assert wants is True
+def test_translate_openai_function_tool_without_description():
+    out = _translate_tools_for_openai([{"type": "function", "function": {"name": "lookup", "parameters": {}}}])
+    assert out == [{"type": "function", "name": "lookup", "parameters": {}}]
+
+
+def test_translate_openai_mixed_keeps_both():
+    out = _translate_tools_for_openai(
+        [
+            {"type": "web_search"},
+            {"type": "function", "function": {"name": "f", "parameters": {}}},
+        ]
+    )
+    assert out == [
+        {"type": "web_search"},
+        {"type": "function", "name": "f", "parameters": {}},
+    ]
 
 
 def test_translate_openai_empty_or_none():
-    assert _translate_tools_for_openai(None) == ([], False)
-    assert _translate_tools_for_openai([]) == ([], False)
+    assert _translate_tools_for_openai(None) == []
+    assert _translate_tools_for_openai([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _chat_messages_to_responses_input
+# ---------------------------------------------------------------------------
+
+
+def test_chat_to_responses_extracts_system_as_instructions():
+    instructions, items = _chat_messages_to_responses_input(
+        [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert instructions == "be brief"
+    assert items == [{"role": "user", "content": "hi"}]
+
+
+def test_chat_to_responses_concatenates_multiple_system_messages():
+    instructions, _ = _chat_messages_to_responses_input(
+        [
+            {"role": "system", "content": "first"},
+            {"role": "system", "content": "second"},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert instructions == "first\n\nsecond"
+
+
+def test_chat_to_responses_no_system_returns_none_instructions():
+    instructions, items = _chat_messages_to_responses_input([{"role": "user", "content": "hi"}])
+    assert instructions is None
+    assert items == [{"role": "user", "content": "hi"}]
+
+
+def test_chat_to_responses_assistant_tool_calls_become_function_call_items():
+    _, items = _chat_messages_to_responses_input(
+        [
+            {"role": "user", "content": "what's the weather?"},
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [
+                    {
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city":"NYC"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_abc", "content": "72F sunny"},
+        ]
+    )
+
+    assert items == [
+        {"role": "user", "content": "what's the weather?"},
+        {"role": "assistant", "content": "Let me check."},
+        {
+            "type": "function_call",
+            "call_id": "call_abc",
+            "name": "get_weather",
+            "arguments": '{"city":"NYC"}',
+        },
+        {"type": "function_call_output", "call_id": "call_abc", "output": "72F sunny"},
+    ]
+
+
+def test_chat_to_responses_assistant_with_only_tool_calls_no_text():
+    _, items = _chat_messages_to_responses_input(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "x", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+            },
+        ]
+    )
+    # No empty assistant text item — only the function_call.
+    assert items == [
+        {"type": "function_call", "call_id": "x", "name": "f", "arguments": "{}"},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _chat_tool_choice_to_responses
+# ---------------------------------------------------------------------------
+
+
+def test_chat_tool_choice_strings_pass_through():
+    assert _chat_tool_choice_to_responses("auto") == "auto"
+    assert _chat_tool_choice_to_responses("required") == "required"
+    assert _chat_tool_choice_to_responses("none") == "none"
+
+
+def test_chat_tool_choice_none_returns_none():
+    assert _chat_tool_choice_to_responses(None) is None
+
+
+def test_chat_tool_choice_function_specific_flattened():
+    out = _chat_tool_choice_to_responses({"type": "function", "function": {"name": "lookup"}})
+    assert out == {"type": "function", "name": "lookup"}
+
+
+# ---------------------------------------------------------------------------
+# _responses_response_to_chat_completion
+# ---------------------------------------------------------------------------
+
+
+def test_responses_to_chat_extracts_text_and_usage():
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text="Hello world.")],
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=5, output_tokens=3),
+    )
+    payload = _responses_response_to_chat_completion(response, "gpt-x")
+    choice = payload["choices"][0]
+    assert choice["message"]["role"] == "assistant"
+    assert choice["message"]["content"] == "Hello world."
+    assert choice["finish_reason"] == "stop"
+    assert payload["usage"] == {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+    assert payload["model"] == "gpt-x"
+
+
+def test_responses_to_chat_function_call_becomes_tool_call_and_finish_reason():
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                call_id="call_1",
+                name="lookup",
+                arguments='{"q":"x"}',
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2),
+    )
+    payload = _responses_response_to_chat_completion(response, "gpt-x")
+    choice = payload["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": '{"q":"x"}'},
+        }
+    ]
+    # No text content was produced.
+    assert choice["message"]["content"] is None
+
+
+def test_responses_to_chat_ignores_web_search_call_and_reasoning_items():
+    # Server-side intermediates should not surface to the chat completion shape.
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(type="web_search_call", id="ws_1"),
+            SimpleNamespace(type="reasoning", id="r_1"),
+            SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text="Final answer.")],
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=4),
+    )
+    payload = _responses_response_to_chat_completion(response, "gpt-x")
+    assert payload["choices"][0]["message"]["content"] == "Final answer."
+    assert "tool_calls" not in payload["choices"][0]["message"]
+    assert payload["choices"][0]["finish_reason"] == "stop"
 
 
 # ---------------------------------------------------------------------------
@@ -194,12 +381,23 @@ def _make_anthropic_response() -> SimpleNamespace:
     )
 
 
-def _make_openai_response() -> SimpleNamespace:
-    """Minimal OpenAI non-streaming response stub."""
+def _make_openai_responses_response() -> SimpleNamespace:
+    """Minimal OpenAI Responses API non-streaming response stub."""
     return SimpleNamespace(
-        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-        model_dump=lambda: {"id": "x", "choices": [], "usage": {}},
+        output=[
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                content=[SimpleNamespace(type="output_text", text="hello")],
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
     )
+
+
+def _fake_openai_client(create_mock: AsyncMock) -> SimpleNamespace:
+    """Stand-in for an AsyncOpenAI client exposing only ``responses.create``."""
+    return SimpleNamespace(responses=SimpleNamespace(create=create_mock))
 
 
 @pytest.mark.asyncio
@@ -296,30 +494,33 @@ async def test_proxy_anthropic_no_beta_header_when_no_fetch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_openai_drops_tool_choice_when_only_web_tools(monkeypatch):
+async def test_proxy_openai_uses_responses_api_with_web_search(monkeypatch):
     agent = PassthroughAgent(
         config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
     )
 
-    create_mock = AsyncMock(return_value=_make_openai_response())
-    fake_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create_mock)),
-    )
-    monkeypatch.setattr(agent, "_get_openai_client", lambda: fake_client)
+    create_mock = AsyncMock(return_value=_make_openai_responses_response())
+    monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
 
     await agent._proxy_openai(
-        messages=[{"role": "user", "content": "hi"}],
+        messages=[{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}],
         stream=False,
         request_id="req-5",
         tools=[{"type": "web_search"}],
         tool_choice="required",
     )
 
+    create_mock.assert_awaited_once()
     kwargs = create_mock.await_args.kwargs
+    # System message extracted as instructions; user message in input list.
+    assert kwargs["instructions"] == "be brief"
+    assert kwargs["input"] == [{"role": "user", "content": "hi"}]
+    # Web search appears as a tools[] entry on the Responses API.
+    assert kwargs["tools"] == [{"type": "web_search"}]
+    # No web_search_options on Responses API (that was the old chat-completions path).
+    assert "web_search_options" not in kwargs
+    # tool_choice dropped because only web tools were provided.
     assert "tool_choice" not in kwargs
-    # web_search is moved out of tools[] and onto web_search_options.
-    assert "tools" not in kwargs
-    assert kwargs["web_search_options"] == {}
 
 
 @pytest.mark.asyncio
@@ -328,11 +529,8 @@ async def test_proxy_openai_forwards_tool_choice_when_mixed(monkeypatch):
         config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
     )
 
-    create_mock = AsyncMock(return_value=_make_openai_response())
-    fake_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create_mock)),
-    )
-    monkeypatch.setattr(agent, "_get_openai_client", lambda: fake_client)
+    create_mock = AsyncMock(return_value=_make_openai_responses_response())
+    monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
 
     function_tool = {
         "type": "function",
@@ -348,19 +546,21 @@ async def test_proxy_openai_forwards_tool_choice_when_mixed(monkeypatch):
 
     kwargs = create_mock.await_args.kwargs
     assert kwargs["tool_choice"] == "required"
+    # Function tool is flattened to Responses API shape; web_search is included.
+    assert kwargs["tools"] == [
+        {"type": "web_search"},
+        {"type": "function", "name": "f", "parameters": {}},
+    ]
 
 
 @pytest.mark.asyncio
-async def test_proxy_openai_fetch_alone_sets_web_search_options(monkeypatch):
+async def test_proxy_openai_fetch_alone_emits_single_web_search(monkeypatch):
     agent = PassthroughAgent(
         config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
     )
 
-    create_mock = AsyncMock(return_value=_make_openai_response())
-    fake_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create_mock)),
-    )
-    monkeypatch.setattr(agent, "_get_openai_client", lambda: fake_client)
+    create_mock = AsyncMock(return_value=_make_openai_responses_response())
+    monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
 
     await agent._proxy_openai(
         messages=[{"role": "user", "content": "hi"}],
@@ -370,37 +570,53 @@ async def test_proxy_openai_fetch_alone_sets_web_search_options(monkeypatch):
     )
 
     kwargs = create_mock.await_args.kwargs
-    # fetch alone collapses to the same web_search_options signal (no tools[]).
-    assert "tools" not in kwargs
-    assert kwargs["web_search_options"] == {}
+    # fetch alone collapses to a single web_search tool on Responses.
+    assert kwargs["tools"] == [{"type": "web_search"}]
 
 
 @pytest.mark.asyncio
-async def test_proxy_openai_mixed_keeps_function_tool_and_sets_web_search_options(monkeypatch):
+async def test_proxy_openai_max_tokens_renamed_to_max_output_tokens(monkeypatch):
     agent = PassthroughAgent(
         config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
     )
 
-    create_mock = AsyncMock(return_value=_make_openai_response())
-    fake_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create_mock)),
-    )
-    monkeypatch.setattr(agent, "_get_openai_client", lambda: fake_client)
+    create_mock = AsyncMock(return_value=_make_openai_responses_response())
+    monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
 
-    function_tool = {
-        "type": "function",
-        "function": {"name": "f", "parameters": {}},
-    }
     await agent._proxy_openai(
         messages=[{"role": "user", "content": "hi"}],
         stream=False,
-        request_id="req-8",
-        tools=[{"type": "web_search"}, function_tool],
+        request_id="req-9",
+        max_tokens=512,
     )
 
     kwargs = create_mock.await_args.kwargs
-    assert kwargs["tools"] == [function_tool]
-    assert kwargs["web_search_options"] == {}
+    assert kwargs["max_output_tokens"] == 512
+    # Chat-completions ``max_tokens`` should not leak through.
+    assert "max_tokens" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_proxy_openai_specific_function_tool_choice_translated(monkeypatch):
+    agent = PassthroughAgent(
+        config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
+    )
+
+    create_mock = AsyncMock(return_value=_make_openai_responses_response())
+    monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
+
+    function_tool = {"type": "function", "function": {"name": "f", "parameters": {}}}
+    await agent._proxy_openai(
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        request_id="req-10",
+        tools=[function_tool],
+        tool_choice={"type": "function", "function": {"name": "f"}},
+    )
+
+    kwargs = create_mock.await_args.kwargs
+    # Chat-completions specific-function shape → Responses flat shape.
+    assert kwargs["tool_choice"] == {"type": "function", "name": "f"}
 
 
 # ---------------------------------------------------------------------------
@@ -428,10 +644,11 @@ _settings = get_app_settings()
 _anthropic_key_set = bool(_settings.anthropic.api_key)
 _openai_key_set = bool(_settings.openai.api_key) and _settings.openai.api_key != "not set"
 
-# Defaults chosen for breadth of native-tool support; override via env vars
-# if your account doesn't have access to these specific models.
+# Defaults chosen for breadth of native-tool support on the OpenAI Responses
+# API (gpt-5-mini is fast and supports {"type":"web_search"}); override via
+# env vars if your account doesn't have access to these specific models.
 _LIVE_ANTHROPIC_MODEL = os.getenv("LIVE_TEST_ANTHROPIC_MODEL", "claude-sonnet-4-6")
-_LIVE_OPENAI_MODEL = os.getenv("LIVE_TEST_OPENAI_MODEL", "gpt-4o-mini-search-preview")
+_LIVE_OPENAI_MODEL = os.getenv("LIVE_TEST_OPENAI_MODEL", "gpt-5-mini")
 
 requires_anthropic = pytest.mark.skipif(not _anthropic_key_set, reason="ANTHROPIC__API_KEY not configured")
 requires_openai = pytest.mark.skipif(not _openai_key_set, reason="OPENAI__API_KEY not configured")
