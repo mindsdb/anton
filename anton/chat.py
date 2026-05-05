@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.error
+from urllib.parse import quote
 import sys
 import time
 from pathlib import Path
@@ -359,10 +360,12 @@ async def _handle_remote(
             console.print()
             return
         if has_key.lower() == "n":
+            # Strip /api/v1 suffix if present.
+            base_url = settings.minds_url.rstrip("/").removesuffix("/api/v1")
             webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                f"{base_url}/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+                f"&redirect_uri={quote(base_url, safe='')}"
             )
             console.print()
 
