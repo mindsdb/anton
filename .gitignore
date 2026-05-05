@@ -207,6 +207,10 @@ cython_debug/
 *.swp
 *.swo
 
+# Claude code stuff
+CLAUDE.md
+.claude/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
