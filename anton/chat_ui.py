@@ -553,9 +553,14 @@ class StreamDisplay:
         line.append("  \u2714 ", style="green")
         work_str = self._fmt_elapsed(work_elapsed)
 
+        from anton.config.settings import AntonSettings
+
+        settings = AntonSettings()
+        work_label = "Remote work" if settings.backend == "remote" else "Worked"
+
         if reasoning_elapsed > 0:
             reason_str = self._fmt_elapsed(reasoning_elapsed)
-            line.append(f"(Worked: {work_str}, Reasoned: {reason_str})", style="anton.muted")
+            line.append(f"({work_label}: {work_str}, Reasoned: {reason_str})", style="anton.muted")
         else:
             line.append(work_str, style="anton.muted")
 

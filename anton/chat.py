@@ -331,6 +331,61 @@ def _extract_html_title(path, re_module) -> str:
         return ""
 
 
+async def _handle_remote(
+    console: Console,
+    settings,
+) -> None:
+    """Handle /remote command — provision or check status of remote scratchpad."""
+    console.print()
+
+    from pathlib import Path as _P
+    from anton.workspace import Workspace as _W
+    _global_ws = _W(_P.home())
+
+    # Ensure minds API key — same flow as /publish
+    if not settings.minds_api_key:
+        import webbrowser
+        from anton.utils.prompt import prompt_or_cancel
+
+        console.print("  [anton.muted]To use remote scratchpad you need a free Minds account.[/]")
+        console.print()
+        has_key = await prompt_or_cancel(
+            "  Do you have an mdb.ai API key?",
+            choices=["y", "n"],
+            choices_display="y/n",
+            default="y",
+        )
+        if has_key is None:
+            console.print()
+            return
+        if has_key.lower() == "n":
+            webbrowser.open(
+                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "?client_id=public-client&response_type=code&scope=openid"
+                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+            )
+            console.print()
+
+        api_key_input = await prompt_or_cancel("  API key", password=True)
+        if api_key_input is None or not api_key_input.strip():
+            console.print()
+            return
+        api_key_input = api_key_input.strip()
+        settings.minds_api_key = api_key_input
+
+        _global_ws.set_secret("ANTON_MINDS_API_KEY", api_key_input)
+        console.print()
+
+    # If an API key is provided, set the backend to remote backend
+    if settings.minds_api_key:
+        _global_ws.set_secret("ANTON_BACKEND", "remote")
+
+    # Save and confirm
+    console.print(f"  [anton.success]Remote scratchpad ready![/]")
+    console.print(f"  [link={settings.minds_url}]{settings.minds_url}[/link]")
+    console.print()
+
+
 async def _handle_publish(
     console: Console,
     settings,
@@ -375,6 +430,9 @@ async def _handle_publish(
         settings.minds_api_key = api_key
         # Key is not persisted yet — wait until publish succeeds to avoid
         # locking the user out with a bad key on every subsequent /publish call.
+        from pathlib import Path as _P
+        from anton.workspace import Workspace as _W
+        _W(_P.home()).set_secret("ANTON_MINDS_API_KEY", api_key)
         console.print()
 
     # 2. Find the HTML file to publish
@@ -1052,8 +1110,11 @@ async def _chat_loop(
     runtime_context = build_runtime_context(settings)
 
     output_path = f"{settings.output_dir.rstrip('/')}/"
+    from anton.chat_session import get_runtime_factory
+
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
+        runtime_factory=get_runtime_factory(settings),
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
@@ -1375,6 +1436,21 @@ async def _chat_loop(
                 elif cmd == "/theme":
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     handle_theme(console, arg)
+                    continue
+                elif cmd == "/remote":
+                    await _handle_remote(console, settings)
+                    # Rebuild session so scratchpad uses remote/local factory
+                    session = rebuild_session(
+                        settings=settings,
+                        state=state,
+                        self_awareness=self_awareness,
+                        cortex=cortex,
+                        workspace=workspace,
+                        console=console,
+                        episodic=episodic,
+                        history_store=history_store,
+                        session_id=current_session_id,
+                    )
                     continue
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""
