@@ -189,6 +189,127 @@ def _anthropic_response_to_openai(response: Any, model_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Native web-tool support
+# ---------------------------------------------------------------------------
+#
+# Clients may opt into provider-native server-side web tools via a uniform
+# generic shape in the request's ``tools`` array, regardless of which
+# provider the passthrough config resolves to:
+#
+#     {"type": "web_search"}   # → Anthropic: tools=[{"type":"web_search_20250305", ...}]
+#                              # → OpenAI: web_search_options={} (search-preview models)
+#     {"type": "fetch"}        # → Anthropic: tools=[{"type":"web_fetch_20250910", ...}]
+#                              #   (requires anthropic-beta: web-fetch-2025-09-10 header)
+#                              # → OpenAI: bundled into web_search_options (no separate
+#                              #   fetch tool exists), so requesting fetch alone still
+#                              #   sets web_search_options.
+#
+# Note on the OpenAI request shape: chat-completions does NOT accept
+# ``{"type": "web_search"}`` as a ``tools[]`` entry — its tools array only
+# accepts ``function`` and ``custom`` types. Native web search on chat
+# completions is enabled via the top-level ``web_search_options`` parameter
+# (on search-preview models such as ``gpt-4o-search-preview`` /
+# ``gpt-4o-mini-search-preview``). Per the user's "let upstream error" rule,
+# we don't gate on model name; non-search-preview models will return an
+# upstream error which we surface.
+#
+# These coexist with the existing OpenAI function-calling shape
+# (``{"type": "function", ...}``) and any number of each may be mixed.
+
+# Generic wire-format type names that clients send to opt into native web tools.
+WEB_SEARCH_TYPE = "web_search"
+FETCH_TYPE = "fetch"
+_GENERIC_WEB_TOOL_TYPES = {WEB_SEARCH_TYPE, FETCH_TYPE}
+
+# Provider-native equivalents.
+_ANTHROPIC_WEB_SEARCH_TYPE = "web_search_20250305"
+_ANTHROPIC_WEB_FETCH_TYPE = "web_fetch_20250910"
+_ANTHROPIC_WEB_FETCH_BETA_HEADER = "web-fetch-2025-09-10"
+
+
+def _is_generic_web_tool(tool: dict) -> bool:
+    """True iff ``tool`` uses our generic web-tool shape (``web_search`` / ``fetch``)."""
+    return isinstance(tool, dict) and tool.get("type") in _GENERIC_WEB_TOOL_TYPES
+
+
+def _only_web_tools(tools: list[dict] | None) -> bool:
+    """True iff ``tools`` is non-empty and every entry is a generic web tool.
+
+    Drives whether ``tool_choice`` is dropped before forwarding upstream — see
+    the ``_proxy_*`` methods for the rationale.
+    """
+    if not tools:
+        return False
+    return all(_is_generic_web_tool(t) for t in tools)
+
+
+def _translate_tools_for_anthropic(
+    tools: list[dict] | None,
+) -> tuple[list[dict], bool]:
+    """Translate generic + function tools to Anthropic's native tool format.
+
+    Returns ``(anthropic_tools, needs_web_fetch_beta)``. The boolean is True
+    iff a generic ``fetch`` tool was translated, meaning the caller must add
+    the ``anthropic-beta: web-fetch-2025-09-10`` header to the request (the
+    Anthropic web_fetch tool is currently in beta).
+
+    Generic web tools become Anthropic's versioned native types; function
+    tools fall through to the existing :func:`_openai_tools_to_anthropic`
+    shape; unrecognized types are skipped (matches today's behavior).
+    """
+    if not tools:
+        return [], False
+
+    out: list[dict] = []
+    needs_web_fetch_beta = False
+    for tool in tools:
+        ttype = tool.get("type") if isinstance(tool, dict) else None
+        if ttype == WEB_SEARCH_TYPE:
+            out.append({"type": _ANTHROPIC_WEB_SEARCH_TYPE, "name": "web_search"})
+        elif ttype == FETCH_TYPE:
+            out.append({"type": _ANTHROPIC_WEB_FETCH_TYPE, "name": "web_fetch"})
+            needs_web_fetch_beta = True
+        elif ttype == "function":
+            # Reuse existing function-tool conversion for one-tool input.
+            out.extend(_openai_tools_to_anthropic([tool]))
+        # else: silently skip unknown tool types (preserves prior behavior).
+
+    return out, needs_web_fetch_beta
+
+
+def _translate_tools_for_openai(
+    tools: list[dict] | None,
+) -> tuple[list[dict], bool]:
+    """Filter generic web tools out of the OpenAI ``tools`` array.
+
+    Returns ``(chat_tools, wants_web_search)``. The chat-completions API does
+    not accept ``{"type": "web_search"}`` as a ``tools[]`` entry — its tools
+    array only accepts ``function`` and ``custom`` types. Native web search
+    is enabled instead via the top-level ``web_search_options`` parameter on
+    search-preview models, so we strip generic ``web_search`` / ``fetch``
+    here and signal the caller to set ``web_search_options={}`` on the
+    request.
+
+    OpenAI's web_search bundles URL fetching internally, so both generic
+    ``web_search`` and ``fetch`` collapse to the same signal. Function tools
+    and any other unrecognized entries pass through unchanged.
+    """
+    if not tools:
+        return [], False
+
+    out: list[dict] = []
+    wants_web_search = False
+    for tool in tools:
+        ttype = tool.get("type") if isinstance(tool, dict) else None
+        if ttype in _GENERIC_WEB_TOOL_TYPES:
+            wants_web_search = True
+            continue
+        out.append(tool)
+
+    return out, wants_web_search
+
+
+# ---------------------------------------------------------------------------
 # PassthroughAgent
 # ---------------------------------------------------------------------------
 
@@ -262,8 +383,20 @@ class PassthroughAgent:
         streamer: Any,
         stream: bool,
         run_context: Any = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ):
-        """Legacy run method for backward compat with MessageStreamer pipeline."""
+        """Legacy run method for backward compat with MessageStreamer pipeline.
+
+        Note: this code path is currently unreachable for passthrough models
+        (``OpenAIRequestHandler.create`` short-circuits to ``proxy()``); the
+        ``tools`` / ``tool_choice`` parameters exist for feature parity with
+        ``proxy()`` so future callers can use generic ``web_search`` / ``fetch``
+        here too. Only the model's final-text content is pushed to ``streamer``;
+        any ``server_tool_use`` / ``web_search_tool_result`` /
+        ``web_fetch_tool_result`` blocks Anthropic emits for native tools are
+        intentionally not surfaced (they're internal to the server-side tool).
+        """
         logger.debug(
             "run called",
             extra={
@@ -276,6 +409,11 @@ class PassthroughAgent:
         )
         msg_dicts = _messages_to_dicts(messages)
 
+        # See _proxy_anthropic / _proxy_openai for the tool_choice rationale:
+        # native web tools cannot be forced via tool_choice, so drop it when
+        # the request's only tools are web tools.
+        effective_tool_choice = None if _only_web_tools(tools) else tool_choice
+
         if self.config.provider == "anthropic":
             client = self._get_anthropic_client()
             system_prompt, anthropic_msgs = _openai_messages_to_anthropic(msg_dicts)
@@ -287,6 +425,15 @@ class PassthroughAgent:
             }
             if system_prompt:
                 kwargs["system"] = system_prompt
+
+            anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools)
+            if anthropic_tools:
+                kwargs["tools"] = anthropic_tools
+            if needs_web_fetch_beta:
+                kwargs["extra_headers"] = {"anthropic-beta": _ANTHROPIC_WEB_FETCH_BETA_HEADER}
+            anthropic_tc = _openai_tool_choice_to_anthropic(effective_tool_choice)
+            if anthropic_tc is not None:
+                kwargs["tool_choice"] = anthropic_tc
 
             try:
                 response = await client.messages.create(**kwargs)
@@ -305,11 +452,22 @@ class PassthroughAgent:
             await streamer.push(role=Role.assistant, content=text)
         else:
             client = self._get_openai_client()
+            kwargs = {
+                "model": self.config.model_name,
+                "messages": msg_dicts,
+            }
+            openai_tools, wants_web_search = _translate_tools_for_openai(tools)
+            if openai_tools:
+                kwargs["tools"] = openai_tools
+            if wants_web_search:
+                # See _proxy_openai: native web search is enabled via the
+                # top-level web_search_options param, not the tools array.
+                kwargs["web_search_options"] = {}
+            if effective_tool_choice is not None:
+                kwargs["tool_choice"] = effective_tool_choice
+
             try:
-                response = await client.chat.completions.create(
-                    model=self.config.model_name,
-                    messages=msg_dicts,
-                )
+                response = await client.chat.completions.create(**kwargs)
             except Exception:
                 logger.error(
                     "OpenAI API request failed in run",
@@ -367,9 +525,20 @@ class PassthroughAgent:
             "messages": messages,
             "stream": stream,
         }
-        if tools:
-            kwargs["tools"] = tools
-        if tool_choice is not None:
+        openai_tools, wants_web_search = _translate_tools_for_openai(tools)
+        if openai_tools:
+            kwargs["tools"] = openai_tools
+        if wants_web_search:
+            # Native web search on chat-completions is enabled via the
+            # top-level ``web_search_options`` parameter (on search-preview
+            # models), not as a tools[] entry. Empty dict = default config.
+            kwargs["web_search_options"] = {}
+        # tool_choice handling: pure pass-through, with one exception. OpenAI's
+        # native web_search hosted tool is invoked at the model's discretion;
+        # it cannot be forced via tool_choice. If the request's only tools are
+        # web tools, forwarding tool_choice would be a no-op or upstream error,
+        # so drop it. When function tools are also present, pass-through.
+        if tool_choice is not None and not _only_web_tools(tools):
             kwargs["tool_choice"] = tool_choice
         if temperature is not None:
             kwargs["temperature"] = temperature
@@ -449,9 +618,22 @@ class PassthroughAgent:
         }
         if system_prompt:
             kwargs["system"] = system_prompt
-        if tools:
-            kwargs["tools"] = _openai_tools_to_anthropic(tools)
-        anthropic_tc = _openai_tool_choice_to_anthropic(tool_choice)
+
+        anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools)
+        if anthropic_tools:
+            kwargs["tools"] = anthropic_tools
+        if needs_web_fetch_beta:
+            # Anthropic's web_fetch tool is currently behind a beta header.
+            kwargs["extra_headers"] = {"anthropic-beta": _ANTHROPIC_WEB_FETCH_BETA_HEADER}
+
+        # tool_choice handling: pure pass-through, with one exception. Native
+        # server-side tools (web_search_20250305 / web_fetch_20250910) cannot
+        # be forced or pinned via tool_choice on Anthropic — they're invoked at
+        # the model's discretion. If the request's only tools are web tools,
+        # forwarding e.g. tool_choice="required" would be a no-op or upstream
+        # error, so drop it. When function tools are also present, pass-through.
+        effective_tool_choice = None if _only_web_tools(tools) else tool_choice
+        anthropic_tc = _openai_tool_choice_to_anthropic(effective_tool_choice)
         if anthropic_tc is not None:
             kwargs["tool_choice"] = anthropic_tc
         if temperature is not None:
@@ -493,7 +675,18 @@ class PassthroughAgent:
             return JSONResponse(content=openai_response)
 
     async def _stream_anthropic_as_openai(self, stream, request_id: str):
-        """Convert Anthropic streaming events to OpenAI SSE format on the fly."""
+        """Convert Anthropic streaming events to OpenAI SSE format on the fly.
+
+        Note on native server-side tools: when generic ``web_search`` /
+        ``fetch`` are translated to Anthropic's ``web_search_20250305`` /
+        ``web_fetch_20250910``, the streaming response contains
+        ``server_tool_use`` and ``web_search_tool_result`` /
+        ``web_fetch_tool_result`` content blocks for the model's intermediate
+        search/fetch artifacts. We intentionally do not surface these in the
+        OpenAI-shaped output — clients see only the model's final ``text``
+        deltas (with citations baked into the text). Surfacing structured
+        citations / annotations is a possible follow-up.
+        """
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
         model = self.config.model_name
