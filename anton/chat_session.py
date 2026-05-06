@@ -105,6 +105,7 @@ def rebuild_session(
     return ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
         runtime_factory=get_runtime_factory(settings),
+        settings=settings,
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
@@ -117,4 +118,6 @@ def rebuild_session(
         history_store=history_store,
         session_id=session_id,
         proactive_dashboards=settings.proactive_dashboards,
+        web_search_enabled=settings.web_search_enabled,
+        web_fetch_enabled=settings.web_fetch_enabled,
     ))

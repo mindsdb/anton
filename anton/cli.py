@@ -1087,6 +1087,207 @@ def _setup_custom_openai(settings, ws) -> None:
     ws.set_secret("ANTON_PLANNING_MODEL", model)
     ws.set_secret("ANTON_CODING_MODEL", model)
 
+    # The custom endpoint is generic openai-compatible (i.e. NOT mdb.ai
+    # passthrough), so the LLM provider doesn't expose web_search natively.
+    # Offer to configure Exa or Brave so the agent has search available.
+    # Skip the prompt in non-interactive contexts (tests, CI) — the user can
+    # always run ``anton setup-search`` later.
+    if not _looks_like_mdb_ai(base_url, settings) and sys.stdout.isatty():
+        console.print()
+        console.print(
+            "  [anton.muted]Web search needs an external provider on this endpoint. "
+            "You can configure one now or run [bold]anton setup-search[/] later.[/]"
+        )
+        try:
+            _setup_search_provider(settings, ws)
+        except _SetupRetry:
+            # User pressed ESC out of the search-provider step — that's fine,
+            # the LLM is already configured. They can rerun `anton setup-search`.
+            pass
+
+
+def _looks_like_mdb_ai(base_url: str, settings) -> bool:
+    """Match the same condition LLMClient.from_settings uses for mdb.ai."""
+    base = (base_url or "").rstrip("/").lower()
+    minds = (getattr(settings, "minds_url", None) or "").rstrip("/").lower()
+    if not minds:
+        return False
+    return base == minds or base == f"{minds}/api/v1"
+
+
+def _setup_search_provider(settings, ws) -> None:
+    """Configure an external search provider (Exa.ai or Brave Search).
+
+    Used by Case 3 in the web-tools design (generic OpenAI-compatible endpoints
+    that don't have a native ``web_search`` capability). The user picks a
+    provider and supplies a key; we validate the key with a probe call before
+    persisting it to the global ``~/.anton/.env`` so it survives across
+    sessions and workspaces — same scope as the LLM provider keys.
+    """
+    console.print()
+    console.print("[anton.cyan]Search provider[/]")
+    console.print(
+        "  [bold]1[/]  [link=https://exa.ai][anton.cyan]Exa.ai[/][/link] "
+        "[anton.muted]AI-native semantic search[/]"
+    )
+    console.print(
+        "  [bold]2[/]  [link=https://brave.com/search/api][anton.cyan]Brave Search[/][/link] "
+        "[anton.muted]privacy-focused web search[/]"
+    )
+    console.print("  [bold]3[/]  [anton.muted]Skip — disable web_search for now[/]")
+    console.print()
+
+    from rich.prompt import Prompt
+    choice = Prompt.ask(
+        "  Choose",
+        choices=["1", "2", "3"],
+        default="1",
+        console=console,
+    )
+
+    if choice == "3":
+        settings.external_search_provider = None
+        ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "")
+        console.print(
+            "  [anton.muted]web_search will be unavailable until you run "
+            "[bold]anton setup-search[/].[/]"
+        )
+        return
+
+    if choice == "1":
+        _setup_exa(settings, ws)
+    else:
+        _setup_brave(settings, ws)
+
+
+def _setup_exa(settings, ws) -> None:
+    """Collect and validate an Exa.ai API key."""
+    console.print()
+    console.print(
+        "  [anton.muted]Get an API key at "
+        "[link=https://dashboard.exa.ai/api-keys]"
+        "[anton.cyan]dashboard.exa.ai/api-keys[/][/link][/]"
+    )
+    console.print()
+
+    while True:
+        api_key = _setup_prompt("Exa API key", is_password=True)
+        if api_key.strip():
+            break
+        console.print("  [anton.warning]Please enter your API key.[/]")
+    api_key = api_key.strip()
+
+    try:
+
+        def _test():
+            # Sync httpx call — _validate_with_spinner runs us inside a Live.
+            import httpx as _httpx
+
+            resp = _httpx.post(
+                "https://api.exa.ai/search",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"query": "anton ping", "num_results": 1},
+                timeout=15.0,
+            )
+            if resp.status_code in (401, 403):
+                raise PermissionError("Authentication failed. Check your API key.")
+            if resp.status_code >= 400:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+        _validate_with_spinner(console, "Exa.ai", _test)
+    except PermissionError as exc:
+        console.print(f"  [anton.error]{exc}[/]")
+        _handle_search_retry(settings, ws)
+        return
+    except Exception as exc:
+        if _is_transient_error(exc):
+            console.print("  [anton.warning]Search service is temporarily overloaded.[/]")
+        else:
+            console.print(f"  [anton.error]Failed:[/] {exc}")
+        _handle_search_retry(settings, ws)
+        return
+
+    settings.external_search_provider = "exa"
+    settings.exa_api_key = api_key
+    ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "exa")
+    ws.set_secret("ANTON_EXA_API_KEY", api_key)
+    console.print("  [anton.success]Exa.ai configured.[/]")
+
+
+def _setup_brave(settings, ws) -> None:
+    """Collect and validate a Brave Search API key."""
+    console.print()
+    console.print(
+        "  [anton.muted]Get an API key at "
+        "[link=https://api.search.brave.com/app/keys]"
+        "[anton.cyan]api.search.brave.com/app/keys[/][/link][/]"
+    )
+    console.print()
+
+    while True:
+        api_key = _setup_prompt("Brave Search API key", is_password=True)
+        if api_key.strip():
+            break
+        console.print("  [anton.warning]Please enter your API key.[/]")
+    api_key = api_key.strip()
+
+    try:
+
+        def _test():
+            import httpx as _httpx
+
+            resp = _httpx.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={
+                    "X-Subscription-Token": api_key,
+                    "Accept": "application/json",
+                },
+                params={"q": "anton ping", "count": 1},
+                timeout=15.0,
+            )
+            if resp.status_code in (401, 403):
+                raise PermissionError("Authentication failed. Check your API key.")
+            if resp.status_code >= 400:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+        _validate_with_spinner(console, "Brave Search", _test)
+    except PermissionError as exc:
+        console.print(f"  [anton.error]{exc}[/]")
+        _handle_search_retry(settings, ws)
+        return
+    except Exception as exc:
+        if _is_transient_error(exc):
+            console.print("  [anton.warning]Search service is temporarily overloaded.[/]")
+        else:
+            console.print(f"  [anton.error]Failed:[/] {exc}")
+        _handle_search_retry(settings, ws)
+        return
+
+    settings.external_search_provider = "brave"
+    settings.brave_api_key = api_key
+    ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "brave")
+    ws.set_secret("ANTON_BRAVE_API_KEY", api_key)
+    console.print("  [anton.success]Brave Search configured.[/]")
+
+
+def _handle_search_retry(settings, ws) -> None:
+    """Retry / switch / skip after a search-provider validation failure."""
+    from rich.prompt import Prompt
+    choice = Prompt.ask(
+        "  Retry, switch provider, or skip?",
+        choices=["retry", "switch", "skip", "r", "s", "k"],
+        default="retry",
+        console=console,
+    )
+    if choice in ("retry", "r"):
+        _setup_search_provider(settings, ws)
+    elif choice in ("switch", "s"):
+        # Re-show the picker so the user can pick the other provider.
+        _setup_search_provider(settings, ws)
+    else:
+        settings.external_search_provider = None
+        ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "")
+
 
 @app.command("setup")
 def setup(ctx: typer.Context) -> None:
@@ -1095,6 +1296,32 @@ def setup(ctx: typer.Context) -> None:
     _ensure_workspace(settings)
     _onboard(settings)
     console.print("[anton.success]Setup complete.[/]")
+
+
+@app.command("setup-search")
+def setup_search(ctx: typer.Context) -> None:
+    """Configure an external search provider (Exa.ai or Brave Search).
+
+    Only used when the active LLM endpoint is a generic OpenAI-compatible
+    third-party (i.e. NOT Anthropic, OpenAI BYOK, or the mdb.ai passthrough —
+    those expose web_search natively on the LLM provider's key). The chosen
+    key is persisted to the global ``~/.anton/.env`` so it survives across
+    sessions and workspaces, exactly like LLM provider keys.
+    """
+    from pathlib import Path
+    from anton.workspace import Workspace
+
+    settings = _get_settings(ctx)
+    _ensure_workspace(settings)
+    # Search-provider keys live globally — same scope as LLM keys.
+    global_ws = Workspace(Path.home())
+    try:
+        _setup_search_provider(settings, global_ws)
+    except _SetupRetry:
+        console.print("  [anton.muted]Cancelled.[/]")
+        return
+    global_ws.apply_env_to_process()
+    console.print("[anton.success]Search provider setup complete.[/]")
 
 
 @app.command("dashboard")
