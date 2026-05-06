@@ -13,6 +13,10 @@ from minds.model.chat_completion import ChatCompletion
 from minds.model.mind_datasource import DataCatalogStatus
 from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
 from minds.requests.context import Context
+from minds.requests.langfuse_tracing import (
+    capture_langfuse_generation_context,
+    update_generation_usage,
+)
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
 from minds.services.conversations import ConversationsService
@@ -36,6 +40,7 @@ class OpenAIRequestHandler:
         instrument: bool = True,
         request_id: str | None = None,
         langfuse_trace_id: str | None = None,
+        langfuse_trace_context: dict | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         temperature: float | None = None,
@@ -69,6 +74,10 @@ class OpenAIRequestHandler:
         self.instrument = instrument
         self.request_id = request_id
         self.langfuse_trace_id = langfuse_trace_id
+        # Captured @observe trace context, used to attach a child generation
+        # carrying token usage when the surrounding @observe scope has already
+        # closed by the time usage is known (every streaming path).
+        self.langfuse_trace_context = langfuse_trace_context
         self.tools = tools
         self.tool_choice = tool_choice
         self.temperature = temperature
@@ -92,6 +101,7 @@ class OpenAIRequestHandler:
         instrument: bool = True,
         request_id: str | None = None,
         langfuse_trace_id: str | None = None,
+        langfuse_trace_context: dict | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         temperature: float | None = None,
@@ -129,6 +139,7 @@ class OpenAIRequestHandler:
             instrument=instrument,
             request_id=request_id,
             langfuse_trace_id=langfuse_trace_id,
+            langfuse_trace_context=langfuse_trace_context,
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
@@ -173,8 +184,21 @@ class OpenAIRequestHandler:
 
         return handler
 
-    def _save_usage(self, usage: tuple[int, int] | None) -> None:
-        """Persist token usage to the database."""
+    def _save_usage(
+        self,
+        usage: tuple[int, int] | None,
+        *,
+        langfuse_trace_context: dict | None = None,
+    ) -> None:
+        """Persist token usage to the database AND record it on the Langfuse generation.
+
+        ``langfuse_trace_context`` selects the Langfuse update mode:
+        - ``None`` → caller is inside the @observe scope; the helper updates
+          the current generation in place.
+        - dict   → caller is outside the @observe scope (streaming body
+          iterator runs after the handler returns); the helper attaches a
+          child generation observation to the captured trace.
+        """
         chat_completion = ChatCompletion(
             organization_id=self.context.organization_id,
             user_id=self.context.user_id,
@@ -189,6 +213,12 @@ class OpenAIRequestHandler:
         logger.debug(
             f"[{self.request_id}] Saved ChatCompletion usage: "
             f"{usage[0] if usage else 0} in / {usage[1] if usage else 0} out"
+        )
+
+        update_generation_usage(
+            usage=usage,
+            model=self.model,
+            trace_context=langfuse_trace_context,
         )
 
     async def chat_completions(self, streamer: MessageStreamer):
@@ -213,7 +243,13 @@ class OpenAIRequestHandler:
         )
 
         usage = await self.agent.get_last_run_usage()
-        self._save_usage(usage)
+        # Streaming path runs in a producer task whose lifetime outlives the
+        # @observe-decorated handler — pass the captured trace context so the
+        # Langfuse update attaches a child generation. Non-streaming runs
+        # synchronously inside the @observe scope; in that case the caller
+        # supplies langfuse_trace_context=None and the helper updates the
+        # current generation directly.
+        self._save_usage(usage, langfuse_trace_context=self.langfuse_trace_context if self.stream else None)
 
     async def proxy_chat_completions(self) -> StreamingResponse | JSONResponse:
         """Passthrough proxy — returns the upstream response directly."""
@@ -229,24 +265,32 @@ class OpenAIRequestHandler:
         )
 
         if isinstance(response, StreamingResponse):
-            # Wrap the streaming body to save usage after the last chunk
+            # Wrap the streaming body to save usage after the last chunk.
             original_body = response.body_iterator
+
+            # Capture the @observe trace context NOW, while we are still
+            # synchronously inside chat_completions_request_handler. The body
+            # iterator below runs from the ASGI server *after* this method
+            # returns, by which point the @observe span has closed.
+            captured_ctx = self.langfuse_trace_context or capture_langfuse_generation_context()
 
             async def _wrapped_body():
                 async for chunk in original_body:
                     yield chunk
-                # After stream completes, save usage
+                # After stream completes, save usage.
                 usage = await agent.get_last_run_usage()
-                self._save_usage(usage)
+                self._save_usage(usage, langfuse_trace_context=captured_ctx)
 
             return StreamingResponse(
                 _wrapped_body(),
                 media_type="text/event-stream",
             )
         else:
-            # Non-streaming: usage is already set on the agent
+            # Non-streaming: usage is already set on the agent and we are
+            # still inside the @observe scope — update the current generation
+            # in place (langfuse_trace_context=None).
             usage = await agent.get_last_run_usage()
-            self._save_usage(usage)
+            self._save_usage(usage, langfuse_trace_context=None)
             return response
 
     async def responses(self, streamer: MessageStreamer, message: Message):
@@ -291,4 +335,15 @@ class OpenAIRequestHandler:
             langfuse_trace_id=self.langfuse_trace_id,
             input_tokens=usage[0] if usage else 0,
             output_tokens=usage[1] if usage else 0,
+        )
+
+        # Mirror the Langfuse update done by _save_usage on the chat_completions
+        # path. Streaming runs from the producer task — outside the @observe
+        # scope — so we pass the captured trace context. Non-streaming uses
+        # in-scope mode (None) and updates the current generation directly.
+        update_generation_usage(
+            usage=usage,
+            model=self.model,
+            trace_context=self.langfuse_trace_context if self.stream else None,
+            output=response.answer if response is not None else None,
         )
