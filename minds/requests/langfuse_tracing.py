@@ -192,9 +192,7 @@ def update_generation_usage(
                 input=input,
                 output=output,
             )
-            logger.debug(
-                f"Updated current Langfuse generation with usage_details={usage_details} model={model}"
-            )
+            logger.debug(f"Updated current Langfuse generation with usage_details={usage_details} model={model}")
         else:
             obs = langfuse_client.start_observation(
                 trace_context=trace_context,

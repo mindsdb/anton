@@ -53,6 +53,7 @@ def _real_observe(**kwargs):
 
     return _observe(**kwargs)
 
+
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
@@ -113,9 +114,7 @@ async def test_passthrough_non_streaming_records_usage_on_parent_generation(
     """Non-streaming path: the @observe-created generation itself carries
     the token usage attached via update_current_generation."""
 
-    handler = _build_handler(
-        mock_session, mock_context, sample_messages, stream=False, is_passthrough=True
-    )
+    handler = _build_handler(mock_session, mock_context, sample_messages, stream=False, is_passthrough=True)
     handler.agent = Mock()
     handler.agent.proxy = AsyncMock(return_value=Mock(spec=JSONResponse))
     handler.agent.get_last_run_usage = AsyncMock(return_value=(11, 7))
@@ -158,9 +157,7 @@ async def test_passthrough_streaming_attaches_child_generation_with_usage(
 
     upstream_response = StreamingResponse(_upstream_body(), media_type="text/event-stream")
 
-    handler = _build_handler(
-        mock_session, mock_context, sample_messages, stream=True, is_passthrough=True
-    )
+    handler = _build_handler(mock_session, mock_context, sample_messages, stream=True, is_passthrough=True)
     handler.agent = Mock()
     handler.agent.proxy = AsyncMock(return_value=upstream_response)
     handler.agent.get_last_run_usage = AsyncMock(return_value=(7, 11))
@@ -219,9 +216,7 @@ async def test_responses_non_streaming_records_usage_on_parent_generation(
 ):
     """Responses API non-streaming: parent @observe generation carries usage."""
 
-    handler = _build_handler(
-        mock_session, mock_context, sample_messages, stream=False, model="custom-mind"
-    )
+    handler = _build_handler(mock_session, mock_context, sample_messages, stream=False, model="custom-mind")
 
     agent_response = Mock()
     agent_response.answer = "the answer"
@@ -277,9 +272,7 @@ async def test_responses_streaming_attaches_child_generation_with_usage(
     handler.langfuse_trace_context already populated and stream=True.
     """
 
-    handler = _build_handler(
-        mock_session, mock_context, sample_messages, stream=True, model="custom-mind"
-    )
+    handler = _build_handler(mock_session, mock_context, sample_messages, stream=True, model="custom-mind")
 
     agent_response = Mock()
     agent_response.answer = "streamed answer"
@@ -347,9 +340,7 @@ async def test_capture_fixture_actually_records_real_langfuse_spans(langfuse_cap
 
     @_real_observe(name="anchor", as_type="generation")
     def f():
-        get_client().update_current_generation(
-            model="m", usage_details={"input": 1, "output": 2, "total": 3}
-        )
+        get_client().update_current_generation(model="m", usage_details={"input": 1, "output": 2, "total": 3})
 
     f()
 
