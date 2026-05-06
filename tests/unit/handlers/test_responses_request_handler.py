@@ -131,6 +131,18 @@ def sample_message_responses():
 
 
 class TestResponsesRequestHandler:
+    @pytest.fixture(autouse=True)
+    def _stable_langfuse_capture(self, handler_mod):
+        """Force capture_langfuse_generation_context to return None across this
+        class so the trace context the request handler forwards to
+        OpenAIRequestHandler.create is deterministic and not contaminated by
+        whether the conftest-level Langfuse stub or the real (auth-disabled)
+        Langfuse client got loaded first. Tests that specifically need to
+        assert a non-None captured context should patch this themselves.
+        """
+        with patch.object(handler_mod, "capture_langfuse_generation_context", return_value=None):
+            yield
+
     @pytest.mark.asyncio
     async def test_responses_request_handler_streaming(
         self,
@@ -200,6 +212,7 @@ class TestResponsesRequestHandler:
                 stream=True,
                 metadata=None,
                 instrument=True,
+                langfuse_trace_context=None,
                 limits_service=None,
             )
 
@@ -354,6 +367,7 @@ class TestResponsesRequestHandler:
                 stream=False,
                 metadata=None,
                 instrument=True,
+                langfuse_trace_context=None,
                 limits_service=None,
             )
 
@@ -438,6 +452,7 @@ class TestResponsesRequestHandler:
                 stream=False,  # Should default to False when None
                 metadata=None,
                 instrument=True,
+                langfuse_trace_context=None,
                 limits_service=None,
             )
 
@@ -781,6 +796,7 @@ class TestResponsesRequestHandler:
                 stream=False,  # Explicit stream value
                 metadata=None,
                 instrument=True,
+                langfuse_trace_context=None,
                 limits_service=None,
             )
 
@@ -846,3 +862,58 @@ class TestResponsesRequestHandler:
 
             # Verify return value
             assert result == mock_json_response
+
+    @pytest.mark.asyncio
+    async def test_responses_request_handler_passes_captured_trace_context_to_factory(
+        self,
+        handler_mod,
+        mock_session,
+        mock_mindsdb_client,
+        sample_streaming_responses_request,
+        mock_context,
+        mock_conversation_service,
+        sample_conversation_response,
+        sample_message_responses,
+    ):
+        """The Responses handler must capture the @observe trace context and
+        forward it to OpenAIRequestHandler.create so streaming code paths can
+        attach a child generation with token usage after the @observe scope
+        closes.
+        """
+        mock_streaming_response = Mock(spec=StreamingResponse)
+        message_id = uuid4()
+        captured_ctx = {"trace_id": "trace-z", "parent_span_id": "obs-w"}
+
+        with (
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
+            patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
+            patch.object(handler_mod.MindsService, "get_mind_model", new_callable=AsyncMock) as mock_get_mind_model,
+            patch.object(handler_mod, "capture_langfuse_generation_context", return_value=captured_ctx),
+        ):
+            mock_handler_instance = Mock()
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+            mock_handler_instance.responses = AsyncMock()
+            mock_process_streaming.return_value = mock_streaming_response
+
+            fake_mind = Mock()
+            fake_mind.parameters = {"agent_name": "candidate_sql_agent"}
+            mock_get_mind_model.return_value = fake_mind
+
+            mock_conversation_service.create_conversation = AsyncMock(return_value=sample_conversation_response)
+            mock_conversation_service.get_conversation_messages = AsyncMock(return_value=sample_message_responses)
+            placeholder = Mock()
+            placeholder.id = message_id
+            mock_conversation_service.create_conversation_message_placeholder = AsyncMock(return_value=placeholder)
+            mock_conversation_service.update_conversation_message_content = AsyncMock()
+
+            await handler_mod.responses_request_handler(
+                session=mock_session,
+                context=mock_context,
+                mindsdb_client=mock_mindsdb_client,
+                responses_request=sample_streaming_responses_request,
+                conversation_service=mock_conversation_service,
+            )
+
+            mock_handler_class.create.assert_awaited_once()
+            kwargs = mock_handler_class.create.call_args.kwargs
+            assert kwargs["langfuse_trace_context"] == captured_ctx
