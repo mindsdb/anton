@@ -49,6 +49,19 @@ def _have(key: str) -> bool:
     return bool(os.environ.get(key))
 
 
+def _has_https_url_line(text: str) -> bool:
+    """Return True if any line of ``text`` is a formatted URL row.
+
+    The web_search formatter emits URLs on their own indented line — see
+    ``anton.core.tools.web_tools._search_exa`` / ``_search_brave``. Asserting
+    against an exact line beginning is both stricter than ``"https://" in out``
+    (which would also pass for ``"foo https://x evil"``) and avoids tripping
+    CodeQL's ``py/incomplete-url-substring-sanitization`` rule, which
+    correctly flags the substring pattern even in test contexts.
+    """
+    return any(line.lstrip().startswith("https://") for line in text.splitlines())
+
+
 anthropic_only = pytest.mark.skipif(
     not _have("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set — live test skipped",
@@ -488,7 +501,7 @@ class TestExaLive:
 
         assert "Web search results for: 'Anthropic Claude'" in out
         # At least one https:// URL should appear in the formatted output.
-        assert "https://" in out
+        assert _has_https_url_line(out)
         # And the markdown numbering means we got real hits, not the "no
         # results" branch.
         assert "1. **" in out
@@ -508,7 +521,7 @@ class TestExaLive:
         out = await handle_web_search_fallback(
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
-        assert "https://" in out
+        assert _has_https_url_line(out)
         assert "Anthropic Claude" in out  # query echoed in the header
 
     @pytest.mark.asyncio
@@ -546,7 +559,7 @@ class TestBraveLive:
         )
 
         assert "Web search results for: 'Anthropic Claude'" in out
-        assert "https://" in out
+        assert _has_https_url_line(out)
         assert "1. **" in out
 
     @pytest.mark.asyncio
@@ -562,7 +575,7 @@ class TestBraveLive:
         out = await handle_web_search_fallback(
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
-        assert "https://" in out
+        assert _has_https_url_line(out)
         assert "Anthropic Claude" in out
 
     @pytest.mark.asyncio

@@ -94,9 +94,14 @@ class TestWebSearchFallbackExa:
         assert captured["headers"]["Authorization"] == "Bearer exa-key-xyz"
         assert captured["json"]["query"] == "what is anton"
         assert captured["json"]["num_results"] == 2
-        # Output is markdown-ish with both results
+        # Output is markdown-ish with both results. Assert the URL appears as
+        # an exact formatted line ("   <url>") rather than via substring `in`
+        # — the latter would also pass for "https://a.example.evil.com" and
+        # CodeQL's incomplete-URL-substring-sanitization rule (correctly)
+        # warns on that pattern even in tests.
+        out_lines = out.splitlines()
         assert "Result A" in out
-        assert "https://a.example" in out
+        assert "   https://a.example" in out_lines
         assert "Result B" in out
 
     async def test_exa_non_200_response_returns_error_string(self):
