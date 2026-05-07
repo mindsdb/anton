@@ -223,7 +223,7 @@ class ChatSession:
         ]
         if not tool_ids:
             return
-        self._history.append(
+        self._append_history(
             {
                 "role": "user",
                 "content": [
@@ -241,6 +241,143 @@ class ChatSession:
         """Save current history to disk if a history store is configured."""
         if self._history_store and self._session_id:
             self._history_store.save(self._session_id, self._history)
+
+    # ── History append helpers ─────────────────────────────────────────
+    #
+    # Most chat APIs require `messages` to alternate user / assistant
+    # roles strictly:
+    #
+    #   • Anthropic — rejects two same-role messages back-to-back
+    #     with a 400.
+    #   • Mistral, Groq, and most "OpenAI-compatible" relays (mdb.ai,
+    #     Together.ai, Fireworks, llama.cpp servers) — same.
+    #   • OpenAI proper — technically tolerates non-alternating, but
+    #     model output quality drops when fed consecutive same-role
+    #     turns; the model tends to fold them together or treat the
+    #     second as an interruption.
+    #
+    # Anton appends to history from a dozen places — tool_results,
+    # SYSTEM-recovery prompts, intermediate assistant text, etc. —
+    # and the auto-retry path used to be able to slip two user
+    # messages in a row (a synthetic tool_result append + a
+    # SYSTEM-recovery append back-to-back), which any strict
+    # provider rejects.
+    #
+    # Centralising every append through `_append_history` enforces
+    # the alternation invariant at the source — *before* any provider
+    # sees the messages — so clean output is portable across every
+    # provider we support today and any we add tomorrow. When the
+    # new message has the same role as the previous one, the helper
+    # merges them rather than pushing a new entry. The merge is
+    # content-shape-aware: list-of-blocks + list-of-blocks →
+    # concatenated list, string + string → list-of-text-blocks,
+    # mixed shapes get normalised to a list-of-blocks (the form
+    # every chat API accepts for both roles).
+
+    @staticmethod
+    def _coerce_to_block_list(content) -> list[dict]:
+        """Normalise a message's content into a list of blocks.
+
+        Strings become a single ``{"type": "text", "text": ...}``.
+        Existing block lists pass through unchanged. Anything else
+        (None, dicts) is wrapped sensibly.
+        """
+        if isinstance(content, list):
+            return list(content)
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        if isinstance(content, dict):
+            return [content]
+        return []
+
+    def _append_history(self, msg: dict) -> None:
+        """Append `msg` to history, preserving role alternation.
+
+        If the previous message has the same role, merge the new
+        content INTO the previous message instead of pushing a fresh
+        entry. The merged form always uses a list-of-blocks so the
+        Anthropic API accepts it whether the originals were strings
+        or already block lists.
+
+        Direct ``self._append_history(...)`` calls inside this class
+        should be avoided — every append site routes through here
+        so the invariant is impossible to violate accidentally.
+        """
+        if not isinstance(msg, dict):
+            return
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            # System-role messages aren't expected in `history`
+            # (system goes via the `system` argument on the
+            # provider), but if anything ever drops one in, just
+            # accept it without merging.
+            self._history.append(msg)
+            return
+        # Empty-content append → no-op (would just create a phantom
+        # turn that the API may reject).
+        content = msg.get("content")
+        if content in (None, "", []):
+            return
+        if not self._history:
+            self._history.append(msg)
+            return
+        prev = self._history[-1]
+        if prev.get("role") != role:
+            self._history.append(msg)
+            return
+        # Same-role back-to-back. Merge by concatenating block lists.
+        merged_blocks = (
+            self._coerce_to_block_list(prev.get("content"))
+            + self._coerce_to_block_list(content)
+        )
+        self._history[-1] = {**prev, "role": role, "content": merged_blocks}
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "Merged consecutive %s messages in history (would have violated "
+            "Anthropic role alternation). Combined block count: %d.",
+            role, len(merged_blocks),
+        )
+
+    def _validate_history_for_provider(self, messages: list[dict]) -> None:
+        """Defensive pre-flight: warn (don't raise) if the messages
+        list still violates the chat-API structural invariants.
+
+        Provider-agnostic. The two assertions below are what every
+        major chat API expects — Anthropic and most OpenAI-compatible
+        relays enforce them strictly; even providers that technically
+        tolerate non-alternating messages produce better output when
+        the rules hold.
+
+        With `_append_history` at every append site this should never
+        fire; treating it as a paranoia check that surfaces in logs
+        if a future code path forgets to use the helper. We don't
+        raise — sending the request and letting the provider return
+        its own 400 is more useful for debugging than crashing here.
+        """
+        import logging as _logging
+        log = _logging.getLogger(__name__)
+        if not messages:
+            return
+        if messages[0].get("role") != "user":
+            log.warning(
+                "History pre-flight: first message has role %r, expected 'user'. "
+                "The provider call is likely to 400.",
+                messages[0].get("role"),
+            )
+        for i in range(1, len(messages)):
+            prev_role = messages[i - 1].get("role")
+            curr_role = messages[i].get("role")
+            if prev_role == curr_role and prev_role in ("user", "assistant"):
+                log.warning(
+                    "History pre-flight: consecutive %s messages at indices "
+                    "%d and %d. Most providers will reject this; OpenAI may "
+                    "accept it but produce worse output. Some append site "
+                    "isn't routing through _append_history.",
+                    prev_role, i - 1, i,
+                )
+                # Only flag the first violation per call; the noise
+                # of a longer broken stretch isn't useful.
+                return
 
     def _record_cell_explainability(
         self, *, pad_name: str, description: str, cell
@@ -664,7 +801,14 @@ class ChatSession:
             "content": "[Earlier conversation was truncated due to persistent context overflow.]",
         }
         separator = {"role": "assistant", "content": "Understood."}
-        self._history = [placeholder, separator, *tail]
+        # If the tail starts with assistant, the separator above would
+        # land us with assistant→assistant. Drop the separator in that
+        # case — the tail's first assistant message can directly
+        # respond to the placeholder user message.
+        if tail and tail[0].get("role") == "assistant":
+            self._history = [placeholder, *tail]
+        else:
+            self._history = [placeholder, separator, *tail]
 
     async def plan_with_recovery(
         self,
@@ -684,6 +828,17 @@ class ChatSession:
         appended prompt) see the latest post-compaction history.
         """
         factory = messages_factory if messages_factory is not None else (lambda: self._history)
+        # Defensive pre-flight — log a warning if the message list
+        # would violate the role-alternation invariant that every
+        # major chat API expects (strict on Anthropic / Mistral /
+        # most OpenAI-compatible relays; soft-required on OpenAI for
+        # output quality). Should never fire now that every append
+        # routes through `_append_history`; catches future code paths
+        # that forget the helper.
+        def factory_validated():
+            msgs = factory()
+            self._validate_history_for_provider(msgs)
+            return msgs
 
         kwargs: dict = {"system": system}
         if tools is not None:
@@ -692,7 +847,7 @@ class ChatSession:
             kwargs["max_tokens"] = max_tokens
 
         try:
-            return await self._llm.plan(messages=factory(), **kwargs)
+            return await self._llm.plan(messages=factory_validated(), **kwargs)
         except ContextOverflowError:
             pass
 
@@ -700,12 +855,12 @@ class ChatSession:
         self._compact_scratchpads()
         self._compacted_this_turn = True
         try:
-            return await self._llm.plan(messages=factory(), **kwargs)
+            return await self._llm.plan(messages=factory_validated(), **kwargs)
         except ContextOverflowError:
             pass
 
         self.hard_truncate_history()
-        return await self._llm.plan(messages=factory(), **kwargs)
+        return await self._llm.plan(messages=factory_validated(), **kwargs)
 
     async def plan_stream_with_recovery(
         self,
@@ -723,6 +878,12 @@ class ChatSession:
         overflow), and restarts the stream. A fourth overflow propagates.
         """
         factory = messages_factory if messages_factory is not None else (lambda: self._history)
+        # Same defensive pre-flight as plan_with_recovery — see the
+        # comment there for the why.
+        def factory_validated():
+            msgs = factory()
+            self._validate_history_for_provider(msgs)
+            return msgs
 
         kwargs: dict = {"system": system}
         if tools is not None:
@@ -731,7 +892,7 @@ class ChatSession:
             kwargs["max_tokens"] = max_tokens
 
         try:
-            async for event in self._llm.plan_stream(messages=factory(), **kwargs):
+            async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 yield event
             return
         except ContextOverflowError:
@@ -744,7 +905,7 @@ class ChatSession:
             message="Context was getting long — older history has been summarized."
         )
         try:
-            async for event in self._llm.plan_stream(messages=factory(), **kwargs):
+            async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 yield event
             return
         except ContextOverflowError:
@@ -754,7 +915,7 @@ class ChatSession:
         yield StreamContextCompacted(
             message="Context still exceeded limits — older history was hard-truncated."
         )
-        async for event in self._llm.plan_stream(messages=factory(), **kwargs):
+        async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
             yield event
 
     def _schedule_cerebellum_flush(self) -> None:
@@ -783,7 +944,7 @@ class ChatSession:
             cb.reset()
 
     async def turn(self, user_input: str | list[dict]) -> str:
-        self._history.append({"role": "user", "content": user_input})
+        self._append_history({"role": "user", "content": user_input})
 
         user_msg_str = user_input if isinstance(user_input, str) else ""
         tools = self._build_tools()
@@ -810,10 +971,10 @@ class ChatSession:
         while response.tool_calls:
             tool_round += 1
             if tool_round > self._max_tool_rounds:
-                self._history.append(
+                self._append_history(
                     {"role": "assistant", "content": response.content or ""}
                 )
-                self._history.append(
+                self._append_history(
                     {
                         "role": "user",
                         "content": (
@@ -841,7 +1002,7 @@ class ChatSession:
                         "input": tc.input,
                     }
                 )
-            self._history.append({"role": "assistant", "content": assistant_content})
+            self._append_history({"role": "assistant", "content": assistant_content})
 
             # Process each tool call via registry
             tool_results: list[dict] = []
@@ -869,7 +1030,7 @@ class ChatSession:
                     }
                 )
 
-            self._history.append({"role": "user", "content": tool_results})
+            self._append_history({"role": "user", "content": tool_results})
 
             # Get follow-up from LLM
             response = await self.plan_with_recovery(system=system, tools=tools)
@@ -886,7 +1047,7 @@ class ChatSession:
 
         # Text-only response
         reply = response.content or ""
-        self._history.append({"role": "assistant", "content": reply})
+        self._append_history({"role": "assistant", "content": reply})
 
         # Periodic memory vacuum (Systems Consolidation)
         if self._cortex is not None and self._cortex.mode != "off":
@@ -904,7 +1065,7 @@ class ChatSession:
         self, user_input: str | list[dict]
     ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive."""
-        self._history.append({"role": "user", "content": user_input})
+        self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -949,7 +1110,7 @@ class ChatSession:
                     self._seal_dangling_tool_uses("interrupted by error")
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to recover
-                        self._history.append(
+                        self._append_history(
                             {
                                 "role": "user",
                                 "content": (
@@ -965,7 +1126,7 @@ class ChatSession:
                         continue
                     else:
                         # Exhausted retries — stop and summarize for the user
-                        self._history.append(
+                        self._append_history(
                             {
                                 "role": "user",
                                 "content": (
@@ -980,6 +1141,7 @@ class ChatSession:
                             }
                         )
                         try:
+                            self._validate_history_for_provider(self._history)
                             async for event in self._llm.plan_stream(
                                 system=await self._build_system_prompt(user_msg_str),
                                 messages=self._history,
@@ -1046,10 +1208,10 @@ class ChatSession:
             llm_response.stop_reason in ("max_tokens", "length")
             and not llm_response.tool_calls
         ):
-            self._history.append(
+            self._append_history(
                 {"role": "assistant", "content": llm_response.content or ""}
             )
-            self._history.append(
+            self._append_history(
                 {
                     "role": "user",
                     "content": (
@@ -1097,10 +1259,10 @@ class ChatSession:
                 tool_round += 1
                 if tool_round > self._max_tool_rounds:
                     _max_rounds_hit = True
-                    self._history.append(
+                    self._append_history(
                         {"role": "assistant", "content": llm_response.content or ""}
                     )
-                    self._history.append(
+                    self._append_history(
                         {
                             "role": "user",
                             "content": (
@@ -1131,7 +1293,7 @@ class ChatSession:
                             "input": tc.input,
                         }
                     )
-                self._history.append(
+                self._append_history(
                     {"role": "assistant", "content": assistant_content}
                 )
 
@@ -1147,6 +1309,30 @@ class ChatSession:
                             str(tc.input)[:2000],
                             tool=tc.name,
                         )
+
+                    # If the streamed tool-call arguments couldn't be
+                    # parsed (truncation mid-string, missing comma,
+                    # etc.), short-circuit before invoking the
+                    # handler. We synthesise a tool_result asking the
+                    # LLM to re-emit the call with valid JSON. This
+                    # keeps the recovery inside the tool_use /
+                    # tool_result protocol — no session-level retry,
+                    # no SYSTEM message clutter in history. The next
+                    # turn the LLM sees the explanation and re-emits
+                    # cleanly.
+                    if tc.parse_error:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": (
+                                f"Tool call arguments failed to parse: {tc.parse_error}. "
+                                "The streamed JSON was malformed (most often a token-cap "
+                                "truncation mid-call). Re-emit this call with a complete, "
+                                "valid JSON body."
+                            ),
+                            "is_error": True,
+                        })
+                        continue
 
                     _tool_t0 = _time.monotonic()
 
@@ -1285,7 +1471,7 @@ class ChatSession:
                         }
                     )
 
-                self._history.append({"role": "user", "content": tool_results})
+                self._append_history({"role": "user", "content": tool_results})
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
@@ -1322,10 +1508,10 @@ class ChatSession:
                     llm_response.stop_reason in ("max_tokens", "length")
                     and not llm_response.tool_calls
                 ):
-                    self._history.append(
+                    self._append_history(
                         {"role": "assistant", "content": llm_response.content or ""}
                     )
-                    self._history.append(
+                    self._append_history(
                         {
                             "role": "user",
                             "content": (
@@ -1369,11 +1555,11 @@ class ChatSession:
 
             # Append the assistant's final text so the verifier can see it
             reply = llm_response.content or ""
-            self._history.append({"role": "assistant", "content": reply})
+            self._append_history({"role": "assistant", "content": reply})
 
             if continuation >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
-                self._history.append(
+                self._append_history(
                     {
                         "role": "user",
                         "content": (
@@ -1436,7 +1622,7 @@ class ChatSession:
             if "STATUS: STUCK" in status_text:
                 # Stuck — inject diagnosis request and let the LLM explain
                 reason = (verification.content or "").strip()
-                self._history.append(
+                self._append_history(
                     {
                         "role": "user",
                         "content": (
@@ -1457,7 +1643,7 @@ class ChatSession:
             # INCOMPLETE — continue working
             continuation += 1
             reason = (verification.content or "").strip()
-            self._history.append(
+            self._append_history(
                 {
                     "role": "user",
                     "content": (
@@ -1491,7 +1677,7 @@ class ChatSession:
         # by the verification block above).
         if not self._history or self._history[-1].get("role") != "assistant":
             reply = llm_response.content or ""
-            self._history.append({"role": "assistant", "content": reply})
+            self._append_history({"role": "assistant", "content": reply})
 
         # Consolidation: replay scratchpad sessions to extract lessons
         if self._cortex is not None and self._cortex.mode != "off":

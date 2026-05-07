@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 import openai
 from openai import AsyncAzureOpenAI
 
+from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
     LLMProvider,
@@ -310,13 +311,18 @@ class OpenAIProvider(LLMProvider):
 
         if message.tool_calls:
             for tc in message.tool_calls:
+                # safe_parse_tool_input returns (parsed_dict,
+                # parse_error). parse_error is forwarded to the
+                # session dispatcher so the tool_use/tool_result
+                # protocol can carry the recovery — see the streaming
+                # path in this file for the same pattern.
+                parsed_input, parse_error = safe_parse_tool_input(tc.function.arguments or "")
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
-                        input=json.loads(tc.function.arguments)
-                        if tc.function.arguments
-                        else {},
+                        input=parsed_input,
+                        parse_error=parse_error,
                     )
                 )
 
@@ -441,12 +447,20 @@ class OpenAIProvider(LLMProvider):
                 "Could not reach the LLM server — check your connection or try again in a moment."
             ) from exc
 
-        # Finalize tool calls
+        # Finalize tool calls. Same safe-parse protection as the
+        # non-streaming path — a model cut off mid-JSON-arguments
+        # would otherwise crash the whole turn here with an opaque
+        # JSONDecodeError. parse_error rides along on the ToolCall so
+        # the session dispatcher can short-circuit with a structured
+        # recovery tool_result.
         for idx in sorted(tc_state):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
-            parsed = json.loads(raw_json) if raw_json else {}
-            tool_calls.append(ToolCall(id=info["id"], name=info["name"], input=parsed))
+            parsed, parse_error = safe_parse_tool_input(raw_json)
+            tool_calls.append(ToolCall(
+                id=info["id"], name=info["name"], input=parsed,
+                parse_error=parse_error,
+            ))
             yield StreamToolUseEnd(id=info["id"])
 
         yield StreamComplete(
