@@ -79,6 +79,7 @@ class ChatSessionConfig:
     session_id: str | None = None
     proactive_dashboards: bool = False
     tools: list[ToolDef] = field(default_factory=list)
+    output_dir: str = ".anton/output"
 
 
 class ChatSession:
@@ -97,6 +98,7 @@ class ChatSession:
         self._cortex = config.cortex
         self._episodic = config.episodic
         self._system_prompt_context = config.system_prompt_context
+        self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
         self._extra_tools = config.tools
         self._workspace = config.workspace
@@ -449,6 +451,7 @@ class ChatSession:
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
+            output_dir=self._output_dir,
             tool_defs=self.tool_registry.get_tool_defs(),
             memory_context=memory_section,
             project_context=md_context,

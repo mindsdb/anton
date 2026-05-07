@@ -1127,6 +1127,7 @@ async def _chat_loop(
         history_store=history_store,
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,
+        output_dir=settings.output_dir,
         tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
     ))
 
