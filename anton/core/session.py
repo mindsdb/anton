@@ -529,6 +529,97 @@ class ChatSession:
                 compacted = True
         return compacted
 
+    def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
+        """Append synthetic `tool_result` blocks for any unmatched
+        `tool_use` blocks in the last assistant message.
+
+        Anthropic's API requires every assistant `tool_use` to be
+        followed by a user message containing a `tool_result` for the
+        same id. If `_stream_and_handle_tools` raised after the
+        tool_use was committed to history but before the dispatcher
+        appended its tool_result (e.g. an HTTP failure inside the LLM
+        call, an exception in a tool handler), the next API request
+        sees an orphan tool_use and returns a 400.
+
+        Call this BEFORE appending any non-tool-result user message
+        on an error path. It walks back to the last assistant turn
+        with tool_use blocks and inserts a user message carrying
+        synthetic `is_error: true` results for whichever ids didn't
+        get acknowledged in the immediately following message.
+
+        Returns the number of synthetic results inserted (0 if the
+        history is already clean).
+        """
+        if not self._history:
+            return 0
+        # Find the last assistant message with tool_use blocks.
+        last_assistant_idx = None
+        for j in range(len(self._history) - 1, -1, -1):
+            msg = self._history[j]
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                if isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_use"
+                    for b in content
+                ):
+                    last_assistant_idx = j
+                break
+        if last_assistant_idx is None:
+            return 0
+        assistant = self._history[last_assistant_idx]
+        tool_use_ids = [
+            b.get("id") for b in assistant["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")
+        ]
+        if not tool_use_ids:
+            return 0
+        # Gather the ids ALREADY acknowledged by the next message
+        # (if any). The seal only adds what's missing.
+        ack_ids: set = set()
+        next_msg = (
+            self._history[last_assistant_idx + 1]
+            if last_assistant_idx + 1 < len(self._history)
+            else None
+        )
+        if isinstance(next_msg, dict) and next_msg.get("role") == "user":
+            nc = next_msg.get("content")
+            if isinstance(nc, list):
+                for b in nc:
+                    if (
+                        isinstance(b, dict)
+                        and b.get("type") == "tool_result"
+                        and b.get("tool_use_id")
+                    ):
+                        ack_ids.add(b["tool_use_id"])
+        missing = [tid for tid in tool_use_ids if tid not in ack_ids]
+        if not missing:
+            return 0
+        synth_blocks = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tid,
+                "content": f"[{reason} — tool call did not complete]",
+                "is_error": True,
+            }
+            for tid in missing
+        ]
+        if (
+            isinstance(next_msg, dict)
+            and next_msg.get("role") == "user"
+            and isinstance(next_msg.get("content"), list)
+        ):
+            # Splice into the existing user message.
+            next_msg["content"] = synth_blocks + next_msg["content"]
+        else:
+            # Insert a fresh user message right after the assistant.
+            self._history.insert(
+                last_assistant_idx + 1,
+                {"role": "user", "content": synth_blocks},
+            )
+        return len(missing)
+
     def hard_truncate_history(self, keep: int = 4) -> None:
         """Last-resort history truncation for persistent context overflow.
 
@@ -845,6 +936,17 @@ class ChatSession:
                     if isinstance(_agent_exc, TokenLimitExceeded):
                         raise
                     _retry_count += 1
+                    # Anthropic's API rejects any history where the
+                    # message after a `tool_use` lacks matching
+                    # `tool_result` blocks. If `_stream_and_handle_tools`
+                    # raised AFTER the assistant's tool_use was
+                    # appended but BEFORE the dispatcher could add the
+                    # tool_result (e.g. an HTTP error inside the LLM
+                    # call), the next history entry MUST start with
+                    # tool_result blocks for those orphan ids — otherwise
+                    # the auto-retry below sends a malformed history
+                    # and we get the same 400 forever.
+                    self._seal_dangling_tool_uses("interrupted by error")
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to recover
                         self._history.append(
