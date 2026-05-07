@@ -376,6 +376,90 @@ Never split CSS or chart logic into separate files — only large data payloads.
 """
 
 
+BACKEND_GENERATION_PROMPT = """\
+BACKEND & FULLSTACK APPLICATION GENERATION:
+
+When the user asks to build a backend service, web application with a backend, or stateless \
+API-driven system, follow this workflow:
+
+1. CREATE APPLICATION DIRECTORY: Create a folder for the application at \
+{output_dir}/app_name/ (replace 'app_name' with descriptive name). All generated files \
+(backend code, frontend HTML, requirements.txt, config files, etc.) must be saved into \
+this directory. CRITICAL:
+  - First, check if this directory already exists
+  - For NEW applications: create a fresh, new directory (do NOT reuse existing folders)
+  - For EDITING/UPDATING existing applications: only reuse the existing folder if the user \
+    explicitly asks to edit or update that application
+  - If a folder with that name exists and the user is building a NEW app, choose a different \
+    app_name or ask the user for confirmation
+
+2. TECHNICAL SPECIFICATION (as a system analyst): Create a brief technical specification for \
+the application. The specification MUST include:
+  - Brief description of what the application does (keep it concise)
+  - Core features and requirements
+  - REST API specification in markdown format with:
+    * Endpoints and HTTP methods
+    * Request/response schemas (JSON examples)
+    * Error handling
+  - Framework choice: PREFER Python's built-in http.server or http module if possible. \
+    If that's insufficient, use Bottle (simplest, minimal surface area). \
+    Only use FastAPI/Flask if the requirements demand it.
+  - Key dependencies and libraries needed
+
+3. FETCH & VALIDATE SAMPLE DATA: Using the scratchpad tool:
+  - Fetch representative sample data from the user's data source (API, database, file)
+  - Get enough data to understand: structure, data types, volume, and shape
+  - Answer these questions:
+    * Is the fetched data sufficient for building the application per the spec?
+    * Can this data type be used to implement the API as designed?
+    * Do we need different/more data, or should the spec be revised?
+  - If the answer to any question is "no" — go back to step 2 and revise the technical \
+    specification based on what you learned about the actual data
+
+4. IMPLEMENT BACKEND: In a dedicated scratchpad, implement the backend code:
+  - Write the complete backend application (Flask, Bottle, FastAPI, etc.)
+  - Save it to a file: {output_dir}/app_name/backend.py (or backend_main.py)
+  - Also save requirements.txt or dependencies file in the same directory
+  - Use `action='serve'` with `estimated_execution_time_seconds=3600` for long-running \
+    web servers
+  - The backend serves the frontend at `/` (single-origin, no CORS for stateless backends)
+  - Verify with a test call: test one endpoint to confirm it's working
+
+5. BUILD FRONTEND (if needed): In a separate scratchpad:
+  - Build a single-file HTML dashboard or web interface
+  - Include all CSS and JS inlined (no external file references)
+  - Follow the VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT guidelines
+  - Save to {output_dir}/app_name/index.html (or frontend.html)
+  - It should fetch data from http://localhost:PORT/api/endpoints as defined in step 2
+
+6. LAUNCH THE BACKEND: In a new scratchpad, start the server with `action='serve'`:
+  - Navigate to {output_dir}/app_name/ and run the backend code
+  - Pass large `estimated_execution_time_seconds` (e.g., 3600)
+  - The frontend can now connect and pull live data
+  - Confirm it's reachable by testing an API endpoint
+
+7. PREVIEW THE APPLICATION: When opening the application in a browser:
+  - CRITICAL: Open the backend's address and port (e.g., http://localhost:8000), \
+    NOT the HTML file from disk (file://...)
+  - The backend serves the frontend at the root path `/`. Opening localhost:PORT \
+    will automatically load the frontend HTML and allow it to make API calls
+  - If you open the HTML file directly from disk, fetch() calls will fail due to \
+    browser CORS/security restrictions (file:// protocol cannot make fetch requests)
+  - After confirming the backend is running, direct the user to http://localhost:PORT \
+    in their browser
+
+DEPLOYMENT NOTES:
+- Backend must be stateless (no mutable global state that matters across requests)
+- All data persistence should go through the user's connected data sources (databases, APIs)
+- The backend process shuts down when the Anton CLI session ends (per MVP constraints)
+- For production, the user must deploy the backend.py file to their own infrastructure
+
+PUBLISH OR SHARE:
+- Publishing is disabled for this MVP (per constraints), but preview is fully supported
+- After building, offer to preview the frontend in the browser (action='preview')
+- The backend must be running for the frontend to work
+"""
+
 CONSOLIDATION_PROMPT = """\
 You are a memory consolidation system for an AI coding assistant.
 
