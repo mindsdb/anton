@@ -1354,6 +1354,7 @@ class ChatSession:
                                     phase="scratchpad_start",
                                     message=description or "Running code",
                                     eta_seconds=estimated_seconds,
+                                    id=tc.id,
                                 )
 
                                 _sp_t0 = _time.monotonic()
@@ -1371,7 +1372,7 @@ class ChatSession:
                                         break
                                     if isinstance(item, str):
                                         yield StreamTaskProgress(
-                                            phase="scratchpad", message=item
+                                            phase="scratchpad", message=item, id=tc.id,
                                         )
                                     elif isinstance(item, Cell):
                                         cell = item
@@ -1380,6 +1381,7 @@ class ChatSession:
                                     phase="scratchpad_done",
                                     message=description or "Done",
                                     eta_seconds=_sp_elapsed,
+                                    id=tc.id,
                                 )
                                 result_text = (
                                     format_cell_result(cell)
@@ -1395,7 +1397,8 @@ class ChatSession:
                                     yield StreamToolResult(
                                         name=tc.name,
                                         action="exec",
-                                        content=json.dumps(asdict(cell))
+                                        content=json.dumps(asdict(cell)),
+                                        id=tc.id,
                                     )
                                 if self._episodic is not None and cell is not None:
                                     self._episodic.log_turn(
@@ -1443,7 +1446,7 @@ class ChatSession:
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"
                             ):
-                                yield StreamToolResult(name=tc.name, action="dump", content=result_text)
+                                yield StreamToolResult(name=tc.name, action="dump", content=result_text, id=tc.id)
                                 result_text = (
                                     "The full notebook has been displayed to the user above. "
                                     "Do not repeat it. Here is the content for your reference:\n\n"

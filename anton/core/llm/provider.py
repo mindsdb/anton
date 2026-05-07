@@ -65,19 +65,37 @@ class StreamComplete:
 
 @dataclass
 class StreamTaskProgress:
-    """Progress event from agent task execution (planning, building, executing)."""
+    """Progress event from agent task execution (planning, building, executing).
+
+    `id` carries the originating tool_use id when this progress event
+    is a scratchpad phase marker (e.g. `scratchpad_start` /
+    `scratchpad_done`). The frontend correlates the event to the
+    specific step it advances; without it, multi-cell turns where the
+    LLM queued several tool calls before execution would patch the
+    wrong step (always the last one in the array).
+    """
 
     phase: str
     message: str
     eta_seconds: float | None = None
+    id: str | None = None
 
 
 @dataclass
 class StreamToolResult:
-    """Tool result that should be displayed to the user (e.g. scratchpad dump)."""
+    """Tool result that should be displayed to the user (e.g. scratchpad dump).
+
+    `id` is the originating tool_use id. Required so the frontend can
+    correlate this result to the specific step that emitted the call —
+    when a turn has multiple tool calls, all start/end events fire
+    upfront (during the LLM stream) and only THEN do results arrive
+    sequentially. Patching by "the last scratchpad step" silently
+    misattributes the output of cell A to cell B.
+    """
     name: str
     content: str
     action: str | None = None  # Relevant only for scratchpad tool calls.
+    id: str | None = None
 
 
 @dataclass
