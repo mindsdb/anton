@@ -20,18 +20,15 @@ if TYPE_CHECKING:
 class SystemPromptContext:
     """Bundled prompt-injection points for the system prompt.
 
-    Four levels with increasing importance (later = stronger influence):
+    Three levels with increasing importance (later = stronger influence):
       1. ``prefix``  — prepended before the base prompt
       2. ``runtime_context`` — interpolated into the RUNTIME IDENTITY section
-      3. ``output_context`` — free-text instructions on where to
-         store generated resources (visualizations, HTML files, data exports)
-      4. ``suffix``  — appended after all other sections
+      3. ``suffix``  — appended after all other sections
     """
 
     runtime_context: str = ""
     prefix: str = ""
     suffix: str = ""
-    output_context: str = ""
 
 
 class ChatSystemPromptBuilder:
@@ -111,7 +108,7 @@ class ChatSystemPromptBuilder:
         self,
         *,
         proactive_dashboards: bool,
-        output_context: str,
+        output_dir: str,
     ) -> str:
         visualizations_output_format_prompt = (
             VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
@@ -119,7 +116,7 @@ class ChatSystemPromptBuilder:
             else VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT
         )
         output_format = visualizations_output_format_prompt.format(
-            output_context=output_context,
+            output_dir=output_dir,
         )
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
@@ -139,7 +136,7 @@ class ChatSystemPromptBuilder:
     ) -> str:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
-            output_context=system_prompt_context.output_context,
+            output_dir=output_dir,
         )
 
         prompt = ""

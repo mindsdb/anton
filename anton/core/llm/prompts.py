@@ -300,7 +300,7 @@ breaks JavaScript string literals. Rules:
 Output format:
 - Unless the user explicitly asks for a different format, always output visualizations \
 as polished, single-file HTML pages — never raw PNGs or bare image files.
-{output_context}
+Save output to `{output_dir}` (create it if needed).
 
 Visual design:
 - Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), \
@@ -369,7 +369,7 @@ inline numbers. The terminal is the primary display — make it look great there
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
 THEN build it as a self-contained HTML file with inlined CSS, JS, and data. \
-{output_context}
+Save output to `{output_dir}` (create it if needed).
 Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices. \
 If the dataset is very large (>100KB), write it to a separate .js file in the same directory. \
 Never split CSS or chart logic into separate files — only large data payloads.\

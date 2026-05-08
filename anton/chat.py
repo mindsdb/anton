@@ -1109,7 +1109,6 @@ async def _chat_loop(
     # Build runtime context so the LLM knows what it's running on
     runtime_context = build_runtime_context(settings)
 
-    output_path = f"{settings.output_dir.rstrip('/')}/"
     from anton.chat_session import get_runtime_factory
 
     session = ChatSession(ChatSessionConfig(
@@ -1120,7 +1119,6 @@ async def _chat_loop(
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=runtime_context,
-            output_context=f"Save output to `{output_path}` (create it if needed).",
         ),
         workspace=workspace,
         console=console,

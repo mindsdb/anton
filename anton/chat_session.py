@@ -101,7 +101,6 @@ def rebuild_session(
     refresh_knowledge(settings, cortex)
 
     runtime_context = build_runtime_context(settings)
-    output_path = f"{settings.output_dir.rstrip('/')}/"
     return ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
         runtime_factory=get_runtime_factory(settings),
@@ -110,7 +109,6 @@ def rebuild_session(
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=runtime_context,
-            output_context=f"Save output to `{output_path}` (create it if needed).",
         ),
         workspace=workspace,
         console=console,
