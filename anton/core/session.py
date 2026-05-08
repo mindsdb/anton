@@ -924,7 +924,17 @@ class ChatSession:
         self._persist_history()
         if self._cortex is not None and self._cortex.mode != "off":
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
-                asyncio.create_task(self._cortex.maybe_update_identity(user_input))
+                if self._episodic:
+                    user_messages =[
+                        ep.content
+                        for ep in self._episodic.get_conversation()
+                        if ep.role == "user"
+                    ]
+                    messages_str = "\n\n".join(user_messages[-5:])
+                else:
+                    messages_str = user_input
+
+                asyncio.create_task(self._cortex.maybe_update_identity(messages_str))
             # Periodic memory vacuum (Systems Consolidation)
             self._cortex.maybe_vacuum()
 
