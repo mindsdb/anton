@@ -194,12 +194,20 @@ def save_connection(
     engine_def: "DatasourceEngine",
     name: str,
     credentials: dict[str, str],
+    *,
+    secure_keys: list[str] | None = None,
 ) -> str:
     """Persist credentials and refresh DS_* env vars. Returns the connection slug.
 
     Shared save path used by both /connect and connect_new_datasource tool.
+
+    `secure_keys` is forwarded to the vault so future reads can
+    classify fields without falling back to the name-matching
+    heuristic. Optional for backward compatibility — callers that
+    don't have the connector spec handy (the chat-side tool path,
+    for example) can still call this without supplying the list.
     """
-    vault.save(engine_def.engine, name, credentials)
+    vault.save(engine_def.engine, name, credentials, secure_keys=secure_keys)
     restore_namespaced_env(vault)
     register_secret_vars(engine_def, engine=engine_def.engine, name=name)
     return f"{engine_def.engine}-{name}"
