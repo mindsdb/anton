@@ -56,6 +56,155 @@ async def _fire_post_execute(session: "ChatSession", cell: Cell) -> None:
             )
 
 
+def _artifact_store(session: "ChatSession"):
+    """Return the artifact store rooted at the session's workspace.
+
+    Returns None when the session has no workspace (e.g. CLI calls
+    that don't go through `resolve_workspace`). Tool handlers fall
+    back to a clear error string in that case rather than raising.
+    """
+    workspace = getattr(session, "_workspace", None)
+    if workspace is None:
+        return None
+    from anton.core.artifacts import ArtifactStore
+    return ArtifactStore(workspace.artifacts_dir)
+
+
+async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
+    """Create a fresh artifact folder + metadata.json + README.md.
+
+    Returns a JSON-shaped string the LLM can parse into the artifact
+    path. The agent is expected to write its output files under
+    `<path>/...` after this call returns.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    name = (tc_input.get("name") or "").strip()
+    description = (tc_input.get("description") or "").strip()
+    artifact_type = (tc_input.get("type") or "").strip()
+    primary = tc_input.get("primary")
+    if not name:
+        return "Error: `name` is required."
+    if not description:
+        return "Error: `description` is required."
+
+    from anton.core.artifacts.models import ARTIFACT_TYPES
+
+    if artifact_type not in ARTIFACT_TYPES:
+        return (
+            f"Error: `type` must be one of {ARTIFACT_TYPES}. "
+            f"Got: {artifact_type!r}."
+        )
+
+    artifact = store.create(  # type: ignore[arg-type]
+        name=name,
+        description=description,
+        type=artifact_type,
+        primary=primary if isinstance(primary, str) else None,
+    )
+    folder = store.folder_for(artifact.slug)
+    return json.dumps({
+        "id": artifact.id,
+        "slug": artifact.slug,
+        "name": artifact.name,
+        "type": artifact.type,
+        "primary": artifact.primary,
+        "path": str(folder),
+    }, indent=2)
+
+
+async def handle_set_artifact_primary(session: "ChatSession", tc_input: dict) -> str:
+    """Update or clear the primary-file pointer on an existing artifact.
+
+    The agent calls this when it created an artifact without a
+    primary and now knows what it should be, or when the primary
+    file's name changed. Pass `primary: null` to clear and revert
+    the renderer to its heuristic.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        return "Error: `slug` is required."
+    raw = tc_input.get("primary")
+    primary = raw if isinstance(raw, str) else None
+    artifact = store.set_primary(slug, primary)
+    if artifact is None:
+        return f"Error: no artifact found for slug `{slug}`."
+    return json.dumps({
+        "slug": artifact.slug,
+        "primary": artifact.primary,
+    }, indent=2)
+
+
+async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
+    """List every artifact in the workspace, newest first.
+
+    Output is a JSON array of summaries — slug, name, type,
+    description, file count, last-update timestamp. The agent uses
+    this to decide whether to create a new artifact or modify an
+    existing one.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    artifacts = store.list()
+    summaries = [
+        {
+            "slug": a.slug,
+            "name": a.name,
+            "type": a.type,
+            "description": a.description,
+            "file_count": len(a.files),
+            "updatedAt": a.updatedAt,
+        }
+        for a in artifacts
+    ]
+    return json.dumps(summaries, indent=2)
+
+
+async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
+    """Load an existing artifact's metadata + folder path.
+
+    Returns the same shape as `create_artifact` plus the file list
+    so the agent can decide what to edit. 404-shaped error when the
+    slug is unknown.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        return "Error: `slug` is required."
+    artifact = store.open(slug)
+    if artifact is None:
+        return f"Error: no artifact found for slug `{slug}`."
+    folder = store.folder_for(artifact.slug)
+    return json.dumps({
+        "id": artifact.id,
+        "slug": artifact.slug,
+        "name": artifact.name,
+        "type": artifact.type,
+        "description": artifact.description,
+        "path": str(folder),
+        "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
+    }, indent=2)
+
+
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
     """Process a recall tool call — search episodic memory."""
     if session._episodic is None or not session._episodic.enabled:

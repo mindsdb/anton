@@ -42,7 +42,14 @@ class AntonSettings(CoreSettings):
 
     context_dir: str = ".anton/context"
 
-    output_dir: str = ".anton/output"
+    # Project-visible directory where user-facing artifacts (HTML
+    # apps, docs, datasets, etc.) live. One subfolder per artifact,
+    # each carrying a `metadata.json` and a `README.md` rendered
+    # from it. Replaces the legacy `output_dir = ".anton/output"`
+    # setting — anton-core no longer auto-migrates; users move
+    # their old `.anton/output/` files manually if they want them
+    # tracked under the new model.
+    artifacts_dir: str = "artifacts"
 
     memory_mode: str = "autopilot"  # autopilot | copilot | off
 
@@ -123,5 +130,5 @@ class AntonSettings(CoreSettings):
             self.memory_dir = str(base / self.memory_dir)
         if not Path(self.context_dir).is_absolute():
             self.context_dir = str(base / self.context_dir)
-        if not Path(self.output_dir).is_absolute():
-            self.output_dir = str(base / self.output_dir)
+        if not Path(self.artifacts_dir).is_absolute():
+            self.artifacts_dir = str(base / self.artifacts_dir)

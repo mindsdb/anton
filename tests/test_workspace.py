@@ -73,9 +73,16 @@ class TestInitialization:
         # Should not overwrite existing anton.md
         assert (tmp_path / ".anton" / "anton.md").read_text() == "custom content"
 
-    def test_returns_actions(self, ws):
+    def test_returns_actions(self, ws, tmp_path):
         actions = ws.initialize()
-        assert len(actions) == 3  # .anton/, anton.md, .env
+        assert len(actions) == 4  # .anton/, anton.md, .env, artifacts/
+
+    def test_creates_artifacts_dir(self, ws, tmp_path):
+        ws.initialize()
+        assert (tmp_path / "artifacts").is_dir()
+
+    def test_artifacts_dir_property(self, ws, tmp_path):
+        assert ws.artifacts_dir == tmp_path / "artifacts"
 
 
 class TestAntonMd:
