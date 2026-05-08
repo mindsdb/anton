@@ -47,6 +47,10 @@ class EpisodicMemory:
     def enabled(self, value: bool) -> None:
         self._enabled = value
 
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
     def start_session(self) -> str:
         """Create a new JSONL file for this session and return the session ID."""
         now = datetime.now(timezone.utc)
@@ -200,33 +204,33 @@ class EpisodicMemory:
 
         return matches
 
-    def get_episodes(self) -> list[Episode]:
-        """Return all episodes across all sessions, newest-first."""
-        if not self._dir.is_dir():
-            return []
-        result = []
-        for path in sorted(self._dir.glob("*.jsonl"), reverse=True):
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        ep = Episode(**json.loads(line))
-                        if ep.role not in ("memory_read", "memory_write"):
-                            result.append(ep)
-            except Exception:
-                continue
-        return result
-
     def get_conversation(self) -> list[Episode]:
         """Yield conversation episodes for the current session (excludes memory entries)."""
         for ep in self.get_items():
             if ep.role not in ["memory_write", "memory_read"]:
                 yield ep
 
-    def del_episode(self, session_id: str) -> bool:
-        path = self._dir / f"{session_id}.jsonl"
-        if not path.is_file():
+    def del_episode_entry(self, turn: int) -> bool:
+        """Remove all episode lines for *turn* from the current session file."""
+        if self._file is None or not self._file.is_file():
             return False
-        path.unlink()
+        kept = []
+        removed = 0
+        for line in self._file.read_text(encoding="utf-8").splitlines(keepends=True):
+            if not line.strip():
+                kept.append(line)
+                continue
+            try:
+                ep = Episode(**json.loads(line))
+                if ep.turn == turn:
+                    removed += 1
+                    continue
+            except Exception:
+                pass
+            kept.append(line)
+        if removed == 0:
+            return False
+        self._file.write_text("".join(kept), encoding="utf-8")
         return True
 
     def recall_formatted(

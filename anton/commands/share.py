@@ -1,13 +1,11 @@
 """Slash-command handlers for /share."""
 from __future__ import annotations
 
-import ast
 import getpass
 import json
 import os
 import re
 import tempfile
-import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -349,66 +347,6 @@ def handle_share_history(
 # ── import ────────────────────────────────────────────────────────────────────
 
 
-def _episodic_to_api_history(episodes: list[dict]) -> list[dict]:
-    """Convert episodic episode list to Anthropic API message format for HistoryStore.
-
-    Processes episodes sequentially:
-      user -> {"role":"user","content":text}
-      tool_call -> {"role":"assistant","content":[tool_use block]}  (generates id)
-      scratchpad -> skipped (content captured in tool_result)
-      tool_result -> {"role":"user","content":[tool_result block]}  (uses id from preceding tool_call)
-      assistant -> {"role":"assistant","content":text}
-    """
-    history: list[dict] = []
-    i = 0
-    while i < len(episodes):
-        ep = episodes[i]
-        role = ep.get("role", "")
-
-        if role == "user":
-            history.append({"role": "user", "content": ep["content"]})
-            i += 1
-
-        elif role == "tool_call":
-            tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
-            tool_name = ep.get("meta", {}).get("tool", "unknown")
-            content_str = ep.get("content", "{}")
-            try:
-                tool_input = json.loads(content_str)
-            except Exception:
-                try:
-                    tool_input = ast.literal_eval(content_str)
-                except Exception:
-                    tool_input = {"raw": content_str}
-
-            history.append({
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": tool_id, "name": tool_name, "input": tool_input}],
-            })
-            i += 1
-
-            # Skip optional scratchpad episode
-            if i < len(episodes) and episodes[i].get("role") == "scratchpad":
-                i += 1
-
-            # Consume matching tool_result
-            if i < len(episodes) and episodes[i].get("role") == "tool_result":
-                history.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": episodes[i]["content"]}],
-                })
-                i += 1
-
-        elif role == "assistant":
-            history.append({"role": "assistant", "content": ep["content"]})
-            i += 1
-
-        else:
-            i += 1
-
-    return history
-
-
 async def import_v0_1(
         console: Console,
         session: "ChatSession",
@@ -456,7 +394,9 @@ async def import_v0_1(
         episodic.log(ep)
 
     # reconstruct API history and save to history_store
-    api_history = _episodic_to_api_history(raw_history)
+    from anton.memory.history_store import HistoryStore
+
+    api_history = HistoryStore.episodes_to_api_history(raw_history)
     if history_store and new_session_id:
         history_store.save(new_session_id, api_history)
 

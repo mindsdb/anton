@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
-import subprocess
+from collections import defaultdict
 from pathlib import Path
 
-from prompt_toolkit import PromptSession
-
 from rich.console import Console
+from rich.table import Table
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.config.settings import AntonSettings
@@ -36,7 +34,7 @@ MEMORY_COMMANDS = [
     Command("/memory identity edit <n>", "edit identity entry #n"),
     None,
     Command("/memory episodes", "show episodic sessions"),
-    Command("/memory episodes delete <n>", "delete session #n"),
+    Command("/memory episodes delete <n>", "delete turn #n"),
     None,
     'Maintenance',
     Command("/memory vacuum", "deduplicate and compact"),
@@ -105,11 +103,14 @@ class MemoryManage:
         settings: AntonSettings,
         cortex: "Cortex | None",
         episodic: "EpisodicMemory | None" = None,
+        history_store: "HistoryStore | None" = None,
     ) -> None:
         self.console = console
         self.settings = settings
         self.cortex = cortex
         self.episodic = episodic
+        self.history_store = history_store
+        self.session = None
 
         self.SUBCOMMANDS: dict[str, object] = {
             "help":        self.help,
@@ -125,10 +126,12 @@ class MemoryManage:
     # Entry point
     # ------------------------------------------------------------------
 
-    async def handle(self, cmd: str) -> None:
+    async def handle(self, cmd: str, session) -> None:
         """Dispatch /memory [sub-command] or show the status dashboard."""
         sub_cmd = cmd.removeprefix("/memory").strip()
         parts = sub_cmd.split()
+        # session might be changed
+        self.session = session
 
         if len(parts) == 0:
             return self.info()
@@ -292,45 +295,52 @@ class MemoryManage:
             self.console.print("[anton.warning]Episodic memory not initialized.[/]")
             return
 
-        items = dict(enumerate(self.episodic.get_episodes(), start=1))
+        turns = defaultdict(dict)
+        for ep in self.episodic.get_conversation():
+            turns[ep.turn][ep.role] = ep.content
+
+        if not turns:
+            self.console.print("(no items)")
+            return
 
         if action is not None:
-            nums = list(items.keys())
-
-            if not nums:
-                return self.console.print("Nothing to act on — no episodes.")
+            nums = list(turns.keys())
 
             if num is None:
                 return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
 
             if num.isdigit():
                 num = int(num)
-            if num not in items:
+            if num not in turns:
                 return self.console.print(f"Item {num} not found, choose number between {min(nums)} and {max(nums)}")
 
             if action == 'delete':
-                session_id = items[num].session
-                self.episodic.del_episode(session_id)
-                self.console.print("[anton.cyan]Deleted[/]")
+                if self.episodic.del_episode_entry(num):
+                    if self.history_store:
+                        new_history = self.history_store.rebuild_from_episodic(self.episodic)
+                        if self.session is not None:
+                            self.session._history[:] = new_history
+                    self.console.print("[anton.cyan]Deleted[/]")
                 return await self.episodes()
             else:
                 return self.console.print(f"Unknown action: {action}")
 
         self._print_title("Episodic Memory")
-        max_shown_items = 50
-        if len(items) > max_shown_items:
-            # keep only last items
-            items = dict(sorted(items.items())[-max_shown_items:])
-            self.console.print(f"Only the last {max_shown_items} are shown:")
-        if len(items) == 0:
-            print("(no items)")
-        for i, item in items.items():
-            content = item.content.replace('\n', ' ')
-            if len(content) > 100:
-                content = content[:97] + "..."
-            self.console.print(f"    [dim]{i:>3}.[/]  {content}")
 
-        self.console.print("  [bold]/memory episodes delete <n>[/]  — delete session #n")
+        table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+        table.add_column("turn", justify="right", no_wrap=True)
+        table.add_column("question")
+        table.add_column("answer")
+
+        for turn, data in turns.items():
+            q = data.get("user", "").replace('\n', ' ')
+            a = data.get("assistant", "").replace('\n', ' ')
+            q_short = (q[:60] + "...") if len(q) > 63 else q
+            a_short = (a[:60] + "...") if len(a) > 63 else a
+            table.add_row(str(turn), q_short, a_short)
+
+        self.console.print(table)
+        self.console.print("  [bold]/memory episodes delete <n>[/]  — delete turn #n")
 
     async def vacuum(self):
         toggle = await prompt_or_cancel(

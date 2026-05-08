@@ -1149,7 +1149,7 @@ async def _chat_loop(
         complete_while_typing=True,
     )
 
-    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
+    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic, history_store=history_store)
     try:
         while True:
             # Memory confirmation UX — show pending lessons before prompt
@@ -1281,7 +1281,7 @@ async def _chat_loop(
                     )
                     continue
                 elif cmd == "/memory":
-                    await memory_manage.handle(cmd=stripped)
+                    await memory_manage.handle(cmd=stripped, session=session)
                     continue
                 elif cmd == "/connect":
                     arg = parts[1].strip() if len(parts) > 1 else ""
