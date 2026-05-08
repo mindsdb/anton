@@ -125,6 +125,7 @@ async def test_full_skills_loop(console, store_root):
         current_datetime="2026-04-10T13:00:00+00:00",
         system_prompt_context=SystemPromptContext(runtime_context="test"),
         proactive_dashboards=False,
+        output_dir="",
         skill_store=fresh_store,
     )
     assert "## Procedural memory" in prompt
