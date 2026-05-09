@@ -15,21 +15,82 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from minds.agents.passthrough_agent.agent import (
     _ANTHROPIC_WEB_FETCH_BETA_HEADER,
     PassthroughAgent,
+    _chat_messages_to_gemini,
     _chat_messages_to_responses_input,
+    _chat_tool_choice_to_gemini,
     _chat_tool_choice_to_responses,
+    _gemini_response_to_openai,
     _is_generic_web_tool,
     _only_web_tools,
     _responses_response_to_chat_completion,
     _translate_tools_for_anthropic,
+    _translate_tools_for_gemini,
     _translate_tools_for_openai,
 )
-from minds.common.passthrough_config import PassthroughModelConfig
+from minds.common.passthrough_config import (
+    PassthroughModelConfig,
+    resolve_passthrough_model,
+)
 from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.chat import Message, Role
+
+# ---------------------------------------------------------------------------
+# Test config helpers
+# ---------------------------------------------------------------------------
+#
+# PassthroughModelConfig is keyed on `api_kind` rather than a free-text
+# `provider` string; these helpers spell out the boilerplate once so each
+# test only has to override the fields it actually exercises.
+
+
+def _anthropic_config(
+    model_name: str = "claude-x",
+    web_search_mode: str = "anthropic_native",
+) -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="anthropic_messages",
+        model_name=model_name,
+        api_key="test-key",
+        web_search_mode=web_search_mode,
+        label="anthropic",
+    )
+
+
+def _openai_config(model_name: str = "gpt-x", web_search_mode: str = "openai_native") -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="openai_responses",
+        model_name=model_name,
+        api_key="test-key",
+        web_search_mode=web_search_mode,
+        label="openai",
+    )
+
+
+def _fireworks_config(model_name: str = "accounts/fireworks/models/kimi-k2p6") -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="anthropic_messages",
+        model_name=model_name,
+        api_key="test-key",
+        base_url="https://api.fireworks.ai/inference",
+        web_search_mode="drop",
+        label="fireworks",
+    )
+
+
+def _gemini_config(model_name: str = "gemini-2.5-pro") -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="gemini_native",
+        model_name=model_name,
+        api_key="test-key",
+        web_search_mode="gemini_google_search",
+        label="gemini",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Pure helper functions
@@ -402,9 +463,7 @@ def _fake_openai_client(create_mock: AsyncMock) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_proxy_anthropic_drops_tool_choice_when_only_web_tools(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="anthropic", model_name="claude-x"),
-    )
+    agent = PassthroughAgent(config=_anthropic_config())
 
     create_mock = AsyncMock(return_value=_make_anthropic_response())
     fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
@@ -426,9 +485,7 @@ async def test_proxy_anthropic_drops_tool_choice_when_only_web_tools(monkeypatch
 
 @pytest.mark.asyncio
 async def test_proxy_anthropic_forwards_tool_choice_when_mixed(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="anthropic", model_name="claude-x"),
-    )
+    agent = PassthroughAgent(config=_anthropic_config())
 
     create_mock = AsyncMock(return_value=_make_anthropic_response())
     fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
@@ -453,9 +510,7 @@ async def test_proxy_anthropic_forwards_tool_choice_when_mixed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_proxy_anthropic_sets_beta_header_for_fetch(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="anthropic", model_name="claude-x"),
-    )
+    agent = PassthroughAgent(config=_anthropic_config())
 
     create_mock = AsyncMock(return_value=_make_anthropic_response())
     fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
@@ -474,9 +529,7 @@ async def test_proxy_anthropic_sets_beta_header_for_fetch(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_proxy_anthropic_no_beta_header_when_no_fetch(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="anthropic", model_name="claude-x"),
-    )
+    agent = PassthroughAgent(config=_anthropic_config())
 
     create_mock = AsyncMock(return_value=_make_anthropic_response())
     fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
@@ -495,9 +548,7 @@ async def test_proxy_anthropic_no_beta_header_when_no_fetch(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_proxy_openai_uses_responses_api_with_web_search(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
-    )
+    agent = PassthroughAgent(config=_openai_config())
 
     create_mock = AsyncMock(return_value=_make_openai_responses_response())
     monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
@@ -525,9 +576,7 @@ async def test_proxy_openai_uses_responses_api_with_web_search(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_proxy_openai_forwards_tool_choice_when_mixed(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
-    )
+    agent = PassthroughAgent(config=_openai_config())
 
     create_mock = AsyncMock(return_value=_make_openai_responses_response())
     monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
@@ -555,9 +604,7 @@ async def test_proxy_openai_forwards_tool_choice_when_mixed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_proxy_openai_fetch_alone_emits_single_web_search(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
-    )
+    agent = PassthroughAgent(config=_openai_config())
 
     create_mock = AsyncMock(return_value=_make_openai_responses_response())
     monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
@@ -576,9 +623,7 @@ async def test_proxy_openai_fetch_alone_emits_single_web_search(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_proxy_openai_max_tokens_renamed_to_max_output_tokens(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
-    )
+    agent = PassthroughAgent(config=_openai_config())
 
     create_mock = AsyncMock(return_value=_make_openai_responses_response())
     monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
@@ -598,9 +643,7 @@ async def test_proxy_openai_max_tokens_renamed_to_max_output_tokens(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_proxy_openai_specific_function_tool_choice_translated(monkeypatch):
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="openai", model_name="gpt-x"),
-    )
+    agent = PassthroughAgent(config=_openai_config())
 
     create_mock = AsyncMock(return_value=_make_openai_responses_response())
     monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
@@ -617,6 +660,403 @@ async def test_proxy_openai_specific_function_tool_choice_translated(monkeypatch
     kwargs = create_mock.await_args.kwargs
     # Chat-completions specific-function shape → Responses flat shape.
     assert kwargs["tool_choice"] == {"type": "function", "name": "f"}
+
+
+# ---------------------------------------------------------------------------
+# web_search_mode="drop" — Fireworks parity
+# ---------------------------------------------------------------------------
+
+
+def test_translate_anthropic_drop_mode_strips_web_search():
+    # Used for Fireworks: their Anthropic-shape API has no hosted search.
+    tools, beta = _translate_tools_for_anthropic([{"type": "web_search"}], web_search_mode="drop")
+    assert tools == []
+    assert beta is False
+
+
+def test_translate_anthropic_drop_mode_strips_fetch_and_keeps_function():
+    function_tool = {"type": "function", "function": {"name": "f", "parameters": {}}}
+    tools, beta = _translate_tools_for_anthropic([{"type": "fetch"}, function_tool], web_search_mode="drop")
+    # fetch dropped; function tool still translated to Anthropic shape.
+    assert tools == [{"name": "f", "description": "", "input_schema": {}}]
+    assert beta is False
+
+
+def test_translate_openai_drop_mode_strips_web_search_and_fetch():
+    function_tool = {"type": "function", "function": {"name": "f", "parameters": {}}}
+    out = _translate_tools_for_openai(
+        [{"type": "web_search"}, {"type": "fetch"}, function_tool], web_search_mode="drop"
+    )
+    # Both web tools dropped; function tool flattened.
+    assert out == [{"type": "function", "name": "f", "parameters": {}}]
+
+
+@pytest.mark.asyncio
+async def test_proxy_anthropic_with_fireworks_config_drops_web_search(monkeypatch):
+    """A Fireworks config (Anthropic-shape transport, web_search_mode='drop')
+    must strip a generic web_search tool before forwarding upstream."""
+    agent = PassthroughAgent(config=_fireworks_config())
+
+    create_mock = AsyncMock(return_value=_make_anthropic_response())
+    fake_client = SimpleNamespace(messages=SimpleNamespace(create=create_mock))
+    monkeypatch.setattr(agent, "_get_anthropic_client", lambda: fake_client)
+
+    function_tool = {"type": "function", "function": {"name": "f", "parameters": {}}}
+    await agent._proxy_anthropic(
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        request_id="req-fw-1",
+        tools=[{"type": "web_search"}, function_tool],
+    )
+
+    kwargs = create_mock.await_args.kwargs
+    # web_search dropped; function tool survives.
+    assert kwargs["tools"] == [{"name": "f", "description": "", "input_schema": {}}]
+    assert "extra_headers" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# Anthropic SDK base_url plumbing — Fireworks via Anthropic shape
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_threads_base_url_from_config(monkeypatch):
+    """A Fireworks-style config with base_url must reach AsyncAnthropic(base_url=...)."""
+    captured: dict = {}
+
+    class _FakeAsyncAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.messages = SimpleNamespace(create=AsyncMock(return_value=_make_anthropic_response()))
+
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+    agent = PassthroughAgent(config=_fireworks_config())
+    client = agent._get_anthropic_client()
+
+    assert isinstance(client, _FakeAsyncAnthropic)
+    assert captured["api_key"] == "test-key"
+    assert captured["base_url"] == "https://api.fireworks.ai/inference"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_omits_base_url_when_unset(monkeypatch):
+    """Direct Anthropic config (no base_url) must NOT pass base_url to the SDK
+    so the SDK's default endpoint is used."""
+    captured: dict = {}
+
+    class _FakeAsyncAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+    agent = PassthroughAgent(config=_anthropic_config())
+    agent._get_anthropic_client()
+
+    assert captured["api_key"] == "test-key"
+    assert "base_url" not in captured
+
+
+# ---------------------------------------------------------------------------
+# resolve_passthrough_model — alias table
+# ---------------------------------------------------------------------------
+
+
+def _fake_settings(*, openai_key="", anthropic_key="", fireworks_key="", gemini_key=""):
+    """Build a stand-in for AppSettings exposing only the fields the resolver reads."""
+    return SimpleNamespace(
+        openai=SimpleNamespace(api_key=openai_key, api_url="https://api.openai.com/v1"),
+        anthropic=SimpleNamespace(api_key=anthropic_key),
+        fireworks=SimpleNamespace(
+            api_key=fireworks_key,
+            anthropic_base_url="https://api.fireworks.ai/inference",
+        ),
+        gemini=SimpleNamespace(api_key=gemini_key),
+    )
+
+
+def _patch_settings(monkeypatch, settings) -> None:
+    monkeypatch.setattr("minds.common.passthrough_config.get_app_settings", lambda: settings)
+
+
+def test_resolve_reason_prefers_anthropic_when_both_keys_set(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key", anthropic_key="an-key"))
+    cfg = resolve_passthrough_model("_reason_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "claude-sonnet-4-6"
+    assert cfg.api_key == "an-key"
+    assert cfg.web_search_mode == "anthropic_native"
+    assert cfg.label == "anthropic"
+
+
+def test_resolve_reason_falls_back_to_openai_without_anthropic(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key"))
+    cfg = resolve_passthrough_model("_reason_")
+    assert cfg.api_kind == "openai_responses"
+    assert cfg.model_name == "gpt-5.2"
+    assert cfg.api_key == "ok-key"
+    assert cfg.label == "openai"
+
+
+def test_resolve_code_prefers_anthropic_haiku_when_both_keys_set(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key", anthropic_key="an-key"))
+    cfg = resolve_passthrough_model("_code_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "claude-haiku-4-5-20251001"
+
+
+def test_resolve_kimi_uses_fireworks_with_anthropic_shape(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(fireworks_key="fw-key"))
+    cfg = resolve_passthrough_model("_kimi_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "accounts/fireworks/models/kimi-k2p6"
+    assert cfg.api_key == "fw-key"
+    assert cfg.base_url == "https://api.fireworks.ai/inference"
+    assert cfg.web_search_mode == "drop"
+    assert cfg.label == "fireworks"
+
+
+def test_resolve_kimi_without_fireworks_key_raises_400_no_silent_fallback(monkeypatch):
+    # Critical: even with Anthropic + OpenAI keys present, _kimi_ must NOT
+    # silently fall back to Claude or GPT. Callers asked for Kimi.
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key", anthropic_key="an-key"))
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_passthrough_model("_kimi_")
+    assert exc_info.value.status_code == 400
+    assert "_kimi_" in exc_info.value.detail
+
+
+def test_resolve_gemini_uses_native_api_with_google_search(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(gemini_key="gm-key"))
+    cfg = resolve_passthrough_model("_gemini_")
+    assert cfg.api_kind == "gemini_native"
+    assert cfg.model_name == "gemini-2.5-pro"
+    assert cfg.api_key == "gm-key"
+    assert cfg.web_search_mode == "gemini_google_search"
+    assert cfg.label == "gemini"
+
+
+def test_resolve_gemini_without_key_raises_400(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key", anthropic_key="an-key"))
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_passthrough_model("_gemini_")
+    assert exc_info.value.status_code == 400
+
+
+def test_resolve_reason_with_no_keys_raises_400(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings())
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_passthrough_model("_reason_")
+    assert exc_info.value.status_code == 400
+
+
+def test_resolve_unknown_alias_falls_back_to_reason_table(monkeypatch):
+    # Preserves prior behavior: unknown aliases route through _reason_'s
+    # priority list, so they still resolve to *something* when at least one
+    # of the _reason_ providers is configured.
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    cfg = resolve_passthrough_model("_mystery_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "claude-sonnet-4-6"
+
+
+# ---------------------------------------------------------------------------
+# Gemini translation — message + tool round-trips
+# ---------------------------------------------------------------------------
+
+
+def test_chat_messages_to_gemini_extracts_system_instruction():
+    system_instruction, contents = _chat_messages_to_gemini(
+        [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system_instruction == "be brief"
+    # One Content with a single text part for the user turn.
+    assert len(contents) == 1
+    assert contents[0].role == "user"
+    parts = contents[0].parts or []
+    assert len(parts) == 1
+    assert parts[0].text == "hi"
+
+
+def test_chat_messages_to_gemini_concatenates_multiple_system_messages():
+    system_instruction, _ = _chat_messages_to_gemini(
+        [
+            {"role": "system", "content": "first"},
+            {"role": "system", "content": "second"},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system_instruction == "first\n\nsecond"
+
+
+def test_chat_messages_to_gemini_assistant_tool_calls_become_function_call_parts():
+    _, contents = _chat_messages_to_gemini(
+        [
+            {"role": "user", "content": "weather?"},
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [
+                    {
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city":"NYC"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_abc", "content": "72F sunny"},
+        ]
+    )
+
+    # 3 turns: user, assistant (with text + function_call), tool-result-as-user.
+    assert len(contents) == 3
+
+    user_turn = contents[0]
+    assert user_turn.role == "user"
+    assert (user_turn.parts or [])[0].text == "weather?"
+
+    assistant_turn = contents[1]
+    assert assistant_turn.role == "model"
+    assistant_parts = assistant_turn.parts or []
+    assert len(assistant_parts) == 2
+    # First part: leading text.
+    assert assistant_parts[0].text == "Let me check."
+    # Second part: function call carrying the parsed arguments.
+    fn_call = assistant_parts[1].function_call
+    assert fn_call.name == "get_weather"
+    assert fn_call.args == {"city": "NYC"}
+
+    tool_turn = contents[2]
+    assert tool_turn.role == "user"  # Gemini puts tool results on user role
+    fn_response = (tool_turn.parts or [])[0].function_response
+    assert fn_response.name == "get_weather"
+    # Raw text result wrapped under {"result": ...} since Gemini expects a dict.
+    assert fn_response.response == {"result": "72F sunny"}
+
+
+def test_translate_tools_for_gemini_function_declaration():
+    out = _translate_tools_for_gemini(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Look it up",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                },
+            }
+        ]
+    )
+    assert len(out) == 1
+    decls = out[0].function_declarations or []
+    assert len(decls) == 1
+    assert decls[0].name == "lookup"
+    assert decls[0].description == "Look it up"
+
+
+def test_translate_tools_for_gemini_web_search_emits_google_search_tool():
+    out = _translate_tools_for_gemini([{"type": "web_search"}])
+    assert len(out) == 1
+    assert out[0].google_search is not None
+
+
+def test_translate_tools_for_gemini_drops_fetch_silently():
+    function_tool = {"type": "function", "function": {"name": "f", "parameters": {}}}
+    out = _translate_tools_for_gemini([{"type": "fetch"}, function_tool])
+    # fetch dropped (no Gemini equivalent); function tool kept.
+    assert len(out) == 1
+    assert (out[0].function_declarations or [])[0].name == "f"
+
+
+def test_translate_tools_for_gemini_drop_mode_strips_web_search():
+    out = _translate_tools_for_gemini([{"type": "web_search"}], web_search_mode="drop")
+    assert out == []
+
+
+def test_chat_tool_choice_to_gemini_required_maps_to_any_mode():
+    cfg = _chat_tool_choice_to_gemini("required")
+    assert cfg is not None
+    assert cfg.function_calling_config.mode == "ANY"
+
+
+def test_chat_tool_choice_to_gemini_specific_function_pins_allowed_names():
+    cfg = _chat_tool_choice_to_gemini({"type": "function", "function": {"name": "lookup"}})
+    assert cfg is not None
+    assert cfg.function_calling_config.mode == "ANY"
+    assert cfg.function_calling_config.allowed_function_names == ["lookup"]
+
+
+def test_chat_tool_choice_to_gemini_auto_returns_none():
+    # AUTO is Gemini's default; no config emitted.
+    assert _chat_tool_choice_to_gemini("auto") is None
+    assert _chat_tool_choice_to_gemini(None) is None
+
+
+def test_gemini_response_to_chat_extracts_text_and_usage():
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(parts=[SimpleNamespace(text="Hello world.", function_call=None)]),
+                finish_reason="STOP",
+            )
+        ],
+        usage_metadata=SimpleNamespace(prompt_token_count=5, candidates_token_count=3),
+    )
+    payload = _gemini_response_to_openai(response, "gemini-x")
+    choice = payload["choices"][0]
+    assert choice["message"]["role"] == "assistant"
+    assert choice["message"]["content"] == "Hello world."
+    assert choice["finish_reason"] == "stop"
+    assert payload["usage"] == {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+    assert payload["model"] == "gemini-x"
+
+
+def test_gemini_response_to_chat_function_call_becomes_tool_call():
+    fn_call = SimpleNamespace(name="lookup", args={"q": "x"})
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(parts=[SimpleNamespace(text=None, function_call=fn_call)]),
+                finish_reason="STOP",
+            )
+        ],
+        usage_metadata=SimpleNamespace(prompt_token_count=4, candidates_token_count=2),
+    )
+    payload = _gemini_response_to_openai(response, "gemini-x")
+    choice = payload["choices"][0]
+    # tool_calls finish-reason takes precedence even when Gemini reports STOP.
+    assert choice["finish_reason"] == "tool_calls"
+    tool_calls = choice["message"]["tool_calls"]
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "lookup"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"q": "x"}
+    # Synthesized id pattern.
+    assert tool_calls[0]["id"].startswith("call_")
+    # No text content in the message.
+    assert choice["message"]["content"] is None
+
+
+def test_gemini_response_to_chat_max_tokens_finish_reason_maps_to_length():
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(parts=[SimpleNamespace(text="cut off", function_call=None)]),
+                finish_reason=SimpleNamespace(name="MAX_TOKENS"),
+            )
+        ],
+        usage_metadata=SimpleNamespace(prompt_token_count=1, candidates_token_count=1),
+    )
+    payload = _gemini_response_to_openai(response, "gemini-x")
+    assert payload["choices"][0]["finish_reason"] == "length"
 
 
 # ---------------------------------------------------------------------------
@@ -643,15 +1083,64 @@ _settings = get_app_settings()
 
 _anthropic_key_set = bool(_settings.anthropic.api_key)
 _openai_key_set = bool(_settings.openai.api_key) and _settings.openai.api_key != "not set"
+_fireworks_key_set = bool(_settings.fireworks.api_key)
+_gemini_key_set = bool(_settings.gemini.api_key)
 
 # Defaults chosen for breadth of native-tool support on the OpenAI Responses
 # API (gpt-5-mini is fast and supports {"type":"web_search"}); override via
 # env vars if your account doesn't have access to these specific models.
 _LIVE_ANTHROPIC_MODEL = os.getenv("LIVE_TEST_ANTHROPIC_MODEL", "claude-sonnet-4-6")
 _LIVE_OPENAI_MODEL = os.getenv("LIVE_TEST_OPENAI_MODEL", "gpt-5-mini")
+_LIVE_FIREWORKS_MODEL = os.getenv("LIVE_TEST_FIREWORKS_MODEL", "accounts/fireworks/models/kimi-k2p6")
+_LIVE_GEMINI_MODEL = os.getenv("LIVE_TEST_GEMINI_MODEL", "gemini-2.5-pro")
 
 requires_anthropic = pytest.mark.skipif(not _anthropic_key_set, reason="ANTHROPIC__API_KEY not configured")
 requires_openai = pytest.mark.skipif(not _openai_key_set, reason="OPENAI__API_KEY not configured")
+requires_fireworks = pytest.mark.skipif(not _fireworks_key_set, reason="FIREWORKS__API_KEY not configured")
+requires_gemini = pytest.mark.skipif(not _gemini_key_set, reason="GEMINI__API_KEY not configured")
+
+
+# Live-test config helpers read keys from real settings so calls go upstream.
+def _live_anthropic_config(model_name: str = "") -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="anthropic_messages",
+        model_name=model_name or _LIVE_ANTHROPIC_MODEL,
+        api_key=_settings.anthropic.api_key,
+        web_search_mode="anthropic_native",
+        label="anthropic",
+    )
+
+
+def _live_openai_config(model_name: str = "") -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="openai_responses",
+        model_name=model_name or _LIVE_OPENAI_MODEL,
+        api_key=_settings.openai.api_key,
+        base_url=_settings.openai.api_url,
+        web_search_mode="openai_native",
+        label="openai",
+    )
+
+
+def _live_fireworks_config(model_name: str = "") -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="anthropic_messages",
+        model_name=model_name or _LIVE_FIREWORKS_MODEL,
+        api_key=_settings.fireworks.api_key,
+        base_url=_settings.fireworks.anthropic_base_url,
+        web_search_mode="drop",
+        label="fireworks",
+    )
+
+
+def _live_gemini_config(model_name: str = "") -> PassthroughModelConfig:
+    return PassthroughModelConfig(
+        api_kind="gemini_native",
+        model_name=model_name or _LIVE_GEMINI_MODEL,
+        api_key=_settings.gemini.api_key,
+        web_search_mode="gemini_google_search",
+        label="gemini",
+    )
 
 
 def _decode_response_body(response) -> dict:
@@ -676,9 +1165,7 @@ def _assert_non_empty_assistant_text(payload: dict) -> str:
 @pytest.mark.asyncio
 async def test_live_anthropic_web_search():
     """Anthropic + generic web_search → translated to web_search_20250305."""
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="anthropic", model_name=_LIVE_ANTHROPIC_MODEL),
-    )
+    agent = PassthroughAgent(config=_live_anthropic_config())
     response = await agent.proxy(
         messages=[Message(role=Role.user, content="Give me 200 words on what happened today.")],
         stream=False,
@@ -698,9 +1185,7 @@ async def test_live_anthropic_web_search():
 @pytest.mark.asyncio
 async def test_live_anthropic_fetch():
     """Anthropic + generic fetch → translated to web_fetch_20250910 + beta header."""
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="anthropic", model_name=_LIVE_ANTHROPIC_MODEL),
-    )
+    agent = PassthroughAgent(config=_live_anthropic_config())
     response = await agent.proxy(
         messages=[
             Message(
@@ -723,9 +1208,7 @@ async def test_live_anthropic_fetch():
 @pytest.mark.asyncio
 async def test_live_anthropic_web_search_and_fetch_combined():
     """Anthropic with both generic web tools at once."""
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="anthropic", model_name=_LIVE_ANTHROPIC_MODEL),
-    )
+    agent = PassthroughAgent(config=_live_anthropic_config())
     response = await agent.proxy(
         messages=[
             Message(role=Role.user, content="Give me 200 words on what happened today."),
@@ -745,9 +1228,7 @@ async def test_live_anthropic_web_search_and_fetch_combined():
 @pytest.mark.asyncio
 async def test_live_openai_web_search():
     """OpenAI + generic web_search → translated to native {"type": "web_search"}."""
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="openai", model_name=_LIVE_OPENAI_MODEL),
-    )
+    agent = PassthroughAgent(config=_live_openai_config())
     response = await agent.proxy(
         messages=[Message(role=Role.user, content="Give me 200 words on what happened today.")],
         stream=False,
@@ -765,9 +1246,7 @@ async def test_live_openai_web_search():
 @pytest.mark.asyncio
 async def test_live_openai_fetch_synthesizes_web_search():
     """OpenAI + generic fetch → translated to native web_search (which bundles fetch)."""
-    agent = PassthroughAgent(
-        config=PassthroughModelConfig(provider="openai", model_name=_LIVE_OPENAI_MODEL),
-    )
+    agent = PassthroughAgent(config=_live_openai_config())
     response = await agent.proxy(
         messages=[
             Message(
@@ -783,3 +1262,80 @@ async def test_live_openai_fetch_synthesizes_web_search():
     assert response.status_code == 200, f"non-200 response: {response.body!r}"
     payload = _decode_response_body(response)
     _assert_non_empty_assistant_text(payload)
+
+
+@requires_fireworks
+@pytest.mark.asyncio
+async def test_live_fireworks_kimi_basic_completion():
+    """Fireworks Kimi K2.6 via the Anthropic-compatible API at fireworks.ai.
+
+    This validates §6.1 of the design doc — that the Anthropic SDK pointed
+    at Fireworks's base_url round-trips a basic prompt for ``kimi-k2p6``.
+    """
+    agent = PassthroughAgent(config=_live_fireworks_config())
+    response = await agent.proxy(
+        messages=[Message(role=Role.user, content="In one sentence, what is 2 + 2?")],
+        stream=False,
+        request_id="live-fireworks-kimi",
+        max_tokens=200,
+    )
+
+    assert response.status_code == 200, f"non-200 response: {response.body!r}"
+    payload = _decode_response_body(response)
+    _assert_non_empty_assistant_text(payload)
+
+
+@requires_fireworks
+@pytest.mark.asyncio
+async def test_live_fireworks_kimi_drops_web_search_silently():
+    """A Fireworks call carrying generic web_search must complete normally;
+    the tool is dropped server-side (no Fireworks-hosted search index)."""
+    agent = PassthroughAgent(config=_live_fireworks_config())
+    response = await agent.proxy(
+        messages=[Message(role=Role.user, content="Reply with the single word: ok")],
+        stream=False,
+        request_id="live-fireworks-no-search",
+        tools=[{"type": "web_search"}],
+        max_tokens=200,
+    )
+
+    # Drop is silent — the request succeeds, no search happens.
+    assert response.status_code == 200, f"non-200 response: {response.body!r}"
+    payload = _decode_response_body(response)
+    _assert_non_empty_assistant_text(payload)
+
+
+@requires_gemini
+@pytest.mark.asyncio
+async def test_live_gemini_basic_completion():
+    """Gemini native generateContent + text response."""
+    agent = PassthroughAgent(config=_live_gemini_config())
+    response = await agent.proxy(
+        messages=[Message(role=Role.user, content="In one sentence, what is 2 + 2?")],
+        stream=False,
+        request_id="live-gemini-basic",
+        max_tokens=200,
+    )
+
+    assert response.status_code == 200, f"non-200 response: {response.body!r}"
+    payload = _decode_response_body(response)
+    _assert_non_empty_assistant_text(payload)
+
+
+@requires_gemini
+@pytest.mark.asyncio
+async def test_live_gemini_web_search_via_google_search():
+    """Gemini + generic web_search → Tool(google_search=GoogleSearch())."""
+    agent = PassthroughAgent(config=_live_gemini_config())
+    response = await agent.proxy(
+        messages=[Message(role=Role.user, content="Give me 200 words on what happened today.")],
+        stream=False,
+        request_id="live-gemini-search",
+        tools=[{"type": "web_search"}],
+        max_tokens=2048,
+    )
+
+    assert response.status_code == 200, f"non-200 response: {response.body!r}"
+    payload = _decode_response_body(response)
+    text = _assert_non_empty_assistant_text(payload)
+    assert len(text.split()) >= 30, f"unexpectedly short reply: {text!r}"
