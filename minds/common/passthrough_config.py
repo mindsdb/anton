@@ -149,7 +149,7 @@ def _fireworks_kimi(settings) -> PassthroughModelConfig:  # noqa: ANN001
 def _gemini_pro(settings) -> PassthroughModelConfig:  # noqa: ANN001
     return PassthroughModelConfig(
         api_kind="gemini_native",
-        model_name="gemini-2.5-pro",
+        model_name="gemini-3.1-pro-preview",
         api_key=settings.gemini.api_key,
         web_search_mode="gemini_google_search",
         label="gemini",

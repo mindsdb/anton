@@ -82,7 +82,7 @@ def _fireworks_config(model_name: str = "accounts/fireworks/models/kimi-k2p6") -
     )
 
 
-def _gemini_config(model_name: str = "gemini-2.5-pro") -> PassthroughModelConfig:
+def _gemini_config(model_name: str = "gemini-3.1-pro-preview") -> PassthroughModelConfig:
     return PassthroughModelConfig(
         api_kind="gemini_native",
         model_name=model_name,
@@ -836,7 +836,7 @@ def test_resolve_gemini_uses_native_api_with_google_search(monkeypatch):
     _patch_settings(monkeypatch, _fake_settings(gemini_key="gm-key"))
     cfg = resolve_passthrough_model("_gemini_")
     assert cfg.api_kind == "gemini_native"
-    assert cfg.model_name == "gemini-2.5-pro"
+    assert cfg.model_name == "gemini-3.1-pro-preview"
     assert cfg.api_key == "gm-key"
     assert cfg.web_search_mode == "gemini_google_search"
     assert cfg.label == "gemini"
@@ -1092,7 +1092,7 @@ _gemini_key_set = bool(_settings.gemini.api_key)
 _LIVE_ANTHROPIC_MODEL = os.getenv("LIVE_TEST_ANTHROPIC_MODEL", "claude-sonnet-4-6")
 _LIVE_OPENAI_MODEL = os.getenv("LIVE_TEST_OPENAI_MODEL", "gpt-5-mini")
 _LIVE_FIREWORKS_MODEL = os.getenv("LIVE_TEST_FIREWORKS_MODEL", "accounts/fireworks/models/kimi-k2p6")
-_LIVE_GEMINI_MODEL = os.getenv("LIVE_TEST_GEMINI_MODEL", "gemini-2.5-pro")
+_LIVE_GEMINI_MODEL = os.getenv("LIVE_TEST_GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 requires_anthropic = pytest.mark.skipif(not _anthropic_key_set, reason="ANTHROPIC__API_KEY not configured")
 requires_openai = pytest.mark.skipif(not _openai_key_set, reason="OPENAI__API_KEY not configured")
