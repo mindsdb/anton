@@ -1,4 +1,20 @@
-"""Passthrough LLM agent — proxies requests to upstream OpenAI / Anthropic."""
+"""Passthrough LLM agent — proxies requests to upstream OpenAI / Anthropic / Gemini.
+
+Routing is driven by ``self.config.api_kind``:
+
+- ``openai_responses`` — OpenAI Responses API (also covers any vendor exposing
+  a Responses-compatible surface).
+- ``anthropic_messages`` — Anthropic Messages API. Same path also serves
+  Fireworks.ai when its ``base_url`` is set on the config (Fireworks exposes
+  an Anthropic-compatible endpoint for hosted open-source models).
+- ``gemini_native`` — Google Gemini ``generateContent`` /
+  ``generateContentStream`` via ``google-genai``.
+
+Tool translation per destination is gated by ``self.config.web_search_mode``;
+provider-specific native search hooks in for OpenAI/Anthropic/Gemini, and
+``"drop"`` silently strips generic ``web_search``/``fetch`` entries (used for
+Fireworks today, which has no hosted search index).
+"""
 
 from __future__ import annotations
 
@@ -11,11 +27,9 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
 from minds.common.passthrough_config import PassthroughModelConfig
-from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.chat import Message, Role
 
 logger = setup_logging()
-settings = get_app_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +262,7 @@ def _only_web_tools(tools: list[dict] | None) -> bool:
 
 def _translate_tools_for_anthropic(
     tools: list[dict] | None,
+    web_search_mode: str = "anthropic_native",
 ) -> tuple[list[dict], bool]:
     """Translate generic + function tools to Anthropic's native tool format.
 
@@ -256,9 +271,12 @@ def _translate_tools_for_anthropic(
     the ``anthropic-beta: web-fetch-2025-09-10`` header to the request (the
     Anthropic web_fetch tool is currently in beta).
 
-    Generic web tools become Anthropic's versioned native types; function
-    tools fall through to the existing :func:`_openai_tools_to_anthropic`
-    shape; unrecognized types are skipped (matches today's behavior).
+    Generic web tools become Anthropic's versioned native types when
+    ``web_search_mode == "anthropic_native"``; with ``"drop"`` they are
+    silently omitted (used for Fireworks routes, which share the Anthropic
+    transport shape but have no hosted search index). Function tools fall
+    through to the existing :func:`_openai_tools_to_anthropic` shape;
+    unrecognized types are skipped (matches today's behavior).
     """
     if not tools:
         return [], False
@@ -268,8 +286,12 @@ def _translate_tools_for_anthropic(
     for tool in tools:
         ttype = tool.get("type") if isinstance(tool, dict) else None
         if ttype == WEB_SEARCH_TYPE:
+            if web_search_mode == "drop":
+                continue
             out.append({"type": _ANTHROPIC_WEB_SEARCH_TYPE, "name": "web_search"})
         elif ttype == FETCH_TYPE:
+            if web_search_mode == "drop":
+                continue
             out.append({"type": _ANTHROPIC_WEB_FETCH_TYPE, "name": "web_fetch"})
             needs_web_fetch_beta = True
         elif ttype == "function":
@@ -280,7 +302,10 @@ def _translate_tools_for_anthropic(
     return out, needs_web_fetch_beta
 
 
-def _translate_tools_for_openai(tools: list[dict] | None) -> list[dict]:
+def _translate_tools_for_openai(
+    tools: list[dict] | None,
+    web_search_mode: str = "openai_native",
+) -> list[dict]:
     """Translate generic + chat-completions function tools to OpenAI Responses API shape.
 
     The Responses API accepts ``{"type": "web_search"}`` directly as a
@@ -290,7 +315,8 @@ def _translate_tools_for_openai(tools: list[dict] | None) -> list[dict]:
 
     - Generic ``web_search`` / ``fetch`` → single ``{"type": "web_search"}``
       (deduped — OpenAI's web_search bundles URL fetching, no separate
-      fetch tool exists).
+      fetch tool exists). With ``web_search_mode == "drop"`` they are
+      silently omitted instead.
     - Chat-completions function tool → flattened Responses shape.
     - Anything else passes through unchanged (covers tools the caller
       already shaped for the Responses API).
@@ -303,6 +329,8 @@ def _translate_tools_for_openai(tools: list[dict] | None) -> list[dict]:
     for tool in tools:
         ttype = tool.get("type") if isinstance(tool, dict) else None
         if ttype in _GENERIC_WEB_TOOL_TYPES:
+            if web_search_mode == "drop":
+                continue
             if not web_search_added:
                 out.append({"type": "web_search"})
                 web_search_added = True
@@ -463,6 +491,272 @@ def _responses_response_to_chat_completion(response: Any, model_name: str) -> di
 
 
 # ---------------------------------------------------------------------------
+# Gemini translation
+# ---------------------------------------------------------------------------
+#
+# Gemini's native ``generateContent`` API uses a different message+tool
+# vocabulary than OpenAI/Anthropic. The translators below mirror the
+# OpenAI/Anthropic ones structurally so the dispatch in ``_proxy_gemini``
+# stays the same shape. ``google.genai.types`` is imported lazily inside
+# functions that need it so the import only fires for callers that hit a
+# Gemini route.
+
+
+def _chat_messages_to_gemini(messages: list[dict]) -> tuple[str | None, list]:
+    """Convert OpenAI-format messages to ``(system_instruction, contents)`` for Gemini.
+
+    Returns ``(system_instruction, gemini_contents)`` where ``gemini_contents``
+    is a list of ``types.Content`` objects. System messages collapse into the
+    top-level ``system_instruction`` string (multiple system messages joined
+    with blank lines, matching the Responses-API translator).
+
+    Mappings:
+    - ``user`` text → ``Content(role="user", parts=[Part.from_text(...)])``
+    - ``assistant`` text → ``Content(role="model", parts=[Part.from_text(...)])``
+    - ``assistant`` with ``tool_calls`` → ``Content(role="model",
+      parts=[Part.from_function_call(name, args)])`` (one part per call;
+      preceding text content is preserved as a leading text part)
+    - ``tool`` (a tool result) → ``Content(role="user",
+      parts=[Part.from_function_response(name, response)])`` — Gemini puts
+      tool results on the user role, not a dedicated tool role.
+    """
+    from google.genai import types
+
+    system_parts: list[str] = []
+    gemini_contents: list = []
+
+    # Map tool_call_id → function name so a later tool-result message can
+    # name the function it's responding to (Gemini's function_response
+    # requires the function name; OpenAI's tool message only carries the
+    # call id).
+    call_id_to_name: dict[str, str] = {}
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        if role == "system":
+            if isinstance(content, str) and content:
+                system_parts.append(content)
+            continue
+
+        if role == "tool":
+            call_id = msg.get("tool_call_id", "")
+            fn_name = call_id_to_name.get(call_id, msg.get("name") or "")
+            response_payload = content
+            if isinstance(response_payload, str):
+                # Gemini expects function_response.response to be a dict.
+                # Wrap raw text under a stable key so it's still readable.
+                try:
+                    parsed = json.loads(response_payload)
+                    response_payload = parsed if isinstance(parsed, dict) else {"result": parsed}
+                except (TypeError, ValueError):
+                    response_payload = {"result": response_payload}
+            gemini_contents.append(
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_function_response(name=fn_name, response=response_payload)],
+                )
+            )
+            continue
+
+        if role == "assistant":
+            tool_calls = msg.get("tool_calls") or []
+            parts: list = []
+            text = content if isinstance(content, str) else ""
+            if text:
+                parts.append(types.Part.from_text(text=text))
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                args = fn.get("arguments", "{}")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args) if args else {}
+                    except json.JSONDecodeError:
+                        args = {"_raw_arguments": args}
+                call_id_to_name[tc.get("id", "")] = name
+                parts.append(types.Part.from_function_call(name=name, args=args))
+            if parts:
+                gemini_contents.append(types.Content(role="model", parts=parts))
+            continue
+
+        # user (or any other plain role; treat as user for Gemini).
+        if isinstance(content, str):
+            gemini_contents.append(types.Content(role="user", parts=[types.Part.from_text(text=content)]))
+
+    system_instruction = "\n\n".join(system_parts) if system_parts else None
+    return system_instruction, gemini_contents
+
+
+def _translate_tools_for_gemini(
+    tools: list[dict] | None,
+    web_search_mode: str = "gemini_google_search",
+) -> list:
+    """Translate generic + chat-completions function tools to Gemini ``Tool[]``.
+
+    - ``{"type": "function", "function": {...}}`` → one
+      ``Tool(function_declarations=[FunctionDeclaration(...)])`` per call.
+    - Generic ``web_search`` → ``Tool(google_search=GoogleSearch())`` when
+      ``web_search_mode == "gemini_google_search"``; dropped under
+      ``"drop"``.
+    - Generic ``fetch`` → dropped (Gemini's google_search tool grounds on
+      retrieved URLs implicitly; no separate fetch primitive).
+    - Unknown types → dropped.
+    """
+    from google.genai import types
+
+    if not tools:
+        return []
+
+    out: list = []
+    google_search_added = False
+    for tool in tools:
+        ttype = tool.get("type") if isinstance(tool, dict) else None
+        if ttype == WEB_SEARCH_TYPE:
+            if web_search_mode != "gemini_google_search":
+                continue
+            if google_search_added:
+                continue
+            out.append(types.Tool(google_search=types.GoogleSearch()))
+            google_search_added = True
+            continue
+        if ttype == FETCH_TYPE:
+            # Gemini has no separate fetch primitive; google_search bundles
+            # retrieval. Drop silently regardless of mode.
+            continue
+        if ttype == "function" and "function" in tool:
+            fn = tool["function"]
+            decl = types.FunctionDeclaration(
+                name=fn.get("name", ""),
+                description=fn.get("description", ""),
+                # The SDK accepts a JSON-schema dict here; using the dict
+                # rather than typing it as types.Schema avoids hand-wiring
+                # Schema(type=Type.OBJECT, properties={...}) for every call.
+                parameters=fn.get("parameters", {"type": "object", "properties": {}}),
+            )
+            out.append(types.Tool(function_declarations=[decl]))
+
+    return out
+
+
+def _chat_tool_choice_to_gemini(tool_choice: str | dict | None):
+    """Convert OpenAI ``tool_choice`` to a Gemini ``ToolConfig`` (or ``None``).
+
+    Mappings:
+    - ``"auto"`` / ``None`` → ``None`` (default behavior; no config emitted)
+    - ``"required"`` → mode=ANY (model must call a function)
+    - ``"none"`` → mode=NONE (function calling disabled this turn)
+    - ``{"type":"function","function":{"name":"X"}}`` → mode=ANY with
+      ``allowed_function_names=["X"]``
+    """
+    if tool_choice is None or tool_choice == "auto":
+        return None
+
+    from google.genai import types
+
+    if tool_choice == "required":
+        return types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY"))
+    if tool_choice == "none":
+        return types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="NONE"))
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        fn = tool_choice.get("function", {})
+        name = fn.get("name")
+        if name:
+            return types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowed_function_names=[name],
+                )
+            )
+    return None
+
+
+def _gemini_finish_reason_to_openai(finish_reason: Any, has_tool_calls: bool) -> str:
+    """Map Gemini's ``finish_reason`` enum to an OpenAI ``finish_reason`` string.
+
+    Tool-call finishes take precedence: if any function_call parts were
+    emitted, surface ``"tool_calls"`` regardless of the upstream value
+    (Gemini emits ``STOP`` even when the turn ends with a function call).
+    """
+    if has_tool_calls:
+        return "tool_calls"
+    # finish_reason is a typed enum; ``.name`` gives the canonical token,
+    # ``str(...)`` includes the enum name. Normalize defensively.
+    name = getattr(finish_reason, "name", None) or str(finish_reason or "")
+    name = name.upper()
+    if "MAX_TOKENS" in name:
+        return "length"
+    return "stop"
+
+
+def _gemini_response_to_openai(response: Any, model_name: str) -> dict:
+    """Convert a Gemini ``GenerateContentResponse`` to a ChatCompletion dict.
+
+    Mirrors :func:`_anthropic_response_to_openai`: walks the first candidate's
+    parts, accumulating text and synthesizing OpenAI ``tool_calls`` for any
+    ``function_call`` parts. Gemini doesn't emit tool_call ids — synthesize
+    ``call_<8 hex>`` so callers can correlate tool result messages back.
+    """
+    candidate = (getattr(response, "candidates", None) or [None])[0]
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+
+    if candidate is not None:
+        gemini_content = getattr(candidate, "content", None)
+        for part in getattr(gemini_content, "parts", None) or []:
+            text = getattr(part, "text", None)
+            if text:
+                text_parts.append(text)
+            fn_call = getattr(part, "function_call", None)
+            if fn_call is not None:
+                args = getattr(fn_call, "args", {}) or {}
+                tool_calls.append(
+                    {
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": getattr(fn_call, "name", "") or "",
+                            "arguments": json.dumps(args),
+                        },
+                    }
+                )
+
+    text = "".join(text_parts)
+    finish_reason = _gemini_finish_reason_to_openai(
+        getattr(candidate, "finish_reason", None) if candidate else None,
+        bool(tool_calls),
+    )
+
+    message: dict[str, Any] = {"role": "assistant", "content": text or None}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    usage_metadata = getattr(response, "usage_metadata", None)
+    prompt_tokens = getattr(usage_metadata, "prompt_token_count", 0) or 0
+    completion_tokens = getattr(usage_metadata, "candidates_token_count", 0) or 0
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4()}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # PassthroughAgent
 # ---------------------------------------------------------------------------
 
@@ -500,7 +794,8 @@ class PassthroughAgent:
         logger.debug(
             "proxy called",
             extra={
-                "provider": self.config.provider,
+                "api_kind": self.config.api_kind,
+                "provider_label": self.config.label,
                 "model": self.config.model_name,
                 "message_count": len(messages),
                 "stream": stream,
@@ -509,26 +804,22 @@ class PassthroughAgent:
         )
         msg_dicts = _messages_to_dicts(messages)
 
-        if self.config.provider == "anthropic":
-            return await self._proxy_anthropic(
-                messages=msg_dicts,
-                stream=stream,
-                request_id=request_id,
-                tools=tools,
-                tool_choice=tool_choice,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        else:
-            return await self._proxy_openai(
-                messages=msg_dicts,
-                stream=stream,
-                request_id=request_id,
-                tools=tools,
-                tool_choice=tool_choice,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+        kwargs: dict[str, Any] = {
+            "messages": msg_dicts,
+            "stream": stream,
+            "request_id": request_id,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        if self.config.api_kind == "anthropic_messages":
+            return await self._proxy_anthropic(**kwargs)
+        if self.config.api_kind == "gemini_native":
+            return await self._proxy_gemini(**kwargs)
+        # openai_responses (default)
+        return await self._proxy_openai(**kwargs)
 
     async def run(
         self,
@@ -553,7 +844,8 @@ class PassthroughAgent:
         logger.debug(
             "run called",
             extra={
-                "provider": self.config.provider,
+                "api_kind": self.config.api_kind,
+                "provider_label": self.config.label,
                 "model": self.config.model_name,
                 "message_count": len(messages),
                 "stream": stream,
@@ -567,7 +859,17 @@ class PassthroughAgent:
         # the request's only tools are web tools.
         effective_tool_choice = None if _only_web_tools(tools) else tool_choice
 
-        if self.config.provider == "anthropic":
+        if self.config.api_kind == "gemini_native":
+            # The legacy run() path is currently unreachable for passthrough
+            # models (handler short-circuits to proxy()). Keep the dispatch
+            # symmetric so future callers don't silently fall through to the
+            # OpenAI branch with a Gemini config; surface explicitly instead.
+            raise NotImplementedError(
+                "PassthroughAgent.run() does not yet support api_kind='gemini_native'. "
+                "Use proxy() (the default request path) for Gemini routes."
+            )
+
+        if self.config.api_kind == "anthropic_messages":
             client = self._get_anthropic_client()
             system_prompt, anthropic_msgs = _openai_messages_to_anthropic(msg_dicts)
 
@@ -579,7 +881,7 @@ class PassthroughAgent:
             if system_prompt:
                 kwargs["system"] = system_prompt
 
-            anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools)
+            anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools, self.config.web_search_mode)
             if anthropic_tools:
                 kwargs["tools"] = anthropic_tools
             if needs_web_fetch_beta:
@@ -614,7 +916,7 @@ class PassthroughAgent:
             if instructions:
                 kwargs["instructions"] = instructions
 
-            openai_tools = _translate_tools_for_openai(tools)
+            openai_tools = _translate_tools_for_openai(tools, self.config.web_search_mode)
             if openai_tools:
                 kwargs["tools"] = openai_tools
             if effective_tool_choice is not None:
@@ -651,15 +953,25 @@ class PassthroughAgent:
     def _get_openai_client(self):
         from openai import AsyncOpenAI
 
-        return AsyncOpenAI(
-            api_key=settings.openai.api_key,
-            base_url=settings.openai.api_url,
-        )
+        kwargs: dict[str, Any] = {"api_key": self.config.api_key}
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        return AsyncOpenAI(**kwargs)
 
     def _get_anthropic_client(self):
         from anthropic import AsyncAnthropic
 
-        return AsyncAnthropic(api_key=settings.anthropic.api_key)
+        kwargs: dict[str, Any] = {"api_key": self.config.api_key}
+        # base_url is set for Anthropic-compatible proxies (e.g., Fireworks);
+        # leave unset to use the SDK default for direct Anthropic.
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        return AsyncAnthropic(**kwargs)
+
+    def _get_gemini_client(self):
+        from google import genai
+
+        return genai.Client(api_key=self.config.api_key)
 
     # ------------------------------------------------------------------
     # OpenAI proxy
@@ -696,7 +1008,7 @@ class PassthroughAgent:
         if instructions:
             kwargs["instructions"] = instructions
 
-        openai_tools = _translate_tools_for_openai(tools)
+        openai_tools = _translate_tools_for_openai(tools, self.config.web_search_mode)
         if openai_tools:
             kwargs["tools"] = openai_tools
         # tool_choice handling: pure pass-through, with one exception. OpenAI's
@@ -924,7 +1236,7 @@ class PassthroughAgent:
         if system_prompt:
             kwargs["system"] = system_prompt
 
-        anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools)
+        anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools, self.config.web_search_mode)
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
         if needs_web_fetch_beta:
@@ -1120,4 +1432,224 @@ class PassthroughAgent:
                 pass
 
         self._usage = (input_tokens, output_tokens)
+        yield "data: [DONE]\n\n"
+
+    # ------------------------------------------------------------------
+    # Gemini proxy
+    # ------------------------------------------------------------------
+
+    async def _proxy_gemini(
+        self,
+        messages: list[dict],
+        stream: bool,
+        request_id: str,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> StreamingResponse | JSONResponse:
+        """Proxy to Gemini's native ``generateContent`` / ``generateContentStream``.
+
+        Inbound messages/tools/tool_choice are in chat-completions wire
+        format; we translate to Gemini's ``Content[]`` / ``Tool[]`` shape
+        on the way out and translate the response back to a ChatCompletion
+        dict on return so clients see no difference.
+        """
+        from google.genai import errors as genai_errors
+        from google.genai import types
+
+        client = self._get_gemini_client()
+
+        system_instruction, contents = _chat_messages_to_gemini(messages)
+        gemini_tools = _translate_tools_for_gemini(tools, self.config.web_search_mode)
+        gemini_tool_config = None if _only_web_tools(tools) else _chat_tool_choice_to_gemini(tool_choice)
+
+        config_kwargs: dict[str, Any] = {}
+        if system_instruction:
+            config_kwargs["system_instruction"] = system_instruction
+        if gemini_tools:
+            config_kwargs["tools"] = gemini_tools
+        if gemini_tool_config is not None:
+            config_kwargs["tool_config"] = gemini_tool_config
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            config_kwargs["max_output_tokens"] = max_tokens
+
+        gen_config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+
+        common_kwargs: dict[str, Any] = {
+            "model": self.config.model_name,
+            "contents": contents,
+        }
+        if gen_config is not None:
+            common_kwargs["config"] = gen_config
+
+        try:
+            if stream:
+                return StreamingResponse(
+                    self._stream_gemini_as_openai(client, common_kwargs, request_id),
+                    media_type="text/event-stream",
+                )
+            response = await client.aio.models.generate_content(**common_kwargs)
+        except genai_errors.APIError as exc:
+            logger.error(
+                "Gemini API request failed",
+                exc_info=True,
+                extra={"model": self.config.model_name, "stream": stream, "request_id": request_id},
+            )
+            status_code = getattr(exc, "code", None) or 502
+            return JSONResponse(
+                content={"error": {"message": str(exc), "type": "api_error"}},
+                status_code=status_code if isinstance(status_code, int) else 502,
+            )
+
+        usage_metadata = getattr(response, "usage_metadata", None)
+        self._usage = (
+            getattr(usage_metadata, "prompt_token_count", 0) or 0,
+            getattr(usage_metadata, "candidates_token_count", 0) or 0,
+        )
+        return JSONResponse(content=_gemini_response_to_openai(response, self.config.model_name))
+
+    async def _stream_gemini_as_openai(self, client, common_kwargs: dict, request_id: str):
+        """Convert Gemini streaming chunks to OpenAI ChatCompletion SSE format.
+
+        Gemini emits each ``function_call`` part atomically (full args at
+        once) rather than as incremental argument deltas, so each
+        function_call part is forwarded as a single ``delta.tool_calls``
+        chunk carrying the entire ``arguments`` JSON. Text parts forward
+        as individual ``delta.content`` chunks. Per-chunk
+        ``usage_metadata`` is captured from the final chunk.
+        """
+        completion_id = f"chatcmpl-{uuid.uuid4()}"
+        created = int(time.time())
+        model = self.config.model_name
+
+        sent_role_chunk = False
+        tool_call_index = 0
+        text_emitted = False
+        tool_calls_emitted = False
+        prompt_tokens = 0
+        completion_tokens = 0
+        last_finish_reason: Any = None
+
+        async def _emit_role_chunk():
+            nonlocal sent_role_chunk
+            if sent_role_chunk:
+                return None
+            sent_role_chunk = True
+            return {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+
+        try:
+            stream = await client.aio.models.generate_content_stream(**common_kwargs)
+            async for chunk in stream:
+                role_chunk = await _emit_role_chunk()
+                if role_chunk is not None:
+                    yield f"data: {json.dumps(role_chunk)}\n\n"
+
+                candidate = (getattr(chunk, "candidates", None) or [None])[0]
+                if candidate is None:
+                    continue
+                if getattr(candidate, "finish_reason", None):
+                    last_finish_reason = candidate.finish_reason
+
+                gemini_content = getattr(candidate, "content", None)
+                for part in getattr(gemini_content, "parts", None) or []:
+                    text = getattr(part, "text", None)
+                    if text:
+                        text_emitted = True
+                        delta_chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": text},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(delta_chunk)}\n\n"
+
+                    fn_call = getattr(part, "function_call", None)
+                    if fn_call is not None:
+                        tool_calls_emitted = True
+                        args = getattr(fn_call, "args", {}) or {}
+                        # Whole tool_call atomically — Gemini doesn't stream
+                        # incremental argument deltas.
+                        tc_chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": tool_call_index,
+                                                "id": f"call_{uuid.uuid4().hex[:8]}",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": getattr(fn_call, "name", "") or "",
+                                                    "arguments": json.dumps(args),
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(tc_chunk)}\n\n"
+                        tool_call_index += 1
+
+                usage_metadata = getattr(chunk, "usage_metadata", None)
+                if usage_metadata is not None:
+                    # Gemini's streaming usage is cumulative; latest chunk wins.
+                    prompt_tokens = getattr(usage_metadata, "prompt_token_count", prompt_tokens) or prompt_tokens
+                    completion_tokens = (
+                        getattr(usage_metadata, "candidates_token_count", completion_tokens) or completion_tokens
+                    )
+        except Exception:
+            logger.error(
+                "Gemini streaming request failed",
+                exc_info=True,
+                extra={"model": self.config.model_name, "request_id": request_id},
+            )
+            raise
+
+        finish_reason = _gemini_finish_reason_to_openai(last_finish_reason, tool_calls_emitted)
+        # If nothing came through at all, still emit a role chunk so the
+        # client sees a valid (empty) completion rather than a half-stream.
+        if not sent_role_chunk:
+            empty_chunk = await _emit_role_chunk()
+            if empty_chunk is not None:
+                yield f"data: {json.dumps(empty_chunk)}\n\n"
+        _ = text_emitted  # currently unused but retained for clarity
+        final_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+        }
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+
+        self._usage = (prompt_tokens, completion_tokens)
         yield "data: [DONE]\n\n"

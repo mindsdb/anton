@@ -89,6 +89,18 @@ class AnthropicSettings(Settings):
         return [model.strip() for model in v]
 
 
+class FireworksSettings(Settings):
+    api_key: str = Field(default="", description="The Fireworks.ai API key")  # FIREWORKS__API_KEY
+    anthropic_base_url: str = Field(
+        default="https://api.fireworks.ai/inference",
+        description="Anthropic-compatible base URL for Fireworks (SDK appends /v1/messages)",
+    )  # FIREWORKS__ANTHROPIC_BASE_URL
+
+
+class GeminiSettings(Settings):
+    api_key: str = Field(default="", description="The Google Gemini API key")  # GEMINI__API_KEY
+
+
 class MindsDBSettings(Settings):
     url: str = Field(default="http://localhost:47334", description="The URL of the MindsDB instance")  # MINDSDB__URL
     api_key: str = Field(default="", description="The MindsDB API key")  # MINDSDB__API_KEY
@@ -221,6 +233,8 @@ class AppSettings(Settings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)  # DATABASE__*
     openai: OpenAISettings = Field(default_factory=OpenAISettings)  # OPENAI__*
     anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)  # ANTHROPIC__*
+    fireworks: FireworksSettings = Field(default_factory=FireworksSettings)  # FIREWORKS__*
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)  # GEMINI__*
     mindsdb: MindsDBSettings = Field(default_factory=MindsDBSettings)  # MINDSDB__*
     data_catalog: DataCatalogSettings = Field(default_factory=DataCatalogSettings)  # DATA_CATALOG__*
     default_models: DefaultModelsSettings = Field(default_factory=DefaultModelsSettings)  # DEFAULT_MODELS__*
