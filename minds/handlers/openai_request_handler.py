@@ -152,7 +152,9 @@ class OpenAIRequestHandler:
             config = resolve_passthrough_model(model)
             handler.agent = PassthroughAgent(config=config, instrument=instrument)
             handler.is_passthrough = True
-            logger.debug(f"[{request_id}] Passthrough model {model!r} → {config.provider}:{config.model_name}")
+            logger.debug(
+                f"[{request_id}] Passthrough model {model!r} → {config.label or config.api_kind}:{config.model_name}"
+            )
             return handler
 
         minds_service = MindsService(
