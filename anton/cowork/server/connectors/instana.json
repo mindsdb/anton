@@ -1,0 +1,61 @@
+{
+  "id": "instana",
+  "label": "Instana",
+  "aliases": [
+    "ibm instana",
+    "instana apm",
+    "instana observability",
+    "ibm observability"
+  ],
+  "keywords": [
+    "apm",
+    "observability",
+    "monitoring",
+    "tracing",
+    "ibm",
+    "performance",
+    "infrastructure",
+    "metrics",
+    "alerts",
+    "distributed tracing"
+  ],
+  "description": "Connect to IBM Instana to query APM metrics, traces, infrastructure data, and alerts via the Instana REST API.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#E6173C",
+  "form": {
+    "form_id": "instana-connector",
+    "title": "Connect Instana",
+    "subtitle": "Paste your Instana base URL and API token to give Anton access to your observability data.",
+    "logo": "sparkle",
+    "logo_color": "#E6173C",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your Instana tenant base URL and an API token from Team Settings. The simplest and most common way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with an Instana API Token\n\nInstana issues scoped API tokens you can create and revoke from your tenant's settings panel.\n\n### Steps\n\n1. Log in to your Instana tenant (e.g. `https://unit-tenant.instana.io`).\n2. Navigate to **Settings \u2192 Team Settings \u2192 API Tokens**.\n3. Click **Add API Token**.\n4. Give it a recognisable name like `Anton`.\n5. Assign the scopes Anton needs \u2014 at minimum **canViewLogs**, **canViewTraceDetails**, **canViewInfrastructure**, and **canViewApplications**. Add alert and configuration read scopes if you want Anton to query those.\n6. Click **Save** and copy the generated token \u2014 it is shown in full only at creation time.\n7. Paste your tenant base URL (e.g. `https://unit-tenant.instana.io`) and the token into the fields below.\n\n### Notes\n\n- The token is a long opaque string; store it safely \u2014 you cannot retrieve it again from the UI.\n- If you need to rotate the token, generate a new one in Team Settings, update Anton, then delete the old token.\n- Self-hosted (on-prem) Instana units use a custom domain \u2014 use that domain as your base URL instead.",
+        "help_url": "https://www.ibm.com/docs/en/instana-observability/current?topic=apis-web-rest-api#api-tokens",
+        "fields": [
+          {
+            "name": "base_url",
+            "label": "Instana Base URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://unit-tenant.instana.io",
+            "description": "Your tenant URL, e.g. https://unit-tenant.instana.io \u2014 no trailing slash needed."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated in Settings \u2192 Team Settings \u2192 API Tokens. Shown once at creation \u2014 copy it immediately."
+          }
+        ]
+      }
+    ]
+  }
+}

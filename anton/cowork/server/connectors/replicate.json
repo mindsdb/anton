@@ -1,0 +1,52 @@
+{
+  "id": "replicate",
+  "label": "Replicate",
+  "aliases": [
+    "replicate.com",
+    "replicate ai",
+    "replicate api"
+  ],
+  "keywords": [
+    "ai",
+    "machine learning",
+    "models",
+    "inference",
+    "open-source",
+    "image generation",
+    "llm",
+    "stable diffusion",
+    "gpu"
+  ],
+  "description": "Run open-source AI models via Replicate's cloud API with a simple token-based auth.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#000000",
+  "form": {
+    "form_id": "replicate-connector",
+    "title": "Connect Replicate",
+    "subtitle": "Paste your Replicate API token to start running open-source models.",
+    "logo": "brain",
+    "logo_color": "#000000",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your personal API token (starts with r8_) from your Replicate account settings. No OAuth setup required \u2014 the simplest and fastest path.",
+        "recommended": true,
+        "how_to": "## Get your Replicate API token\n\n1. Sign in at [replicate.com](https://replicate.com).\n2. Click your avatar in the top-right corner and select **Account settings**.\n3. Scroll down to the **API tokens** section.\n4. Click **Create token** (or copy an existing one).\n5. Give it a name like `Anton` and click **Create**.\n6. Copy the token \u2014 it starts with `r8_` and is shown in full only once.\n7. Paste it into the **API Token** field below and click **Submit**.\n\n## Notes\n\n- Keep the token secret; anyone who has it can run models and incur charges on your account.\n- If you lose it, generate a new one from the same settings page and update it here.\n- You can revoke a token at any time from **Account settings \u2192 API tokens** without affecting other tokens.",
+        "help_url": "https://replicate.com/docs/reference/http#authentication",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "r8_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Replicate personal API token. Found at replicate.com \u2192 Account settings \u2192 API tokens."
+          }
+        ]
+      }
+    ]
+  }
+}

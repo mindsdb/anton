@@ -1,0 +1,59 @@
+{
+  "id": "copper",
+  "label": "Copper",
+  "aliases": [
+    "copper crm",
+    "prosperworks",
+    "copper hq"
+  ],
+  "keywords": [
+    "crm",
+    "google workspace",
+    "contacts",
+    "leads",
+    "deals",
+    "pipeline",
+    "sales",
+    "opportunities"
+  ],
+  "description": "Copper is a CRM built natively for Google Workspace, managing contacts, leads, and deals inside Gmail and Calendar.",
+  "category": "crm",
+  "logo": "link",
+  "logo_color": "#EF5B25",
+  "form": {
+    "form_id": "copper-connector",
+    "title": "Connect Copper",
+    "subtitle": "Paste your Copper API key and login email to give Anton access to your CRM data.",
+    "logo": "link",
+    "logo_color": "#EF5B25",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Copper API key and the email address tied to your Copper account. Both are required on every request \u2014 takes about 30 seconds to set up.",
+        "recommended": true,
+        "how_to": "## Generate a Copper API Key\n\nCopper requires both an API key and the login email for every API request.\n\n### Steps\n\n1. Log in to [Copper](https://app.copper.com) and click your avatar in the bottom-left corner.\n2. Go to **Settings \u2192 Integrations \u2192 API Keys**.\n3. Click **Generate API Key**. Copy the key immediately \u2014 you can regenerate it later if needed.\n4. Note the email address you use to log in to Copper (the one linked to your Google Workspace account).\n5. Paste both into the fields below and click **Submit**.\n\n### Notes\n\n- Every API request must include both the key and the login email as headers; Anton handles this automatically once you save both values.\n- If you regenerate the key in Copper's settings, return here and update it \u2014 the old key stops working immediately.\n- Only Copper account admins can access the API Keys page. If the menu item is missing, ask your Copper admin to generate a key for you.\n- Read [Copper's API authentication docs](https://developer.copper.com/#introduction) for full details.",
+        "help_url": "https://developer.copper.com/#introduction",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-copper-api-key",
+            "description": "Found in Copper \u2192 Settings \u2192 Integrations \u2192 API Keys. Click Generate API Key to create one."
+          },
+          {
+            "name": "login_email",
+            "label": "Login Email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@yourcompany.com",
+            "description": "The email address you use to sign in to Copper \u2014 required alongside the API key on every request."
+          }
+        ]
+      }
+    ]
+  }
+}

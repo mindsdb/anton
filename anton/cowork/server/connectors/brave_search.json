@@ -1,0 +1,61 @@
+{
+  "id": "brave_search",
+  "label": "Brave Search",
+  "aliases": [
+    "brave",
+    "brave search api",
+    "brave web search",
+    "brave index"
+  ],
+  "keywords": [
+    "search",
+    "web",
+    "index",
+    "brave",
+    "api",
+    "results",
+    "independent",
+    "privacy"
+  ],
+  "description": "Query Brave's independent web search index via API key for privacy-respecting search results.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#FB542B",
+  "form": {
+    "form_id": "brave_search-connector",
+    "title": "Connect Brave Search",
+    "subtitle": "Paste your Brave Search API key to start querying the independent web index.",
+    "logo": "search",
+    "logo_color": "#FB542B",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from your Brave Search subscription. Takes 30 seconds \u2014 no OAuth flow, no extra setup.",
+        "recommended": true,
+        "how_to": "## Get a Brave Search API Key\n\n1. Go to [api.search.brave.com](https://api.search.brave.com) and sign in (or create a Brave account).\n2. Navigate to **Subscriptions** in the left sidebar.\n3. Pick a plan \u2014 a **Free** tier is available with 2,000 queries/month.\n4. After subscribing, open the **API Keys** tab on the same page.\n5. Click **Generate API Key**. Copy the key shown (it will only be displayed once \u2014 save it somewhere safe).\n6. Paste the key into the **API Key** field below and click **Connect**.\n\n## Notes\n\n- Keys are tied to a subscription plan. If you exceed your monthly quota, requests will return a `429` error until the cycle resets or you upgrade.\n- To rotate a key, generate a new one in the portal and re-paste it here.\n- Country/language filtering is configured per-request, not at the key level.",
+        "help_url": "https://api.search.brave.com/app/documentation/web-search/get-started",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "BSAxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at api.search.brave.com \u2192 Subscriptions \u2192 API Keys. Shown once at generation time."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.search.brave.com/res/v1",
+            "default": "https://api.search.brave.com/res/v1",
+            "description": "Override only if Brave issues a regional or versioned endpoint. Leave blank to use the default."
+          }
+        ]
+      }
+    ]
+  }
+}

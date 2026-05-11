@@ -1,0 +1,124 @@
+{
+  "id": "stripe",
+  "label": "Stripe",
+  "aliases": [
+    "stripe payments",
+    "stripe billing",
+    "stripe subscriptions"
+  ],
+  "keywords": [
+    "payments",
+    "subscriptions",
+    "billing",
+    "invoices",
+    "charges",
+    "customers",
+    "checkout",
+    "revenue",
+    "saas",
+    "ecommerce"
+  ],
+  "description": "Read payments, subscriptions, invoices, and customer data from your Stripe account.",
+  "category": "billing",
+  "logo": "key",
+  "logo_color": "#635BFF",
+  "form": {
+    "form_id": "stripe-connector",
+    "title": "Connect Stripe",
+    "subtitle": "Paste a Stripe Restricted API key to give Anton scoped, least-privilege access to your account.",
+    "logo": "key",
+    "logo_color": "#635BFF",
+    "methods": [
+      {
+        "id": "restricted-key",
+        "label": "Restricted API key",
+        "description": "Paste a Stripe Restricted key (rk_live_\u2026 or rk_test_\u2026) scoped to only the resources Anton needs. Safer than a Secret key \u2014 permissions are granular and the key can be rolled independently.",
+        "recommended": true,
+        "how_to": "## Create a Stripe Restricted API key\n\nRestricted keys let you grant Anton read access to exactly the resources it needs \u2014 nothing more. Never paste your full Secret key (sk_live_\u2026).\n\n### Steps\n\n1. Log in to the [Stripe Dashboard](https://dashboard.stripe.com/).\n2. Go to **Developers \u2192 API keys**.\n3. Click **Create restricted key**.\n4. Give it a name like `Anton`.\n5. Under **Permissions**, enable **Read** for the resources you want Anton to access. Common choices:\n   - Customers\n   - Charges\n   - Payment Intents\n   - Subscriptions\n   - Invoices\n   - Products & Prices\n6. Click **Create key**. Stripe shows the key once \u2014 copy it immediately.\n7. Paste the key (starts with `rk_live_` for production or `rk_test_` for test mode) into the field below.\n\n### Notes\n\n- The key is shown **only once**. If you lose it, delete it in the Dashboard and create a new one.\n- Use `rk_test_\u2026` keys during setup so no live data is touched.\n- You can roll or revoke the key from **Developers \u2192 API keys** at any time without affecting other integrations.\n- If Anton reports permission errors, return to the key settings and add Read access for the missing resource.\n",
+        "help_url": "https://stripe.com/docs/keys#limit-access",
+        "fields": [
+          {
+            "name": "restricted_key",
+            "label": "Restricted API key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "rk_live_\u2026 or rk_test_\u2026",
+            "description": "Create a Restricted key in Stripe Dashboard \u2192 Developers \u2192 API keys. Never use your Secret key (sk_live_\u2026)."
+          },
+          {
+            "name": "account_name",
+            "label": "Account nickname",
+            "type": "text",
+            "required": false,
+            "placeholder": "My Stripe account",
+            "description": "Optional label to identify this Stripe connection in Anton."
+          },
+          {
+            "name": "mode",
+            "label": "Mode",
+            "type": "select",
+            "required": true,
+            "default": "live",
+            "description": "Match this to the key you pasted \u2014 test keys (rk_test_\u2026) only return test-mode data.",
+            "options": [
+              {
+                "value": "live",
+                "label": "Live"
+              },
+              {
+                "value": "test",
+                "label": "Test"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "secret-key",
+        "label": "Secret API key (not recommended)",
+        "description": "Use your full Stripe Secret key (sk_live_\u2026). Grants unrestricted access to your entire Stripe account \u2014 only use this if you cannot create a Restricted key.",
+        "recommended": false,
+        "how_to": "## Using a Stripe Secret API key\n\nSecret keys grant full access to your Stripe account and should be avoided in favour of Restricted keys wherever possible.\n\n### Steps\n\n1. Log in to the [Stripe Dashboard](https://dashboard.stripe.com/).\n2. Go to **Developers \u2192 API keys**.\n3. Under **Standard keys**, find the **Secret key** row and click **Reveal live key** (or copy the test key for `sk_test_\u2026`).\n4. Copy the key and paste it into the field below.\n\n### Notes\n\n- Secret keys start with `sk_live_` (production) or `sk_test_` (test mode).\n- A Secret key has full read and write access to your entire Stripe account including payouts and refunds. Prefer Restricted keys.\n- Store this key securely \u2014 do not share it or commit it to source control.\n- You can roll the key from the Dashboard if you suspect it has been exposed.\n",
+        "help_url": "https://stripe.com/docs/keys",
+        "fields": [
+          {
+            "name": "secret_key",
+            "label": "Secret API key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "sk_live_\u2026 or sk_test_\u2026",
+            "description": "From Stripe Dashboard \u2192 Developers \u2192 API keys \u2192 Secret key. Consider using a Restricted key instead."
+          },
+          {
+            "name": "account_name",
+            "label": "Account nickname",
+            "type": "text",
+            "required": false,
+            "placeholder": "My Stripe account",
+            "description": "Optional label to identify this Stripe connection in Anton."
+          },
+          {
+            "name": "mode",
+            "label": "Mode",
+            "type": "select",
+            "required": true,
+            "default": "live",
+            "description": "Match this to the key you pasted \u2014 test keys (sk_test_\u2026) only return test-mode data.",
+            "options": [
+              {
+                "value": "live",
+                "label": "Live"
+              },
+              {
+                "value": "test",
+                "label": "Test"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

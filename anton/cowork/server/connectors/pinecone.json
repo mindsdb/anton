@@ -1,0 +1,76 @@
+{
+  "id": "pinecone",
+  "label": "Pinecone",
+  "aliases": [
+    "pinecone db",
+    "pinecone vector",
+    "pinecone.io"
+  ],
+  "keywords": [
+    "vector",
+    "database",
+    "embeddings",
+    "similarity search",
+    "semantic search",
+    "ai",
+    "machine learning",
+    "nearest neighbor",
+    "index"
+  ],
+  "description": "Query and upsert vectors in a Pinecone managed vector database for semantic search and AI-powered retrieval.",
+  "category": "vector-db",
+  "logo": "cube",
+  "logo_color": "#1B2B4B",
+  "form": {
+    "form_id": "pinecone-connector",
+    "title": "Connect Pinecone",
+    "subtitle": "Provide your API key, environment, and index name to connect Anton to your Pinecone vector database.",
+    "logo": "cube",
+    "logo_color": "#1B2B4B",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Pinecone API key along with your environment and index name. The fastest way to get connected \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect with a Pinecone API Key\n\n### Get your API key\n\n1. Log in to [Pinecone Console](https://app.pinecone.io).\n2. In the left sidebar, click **API Keys**.\n3. Click **Create API Key**, give it a name like `Anton`, and click **Create**.\n4. Copy the key \u2014 it is shown once. Store it somewhere safe.\n\n### Find your environment\n\n1. In the Pinecone Console, look at the top-right corner or open **Indexes**.\n2. Each index shows its **Environment** (e.g. `us-west1-gcp`, `us-east1-aws`, `eu-west1-gcp`). Copy it exactly \u2014 it must match.\n\n### Find your index name\n\n1. Open **Indexes** in the left sidebar.\n2. Copy the exact name of the index Anton should read from and write to.\n\n### Notes\n\n- API keys are scoped to your Pinecone project. If you have multiple projects, make sure the key, environment, and index all belong to the same project.\n- If you rotate or delete the key in the Pinecone Console, return here and update it.\n- Pinecone's newer Serverless indexes (introduced in 2024) don't use a regional environment string \u2014 leave the environment field as `us-east-1` or the region shown in the Console for your serverless index.\n",
+        "help_url": "https://docs.pinecone.io/docs/quickstart",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Found in Pinecone Console \u2192 API Keys. Shown only once at creation \u2014 copy it before closing the dialog."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "text",
+            "required": true,
+            "placeholder": "us-west1-gcp",
+            "description": "The cloud region your index is hosted in, e.g. us-west1-gcp or us-east1-aws. Visible on the Indexes page next to each index name."
+          },
+          {
+            "name": "index_name",
+            "label": "Index Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-index",
+            "description": "The exact name of the Pinecone index Anton should connect to."
+          },
+          {
+            "name": "namespace",
+            "label": "Namespace",
+            "type": "text",
+            "required": false,
+            "placeholder": "(optional)",
+            "description": "Optional namespace within the index to scope reads and writes. Leave blank to use the default namespace."
+          }
+        ]
+      }
+    ]
+  }
+}

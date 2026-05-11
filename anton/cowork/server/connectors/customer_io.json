@@ -1,0 +1,125 @@
+{
+  "id": "customer_io",
+  "label": "Customer.io",
+  "aliases": [
+    "customerio",
+    "customer io",
+    "cio"
+  ],
+  "keywords": [
+    "lifecycle",
+    "messaging",
+    "email",
+    "push",
+    "sms",
+    "automation",
+    "marketing",
+    "campaigns",
+    "events",
+    "tracking"
+  ],
+  "description": "Send lifecycle messages and track customer events via Customer.io's Track and App APIs.",
+  "category": "marketing",
+  "logo": "mail",
+  "logo_color": "#3D4EAC",
+  "form": {
+    "form_id": "customer_io-connector",
+    "title": "Connect Customer.io",
+    "subtitle": "Paste your Track and App API credentials to send messages and track events.",
+    "logo": "mail",
+    "logo_color": "#3D4EAC",
+    "methods": [
+      {
+        "id": "track-api-key",
+        "label": "Track API Key",
+        "description": "Paste your Track Site ID and Track API Key from your Customer.io workspace. Quickest way to start sending events and identifying customers.",
+        "recommended": true,
+        "how_to": "## Connect with Track API Key\n\nThe Track API is the primary way to identify users and send events to Customer.io.\n\n### Steps\n\n1. Log in to [Customer.io](https://fly.customer.io) and open your workspace.\n2. Go to **Settings \u2192 API Credentials** (or **Account Settings \u2192 Track API**).\n3. Copy your **Site ID** and **Track API Key** from the \"Track API\" section.\n4. Paste both values into the fields below.\n5. Select your data **Region** \u2014 choose **EU** if your workspace is in the EU data center, otherwise leave it as **US**.\n\n### Notes\n\n- Your Site ID and Track API Key are workspace-specific. If you have multiple workspaces, make sure you're copying from the right one.\n- The Track API Key is shown in plain text in the dashboard \u2014 regenerate it from the same page if you suspect exposure.\n- If you also want to manage campaigns, segments, or send transactional messages programmatically, add an **App API Key** in the optional field below.\n",
+        "help_url": "https://customer.io/docs/api/track/",
+        "fields": [
+          {
+            "name": "site_id",
+            "label": "Site ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your_site_id",
+            "description": "Found in Customer.io under Settings \u2192 API Credentials \u2192 Track API."
+          },
+          {
+            "name": "track_api_key",
+            "label": "Track API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_track_api_key",
+            "description": "Paired with your Site ID. Found in the same Track API section of your credentials page."
+          },
+          {
+            "name": "region",
+            "label": "Data Center Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select the region where your Customer.io workspace data is hosted.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (track.customer.io)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (track-eu.customer.io)"
+              }
+            ]
+          },
+          {
+            "name": "app_api_key",
+            "label": "App API Key (optional)",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "your_app_api_key",
+            "description": "Optional. Enables access to the App API for managing campaigns, segments, and sending transactional messages. Found under Settings \u2192 API Credentials \u2192 App API."
+          }
+        ]
+      },
+      {
+        "id": "app-api-key",
+        "label": "App API Key Only",
+        "description": "Use a Customer.io App API Key for managing campaigns, segments, and transactional messages without Track event ingestion.",
+        "recommended": false,
+        "how_to": "## Connect with App API Key\n\nUse this method if you only need access to Customer.io's App API \u2014 for example, to trigger broadcasts, manage segments, or send transactional emails without piping raw tracking events.\n\n### Steps\n\n1. Log in to [Customer.io](https://fly.customer.io) and open your workspace.\n2. Go to **Settings \u2192 API Credentials**.\n3. Under the **App API** section, click **Create App API Key** if you don't have one yet.\n4. Copy the generated key \u2014 it may only be shown once, so save it somewhere safe.\n5. Paste it into the **App API Key** field below.\n6. Select your data **Region** \u2014 choose **EU** if your workspace is in the EU data center.\n\n### Notes\n\n- The App API Key does not allow you to track events or identify customers. Use the **Track API Key** method if you need that capability.\n- You can scope App API Keys to specific permissions in the Customer.io dashboard \u2014 grant only what Anton needs.\n- Regenerate the key from the same credentials page if it is ever compromised.\n",
+        "help_url": "https://customer.io/docs/api/app/",
+        "fields": [
+          {
+            "name": "app_api_key",
+            "label": "App API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_app_api_key",
+            "description": "Found in Customer.io under Settings \u2192 API Credentials \u2192 App API. May only be shown once \u2014 copy it immediately."
+          },
+          {
+            "name": "region",
+            "label": "Data Center Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select the region where your Customer.io workspace data is hosted.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (api.customer.io)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (api-eu.customer.io)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

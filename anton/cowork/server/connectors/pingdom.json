@@ -1,0 +1,61 @@
+{
+  "id": "pingdom",
+  "label": "Pingdom",
+  "aliases": [
+    "pingdom uptime",
+    "solarwinds pingdom",
+    "pingdom monitoring"
+  ],
+  "keywords": [
+    "uptime",
+    "monitoring",
+    "synthetic",
+    "alerts",
+    "solarwinds",
+    "ping",
+    "availability",
+    "observability",
+    "status",
+    "checks"
+  ],
+  "description": "Connect to Pingdom to access uptime and synthetic monitoring data, alerts, and check results.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#F7941D",
+  "form": {
+    "form_id": "pingdom-connector",
+    "title": "Connect Pingdom",
+    "subtitle": "Paste your Pingdom API token to give Anton access to your uptime and synthetic monitoring data.",
+    "logo": "sparkle",
+    "logo_color": "#F7941D",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste a Pingdom API token generated from Settings \u2192 Pingdom API. The simplest and most direct way to connect \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Pingdom API Token\n\n1. Log in to your Pingdom account at [my.pingdom.com](https://my.pingdom.com).\n2. Click your account name in the top-right corner, then go to **Settings**.\n3. Select **Pingdom API** from the left sidebar.\n4. Click **Generate API Token**.\n5. Give the token a descriptive name like `Anton`.\n6. Choose the appropriate access level \u2014 **Read** is sufficient for pulling monitoring data; select **Read-Write** if you want Anton to manage checks.\n7. Click **Create Token**. Copy the token immediately \u2014 it is only shown once.\n8. Paste the token into the **API Token** field below.\n\n## Notes\n\n- Tokens are scoped to the Pingdom account that generated them. Multi-account setups require one connector per account.\n- If you lose the token, delete it in Settings \u2192 Pingdom API and generate a new one.\n- The Pingdom API base URL is `https://api.pingdom.com/api/3.1`. Tokens are passed via the `Authorization: Bearer` header.",
+        "help_url": "https://docs.pingdom.com/api/#section/Authentication",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Pingdom \u2192 Settings \u2192 Pingdom API. Shown only once at creation \u2014 store it safely."
+          },
+          {
+            "name": "account_email",
+            "label": "Account Email (multi-account only)",
+            "type": "text",
+            "required": false,
+            "placeholder": "user@yourcompany.com",
+            "description": "Only required if your token has access to multiple Pingdom accounts and you want to target a specific one. Leave blank for single-account setups."
+          }
+        ]
+      }
+    ]
+  }
+}

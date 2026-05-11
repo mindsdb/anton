@@ -29,13 +29,22 @@ dev = [
 clipboard = [
     "Pillow>=12.2.0",
 ]
+cowork-server = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+]
 
 [project.scripts]
 anton = "anton.cli:app"
+anton-cowork-server = "anton.cowork.server.main:main"
 
 [tool.hatch.version]
 source = "regex"
 path = "anton/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["anton"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

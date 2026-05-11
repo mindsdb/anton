@@ -1,0 +1,66 @@
+{
+  "id": "polygon_io",
+  "label": "Polygon.io",
+  "aliases": [
+    "polygon",
+    "polygon io",
+    "polygon.io",
+    "polygonio"
+  ],
+  "keywords": [
+    "stocks",
+    "options",
+    "forex",
+    "crypto",
+    "market data",
+    "equities",
+    "finance",
+    "trading",
+    "ticker",
+    "quotes",
+    "historical",
+    "real-time",
+    "financial data"
+  ],
+  "description": "Access real-time and historical market data for stocks, options, forex, and crypto via Polygon.io's REST and WebSocket APIs.",
+  "category": "public-data",
+  "logo": "sparkle",
+  "logo_color": "#6C47FF",
+  "form": {
+    "form_id": "polygon_io-connector",
+    "title": "Connect Polygon.io",
+    "subtitle": "Paste your Polygon.io API key to start pulling market data for stocks, options, forex, and crypto.",
+    "logo": "sparkle",
+    "logo_color": "#6C47FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Polygon.io API key. Found in your Polygon.io Dashboard under API Keys \u2014 takes about 30 seconds to set up.",
+        "recommended": true,
+        "how_to": "## Connect with a Polygon.io API Key\n\n### Steps\n\n1. Sign in (or sign up) at [polygon.io](https://polygon.io).\n2. Click your avatar or account name in the top-right corner to open the **Dashboard**.\n3. Navigate to **Dashboard \u2192 API Keys** (direct link: [app.polygon.io/dashboard/api-keys](https://app.polygon.io/dashboard/api-keys)).\n4. Click **Create API Key** if you don't already have one, give it a name like `Anton`, and confirm.\n5. Copy the generated key \u2014 it starts with a string of random characters.\n6. Paste the key into the **API Key** field below and click **Connect**.\n\n### Notes\n\n- Free tier keys are rate-limited and restricted to end-of-day data. Upgrade to a paid plan for real-time data and higher rate limits.\n- Your key is stored locally in Anton and sent only to Polygon.io's API endpoints (`api.polygon.io`).\n- If you suspect your key is compromised, regenerate it in the Dashboard \u2014 the old key stops working immediately. Paste the new one here to reconnect.\n- Polygon.io's full API reference: [polygon.io/docs](https://polygon.io/docs).\n",
+        "help_url": "https://polygon.io/dashboard/api-keys",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "YOUR_POLYGON_API_KEY",
+            "description": "Found in your Polygon.io Dashboard \u2192 API Keys. Stored locally and sent only to api.polygon.io."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.polygon.io",
+            "default": "https://api.polygon.io",
+            "description": "Override only if you're using a proxy or a private deployment. Leave blank to use the default Polygon.io endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

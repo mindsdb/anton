@@ -1,0 +1,118 @@
+{
+  "id": "appdynamics",
+  "label": "AppDynamics",
+  "aliases": [
+    "app dynamics",
+    "appdyn",
+    "cisco appdynamics",
+    "cisco apm"
+  ],
+  "keywords": [
+    "apm",
+    "observability",
+    "monitoring",
+    "performance",
+    "cisco",
+    "application",
+    "metrics",
+    "tracing",
+    "infrastructure"
+  ],
+  "description": "Connect to AppDynamics to query application performance metrics, events, and health rules from your Cisco APM controller.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#00BEF2",
+  "form": {
+    "form_id": "appdynamics-connector",
+    "title": "Connect AppDynamics",
+    "subtitle": "Paste your controller URL and API client credentials to start pulling APM data into Anton.",
+    "logo": "sparkle",
+    "logo_color": "#00BEF2",
+    "methods": [
+      {
+        "id": "api-client",
+        "label": "API Client credentials",
+        "description": "Paste your controller URL, API client name, and API client secret from AppDynamics Settings \u2192 API Clients. The simplest and most secure path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect via AppDynamics API Client\n\nAppDynamics supports machine-to-machine authentication through API Clients, which issue short-lived OAuth2 access tokens internally. You just paste the credentials \u2014 Anton handles the token exchange.\n\n### Steps\n\n1. Log in to your AppDynamics controller (e.g. `https://yourcompany.saas.appdynamics.com`).\n2. Click the **gear icon (\u2699)** in the top-right corner \u2192 **Administration**.\n3. In the left sidebar go to **API Clients**.\n4. Click **Create** (or pick an existing client you own).\n5. Give it a name like `anton-integration` and add the **Default Account** role or a custom role with at least **Account Owner** or the read permissions you need.\n6. Under **Roles**, assign `Account Owner` or at minimum the `View Business Transactions`, `View Health Rules`, and `View Metrics` permissions.\n7. Click **Generate Secret** \u2014 copy the secret immediately (it is shown only once).\n8. Note the **Client Name** shown in the list.\n9. Paste the **Controller URL**, **Client Name**, and **Client Secret** into the fields below.\n\n### Notes\n\n- The client secret is shown only once at generation time. If you lose it, generate a new one from the same API Clients screen.\n- The controller URL should include the protocol and no trailing slash, e.g. `https://yourcompany.saas.appdynamics.com`.\n- On-premise controllers use the same path \u2014 just substitute your internal hostname.\n- Anton uses the client credentials grant to obtain a bearer token scoped to your account.",
+        "help_url": "https://docs.appdynamics.com/appd/23.x/latest/en/extend-appdynamics/appdynamics-apis/api-clients",
+        "fields": [
+          {
+            "name": "controller_url",
+            "label": "Controller URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://yourcompany.saas.appdynamics.com",
+            "description": "The base URL of your AppDynamics controller. No trailing slash. For SaaS controllers this looks like https://yourcompany.saas.appdynamics.com."
+          },
+          {
+            "name": "account_name",
+            "label": "Account Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourcompany",
+            "description": "Your AppDynamics account name. For SaaS this is typically the subdomain prefix (e.g. 'yourcompany'). Found in Administration \u2192 License \u2192 Account."
+          },
+          {
+            "name": "api_client_name",
+            "label": "API Client Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton-integration",
+            "description": "The Client Name shown in Settings \u2192 Administration \u2192 API Clients."
+          },
+          {
+            "name": "api_client_secret",
+            "label": "API Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The secret generated when you created or last rotated the API client. Shown only once \u2014 generate a new one from the API Clients screen if lost."
+          }
+        ]
+      },
+      {
+        "id": "basic-auth",
+        "label": "Username & Password (Basic Auth)",
+        "description": "Authenticate with a local AppDynamics controller username and password. Suitable for on-premise controllers when API Clients are not enabled.",
+        "recommended": false,
+        "how_to": "## Connect via Basic Authentication\n\nUse this method only if your on-premise controller does not have API Clients enabled, or you need to use an existing local user account.\n\n### Steps\n\n1. Log in to your AppDynamics controller.\n2. Confirm the user account has at least **View** permissions on the applications and metrics you want Anton to access.\n3. Note the **Account Name** \u2014 for on-premise this is usually `customer1` unless changed during setup (Administration \u2192 License \u2192 Account).\n4. Enter the controller URL (e.g. `https://your-controller:8090`), account name, username, and password in the fields below.\n\n### Notes\n\n- Basic auth transmits credentials on every API call (over HTTPS). API Client credentials (the other method) are preferred because they use short-lived tokens.\n- If your controller enforces SSO or SAML, basic auth for local users may be disabled \u2014 use API Clients instead.\n- On SaaS controllers, username format is typically `user@account-name`.",
+        "help_url": "https://docs.appdynamics.com/appd/23.x/latest/en/extend-appdynamics/appdynamics-apis/api-authentication",
+        "fields": [
+          {
+            "name": "controller_url",
+            "label": "Controller URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-controller:8090",
+            "description": "The base URL of your AppDynamics controller including port if non-standard. No trailing slash."
+          },
+          {
+            "name": "account_name",
+            "label": "Account Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "customer1",
+            "description": "Your AppDynamics account name. For on-premise this is typically 'customer1'. Found in Administration \u2192 License \u2192 Account."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "admin",
+            "description": "Local AppDynamics user with at least View permissions on the target applications."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the AppDynamics local user account."
+          }
+        ]
+      }
+    ]
+  }
+}

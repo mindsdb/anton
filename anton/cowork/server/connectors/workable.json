@@ -1,0 +1,96 @@
+{
+  "id": "workable",
+  "label": "Workable",
+  "aliases": [
+    "workable ats",
+    "workable hiring",
+    "workable recruitment"
+  ],
+  "keywords": [
+    "ats",
+    "applicant tracking",
+    "hiring",
+    "recruitment",
+    "hr",
+    "jobs",
+    "candidates",
+    "talent"
+  ],
+  "description": "Connect to Workable to read jobs, candidates, and pipeline data from your applicant tracking system.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#2A9D8F",
+  "form": {
+    "form_id": "workable-connector",
+    "title": "Connect Workable",
+    "subtitle": "Paste your Workable API token and subdomain to give Anton access to your hiring data.",
+    "logo": "check",
+    "logo_color": "#2A9D8F",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste an access token from Workable's Settings \u2192 Integrations \u2192 Access Tokens along with your company subdomain. Quickest setup, no OAuth client required.",
+        "recommended": true,
+        "how_to": "## Generate a Workable API Access Token\n\n### Steps\n\n1. Log in to your Workable account at `yourcompany.workable.com`.\n2. Click your avatar (top-right) \u2192 **Settings**.\n3. In the left sidebar, go to **Integrations \u2192 Access Tokens**.\n4. Click **Generate new token**.\n5. Give the token a descriptive name like `Anton Integration` and set the appropriate scopes (read access to jobs, candidates, and pipelines is usually sufficient).\n6. Click **Generate**. Copy the token immediately \u2014 Workable will not show it again.\n7. Paste the token into the **API Token** field below.\n8. Enter your Workable **subdomain** (the part before `.workable.com`, e.g. `yourcompany`).\n\n### Notes\n\n- The token is shown only once. If you lose it, revoke it from the same Access Tokens page and generate a new one.\n- Tokens are scoped to your Workable account and carry the permissions of the user who created them.\n- If you do not see the Access Tokens section, check that your Workable plan supports API access or that you have admin rights.\n",
+        "help_url": "https://workable.readme.io/docs/generate-an-access-token",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your Workable access token",
+            "description": "Found under Settings \u2192 Integrations \u2192 Access Tokens. Shown only once when generated."
+          },
+          {
+            "name": "subdomain",
+            "label": "Workable Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourcompany",
+            "description": "The part of your Workable URL before .workable.com \u2014 e.g. if your URL is acme.workable.com, enter acme."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Authorize via Workable's OAuth 2.0 flow using your own OAuth client credentials. Best for multi-account or partner integrations where token-level access control is needed.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://www.workable.com/oauth/authorize",
+          "token_url": "https://www.workable.com/oauth/token",
+          "scopes": [
+            "r_jobs",
+            "r_candidates",
+            "r_stages"
+          ]
+        },
+        "how_to": "## Connect Workable via OAuth 2.0\n\nThis method uses Workable's OAuth 2.0 flow. You must register an OAuth application in the Workable Partner Dashboard to obtain a Client ID and Client Secret.\n\n### Steps\n\n1. Go to the [Workable Developer Portal](https://developers.workable.com/) and sign in.\n2. Navigate to **My Apps \u2192 Create new app**.\n3. Fill in your app name, description, and set the redirect URI to `http://127.0.0.1` (Anton uses a local redirect).\n4. After saving, copy the **Client ID** and **Client Secret** from the app detail page.\n5. Paste them into the fields below and click **Submit** to launch the browser consent flow.\n6. Log in with your Workable account and approve the requested scopes.\n\n### Notes\n\n- The Client Secret is sensitive \u2014 treat it like a password.\n- If the requested scopes exceed what your Workable plan allows, authorization will fail with a scope error.\n- Refresh tokens are issued automatically; Anton will renew access without re-prompting you.\n",
+        "help_url": "https://workable.readme.io/docs/oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-workable-oauth-client-id",
+            "description": "From the Workable Developer Portal under your registered app's credentials."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-workable-oauth-client-secret",
+            "description": "Paired with the Client ID. Keep this value private."
+          }
+        ]
+      }
+    ]
+  }
+}

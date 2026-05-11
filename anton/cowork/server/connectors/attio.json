@@ -1,0 +1,87 @@
+{
+  "id": "attio",
+  "label": "Attio",
+  "aliases": [
+    "attio crm",
+    "attio.com"
+  ],
+  "keywords": [
+    "crm",
+    "contacts",
+    "companies",
+    "deals",
+    "records",
+    "custom objects",
+    "flexible crm",
+    "workspace"
+  ],
+  "description": "Modern, flexible CRM with custom objects \u2014 connect Anton via an access token from your Attio developer settings.",
+  "category": "crm",
+  "logo": "link",
+  "logo_color": "#1A1A2E",
+  "form": {
+    "form_id": "attio-connector",
+    "title": "Connect Attio",
+    "subtitle": "Paste your Attio access token to give Anton read/write access to your workspace.",
+    "logo": "link",
+    "logo_color": "#1A1A2E",
+    "methods": [
+      {
+        "id": "access-token",
+        "label": "Access Token",
+        "description": "Paste a personal access token from Attio's developer settings. Quickest path \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Generate an Attio Access Token\n\n1. Open [Attio](https://app.attio.com) and log in to your workspace.\n2. Click your workspace name or avatar in the bottom-left corner to open workspace settings.\n3. Navigate to **Settings \u2192 Apps & Integrations \u2192 Developer**.\n4. Click **Create token** (or **New token** / **+** depending on your plan).\n5. Give the token a descriptive name like `Anton`.\n6. Select the scopes Anton needs \u2014 at minimum **Read** access to records, lists, and notes; add **Write** if you want Anton to create or update records.\n7. Click **Create** and copy the token immediately \u2014 it is shown only once.\n8. Paste the token into the **Access Token** field below.\n\n## Notes\n\n- Tokens are workspace-scoped; the permissions you chose at creation time are fixed. Generate a new token to change scopes.\n- If you lose the token, revoke it in the same **Developer** panel and create a fresh one.\n- Each token is tied to the workspace you were viewing when you created it.",
+        "help_url": "https://developers.attio.com/docs/authentication",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "eyJhbGciOiJIUzI1NiIs...",
+            "description": "Personal access token from Attio Settings \u2192 Apps & Integrations \u2192 Developer. Shown only once at creation."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own Client)",
+        "description": "Authorize via Attio's OAuth flow using your own OAuth app credentials from the Attio developer portal. Better for multi-workspace deployments.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.attio.com/authorize",
+          "token_url": "https://app.attio.com/oauth/token",
+          "scopes": [
+            "record_permission:read",
+            "record_permission:read-write",
+            "object_configuration:read",
+            "user_management:read"
+          ]
+        },
+        "how_to": "## Set Up Attio OAuth 2.0\n\n1. Open [Attio](https://app.attio.com) and go to **Settings \u2192 Apps & Integrations \u2192 Developer**.\n2. Click **Create OAuth App** and fill in a name (e.g. `Anton`) and a redirect URI of `http://127.0.0.1` (Anton uses a local redirect).\n3. After saving, copy the **Client ID** and **Client Secret** from the app detail page.\n4. Paste both values into the fields below and click **Submit**.\n5. A browser window will open to Attio's consent screen \u2014 log in and approve the requested scopes.\n6. Anton stores the resulting refresh token locally.\n\n## Notes\n\n- OAuth apps are created per-workspace in the same **Developer** panel as personal tokens.\n- If you need to revoke access, delete the OAuth app or revoke the token from the developer settings panel.\n- Consult the [Attio OAuth docs](https://developers.attio.com/docs/oauth2) for the full list of available scopes.",
+        "help_url": "https://developers.attio.com/docs/oauth2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-attio-client-id",
+            "description": "From your OAuth app in Attio Settings \u2192 Apps & Integrations \u2192 Developer."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID; copied from the same OAuth app detail page."
+          }
+        ]
+      }
+    ]
+  }
+}

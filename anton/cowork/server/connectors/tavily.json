@@ -1,0 +1,52 @@
+{
+  "id": "tavily",
+  "label": "Tavily",
+  "aliases": [
+    "tavily search",
+    "tavily api",
+    "tavily ai"
+  ],
+  "keywords": [
+    "search",
+    "web search",
+    "ai search",
+    "llm",
+    "agent",
+    "research",
+    "retrieval",
+    "rag",
+    "internet"
+  ],
+  "description": "AI-optimized web search API that returns pre-formatted results for LLM and agent consumption.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#0EA5E9",
+  "form": {
+    "form_id": "tavily-connector",
+    "title": "Connect Tavily",
+    "subtitle": "Paste your Tavily API key to give Anton real-time web search tuned for AI agents.",
+    "logo": "search",
+    "logo_color": "#0EA5E9",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Tavily API key (tvly-\u2026) from your dashboard. Takes 30 seconds \u2014 no OAuth flow, no scopes to configure.",
+        "recommended": true,
+        "how_to": "## Get your Tavily API key\n\n1. Open [app.tavily.com](https://app.tavily.com) and sign in (or create a free account).\n2. Click **API Keys** in the left sidebar.\n3. Copy an existing key that starts with `tvly-`, or click **Generate API Key** to create a new one.\n4. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Free-tier accounts include a limited number of searches per month; upgrade in the Tavily dashboard for higher quotas.\n- Treat the key like a password \u2014 anyone with it can consume your search quota.\n- If you suspect a key is compromised, return to **API Keys** in the dashboard, revoke the old key, and generate a new one.\n- See [Tavily API docs](https://docs.tavily.com/docs/tavily-api/introduction) for full rate-limit and pricing details.",
+        "help_url": "https://docs.tavily.com/docs/tavily-api/introduction",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at app.tavily.com \u2192 API Keys. Starts with tvly-."
+          }
+        ]
+      }
+    ]
+  }
+}

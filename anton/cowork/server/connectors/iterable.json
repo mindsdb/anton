@@ -1,0 +1,71 @@
+{
+  "id": "iterable",
+  "label": "Iterable",
+  "aliases": [
+    "iterable.com",
+    "iterable marketing",
+    "iterable messaging"
+  ],
+  "keywords": [
+    "email",
+    "sms",
+    "push",
+    "in-app",
+    "messaging",
+    "marketing",
+    "automation",
+    "cross-channel",
+    "campaigns",
+    "segmentation"
+  ],
+  "description": "Connect to Iterable to manage cross-channel messaging campaigns, users, and events via the server-side API.",
+  "category": "marketing",
+  "logo": "mail",
+  "logo_color": "#5850EC",
+  "form": {
+    "form_id": "iterable-connector",
+    "title": "Connect Iterable",
+    "subtitle": "Paste your Iterable server-side API key to give Anton access to your messaging campaigns and user data.",
+    "logo": "mail",
+    "logo_color": "#5850EC",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a server-side API key from Iterable's Integrations \u2192 API Keys panel. Quickest path \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Generate an Iterable Server-Side API Key\n\n1. Log in to your Iterable account at [app.iterable.com](https://app.iterable.com).\n2. Navigate to **Integrations \u2192 API Keys** in the left sidebar.\n3. Click **Create New API Key**.\n4. Choose **Server-side** as the key type (do not use a Mobile or Web key \u2014 those have restricted scopes).\n5. Give it a descriptive name like `Anton Integration` and click **Create**.\n6. Copy the generated key immediately \u2014 it is shown in full only at creation time. If you lose it, you'll need to create a new one.\n7. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Server-side keys have broad access (users, events, campaigns, lists). Create a dedicated key for Anton so you can revoke it independently if needed.\n- Keys are project-scoped \u2014 make sure you're in the correct Iterable project before generating.\n- If your account uses multiple projects, each project has its own set of API keys and a separate base URL.\n- To revoke access later, return to **Integrations \u2192 API Keys**, find the key, and click **Delete**.",
+        "help_url": "https://support.iterable.com/hc/en-us/articles/360043464871-API-Keys",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your Iterable server-side API key",
+            "description": "Found in Iterable \u2192 Integrations \u2192 API Keys. Use a Server-side key type."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "select",
+            "required": true,
+            "default": "https://api.iterable.com",
+            "description": "Select the regional API endpoint that matches your Iterable account. Most accounts use US.",
+            "options": [
+              {
+                "value": "https://api.iterable.com",
+                "label": "US (api.iterable.com)"
+              },
+              {
+                "value": "https://api.eu.iterable.com",
+                "label": "EU (api.eu.iterable.com)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

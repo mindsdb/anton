@@ -1,0 +1,101 @@
+{
+  "id": "mistral",
+  "label": "Mistral",
+  "aliases": [
+    "mistral ai",
+    "mistralai",
+    "mistral.ai",
+    "la plateforme"
+  ],
+  "keywords": [
+    "llm",
+    "ai",
+    "language model",
+    "inference",
+    "mistral",
+    "mixtral",
+    "chat",
+    "completion",
+    "embeddings",
+    "generative"
+  ],
+  "description": "Connect to Mistral's hosted language models via the La Plateforme API using an API key.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#FF7000",
+  "form": {
+    "form_id": "mistral-connector",
+    "title": "Connect Mistral",
+    "subtitle": "Paste your Mistral API key to start querying hosted models like Mistral Large, Mixtral, and Codestral.",
+    "logo": "brain",
+    "logo_color": "#FF7000",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from console.mistral.ai. Takes under a minute \u2014 no OAuth flow, no extra setup required.",
+        "recommended": true,
+        "how_to": "## Get a Mistral API key\n\n1. Go to [console.mistral.ai](https://console.mistral.ai) and sign in (or create a free account).\n2. Click **API Keys** in the left sidebar.\n3. Click **Create new key**, give it a name like `Anton`, and click **Create**.\n4. Copy the key immediately \u2014 it is shown only once. If you miss it, delete and create a new one.\n5. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Keys are scoped to your workspace. If you belong to multiple workspaces, make sure you're in the right one before generating the key.\n- You can restrict a key's permissions (read-only vs. full access) from the same panel.\n- To revoke access later, return to **API Keys**, find the key, and click **Delete**.\n- Free-tier accounts have rate limits; upgrade your plan in **Billing** if you hit quota errors.",
+        "help_url": "https://docs.mistral.ai/getting-started/authentication/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Found at console.mistral.ai \u2192 API Keys. The key is shown only once when created."
+          },
+          {
+            "name": "model",
+            "label": "Default Model",
+            "type": "select",
+            "required": false,
+            "default": "mistral-large-latest",
+            "description": "The model Anton uses by default. You can override this per-request.",
+            "options": [
+              {
+                "value": "mistral-large-latest",
+                "label": "Mistral Large (latest)"
+              },
+              {
+                "value": "mistral-medium-latest",
+                "label": "Mistral Medium (latest)"
+              },
+              {
+                "value": "mistral-small-latest",
+                "label": "Mistral Small (latest)"
+              },
+              {
+                "value": "mixtral-8x7b-instruct",
+                "label": "Mixtral 8x7B Instruct"
+              },
+              {
+                "value": "mixtral-8x22b-instruct",
+                "label": "Mixtral 8x22B Instruct"
+              },
+              {
+                "value": "codestral-latest",
+                "label": "Codestral (latest)"
+              },
+              {
+                "value": "mistral-embed",
+                "label": "Mistral Embed"
+              }
+            ]
+          },
+          {
+            "name": "api_endpoint",
+            "label": "API Endpoint",
+            "type": "url",
+            "required": false,
+            "default": "https://api.mistral.ai/v1",
+            "placeholder": "https://api.mistral.ai/v1",
+            "description": "Override only if you use a self-hosted or regional Mistral endpoint. Leave as-is for La Plateforme."
+          }
+        ]
+      }
+    ]
+  }
+}

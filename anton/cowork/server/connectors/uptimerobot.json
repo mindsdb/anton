@@ -1,0 +1,80 @@
+{
+  "id": "uptimerobot",
+  "label": "UptimeRobot",
+  "aliases": [
+    "uptime robot",
+    "uptime-robot",
+    "uptimerobot api",
+    "uptime monitor"
+  ],
+  "keywords": [
+    "uptime",
+    "monitoring",
+    "availability",
+    "downtime",
+    "alerts",
+    "status",
+    "ping",
+    "observability",
+    "website monitoring"
+  ],
+  "description": "Monitor website and service uptime, check status, and retrieve alert data from UptimeRobot.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#3BD671",
+  "form": {
+    "form_id": "uptimerobot-connector",
+    "title": "Connect UptimeRobot",
+    "subtitle": "Paste your UptimeRobot API key to start pulling monitor status and uptime data.",
+    "logo": "sparkle",
+    "logo_color": "#3BD671",
+    "methods": [
+      {
+        "id": "main-api-key",
+        "label": "Main API Key",
+        "description": "Use your account-level main API key from UptimeRobot's API Settings. Grants read/write access to all monitors, alert contacts, and account data.",
+        "recommended": true,
+        "how_to": "## Find your Main API Key\n\nThe main API key gives Anton full access to your UptimeRobot account, including all monitors and alert contacts.\n\n### Steps\n\n1. Log in to [UptimeRobot](https://uptimerobot.com) and click your profile/avatar in the top-right corner.\n2. Select **My Settings** from the dropdown.\n3. Scroll down to the **API Settings** section.\n4. Under **Main API Key**, click **Show/Hide** to reveal the key, then copy it.\n5. Paste it into the **Main API Key** field below.\n\n### Notes\n\n- The main API key has both read and write permissions \u2014 keep it secret.\n- If you only need read access (e.g., for reporting or dashboards), use the **Read-Only API Key** method instead.\n- You can regenerate the key in the same panel if you suspect it has been compromised; doing so will invalidate the key stored in Anton.\n",
+        "help_url": "https://uptimerobot.com/api/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "Main API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "u1234567-xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in UptimeRobot \u2192 My Settings \u2192 API Settings \u2192 Main API Key."
+          }
+        ]
+      },
+      {
+        "id": "read-only-api-key",
+        "label": "Read-Only API Key",
+        "description": "Use a monitor-specific or account-level read-only API key. Safe for dashboards and reporting \u2014 cannot create or modify monitors.",
+        "recommended": false,
+        "how_to": "## Find your Read-Only API Key\n\nUptimeRobot provides a read-only API key that restricts access to GET-style operations \u2014 ideal when you only need to query monitor statuses and uptime ratios.\n\n### Account-level read-only key\n\n1. Log in to [UptimeRobot](https://uptimerobot.com) and click your profile/avatar.\n2. Select **My Settings**.\n3. Scroll to **API Settings**.\n4. Under **Read-Only API Key**, click **Show/Hide**, then copy the key.\n5. Paste it into the **Read-Only API Key** field below.\n\n### Monitor-specific read-only key\n\n1. From the dashboard, click the monitor you want to expose.\n2. Open its **Edit** panel.\n3. Scroll to the **Monitor-Specific Read-Only API Key** section and copy the key shown there.\n4. Paste it into the field below.\n\n### Notes\n\n- Read-only keys cannot create, update, or delete monitors or alert contacts.\n- Monitor-specific keys only return data for that one monitor.\n- Regenerating a key in the UptimeRobot UI will invalidate what Anton has stored \u2014 re-paste the new key to restore access.\n",
+        "help_url": "https://uptimerobot.com/api/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "Read-Only API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ur1234567-xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in My Settings \u2192 API Settings \u2192 Read-Only API Key, or inside an individual monitor's edit panel for a monitor-scoped key."
+          },
+          {
+            "name": "monitor_id",
+            "label": "Monitor ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "12345678",
+            "description": "If using a monitor-specific read-only key, enter the corresponding monitor ID here so Anton can scope requests correctly. Leave blank for account-level read-only keys."
+          }
+        ]
+      }
+    ]
+  }
+}

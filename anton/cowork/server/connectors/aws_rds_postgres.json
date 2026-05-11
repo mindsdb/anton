@@ -1,0 +1,161 @@
+{
+  "id": "aws_rds_postgres",
+  "label": "AWS RDS Postgres",
+  "aliases": [
+    "rds postgres",
+    "amazon rds postgresql",
+    "aws postgres",
+    "rds postgresql",
+    "amazon postgres"
+  ],
+  "keywords": [
+    "aws",
+    "rds",
+    "postgres",
+    "postgresql",
+    "database",
+    "amazon",
+    "cloud",
+    "sql",
+    "relational"
+  ],
+  "description": "Connect to an AWS RDS PostgreSQL instance using your RDS endpoint, credentials, and optional SSL.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#527FFF",
+  "form": {
+    "form_id": "aws_rds_postgres-connector",
+    "title": "Connect AWS RDS Postgres",
+    "subtitle": "Enter your RDS endpoint and database credentials to connect Anton to your PostgreSQL instance.",
+    "logo": "database",
+    "logo_color": "#527FFF",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Host + Credentials",
+        "description": "Paste your RDS endpoint, port, database name, and credentials. The simplest and most direct way to connect to an RDS PostgreSQL instance.",
+        "recommended": true,
+        "how_to": "## Connect via RDS Endpoint & Credentials\n\n### Find your RDS endpoint\n\n1. Open the [AWS Console](https://console.aws.amazon.com/) and sign in.\n2. Navigate to **Services \u2192 RDS** (or search for `RDS` in the top bar).\n3. In the left sidebar click **Databases**.\n4. Click the name of your PostgreSQL instance.\n5. On the instance detail page, scroll to the **Connectivity & security** tab.\n6. Copy the **Endpoint** (looks like `mydb.xxxxxxxxxx.us-east-1.rds.amazonaws.com`). The **Port** is shown just below \u2014 default is `5432`.\n\n### Security group / VPC access\n\n- Your RDS instance must be **publicly accessible** OR Anton must run inside the same VPC.\n- In the **Connectivity & security** tab, click the linked **VPC security group** and confirm there is an inbound rule allowing TCP on port `5432` from your IP (or `0.0.0.0/0` for unrestricted \u2014 not recommended for production).\n\n### SSL\n\n- AWS RDS enforces SSL by default on most instance classes. Enable the **Require SSL** toggle below to tell Anton to use `sslmode=require`.\n- Download the [AWS RDS root CA bundle](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) if you need certificate verification.\n\n### Notes\n\n- The master user is set at instance creation. If you've lost it, reset it via **RDS \u2192 Databases \u2192 Modify \u2192 Master password**.\n- For production, prefer a dedicated read-only database user with scoped permissions instead of the master user.\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToPostgreSQLInstance.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "RDS Endpoint",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb.xxxxxxxxxx.us-east-1.rds.amazonaws.com",
+            "description": "Found in AWS Console \u2192 RDS \u2192 Databases \u2192 [your instance] \u2192 Connectivity & security tab."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "Default PostgreSQL port is 5432. Change only if your instance uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "The name of the PostgreSQL database you want to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "description": "Database user \u2014 typically the master user or a dedicated app user with appropriate permissions."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user above. Stored encrypted locally."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable SSL (sslmode=require). Recommended \u2014 AWS RDS enforces SSL on most instance types by default."
+          }
+        ]
+      },
+      {
+        "id": "iam-auth",
+        "label": "IAM Database Authentication",
+        "description": "Use AWS IAM credentials to generate a short-lived auth token instead of a static password. Requires IAM DB authentication enabled on the RDS instance.",
+        "recommended": false,
+        "how_to": "## IAM Database Authentication\n\nInstead of a static password, AWS generates a short-lived token (valid 15 minutes) signed with your IAM credentials.\n\n### Prerequisites\n\n1. In the AWS Console go to **RDS \u2192 Databases \u2192 [your instance] \u2192 Modify**.\n2. Under **Database options**, enable **IAM database authentication**. Apply immediately.\n3. In **IAM \u2192 Policies**, create a policy that allows `rds-db:connect` for your DB resource ARN:\n   - Resource ARN format: `arn:aws:rds-db:<region>:<account-id>:dbuser:<db-instance-resource-id>/<db-username>`\n4. Attach the policy to the IAM user or role Anton will use.\n5. In your PostgreSQL database, create the user and grant the `rds_iam` role:\n   - `CREATE USER myiamuser; GRANT rds_iam TO myiamuser;`\n\n### Finding your values\n\n- **Region**: visible in the AWS Console top-right corner (e.g. `us-east-1`).\n- **DB Resource ID**: on the **Configuration** tab of your RDS instance (e.g. `db-ABCDEFGHIJKLMNOP`).\n- **Access Key / Secret**: from **IAM \u2192 Users \u2192 [user] \u2192 Security credentials \u2192 Create access key**.\n\n### Notes\n\n- SSL is mandatory for IAM auth \u2014 the toggle is always on.\n- The access key is used only to sign a token request; the actual DB connection still uses the token.\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "RDS Endpoint",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb.xxxxxxxxxx.us-east-1.rds.amazonaws.com",
+            "description": "Found in AWS Console \u2192 RDS \u2192 Databases \u2192 [your instance] \u2192 Connectivity & security tab."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "Default PostgreSQL port is 5432."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "The name of the PostgreSQL database you want to connect to."
+          },
+          {
+            "name": "db_username",
+            "label": "Database Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "myiamuser",
+            "description": "The PostgreSQL user that has been granted the rds_iam role."
+          },
+          {
+            "name": "aws_region",
+            "label": "AWS Region",
+            "type": "text",
+            "required": true,
+            "placeholder": "us-east-1",
+            "description": "The AWS region where your RDS instance is running (e.g. us-east-1, eu-west-2)."
+          },
+          {
+            "name": "aws_access_key_id",
+            "label": "AWS Access Key ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "AKIAIOSFODNN7EXAMPLE",
+            "description": "IAM user access key ID with rds-db:connect permission. From IAM \u2192 Users \u2192 Security credentials."
+          },
+          {
+            "name": "aws_secret_access_key",
+            "label": "AWS Secret Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Secret paired with the Access Key ID above. Stored encrypted locally."
+          }
+        ]
+      }
+    ]
+  }
+}

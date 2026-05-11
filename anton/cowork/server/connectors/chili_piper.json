@@ -1,0 +1,97 @@
+{
+  "id": "chili_piper",
+  "label": "Chili Piper",
+  "aliases": [
+    "chilipiper",
+    "chili-piper",
+    "cp meetings",
+    "inbound routing"
+  ],
+  "keywords": [
+    "meeting",
+    "booking",
+    "scheduling",
+    "routing",
+    "inbound",
+    "calendar",
+    "demo",
+    "round robin",
+    "handoff"
+  ],
+  "description": "Route and book inbound meetings instantly using Chili Piper's smart scheduling and lead-routing engine.",
+  "category": "scheduling",
+  "logo": "schedule",
+  "logo_color": "#FF5733",
+  "form": {
+    "form_id": "chili_piper-connector",
+    "title": "Connect Chili Piper",
+    "subtitle": "Paste your Chili Piper API key to give Anton access to your meeting routing and booking data.",
+    "logo": "schedule",
+    "logo_color": "#FF5733",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from Chili Piper's Admin panel. The simplest and fastest way to connect \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Chili Piper API Key\n\nChili Piper issues API keys from the Admin portal. You'll need an admin account to generate one.\n\n### Steps\n\n1. Log in to your Chili Piper account at [app.chilipiper.com](https://app.chilipiper.com).\n2. Click your workspace name or avatar in the top-right corner to open the account menu.\n3. Navigate to **Admin \u2192 API**.\n4. If no key exists, click **Generate API Key** (or **Create New Key**).\n5. Copy the key \u2014 it may only be shown once, so store it somewhere safe.\n6. Paste it into the **API Key** field below.\n7. Enter your Chili Piper **workspace subdomain** (e.g. `acme` if your URL is `acme.chilipiper.com`).\n\n### Notes\n\n- Only workspace admins can view or generate API keys.\n- If you lose the key, regenerate it from the same Admin \u2192 API page; the old key will be invalidated.\n- Keep the key secret \u2014 it grants full API access to your workspace.\n",
+        "help_url": "https://support.chilipiper.com/hc/en-us/articles/360052463713-API-Key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "cp_live_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Chili Piper Admin \u2192 API. Shown once on generation \u2014 copy and store it securely."
+          },
+          {
+            "name": "workspace",
+            "label": "Workspace Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "acme",
+            "description": "Your Chili Piper subdomain \u2014 the part before .chilipiper.com in your workspace URL."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Authorize via OAuth using your own Chili Piper OAuth client credentials. More setup required but allows token-based access without a static API key.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.chilipiper.com/oauth/authorize",
+          "token_url": "https://app.chilipiper.com/oauth/token",
+          "scopes": [
+            "read",
+            "write"
+          ]
+        },
+        "how_to": "## Connect with OAuth 2.0 (Bring Your Own Client)\n\nThis method uses OAuth 2.0 to authenticate. You must create an OAuth application in Chili Piper's developer settings first.\n\n### Steps\n\n1. Log in to [app.chilipiper.com](https://app.chilipiper.com) as an admin.\n2. Go to **Admin \u2192 Integrations \u2192 Developer / OAuth Apps**.\n3. Click **Create OAuth App** and fill in a name (e.g. `Anton`) and a redirect URI of `http://127.0.0.1` (or the redirect Anton instructs you to use).\n4. After saving, copy the **Client ID** and **Client Secret** shown on the app detail page.\n5. Paste both values into the fields below and click **Submit**.\n6. A browser window will open to Chili Piper's consent screen \u2014 approve the requested permissions.\n\n### Notes\n\n- The client secret is shown only once. Store it securely before closing the page.\n- If you need to rotate credentials, create a new OAuth app and update both fields in Anton.\n- Consult [Chili Piper's developer docs](https://developer.chilipiper.com) for scope details.\n",
+        "help_url": "https://developer.chilipiper.com",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "cp_client_xxxxxxxxxxxxxxxx",
+            "description": "From your OAuth app in Chili Piper Admin \u2192 Developer / OAuth Apps."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "cp_secret_xxxxxxxxxxxxxxxx",
+            "description": "Paired with the client ID. Shown once when the OAuth app is created."
+          }
+        ]
+      }
+    ]
+  }
+}

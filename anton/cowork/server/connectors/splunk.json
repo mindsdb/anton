@@ -1,0 +1,121 @@
+{
+  "id": "splunk",
+  "label": "Splunk",
+  "aliases": [
+    "splunk enterprise",
+    "splunk cloud",
+    "splunk siem",
+    "splunk observability"
+  ],
+  "keywords": [
+    "logs",
+    "siem",
+    "security",
+    "analytics",
+    "observability",
+    "events",
+    "hec",
+    "http event collector",
+    "monitoring",
+    "search"
+  ],
+  "description": "Send and query log events and security analytics data from Splunk via HEC or the REST API.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#65A637",
+  "form": {
+    "form_id": "splunk-connector",
+    "title": "Connect Splunk",
+    "subtitle": "Ingest events or query Splunk data by connecting Anton to your Splunk instance.",
+    "logo": "sparkle",
+    "logo_color": "#65A637",
+    "methods": [
+      {
+        "id": "hec-token",
+        "label": "HTTP Event Collector (HEC) Token",
+        "description": "Paste your Splunk instance URL and an HEC token to send log events directly to Splunk. The simplest path for data ingestion \u2014 no username or password required.",
+        "recommended": true,
+        "how_to": "## Connect via HTTP Event Collector (HEC) Token\n\nHEC lets Anton push events to Splunk over HTTP using a token-based auth. No username or password is stored.\n\n### Steps\n\n1. Log in to your Splunk instance (Splunk Enterprise or Splunk Cloud).\n2. Navigate to **Settings \u2192 Data Inputs \u2192 HTTP Event Collector**.\n3. Click **New Token** in the top-right corner.\n4. Give the token a name like `Anton` and click through the wizard, selecting an appropriate source type and index.\n5. On the final screen, copy the **Token Value** shown (it looks like a UUID). This is shown once \u2014 save it.\n6. If HEC is not yet enabled, click **Global Settings** on the HEC page and toggle **All Tokens** to **Enabled**. Note the port (default `8088`).\n7. Paste your Splunk instance URL (e.g. `https://your-splunk-host:8088`) and the token into the fields below.\n\n### Notes\n\n- For Splunk Cloud, the HEC endpoint is typically `https://<stack>.splunkcloud.com:8088`.\n- Ensure your network/firewall allows outbound connections to port 8088.\n- If you lose the token, create a new one under **Settings \u2192 Data Inputs \u2192 HTTP Event Collector**.",
+        "help_url": "https://docs.splunk.com/Documentation/Splunk/latest/Data/UsetheHTTPEventCollector",
+        "fields": [
+          {
+            "name": "instance_url",
+            "label": "Splunk Instance URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-splunk-host:8088",
+            "description": "Base URL of your Splunk instance including the HEC port (default 8088). Example: https://splunk.company.com:8088"
+          },
+          {
+            "name": "hec_token",
+            "label": "HEC Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The token value generated from Settings \u2192 Data Inputs \u2192 HTTP Event Collector. Shown once at creation time."
+          },
+          {
+            "name": "index",
+            "label": "Default Index",
+            "type": "text",
+            "required": false,
+            "placeholder": "main",
+            "description": "Optional. Splunk index to send events to. Defaults to the index configured on the HEC token if left blank."
+          },
+          {
+            "name": "ssl_verify",
+            "label": "Verify SSL Certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Disable only if your Splunk instance uses a self-signed certificate. Strongly recommended to leave enabled in production."
+          }
+        ]
+      },
+      {
+        "id": "auth-token",
+        "label": "Splunk Auth Token (REST API)",
+        "description": "Use a Splunk authentication token from Settings \u2192 Tokens to query search jobs and other REST API endpoints. Best for reading and searching data from Splunk.",
+        "recommended": false,
+        "how_to": "## Connect via Splunk Auth Token (REST API)\n\nSplunk supports long-lived authentication tokens for programmatic REST API access. This method lets Anton run searches and retrieve results from your Splunk instance.\n\n### Steps\n\n1. Log in to Splunk Web.\n2. Go to **Settings \u2192 Users and Authentication \u2192 Tokens**.\n3. Click **New Token**.\n4. Set an **Audience** (e.g. `Anton`) and optionally an expiry date. A non-expiring token is simpler but review your security policy.\n5. Click **Create** and copy the token string immediately \u2014 it is only shown once.\n6. Note your Splunk REST API port (default `8089`) and paste the full instance URL (e.g. `https://your-splunk-host:8089`) and token below.\n\n### Notes\n\n- Token-based auth requires Splunk Enterprise 7.3+ or Splunk Cloud.\n- The REST API port is typically `8089`, separate from the HEC port `8088`.\n- If the **Tokens** menu is missing, token authentication may be disabled by your admin. Ask them to enable it under **Settings \u2192 Users and Authentication \u2192 Tokens \u2192 Token Settings**.\n- Tokens can be revoked at any time from the same **Tokens** page.",
+        "help_url": "https://docs.splunk.com/Documentation/Splunk/latest/Security/UseAuthTokens",
+        "fields": [
+          {
+            "name": "instance_url",
+            "label": "Splunk Instance URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-splunk-host:8089",
+            "description": "Base URL of your Splunk REST API endpoint including the management port (default 8089). Example: https://splunk.company.com:8089"
+          },
+          {
+            "name": "auth_token",
+            "label": "Auth Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "eyJra...",
+            "description": "The token string from Settings \u2192 Users and Authentication \u2192 Tokens. Shown only once at creation time."
+          },
+          {
+            "name": "default_app",
+            "label": "Default App Context",
+            "type": "text",
+            "required": false,
+            "placeholder": "search",
+            "description": "Optional. Splunk app context for search jobs (e.g. search, itsi). Defaults to 'search' if left blank."
+          },
+          {
+            "name": "ssl_verify",
+            "label": "Verify SSL Certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Disable only if your Splunk instance uses a self-signed certificate. Strongly recommended to leave enabled in production."
+          }
+        ]
+      }
+    ]
+  }
+}

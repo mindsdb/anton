@@ -1,0 +1,76 @@
+{
+  "id": "hubspot",
+  "label": "HubSpot",
+  "aliases": ["hub spot", "hs"],
+  "keywords": ["crm", "marketing", "sales", "contacts", "deals", "companies", "tickets", "automation"],
+  "description": "Read and write contacts, companies, deals, and tickets in your HubSpot portal.",
+  "category": "crm",
+  "logo": "link",
+  "logo_color": "#FF7A59",
+  "form": {
+    "form_id": "hubspot-connector",
+    "title": "Connect HubSpot",
+    "subtitle": "Authorize Anton to read and update your HubSpot CRM.",
+    "logo": "link",
+    "logo_color": "#FF7A59",
+    "methods": [
+      {
+        "id": "private-app",
+        "label": "Private app token",
+        "description": "Paste a Private App access token from HubSpot. Simplest path — no OAuth dance, the token already encodes the scopes you grant when you create it.",
+        "recommended": true,
+        "how_to": "## Generate a HubSpot Private App access token\n\nPrivate Apps replaced HubSpot's classic API keys in 2022. They're per-portal, scoped, and revocable from HubSpot's UI in two clicks.\n\n### Steps\n\n1. Sign in to your HubSpot portal as a user with **Super admin** rights.\n2. Open **Settings → Integrations → Private Apps** (in the left sidebar of the settings panel).\n3. Click **Create a private app** at the top right.\n4. On the **Basic Info** tab, name it `Anton` (or whatever helps you recognize it later) and add a short description.\n5. Switch to the **Scopes** tab and check the scopes Anton will need. A reasonable starter set:\n   - `crm.objects.contacts.read` / `crm.objects.contacts.write`\n   - `crm.objects.companies.read` / `crm.objects.companies.write`\n   - `crm.objects.deals.read` / `crm.objects.deals.write`\n   - `tickets` (if you use tickets)\n   - `crm.lists.read` / `crm.lists.write`\n6. Click **Create app** at the top right. HubSpot shows the access token (`pat-na1-…` or `pat-eu1-…`).\n7. Copy the token and paste it into the field below. Treat it like a password — anyone with it can read/write everything in the scopes you granted.\n\n### Notes\n\n- You can come back any time to add or remove scopes, or rotate the token.\n- Anton stores the token locally in the data vault; it never leaves your machine except as `Authorization: Bearer …` headers to `api.hubapi.com`.\n- Read [HubSpot's Private Apps guide](https://developers.hubspot.com/docs/api/private-apps) for the full background.\n",
+        "help_url": "https://developers.hubspot.com/docs/api/private-apps",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Private app access token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Starts with pat-na1- (US portals) or pat-eu1- (EU portals)."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "Sign in with HubSpot",
+        "description": "OAuth 2.0 — a browser pops open for you to grant Anton scoped access. Best for shared workspaces; revocable from each user's HubSpot account. Currently requires you to register a developer app in HubSpot's developer portal (steps below); we'll switch to a hosted client in a future release.",
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.hubspot.com/oauth/authorize",
+          "token_url": "https://api.hubapi.com/oauth/v1/token",
+          "scopes": [
+            "crm.objects.contacts.read",
+            "crm.objects.contacts.write",
+            "crm.objects.companies.read",
+            "crm.objects.companies.write",
+            "crm.objects.deals.read",
+            "crm.objects.deals.write"
+          ]
+        },
+        "how_to": "## Sign in with HubSpot (OAuth 2.0)\n\nOAuth is the right choice when multiple users in your portal want to use Anton, or when you want to scope access per-user rather than per-portal.\n\n### Pattern A — using Anton's hosted OAuth client\n\nWhen the connector spec ships with a `client_id`, you don't see any fields here. Click **Submit**, your browser opens HubSpot's consent screen, you pick the portal, click **Connect app**, and the browser hands an authorization code back to Anton through a `127.0.0.1` redirect. Anton exchanges it for a refresh token and stores it locally.\n\n### Pattern B — bring your own developer app\n\nIf this method shows two fields below (**Client ID** and **Client secret**), Anton doesn't ship a hosted OAuth client for HubSpot yet — register your own:\n\n1. Open the [HubSpot Developer Portal](https://developers.hubspot.com/) (or create a developer account if you don't have one).\n2. **Apps → Create app**. Name it `Anton` (or anything).\n3. On the app's **Auth** tab, set the **Redirect URL** to `http://127.0.0.1` (Anton picks a free loopback port at runtime; HubSpot's redirect-URL match is by host only, port doesn't matter).\n4. Add the scopes you want (mirror the recommended Private-App scope list above).\n5. Copy the **Client ID** and **Client secret** from the Auth tab into the fields below.\n6. Click **Submit**. Anton runs the same browser flow with your client.\n\n### Revoking later\n\nAny portal user can revoke at **HubSpot → Settings → Integrations → Connected Apps**. The next task that hits HubSpot will fail with an auth error and prompt you to re-authorize.\n",
+        "help_url": "https://developers.hubspot.com/docs/api/oauth-quickstart-guide",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "12345678-1234-1234-1234-123456789012",
+            "description": "From your HubSpot developer app → Auth tab."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID; same Auth tab."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "id": "google_analytics_4",
+  "label": "Google Analytics 4",
+  "aliases": [
+    "GA4",
+    "google analytics",
+    "ga",
+    "google analytics 4",
+    "universal analytics replacement"
+  ],
+  "keywords": [
+    "analytics",
+    "web analytics",
+    "google",
+    "traffic",
+    "sessions",
+    "conversions",
+    "events",
+    "reporting",
+    "metrics",
+    "dimensions",
+    "ga4"
+  ],
+  "description": "Query web and app analytics data from Google Analytics 4 properties including traffic, events, conversions, and audience metrics.",
+  "category": "analytics",
+  "logo": "sparkle",
+  "logo_color": "#E37400",
+  "form": {
+    "form_id": "google_analytics_4-connector",
+    "title": "Connect Google Analytics 4",
+    "subtitle": "Authorize Anton to read analytics data from your GA4 properties.",
+    "logo": "sparkle",
+    "logo_color": "#E37400",
+    "methods": [
+      {
+        "id": "oauth",
+        "label": "Sign in with Google (OAuth 2.0)",
+        "description": "Opens a browser consent screen so Anton can read your GA4 properties. Requires setting up a Google Cloud OAuth client \u2014 steps below. No passwords stored, revocable from your Google Account at any time.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/analytics.readonly",
+            "https://www.googleapis.com/auth/userinfo.email"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Sign in with Google (OAuth 2.0 \u2014 Bring Your Own Client)\n\nAnton doesn't ship a hosted OAuth client for GA4 yet, so you'll create one in Google Cloud Console first. It takes about 5 minutes.\n\n## 1 \u2014 Enable the GA4 API\n\n1. Go to [Google Cloud Console](https://console.cloud.google.com/) and pick or create a project.\n2. Navigate to **APIs & Services \u2192 Library**.\n3. Search for **Google Analytics Data API** and click **Enable**.\n\n## 2 \u2014 Configure the OAuth consent screen\n\n1. Go to **APIs & Services \u2192 OAuth consent screen**.\n2. Choose **External** (or **Internal** if you're on a Workspace org) and click **Create**.\n3. Fill in the app name (e.g. `Anton`) and your email. Save and continue through all steps.\n4. Under **Test users**, add the Google account that owns your GA4 property.\n\n## 3 \u2014 Create a Desktop OAuth client\n\n1. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID**.\n2. Select **Desktop app** as the application type. Name it `Anton`.\n3. Click **Create**. Copy the **Client ID** and **Client secret** shown in the dialog.\n4. Paste both into the fields below and click **Submit**.\n\n## 4 \u2014 Authorize\n\nAnton opens your browser to Google's consent screen. Sign in with the account that has access to your GA4 properties, review the requested scopes, and click **Continue**.\n\n## Notes\n\n- The `analytics.readonly` scope grants read-only access \u2014 Anton cannot modify any data.\n- If the consent screen shows a warning about an unverified app, click **Advanced \u2192 Go to (app name)** \u2014 this is expected for apps in testing mode.\n- To revoke access later, visit [Google Account \u2192 Third-party apps](https://myaccount.google.com/permissions) and remove the entry.",
+        "help_url": "https://developers.google.com/analytics/devguides/reporting/data/v1/quickstart-client-libraries",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Use a Desktop app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID above; copied from the same row in Credentials."
+          }
+        ]
+      },
+      {
+        "id": "service-account",
+        "label": "Service account",
+        "description": "Use a Google service account JSON key to access GA4 without user interaction. Ideal for server-side or automated workflows where no human login is needed.",
+        "recommended": false,
+        "how_to": "## Service account access for GA4\n\nA service account lets Anton query GA4 without a user's OAuth session \u2014 good for automated or headless setups.\n\n## 1 \u2014 Enable the GA4 API\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **APIs & Services \u2192 Library**, search for **Google Analytics Data API**, and enable it.\n\n## 2 \u2014 Create a service account\n\n1. Go to **IAM & Admin \u2192 Service Accounts \u2192 Create service account**.\n2. Name it something like `anton-ga4`. Click **Create and continue** through the role steps (no special IAM role needed here \u2014 access is granted in GA4 itself).\n3. Open the service account, switch to the **Keys** tab, click **Add key \u2192 Create new key \u2192 JSON**, and download the file.\n\n## 3 \u2014 Grant access in GA4\n\n1. Go to [Google Analytics](https://analytics.google.com/) \u2192 **Admin** (gear icon).\n2. Select the account and/or property you want Anton to access.\n3. Click **Account Access Management** (or **Property Access Management** for property-level access).\n4. Click **+** \u2192 **Add users**, paste the service account email (e.g. `anton-ga4@your-project.iam.gserviceaccount.com`), and assign at least the **Viewer** role.\n5. Click **Add**.\n\n## 4 \u2014 Paste the JSON key\n\nCopy the full contents of the downloaded JSON key file and paste it into the **Service account JSON** field below.\n\n## Notes\n\n- The JSON key is sensitive \u2014 anyone who has it can read your GA4 data. Rotate it in Cloud Console if you suspect exposure.\n- You can grant access to multiple properties by repeating step 3 for each one.",
+        "help_url": "https://developers.google.com/analytics/devguides/reporting/data/v1/quickstart-client-libraries#service_account",
+        "fields": [
+          {
+            "name": "service_account_json",
+            "label": "Service account JSON",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "description": "Paste the entire contents of the JSON key file downloaded from Google Cloud Console."
+          }
+        ]
+      }
+    ]
+  }
+}

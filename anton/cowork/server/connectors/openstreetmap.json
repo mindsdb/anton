@@ -1,0 +1,151 @@
+{
+  "id": "openstreetmap",
+  "label": "OpenStreetMap",
+  "aliases": [
+    "OSM",
+    "open street map",
+    "nominatim",
+    "overpass",
+    "overpass api",
+    "osm maps"
+  ],
+  "keywords": [
+    "maps",
+    "geocoding",
+    "geospatial",
+    "nominatim",
+    "overpass",
+    "open data",
+    "reverse geocoding",
+    "poi",
+    "places",
+    "routing",
+    "geographic"
+  ],
+  "description": "Query free open-data maps via Nominatim for geocoding and Overpass API for arbitrary geographic data \u2014 no API key required for low-volume use.",
+  "category": "maps",
+  "logo": "globe",
+  "logo_color": "#7EBC6F",
+  "form": {
+    "form_id": "openstreetmap-connector",
+    "title": "Connect OpenStreetMap",
+    "subtitle": "Set up access to Nominatim (geocoding) and Overpass API (geographic queries) \u2014 no account needed for light use.",
+    "logo": "globe",
+    "logo_color": "#7EBC6F",
+    "methods": [
+      {
+        "id": "no-auth",
+        "label": "No auth (public endpoints)",
+        "description": "Use the public Nominatim and Overpass APIs with just a contact email as a User-Agent identifier. No key needed \u2014 ideal for low-to-medium query volumes.",
+        "recommended": true,
+        "how_to": "## Public OSM APIs \u2014 no key required\n\nOpenStreetMap's public APIs are free and open to all, but you **must** identify yourself via a `User-Agent` or contact email so OSM operators can reach you if your usage causes problems. This is an OSM usage policy requirement, not optional.\n\n### Steps\n\n1. Decide which APIs you need:\n   - **Nominatim** (`https://nominatim.openstreetmap.org`) \u2014 forward/reverse geocoding and place search.\n   - **Overpass API** (`https://overpass-api.de/api/interpreter`) \u2014 flexible queries over all OSM map data.\n2. Enter your **contact email** below. Anton sends it in every request as part of the `User-Agent` header (e.g. `Anton/1.0 contact:you@example.com`).\n3. Optionally override the default API endpoints if you run your own Nominatim or Overpass instance.\n4. Click **Save** \u2014 no OAuth, no keys, you're ready.\n\n### Usage limits\n\n- Nominatim public instance: max **1 request/second**; no bulk geocoding.\n- Overpass public instance: fair-use \u2014 avoid queries that return millions of elements or hammer the API in tight loops.\n- Heavy production workloads should self-host or use a commercial provider.\n\n### Self-hosting\n\nIf you run your own Nominatim or Overpass instance, enter its base URL in the optional endpoint fields below.",
+        "help_url": "https://operations.osmfoundation.org/policies/nominatim/",
+        "fields": [
+          {
+            "name": "contact_email",
+            "label": "Contact email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@example.com",
+            "description": "Sent in the User-Agent header so OSM operators can contact you about heavy or abusive usage. Required by OSM usage policy."
+          },
+          {
+            "name": "nominatim_base_url",
+            "label": "Nominatim base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://nominatim.openstreetmap.org",
+            "default": "https://nominatim.openstreetmap.org",
+            "description": "Leave as default to use the public OSM Nominatim server, or point to your self-hosted instance."
+          },
+          {
+            "name": "overpass_base_url",
+            "label": "Overpass API base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://overpass-api.de/api/interpreter",
+            "default": "https://overpass-api.de/api/interpreter",
+            "description": "Leave as default to use the public Overpass API, or point to your self-hosted instance."
+          },
+          {
+            "name": "request_delay_ms",
+            "label": "Minimum delay between requests (ms)",
+            "type": "text",
+            "required": false,
+            "placeholder": "1000",
+            "default": "1000",
+            "description": "Throttle Anton's requests to stay within the 1 req/sec Nominatim limit. 1000 ms recommended for the public instance."
+          }
+        ]
+      },
+      {
+        "id": "self-hosted",
+        "label": "Self-hosted / private instance",
+        "description": "Connect to your own Nominatim or Overpass deployment. Optionally supply an API key or HTTP Basic credentials if your instance requires authentication.",
+        "recommended": false,
+        "how_to": "## Self-hosted Nominatim or Overpass instance\n\nIf your organisation runs its own OSM stack, point Anton at your internal endpoints and supply any auth credentials your instance requires.\n\n### Steps\n\n1. Note the base URLs for your Nominatim and/or Overpass instances (e.g. `https://nominatim.internal.example.com`).\n2. If your instance sits behind an API key or HTTP Basic auth, gather those credentials.\n3. Enter your **contact email** \u2014 still good practice even on private instances.\n4. Fill in the endpoint URLs and optional credentials below.\n5. Click **Save**.\n\n### Notes\n\n- If your instance uses an API key passed as a query parameter (common with commercial OSM providers like Geocode.earth or MapTiler), paste it in the **API key** field.\n- If it uses HTTP Basic auth, supply **username** and **password**.\n- Leave unused credential fields blank \u2014 Anton will omit them from requests.\n- Rate-limit rules depend on your own infrastructure; you can set the delay to 0 for private high-throughput instances.",
+        "help_url": "https://nominatim.org/release-docs/latest/admin/Installation/",
+        "fields": [
+          {
+            "name": "contact_email",
+            "label": "Contact email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@example.com",
+            "description": "Used in the User-Agent header to identify your integration."
+          },
+          {
+            "name": "nominatim_base_url",
+            "label": "Nominatim base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://nominatim.internal.example.com",
+            "description": "Your self-hosted Nominatim instance URL. Leave blank if not using Nominatim."
+          },
+          {
+            "name": "overpass_base_url",
+            "label": "Overpass API base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://overpass.internal.example.com/api/interpreter",
+            "description": "Your self-hosted Overpass API interpreter endpoint. Leave blank if not using Overpass."
+          },
+          {
+            "name": "api_key",
+            "label": "API key",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "sk-...",
+            "description": "Optional. If your instance or provider requires a key passed as a query parameter (e.g. Geocode.earth, MapTiler)."
+          },
+          {
+            "name": "basic_auth_username",
+            "label": "HTTP Basic username",
+            "type": "text",
+            "required": false,
+            "placeholder": "admin",
+            "description": "Optional. For instances protected by HTTP Basic authentication."
+          },
+          {
+            "name": "basic_auth_password",
+            "label": "HTTP Basic password",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "description": "Optional. Paired with the HTTP Basic username above."
+          },
+          {
+            "name": "request_delay_ms",
+            "label": "Minimum delay between requests (ms)",
+            "type": "text",
+            "required": false,
+            "placeholder": "0",
+            "default": "0",
+            "description": "Throttle Anton's requests. Set to 0 for high-throughput private instances."
+          }
+        ]
+      }
+    ]
+  }
+}

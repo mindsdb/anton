@@ -1,0 +1,93 @@
+{
+  "id": "tomtom",
+  "label": "TomTom",
+  "aliases": [
+    "tom tom",
+    "tomtom maps",
+    "tomtom api",
+    "tomtom navigation"
+  ],
+  "keywords": [
+    "maps",
+    "geocoding",
+    "routing",
+    "traffic",
+    "navigation",
+    "geolocation",
+    "directions",
+    "poi",
+    "places",
+    "location"
+  ],
+  "description": "Access TomTom Maps, geocoding, real-time traffic data, and routing APIs using an API key from your TomTom developer account.",
+  "category": "maps",
+  "logo": "globe",
+  "logo_color": "#DF1B12",
+  "form": {
+    "form_id": "tomtom-connector",
+    "title": "Connect TomTom",
+    "subtitle": "Paste your TomTom API key to enable maps, geocoding, traffic, and routing.",
+    "logo": "globe",
+    "logo_color": "#DF1B12",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from your TomTom Developer Portal. No OAuth setup required \u2014 copy the key and you're ready to query maps, geocoding, traffic, and routing endpoints.",
+        "recommended": true,
+        "how_to": "## Get your TomTom API Key\n\n### Steps\n\n1. Log in to the [TomTom Developer Portal](https://developer.tomtom.com/) (create a free account if you don't have one).\n2. Click your avatar or account name in the top-right corner and select **My Dashboard**.\n3. Navigate to **Keys & Usage** in the left-hand sidebar.\n4. Click **+ Add a new app** (or select an existing one).\n5. Give the app a name (e.g. `Anton`) and check the APIs you want to enable (Maps, Geocoding, Traffic, Routing, etc.).\n6. Click **Create API Key**. Your new key appears in the list.\n7. Copy the key and paste it into the **API Key** field below.\n\n### Notes\n\n- Each API key can have per-product permissions scoped at creation time. Enable all products you intend to use.\n- Free-tier keys have request limits; upgrade your plan in the portal if you hit quota errors.\n- To revoke access, return to **Keys & Usage**, find the key, and click **Delete**.\n- Keys are shown in full at any time from your dashboard \u2014 no one-time reveal.",
+        "help_url": "https://developer.tomtom.com/knowledgebase/platform-data-dictionary/how-to-get-tomtom-api-key/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in the TomTom Developer Portal under My Dashboard \u2192 Keys & Usage."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.tomtom.com",
+            "default": "https://api.tomtom.com",
+            "description": "Override only if you use a regional or private TomTom endpoint. Leave blank to use the default global API."
+          },
+          {
+            "name": "default_product",
+            "label": "Primary API Product",
+            "type": "select",
+            "required": false,
+            "default": "maps",
+            "description": "Which TomTom product Anton should default to when making requests.",
+            "options": [
+              {
+                "value": "maps",
+                "label": "Maps"
+              },
+              {
+                "value": "geocoding",
+                "label": "Geocoding"
+              },
+              {
+                "value": "routing",
+                "label": "Routing"
+              },
+              {
+                "value": "traffic",
+                "label": "Traffic"
+              },
+              {
+                "value": "search",
+                "label": "Search / POI"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

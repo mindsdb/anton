@@ -1,0 +1,94 @@
+{
+  "id": "google_ads",
+  "label": "Google Ads",
+  "aliases": [
+    "google adwords",
+    "adwords",
+    "google advertising",
+    "google ppc",
+    "google search ads",
+    "google display ads"
+  ],
+  "keywords": [
+    "ads",
+    "advertising",
+    "ppc",
+    "search",
+    "display",
+    "campaigns",
+    "google",
+    "adwords",
+    "remarketing",
+    "conversion"
+  ],
+  "description": "Connect to Google Ads to read and manage search and display ad campaigns, budgets, and performance data.",
+  "category": "ads",
+  "logo": "sparkle",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "google_ads-connector",
+    "title": "Connect Google Ads",
+    "subtitle": "Authorize Anton to access your Google Ads account using OAuth 2.0 and a developer token.",
+    "logo": "sparkle",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth 2.0 + Developer Token",
+        "description": "Bring your own Google Cloud OAuth client and a Google Ads developer token. Anton opens a browser consent screen, then uses both credentials to make authorized API calls against your ad accounts.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/adwords",
+            "https://www.googleapis.com/auth/userinfo.email"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## OAuth 2.0 + Google Ads Developer Token\n\nGoogle Ads requires **two** separate credentials: an OAuth 2.0 client (from Google Cloud Console) and a **developer token** (from Google Ads Manager Center). Both are mandatory.\n\n### Step 1 \u2014 Create an OAuth 2.0 client\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) \u2192 pick or create a project.\n2. **APIs & Services \u2192 Library** \u2192 search for and enable the **Google Ads API**.\n3. **APIs & Services \u2192 OAuth consent screen** \u2192 configure an internal or external app; add your email as a test user if external.\n4. **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID** \u2192 choose **Desktop app**.\n5. Copy the **Client ID** and **Client secret** into the fields below.\n\n### Step 2 \u2014 Obtain a developer token\n\n1. Sign in to your [Google Ads Manager Account (MCC)](https://ads.google.com/).\n2. Click the **Tools & Settings** wrench \u2192 **Setup \u2192 API Center**.\n3. If you haven't applied yet, submit an application. Basic access is granted immediately for testing; standard access requires a short review.\n4. Copy the **Developer token** shown on the API Center page and paste it into the field below.\n\n### Step 3 \u2014 (Optional) MCC login customer ID\n\nIf you manage multiple accounts under an MCC, paste the **manager account customer ID** (10-digit number, no dashes) into **Login customer ID**. Leave blank if you only have a single account.\n\n### Step 4 \u2014 Authorize\n\nClick **Submit**. Anton opens Google's consent screen in your browser. Sign in with the Google account that has access to your ad accounts, grant the requested permissions, and Anton stores the resulting refresh token locally.\n\n### Notes\n\n- The `adwords` scope grants broad access to all accounts reachable by the authorized user.\n- Developer tokens are shown once per API Center session \u2014 bookmark the API Center page for quick retrieval.\n- To revoke, visit [Third-party apps with account access](https://myaccount.google.com/permissions) and remove the entry.",
+        "help_url": "https://developers.google.com/google-ads/api/docs/oauth/overview",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Must be a Desktop app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "GOCSPX-...",
+            "description": "Paired with the Client ID; copied from the same row in Cloud Console."
+          },
+          {
+            "name": "developer_token",
+            "label": "Developer Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ABCDE-FGHIJ-KLMNO",
+            "description": "Found in Google Ads Manager \u2192 Tools & Settings \u2192 Setup \u2192 API Center. Required for every Google Ads API call."
+          },
+          {
+            "name": "login_customer_id",
+            "label": "Login Customer ID (MCC)",
+            "type": "text",
+            "required": false,
+            "placeholder": "1234567890",
+            "description": "10-digit manager account (MCC) customer ID \u2014 no dashes. Required only if you manage multiple accounts through an MCC. Leave blank for single-account setups."
+          }
+        ]
+      }
+    ]
+  }
+}

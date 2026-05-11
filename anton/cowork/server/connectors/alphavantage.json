@@ -1,0 +1,83 @@
+{
+  "id": "alphavantage",
+  "label": "Alpha Vantage",
+  "aliases": [
+    "alpha vantage",
+    "alphavantage api",
+    "alpha vantage stocks",
+    "av api"
+  ],
+  "keywords": [
+    "stocks",
+    "forex",
+    "crypto",
+    "cryptocurrency",
+    "economic indicators",
+    "market data",
+    "equities",
+    "time series",
+    "financial data",
+    "trading",
+    "price",
+    "OHLCV"
+  ],
+  "description": "Fetch real-time and historical data for stocks, forex, crypto, and economic indicators via the Alpha Vantage REST API.",
+  "category": "public-data",
+  "logo": "sparkle",
+  "logo_color": "#1A6BFF",
+  "form": {
+    "form_id": "alphavantage-connector",
+    "title": "Connect Alpha Vantage",
+    "subtitle": "Paste your Alpha Vantage API key to start pulling market and economic data.",
+    "logo": "sparkle",
+    "logo_color": "#1A6BFF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a free or premium Alpha Vantage API key. Takes about 30 seconds \u2014 no OAuth, no app setup required.",
+        "recommended": true,
+        "how_to": "## Get an Alpha Vantage API Key\n\nAlpha Vantage issues API keys directly from their website \u2014 no credit card required for the free tier.\n\n### Steps\n\n1. Go to [https://www.alphavantage.co/support/#api-key](https://www.alphavantage.co/support/#api-key) and click **Get Free API Key**.\n2. Fill in the short form (name, email, intended use) and submit.\n3. Your API key is displayed immediately on the confirmation page and also emailed to you. Copy it.\n4. Paste the key into the **API Key** field below and click **Submit**.\n\n### Notes\n\n- The free tier allows **25 requests per day** and **5 requests per minute**. If you need higher limits, upgrade to a premium plan at [https://www.alphavantage.co/premium/](https://www.alphavantage.co/premium/).\n- The key is tied to your email address. You can retrieve it any time by revisiting the support page and re-submitting your email.\n- Keep your key private \u2014 it is used as your sole credential for all API requests.\n- Optionally set an **Output Format** (JSON or CSV) and a default **Data Type** below to pre-configure request defaults.",
+        "help_url": "https://www.alphavantage.co/support/#api-key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ABCDEFGHIJ123456",
+            "description": "Your Alpha Vantage API key. Found at alphavantage.co \u2192 Get Free API Key."
+          },
+          {
+            "name": "output_format",
+            "label": "Default Output Format",
+            "type": "select",
+            "required": false,
+            "default": "json",
+            "description": "Preferred response format for API calls.",
+            "options": [
+              {
+                "value": "json",
+                "label": "JSON"
+              },
+              {
+                "value": "csv",
+                "label": "CSV"
+              }
+            ]
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "default": "https://www.alphavantage.co",
+            "placeholder": "https://www.alphavantage.co",
+            "description": "Override only if using a proxy or a self-hosted mirror. Leave as default for the public API."
+          }
+        ]
+      }
+    ]
+  }
+}

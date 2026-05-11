@@ -1,0 +1,100 @@
+{
+  "id": "monday",
+  "label": "Monday.com",
+  "aliases": [
+    "monday",
+    "mondaydotcom",
+    "monday crm",
+    "monday work os"
+  ],
+  "keywords": [
+    "project management",
+    "work os",
+    "tasks",
+    "boards",
+    "workflows",
+    "team",
+    "collaboration",
+    "kanban",
+    "automation"
+  ],
+  "description": "Connect to Monday.com to read and manage boards, items, and workflows via the Work OS API.",
+  "category": "productivity",
+  "logo": "grid",
+  "logo_color": "#FF3D57",
+  "form": {
+    "form_id": "monday-connector",
+    "title": "Connect Monday.com",
+    "subtitle": "Paste your Monday.com API v2 token to give Anton access to your boards and items.",
+    "logo": "grid",
+    "logo_color": "#FF3D57",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your personal API v2 token from Monday.com. Fastest setup \u2014 no OAuth client needed, just copy and paste from your profile settings.",
+        "recommended": true,
+        "how_to": "## Get your Monday.com API v2 Token\n\nMonday.com issues a personal API token tied to your account. It has the same permissions as your user.\n\n### Steps\n\n1. Log in to your Monday.com account.\n2. Click your **avatar / profile picture** in the top-right corner.\n3. Select **Developers** from the dropdown menu. This opens the Developer Center.\n4. In the Developer Center, click **My Access Tokens** in the left sidebar.\n5. Copy the token shown under **API v2 Token**. It starts with `eyJ...`.\n6. Paste it into the **API Token** field below.\n\n### Notes\n\n- The token grants access to everything your Monday.com user can see \u2014 boards, items, columns, updates, and automations.\n- If you need scoped access (e.g. read-only), use the **OAuth** method instead to control which scopes are granted.\n- Rotating your token in Monday.com immediately invalidates the old one \u2014 re-paste the new token here if that happens.\n- Workspace admins can also find and manage API tokens under **Admin \u2192 API**.\n",
+        "help_url": "https://developer.monday.com/api-reference/docs/authentication",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "eyJhbGciOiJIUzI1NiJ9...",
+            "description": "Your personal Monday.com API v2 token. Found under your profile avatar \u2192 Developers \u2192 My Access Tokens."
+          },
+          {
+            "name": "account_slug",
+            "label": "Account Subdomain (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "mycompany",
+            "description": "Your Monday.com subdomain (e.g. 'mycompany' from mycompany.monday.com). Used to construct deep links. Leave blank if unsure."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own App)",
+        "description": "Authorize via Monday.com OAuth using your own app credentials from the Monday Developer Center. Allows fine-grained scope control and is suitable for team or multi-account setups.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://auth.monday.com/oauth2/authorize",
+          "token_url": "https://auth.monday.com/oauth2/token",
+          "scopes": [
+            "boards:read",
+            "boards:write",
+            "workspaces:read",
+            "updates:write",
+            "me:read"
+          ]
+        },
+        "how_to": "## Monday.com OAuth 2.0 Setup\n\nUse this method when you want scoped access or are building a shared integration. You'll need to create an app in the Monday Developer Center.\n\n### Steps\n\n1. Go to [Monday Developer Center](https://monday.com/developers/apps) and sign in.\n2. Click **Create app** and give it a name like `Anton`.\n3. In your app's settings, open the **OAuth** tab.\n4. Under **Redirect URIs**, add `http://localhost` (Anton uses a local redirect).\n5. Select the **Scopes** your integration needs. Recommended minimum:\n   - `boards:read`, `boards:write`\n   - `workspaces:read`\n   - `updates:write`\n   - `me:read`\n6. Save the app, then copy the **Client ID** and **Client Secret** from the **Credentials** section.\n7. Paste them into the fields below and click **Submit**. Anton will open Monday.com's consent screen in your browser.\n\n### Notes\n\n- After authorization, Monday.com issues a refresh token so Anton can stay connected without re-authorizing.\n- If you change scopes in the Developer Center, users must re-authorize.\n",
+        "help_url": "https://developer.monday.com/apps/docs/oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "a1b2c3d4e5f6...",
+            "description": "Found in your Monday.com Developer Center app \u2192 OAuth \u2192 Credentials."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-client-secret",
+            "description": "Paired with the Client ID. Keep this confidential."
+          }
+        ]
+      }
+    ]
+  }
+}

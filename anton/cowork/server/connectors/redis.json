@@ -1,0 +1,116 @@
+{
+  "id": "redis",
+  "label": "Redis",
+  "aliases": [
+    "redis db",
+    "redis cache",
+    "redis server",
+    "valkey",
+    "in-memory store",
+    "key-value store"
+  ],
+  "keywords": [
+    "cache",
+    "key-value",
+    "in-memory",
+    "database",
+    "nosql",
+    "pub-sub",
+    "queue",
+    "session",
+    "redis"
+  ],
+  "description": "Connect to a Redis in-memory key-value store using a connection string or manual host/port credentials.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#DC382D",
+  "form": {
+    "form_id": "redis-connector",
+    "title": "Connect Redis",
+    "subtitle": "Paste a connection string or enter host and port details to link Anton to your Redis instance.",
+    "logo": "database",
+    "logo_color": "#DC382D",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste a single redis:// or rediss:// URI \u2014 the quickest way to connect. Encodes host, port, password, and database number in one field.",
+        "recommended": true,
+        "how_to": "## Connect via Redis Connection String\n\nA Redis connection string bundles all the connection details into one URI. This is the fastest path.\n\n### URI format\n\n- Unencrypted: `redis://:yourpassword@hostname:6379/0`\n- TLS/SSL: `rediss://:yourpassword@hostname:6379/0`\n- No password: `redis://hostname:6379/0`\n- With username (Redis 6+ ACL): `redis://username:password@hostname:6379/0`\n\n### Steps\n\n1. Find your Redis host, port, and password from your provider's dashboard (e.g. Redis Cloud, Upstash, ElastiCache, or your self-hosted config file `redis.conf`).\n2. Assemble the URI following the format above, or copy it directly from your provider's connection panel.\n3. If your instance uses TLS (recommended for cloud deployments), use the `rediss://` scheme (double-s).\n4. Paste the full URI into the **Connection String** field below and click **Connect**.\n\n### Notes\n\n- The default database index is `0`; change the trailing `/N` to switch databases (e.g. `/2`).\n- If no password is set, omit the `:password@` portion entirely.\n- For Redis Sentinel or Cluster topologies, use the **Manual** method instead and configure host/port per node.\n",
+        "help_url": "https://redis.io/docs/latest/develop/connect/clients/",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "redis://:yourpassword@hostname:6379/0",
+            "description": "Full Redis URI. Use rediss:// (double-s) for TLS-encrypted connections."
+          }
+        ]
+      },
+      {
+        "id": "manual",
+        "label": "Host / Port / Password",
+        "description": "Enter the host, port, password, and database number individually. Useful when you don't have a pre-formatted URI or need fine-grained control.",
+        "recommended": false,
+        "how_to": "## Connect via Host, Port, and Password\n\nFill in each connection detail separately. Helpful if your provider gives you individual fields rather than a full URI.\n\n### Steps\n\n1. Locate your Redis host (e.g. `my-instance.cache.amazonaws.com` or `127.0.0.1`) from your provider dashboard or `redis.conf`.\n2. Note the port \u2014 Redis default is **6379**. Cloud providers sometimes use a different port.\n3. Find your password. In self-hosted Redis this is the `requirepass` value in `redis.conf`. In managed services it's shown in the credentials panel.\n4. Identify the database number you want to use. Redis ships with 16 databases (0\u201315); the default is **0**.\n5. Enter each value in the fields below and click **Connect**.\n\n### Notes\n\n- If your instance has no password set, leave the **Password** field blank.\n- Enable **Use TLS** if your Redis endpoint requires encrypted connections (common with cloud-hosted instances).\n- Redis usernames are required only when using ACL-based authentication (Redis 6+). Leave blank if not applicable.\n",
+        "help_url": "https://redis.io/docs/latest/operate/oss_and_stack/management/security/",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "127.0.0.1",
+            "description": "Hostname or IP address of your Redis server."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "placeholder": "6379",
+            "default": "6379",
+            "description": "TCP port Redis is listening on. Default is 6379."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "yourpassword",
+            "description": "Leave blank if your Redis instance has no authentication configured."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": false,
+            "placeholder": "default",
+            "description": "Required only for Redis 6+ ACL-based auth. Leave blank if not applicable."
+          },
+          {
+            "name": "database",
+            "label": "Database Number",
+            "type": "text",
+            "required": false,
+            "placeholder": "0",
+            "default": "0",
+            "description": "Redis logical database index (0\u201315). Defaults to 0."
+          },
+          {
+            "name": "use_tls",
+            "label": "Use TLS (SSL)",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Enable TLS encryption. Required for most cloud-hosted Redis instances."
+          }
+        ]
+      }
+    ]
+  }
+}

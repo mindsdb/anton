@@ -1,0 +1,50 @@
+{
+  "id": "instantly",
+  "label": "Instantly",
+  "aliases": [
+    "instantly.ai",
+    "instant email",
+    "cold email tool"
+  ],
+  "keywords": [
+    "cold email",
+    "outreach",
+    "email sequences",
+    "sales",
+    "lead generation",
+    "campaigns",
+    "deliverability"
+  ],
+  "description": "Automate cold email campaigns and manage outreach sequences with Instantly.",
+  "category": "sales-engagement",
+  "logo": "send",
+  "logo_color": "#5B4EE8",
+  "form": {
+    "form_id": "instantly-connector",
+    "title": "Connect Instantly",
+    "subtitle": "Paste your Instantly API key to let Anton manage campaigns and outreach on your behalf.",
+    "logo": "send",
+    "logo_color": "#5B4EE8",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Instantly API key from Integrations \u2192 API. Quickest setup \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect with an Instantly API Key\n\n1. Log in to your [Instantly](https://app.instantly.ai) account.\n2. Click your account avatar or workspace name in the bottom-left corner to open account settings.\n3. Navigate to **Integrations \u2192 API** in the left sidebar.\n4. Click **Create API Key** (or copy an existing one if you already have one).\n5. Give it a descriptive name like `Anton` so you can identify it later.\n6. Copy the generated key \u2014 it may only be shown once, so save it somewhere safe.\n7. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- The API key provides access to your Instantly workspaces, campaigns, and lead lists \u2014 treat it like a password.\n- If you suspect the key is compromised, return to **Integrations \u2192 API** and revoke it, then generate a new one and update Anton.\n- Different workspace plans may expose different API endpoints; check your plan if certain features are unavailable.",
+        "help_url": "https://developer.instantly.ai/introduction/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "inst_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Instantly \u2192 Integrations \u2192 API. Treat this like a password \u2014 do not share it."
+          }
+        ]
+      }
+    ]
+  }
+}

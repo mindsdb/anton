@@ -1,0 +1,113 @@
+{
+  "id": "postgres",
+  "label": "PostgreSQL",
+  "aliases": [
+    "postgres",
+    "pg",
+    "postgresql database",
+    "postgre"
+  ],
+  "keywords": [
+    "database",
+    "sql",
+    "relational",
+    "open-source",
+    "rdbms",
+    "postgres",
+    "pg",
+    "tables",
+    "queries"
+  ],
+  "description": "Connect to a PostgreSQL database to run queries, read tables, and write data.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#336791",
+  "form": {
+    "form_id": "postgres-connector",
+    "title": "Connect PostgreSQL",
+    "subtitle": "Provide your connection details to let Anton query your PostgreSQL database.",
+    "logo": "database",
+    "logo_color": "#336791",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection string",
+        "description": "Paste a single PostgreSQL connection URI (postgres://user:password@host:port/database). Quickest option if you already have one handy.",
+        "recommended": false,
+        "how_to": "## Connect via connection string\n\nA PostgreSQL connection URI bundles all your credentials into one string. Most cloud providers (Supabase, Render, Railway, Neon, etc.) show a ready-to-copy URI in their dashboard.\n\n### Where to find it\n\n1. **Supabase**: Project \u2192 Settings \u2192 Database \u2192 Connection string \u2192 URI tab.\n2. **Render**: Service dashboard \u2192 Info \u2192 Connection \u2192 Internal or External database URL.\n3. **Railway**: Project \u2192 your Postgres plugin \u2192 Connect \u2192 Postgres Connection URL.\n4. **Neon**: Project \u2192 Connection Details \u2192 pick the branch \u2192 copy the URI.\n5. For self-hosted instances, construct it manually:\n   `postgres://USER:PASSWORD@HOST:PORT/DATABASE`\n\n### Notes\n\n- The URI must use the `postgres://` or `postgresql://` scheme.\n- URL-encode special characters in the password (e.g. `@` \u2192 `%40`).\n- Append `?sslmode=require` to the URI to enforce SSL, or `?sslmode=disable` to turn it off.\n- Anton stores the URI encrypted at rest; the password is never shown again after saving.",
+        "help_url": "https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING",
+        "fields": [
+          {
+            "name": "connection_uri",
+            "label": "Connection URI",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "postgres://user:password@host:5432/database",
+            "description": "Full PostgreSQL connection URI. Append ?sslmode=require to enforce SSL."
+          }
+        ]
+      },
+      {
+        "id": "host-port",
+        "label": "Host / port / credentials",
+        "description": "Enter host, port, database name, username, and password individually. Supports SSL toggle. Best when you don't have a ready-made connection URI.",
+        "recommended": true,
+        "how_to": "## Connect with host, port, and credentials\n\nFill in each field separately. This matches the connection panel in tools like pgAdmin, DBeaver, or TablePlus.\n\n### Where to find each value\n\n1. **Host**: The server address \u2014 e.g. `db.example.com` or an IP. Cloud providers show this on their database info page.\n2. **Port**: Almost always `5432`. Change only if your DBA or cloud provider specifies otherwise.\n3. **Database**: The specific database name (not the server). In Supabase this is `postgres` by default.\n4. **Username / Password**: The Postgres role credentials. For cloud providers, check the database \"Connection details\" or \"Credentials\" panel.\n5. **SSL**: Toggle on if your server requires SSL (recommended for any internet-facing database). Most cloud-hosted Postgres instances require it.\n\n### Notes\n\n- If connecting to a local instance, use `localhost` or `127.0.0.1` as the host and leave SSL off.\n- Make sure the host/port is reachable from your machine \u2014 firewalls and VPCs often block external access.\n- The user needs at minimum `CONNECT` + `SELECT` privileges on the target database.\n- For write operations, also grant `INSERT`, `UPDATE`, and `DELETE` as needed.",
+        "help_url": "https://www.postgresql.org/docs/current/runtime-config-connection.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "db.example.com",
+            "description": "Hostname or IP address of your PostgreSQL server."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "placeholder": "5432",
+            "default": "5432",
+            "description": "PostgreSQL listens on 5432 by default. Change only if your server uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "The name of the specific database (schema container) to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "description": "PostgreSQL role / user that Anton will authenticate as."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Password for the above user. Stored encrypted and never shown again."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable to enforce an encrypted connection. Recommended for any internet-facing server."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "id": "freshdesk",
+  "label": "Freshdesk",
+  "aliases": [
+    "fresh desk",
+    "freshworks support",
+    "freshworks helpdesk"
+  ],
+  "keywords": [
+    "helpdesk",
+    "tickets",
+    "support",
+    "customer support",
+    "freshworks",
+    "crm",
+    "service desk",
+    "ticketing"
+  ],
+  "description": "Read and manage Freshdesk support tickets, contacts, and agents via the Freshdesk REST API.",
+  "category": "support",
+  "logo": "chats",
+  "logo_color": "#2C5CC5",
+  "form": {
+    "form_id": "freshdesk-connector",
+    "title": "Connect Freshdesk",
+    "subtitle": "Paste your Freshdesk API key and subdomain to give Anton access to your help desk.",
+    "logo": "chats",
+    "logo_color": "#2C5CC5",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Freshdesk API key and subdomain. Anton authenticates via HTTP Basic using your API key as the username \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Freshdesk API Key\n\nFreshdesk issues a personal API key per agent account. Anton sends it as the HTTP Basic username (with the literal string `X` as the password), which is the standard Freshdesk auth pattern.\n\n### Steps\n\n1. Log in to your Freshdesk account (e.g. `https://yourcompany.freshdesk.com`).\n2. Click your **avatar / profile picture** in the top-right corner.\n3. Select **Profile settings** from the dropdown.\n4. Scroll to the bottom of the profile page \u2014 you'll see your **API Key** in the right-hand panel.\n5. Click the copy icon or select the key text and copy it.\n6. Paste the key into the **API Key** field below.\n7. Enter your subdomain in the **Subdomain** field \u2014 just the prefix, e.g. `yourcompany` from `yourcompany.freshdesk.com`.\n\n### Notes\n\n- The API key is tied to the agent account that generated it. Actions Anton takes (e.g. creating tickets) will appear as that agent.\n- If you regenerate your API key in Freshdesk, you must update it here \u2014 the old key is immediately revoked.\n- Freshdesk also supports using your account **password** instead of the API key, but the API key is preferred and more stable.\n- Admin-level agents can access all tickets; restricted agents may see only tickets assigned to them depending on your Freshdesk plan and permissions.\n",
+        "help_url": "https://support.freshdesk.com/en/support/solutions/articles/215517-how-to-find-your-api-key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "aBcDeFgHiJkLmNoPqRsTuVwX",
+            "description": "Found under your Freshdesk Profile settings \u2192 API Key section at the bottom of the page."
+          },
+          {
+            "name": "subdomain",
+            "label": "Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourcompany",
+            "description": "The prefix of your Freshdesk URL \u2014 e.g. enter 'yourcompany' if your URL is yourcompany.freshdesk.com."
+          }
+        ]
+      }
+    ]
+  }
+}

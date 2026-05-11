@@ -1,0 +1,287 @@
+{
+  "id": "aws_cloudwatch",
+  "label": "AWS CloudWatch",
+  "aliases": [
+    "cloudwatch",
+    "amazon cloudwatch",
+    "aws metrics",
+    "aws logs",
+    "aws alarms",
+    "amazon metrics"
+  ],
+  "keywords": [
+    "aws",
+    "amazon",
+    "cloudwatch",
+    "metrics",
+    "logs",
+    "alarms",
+    "observability",
+    "monitoring",
+    "infrastructure",
+    "dashboards"
+  ],
+  "description": "Query AWS CloudWatch metrics, logs, and alarms using your AWS Access Key ID and Secret Access Key.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#FF9900",
+  "form": {
+    "form_id": "aws_cloudwatch-connector",
+    "title": "Connect AWS CloudWatch",
+    "subtitle": "Authorize Anton to read metrics, logs, and alarms from AWS CloudWatch.",
+    "logo": "sparkle",
+    "logo_color": "#FF9900",
+    "methods": [
+      {
+        "id": "access-key",
+        "label": "Access Key ID + Secret Access Key",
+        "description": "Paste an IAM user's Access Key ID and Secret Access Key. Quickest path \u2014 no OAuth setup required. Recommended for most users.",
+        "recommended": true,
+        "how_to": "## Create an IAM user with CloudWatch read access\n\n1. Sign in to the [AWS Console](https://console.aws.amazon.com/) and open **IAM**.\n2. Go to **Users \u2192 Create user**. Give it a name like `anton-cloudwatch`.\n3. On the **Set permissions** step, choose **Attach policies directly** and attach `CloudWatchReadOnlyAccess` (or `CloudWatchFullAccess` if you also want Anton to manage alarms).\n4. Complete the wizard. Open the new user, go to the **Security credentials** tab.\n5. Under **Access keys**, click **Create access key** \u2192 choose **Application running outside AWS** \u2192 click through to **Create access key**.\n6. Copy the **Access key ID** and **Secret access key** \u2014 the secret is shown only once. Store it securely.\n7. Paste both values and your target AWS region into the fields below.\n\n## Notes\n\n- Use the **principle of least privilege**: `CloudWatchReadOnlyAccess` covers metrics, logs, and alarms reads without write permissions.\n- If your account uses SCPs or permission boundaries, make sure `cloudwatch:*` and `logs:*` reads are not blocked.\n- To rotate keys, generate a new pair in IAM, update Anton, then deactivate the old key.",
+        "help_url": "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/auth-and-access-control-cw.html",
+        "fields": [
+          {
+            "name": "aws_access_key_id",
+            "label": "Access Key ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "AKIAIOSFODNN7EXAMPLE",
+            "description": "The 20-character Access Key ID from your IAM user's Security credentials tab."
+          },
+          {
+            "name": "aws_secret_access_key",
+            "label": "Secret Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "description": "The 40-character secret paired with the Access Key ID. Shown only once at creation time."
+          },
+          {
+            "name": "aws_region",
+            "label": "AWS Region",
+            "type": "select",
+            "required": true,
+            "default": "us-east-1",
+            "description": "The AWS region where your CloudWatch data lives. You can query cross-region later via separate connectors.",
+            "options": [
+              {
+                "value": "us-east-1",
+                "label": "US East (N. Virginia) \u2014 us-east-1"
+              },
+              {
+                "value": "us-east-2",
+                "label": "US East (Ohio) \u2014 us-east-2"
+              },
+              {
+                "value": "us-west-1",
+                "label": "US West (N. California) \u2014 us-west-1"
+              },
+              {
+                "value": "us-west-2",
+                "label": "US West (Oregon) \u2014 us-west-2"
+              },
+              {
+                "value": "ca-central-1",
+                "label": "Canada (Central) \u2014 ca-central-1"
+              },
+              {
+                "value": "eu-west-1",
+                "label": "Europe (Ireland) \u2014 eu-west-1"
+              },
+              {
+                "value": "eu-west-2",
+                "label": "Europe (London) \u2014 eu-west-2"
+              },
+              {
+                "value": "eu-west-3",
+                "label": "Europe (Paris) \u2014 eu-west-3"
+              },
+              {
+                "value": "eu-central-1",
+                "label": "Europe (Frankfurt) \u2014 eu-central-1"
+              },
+              {
+                "value": "eu-north-1",
+                "label": "Europe (Stockholm) \u2014 eu-north-1"
+              },
+              {
+                "value": "ap-northeast-1",
+                "label": "Asia Pacific (Tokyo) \u2014 ap-northeast-1"
+              },
+              {
+                "value": "ap-northeast-2",
+                "label": "Asia Pacific (Seoul) \u2014 ap-northeast-2"
+              },
+              {
+                "value": "ap-northeast-3",
+                "label": "Asia Pacific (Osaka) \u2014 ap-northeast-3"
+              },
+              {
+                "value": "ap-southeast-1",
+                "label": "Asia Pacific (Singapore) \u2014 ap-southeast-1"
+              },
+              {
+                "value": "ap-southeast-2",
+                "label": "Asia Pacific (Sydney) \u2014 ap-southeast-2"
+              },
+              {
+                "value": "ap-south-1",
+                "label": "Asia Pacific (Mumbai) \u2014 ap-south-1"
+              },
+              {
+                "value": "sa-east-1",
+                "label": "South America (S\u00e3o Paulo) \u2014 sa-east-1"
+              },
+              {
+                "value": "me-south-1",
+                "label": "Middle East (Bahrain) \u2014 me-south-1"
+              },
+              {
+                "value": "af-south-1",
+                "label": "Africa (Cape Town) \u2014 af-south-1"
+              }
+            ]
+          },
+          {
+            "name": "log_group_name",
+            "label": "Default Log Group (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "/aws/lambda/my-function",
+            "description": "Optional. Pre-fill a CloudWatch Logs log group name Anton should query by default. You can override this per query."
+          }
+        ]
+      },
+      {
+        "id": "iam-role-arn",
+        "label": "IAM Role (assume-role via keys)",
+        "description": "Provide a base IAM Access Key pair plus a Role ARN. Anton will call STS AssumeRole before each CloudWatch request \u2014 useful when your security policy enforces role-based access rather than long-lived user keys.",
+        "recommended": false,
+        "how_to": "## Set up IAM Role assumption\n\nUse this method when your organization's security policy requires all access to go through assumed roles rather than long-lived IAM user credentials.\n\n1. Create (or identify) an **IAM user** that has `sts:AssumeRole` permission. Generate an Access Key pair for it (see the Access Key method above for steps).\n2. Create (or identify) the **IAM role** Anton should assume. In the role's **Trust policy**, add the IAM user ARN as a trusted principal:\n   ```json\n   { \"Effect\": \"Allow\", \"Principal\": { \"AWS\": \"arn:aws:iam::123456789012:user/anton-cloudwatch\" }, \"Action\": \"sts:AssumeRole\" }\n   ```\n3. Attach `CloudWatchReadOnlyAccess` (or a custom policy) to the role's **Permissions**.\n4. Copy the role's **ARN** from the role's Summary page (format: `arn:aws:iam::ACCOUNT:role/ROLE-NAME`).\n5. Paste the user's Access Key ID, Secret Access Key, the Role ARN, and your region below.\n\n## Notes\n\n- Anton will call `sts:AssumeRole` and cache temporary credentials for up to 1 hour before refreshing.\n- If the role has an **External ID** configured on the trust policy, fill that field too.",
+        "help_url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-api.html",
+        "fields": [
+          {
+            "name": "aws_access_key_id",
+            "label": "Access Key ID (caller identity)",
+            "type": "text",
+            "required": true,
+            "placeholder": "AKIAIOSFODNN7EXAMPLE",
+            "description": "The Access Key ID of the IAM user that has permission to call sts:AssumeRole."
+          },
+          {
+            "name": "aws_secret_access_key",
+            "label": "Secret Access Key (caller identity)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "description": "Paired with the Access Key ID above."
+          },
+          {
+            "name": "role_arn",
+            "label": "Role ARN",
+            "type": "text",
+            "required": true,
+            "placeholder": "arn:aws:iam::123456789012:role/anton-cloudwatch-role",
+            "description": "The full ARN of the IAM role Anton will assume before querying CloudWatch."
+          },
+          {
+            "name": "external_id",
+            "label": "External ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-external-id-secret",
+            "description": "Only needed if the role's trust policy enforces an ExternalId condition."
+          },
+          {
+            "name": "aws_region",
+            "label": "AWS Region",
+            "type": "select",
+            "required": true,
+            "default": "us-east-1",
+            "description": "The AWS region where your CloudWatch data lives.",
+            "options": [
+              {
+                "value": "us-east-1",
+                "label": "US East (N. Virginia) \u2014 us-east-1"
+              },
+              {
+                "value": "us-east-2",
+                "label": "US East (Ohio) \u2014 us-east-2"
+              },
+              {
+                "value": "us-west-1",
+                "label": "US West (N. California) \u2014 us-west-1"
+              },
+              {
+                "value": "us-west-2",
+                "label": "US West (Oregon) \u2014 us-west-2"
+              },
+              {
+                "value": "ca-central-1",
+                "label": "Canada (Central) \u2014 ca-central-1"
+              },
+              {
+                "value": "eu-west-1",
+                "label": "Europe (Ireland) \u2014 eu-west-1"
+              },
+              {
+                "value": "eu-west-2",
+                "label": "Europe (London) \u2014 eu-west-2"
+              },
+              {
+                "value": "eu-west-3",
+                "label": "Europe (Paris) \u2014 eu-west-3"
+              },
+              {
+                "value": "eu-central-1",
+                "label": "Europe (Frankfurt) \u2014 eu-central-1"
+              },
+              {
+                "value": "eu-north-1",
+                "label": "Europe (Stockholm) \u2014 eu-north-1"
+              },
+              {
+                "value": "ap-northeast-1",
+                "label": "Asia Pacific (Tokyo) \u2014 ap-northeast-1"
+              },
+              {
+                "value": "ap-northeast-2",
+                "label": "Asia Pacific (Seoul) \u2014 ap-northeast-2"
+              },
+              {
+                "value": "ap-northeast-3",
+                "label": "Asia Pacific (Osaka) \u2014 ap-northeast-3"
+              },
+              {
+                "value": "ap-southeast-1",
+                "label": "Asia Pacific (Singapore) \u2014 ap-southeast-1"
+              },
+              {
+                "value": "ap-southeast-2",
+                "label": "Asia Pacific (Sydney) \u2014 ap-southeast-2"
+              },
+              {
+                "value": "ap-south-1",
+                "label": "Asia Pacific (Mumbai) \u2014 ap-south-1"
+              },
+              {
+                "value": "sa-east-1",
+                "label": "South America (S\u00e3o Paulo) \u2014 sa-east-1"
+              },
+              {
+                "value": "me-south-1",
+                "label": "Middle East (Bahrain) \u2014 me-south-1"
+              },
+              {
+                "value": "af-south-1",
+                "label": "Africa (Cape Town) \u2014 af-south-1"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

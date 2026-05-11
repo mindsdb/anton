@@ -1,0 +1,93 @@
+{
+  "id": "coingecko",
+  "label": "CoinGecko",
+  "aliases": [
+    "coin gecko",
+    "coingecko api",
+    "cg api",
+    "crypto prices",
+    "gecko"
+  ],
+  "keywords": [
+    "crypto",
+    "cryptocurrency",
+    "bitcoin",
+    "ethereum",
+    "prices",
+    "market data",
+    "on-chain",
+    "defi",
+    "tokens",
+    "blockchain",
+    "analytics",
+    "nft"
+  ],
+  "description": "Fetch real-time crypto prices, market data, and on-chain analytics from CoinGecko's public and Pro APIs.",
+  "category": "public-data",
+  "logo": "cube",
+  "logo_color": "#8DC63F",
+  "form": {
+    "form_id": "coingecko-connector",
+    "title": "Connect CoinGecko",
+    "subtitle": "Pull live crypto prices, market cap rankings, and on-chain analytics from CoinGecko.",
+    "logo": "cube",
+    "logo_color": "#8DC63F",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "Pro API Key",
+        "description": "Paste a CoinGecko Pro or Demo API key for higher rate limits and access to premium endpoints. Generate one in the Developer Dashboard in under a minute.",
+        "recommended": true,
+        "how_to": "## Get a CoinGecko API Key\n\nCoinGecko offers a free Demo key (generous rate limits) and paid Pro keys. Both are obtained from the same Developer Dashboard.\n\n### Steps\n\n1. Sign up or log in at [www.coingecko.com](https://www.coingecko.com).\n2. Open the [Developer Dashboard](https://www.coingecko.com/en/developers/dashboard).\n3. Click **+ Add New Key** (or **Create Demo API Key** if you're on the free plan).\n4. Give the key a name like `Anton` and click **Create**.\n5. Copy the key from the table \u2014 it starts with `CG-`.\n6. Paste it into the **API Key** field below.\n\n### Notes\n\n- Demo keys are free and cover most price + market data endpoints. Pro keys unlock on-chain analytics, NFT data, and higher call volumes.\n- The key is shown at any time in the dashboard, so you can retrieve it if lost.\n- To upgrade a Demo key to Pro, subscribe to a plan and a new key will be issued \u2014 update it here.\n- See [CoinGecko API docs](https://docs.coingecko.com/reference/introduction) for full endpoint coverage by tier.\n",
+        "help_url": "https://docs.coingecko.com/reference/introduction",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "CG-xxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Demo or Pro API key from the CoinGecko Developer Dashboard. Starts with CG-."
+          },
+          {
+            "name": "api_tier",
+            "label": "API Tier",
+            "type": "select",
+            "required": true,
+            "default": "demo",
+            "description": "Select the tier matching your key. Demo keys hit api.coingecko.com; Pro keys use pro-api.coingecko.com.",
+            "options": [
+              {
+                "value": "demo",
+                "label": "Demo (free, api.coingecko.com)"
+              },
+              {
+                "value": "pro",
+                "label": "Pro (paid, pro-api.coingecko.com)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "no-auth",
+        "label": "Public API (No Key)",
+        "description": "Use CoinGecko's public API with no authentication. Free and instant to set up, but heavily rate-limited \u2014 suitable for light, infrequent queries only.",
+        "recommended": false,
+        "how_to": "## CoinGecko Public API (No Authentication)\n\nCoinGecko exposes a public REST API that requires no API key. No sign-up needed \u2014 just point Anton at the endpoint and go.\n\n### Steps\n\n1. No setup required. Click **Submit** to save.\n2. Anton will call `https://api.coingecko.com/api/v3` without an API key header.\n\n### Gotchas\n\n- The public tier allows roughly **5\u201315 calls per minute** depending on server load. Exceeding this returns a 429 error.\n- Several endpoints (on-chain analytics, NFT data, historical OHLCV) are **not available** without at least a Demo key.\n- If you hit rate limits frequently, switch to the **Pro API Key** method \u2014 a free Demo key is sufficient and takes under a minute to generate.\n- See [CoinGecko rate limit docs](https://docs.coingecko.com/reference/common-errors-rate-limit) for details.\n",
+        "help_url": "https://docs.coingecko.com/reference/common-errors-rate-limit",
+        "fields": [
+          {
+            "name": "acknowledged_limits",
+            "label": "I understand this tier is heavily rate-limited",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Check to confirm you're aware of the public API rate limits. Consider a free Demo key for better reliability."
+          }
+        ]
+      }
+    ]
+  }
+}

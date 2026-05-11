@@ -1,0 +1,52 @@
+{
+  "id": "klaviyo",
+  "label": "Klaviyo",
+  "aliases": [
+    "klaviyo email",
+    "klaviyo sms",
+    "klaviyo marketing"
+  ],
+  "keywords": [
+    "email",
+    "sms",
+    "marketing",
+    "ecommerce",
+    "automation",
+    "flows",
+    "segments",
+    "campaigns",
+    "lists"
+  ],
+  "description": "Connect Klaviyo to sync email and SMS marketing data, lists, segments, campaigns, and customer profiles.",
+  "category": "marketing",
+  "logo": "mail",
+  "logo_color": "#1A1A1A",
+  "form": {
+    "form_id": "klaviyo-connector",
+    "title": "Connect Klaviyo",
+    "subtitle": "Paste your Klaviyo Private API key to give Anton access to your marketing data.",
+    "logo": "mail",
+    "logo_color": "#1A1A1A",
+    "methods": [
+      {
+        "id": "private-api-key",
+        "label": "Private API Key",
+        "description": "Paste your Klaviyo Private API key (starts with pk_\u2026). The simplest and recommended path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Klaviyo Private API Key\n\nKlaviyo Private API keys grant server-side access to your account data. Do not use your Site ID (public key) \u2014 that is for client-side event tracking only.\n\n### Steps\n\n1. Log in to [Klaviyo](https://www.klaviyo.com) and click your account name in the bottom-left corner.\n2. Go to **Settings \u2192 API Keys**.\n3. Under **Private API Keys**, click **Create Private API Key**.\n4. Give the key a name like `Anton` so you can identify it later.\n5. Choose the access level \u2014 **Full Access** gives Anton the broadest read/write ability; use **Custom Key** to restrict to specific resources if you prefer.\n6. Click **Create**. The key is shown once \u2014 copy it immediately.\n7. Paste the key (starts with `pk_`) into the **Private API Key** field below.\n\n### Notes\n\n- The key is only displayed at creation time. If you lose it, generate a new one from the same **API Keys** page.\n- To revoke access later, return to **Settings \u2192 API Keys** and delete the key named `Anton`.\n- Never use your public Site ID here \u2014 it cannot authenticate server-side requests.",
+        "help_url": "https://developers.klaviyo.com/en/docs/retrieve-api-credentials",
+        "fields": [
+          {
+            "name": "private_api_key",
+            "label": "Private API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Klaviyo Private API key starting with pk_. Found under Settings \u2192 API Keys. Do not use your public Site ID."
+          }
+        ]
+      }
+    ]
+  }
+}

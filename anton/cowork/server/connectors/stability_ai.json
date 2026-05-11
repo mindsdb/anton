@@ -1,0 +1,62 @@
+{
+  "id": "stability_ai",
+  "label": "Stability AI",
+  "aliases": [
+    "stable diffusion",
+    "stability",
+    "stablediffusion",
+    "stability.ai"
+  ],
+  "keywords": [
+    "image",
+    "generation",
+    "ai",
+    "diffusion",
+    "text-to-image",
+    "art",
+    "generative",
+    "stable diffusion",
+    "api"
+  ],
+  "description": "Generate images using Stable Diffusion models via the Stability AI REST API.",
+  "category": "ai",
+  "logo": "image",
+  "logo_color": "#6D3DE3",
+  "form": {
+    "form_id": "stability_ai-connector",
+    "title": "Connect Stability AI",
+    "subtitle": "Paste your Stability AI API key to start generating images with Stable Diffusion.",
+    "logo": "image",
+    "logo_color": "#6D3DE3",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Stability AI API key (starts with `sk-`). Generate one in seconds from the Stability AI platform \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Get your Stability AI API key\n\n1. Go to [platform.stability.ai](https://platform.stability.ai) and sign in (or create a free account).\n2. Click your avatar or name in the top-right corner and select **Account**.\n3. Open the **API Keys** tab.\n4. Click **Create API Key**. Give it a name like `Anton`.\n5. Copy the generated key \u2014 it starts with `sk-` and is shown only once. Store it somewhere safe.\n6. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Keys are scoped to your account and billed against your credit balance. Monitor usage in the **Billing** tab.\n- If you lose the key, revoke it from the same **API Keys** page and generate a new one.\n- Free accounts receive a small credit grant; paid plans add more credits. Check [pricing](https://platform.stability.ai/pricing) if you hit limits.\n",
+        "help_url": "https://platform.stability.ai/docs/getting-started/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "sk-...",
+            "description": "Your Stability AI API key from platform.stability.ai \u2192 Account \u2192 API Keys."
+          },
+          {
+            "name": "api_base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.stability.ai",
+            "default": "https://api.stability.ai",
+            "description": "Override only if you're using a custom or regional endpoint. Leave as default for most users."
+          }
+        ]
+      }
+    ]
+  }
+}

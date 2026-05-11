@@ -1,0 +1,214 @@
+{
+  "id": "gcp_cloudsql_postgres",
+  "label": "GCP Cloud SQL Postgres",
+  "aliases": [
+    "google cloud sql",
+    "cloud sql postgres",
+    "gcp postgres",
+    "google cloud postgres",
+    "cloud sql postgresql",
+    "gcp postgresql"
+  ],
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "google",
+    "gcp",
+    "cloud sql",
+    "database",
+    "sql",
+    "relational",
+    "google cloud"
+  ],
+  "description": "Connect to a Google Cloud SQL PostgreSQL instance using a public IP or Cloud SQL Auth Proxy.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "gcp_cloudsql_postgres-connector",
+    "title": "Connect GCP Cloud SQL Postgres",
+    "subtitle": "Enter your Cloud SQL instance connection details to let Anton query your PostgreSQL database.",
+    "logo": "database",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "direct-connection",
+        "label": "Direct Connection (Public IP)",
+        "description": "Connect directly to your Cloud SQL instance using its public IP address, port, database name, and credentials. Quickest path if your instance has a public IP and your network allows access.",
+        "recommended": true,
+        "how_to": "## Connect via Public IP\n\n### Prerequisites\n- Your Cloud SQL instance must have a **Public IP** enabled.\n- Your client IP must be added to the instance's **Authorized networks** list.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and navigate to **Cloud SQL \u2192 Instances**.\n2. Click your Postgres instance name to open its details page.\n3. Go to the **Connections** tab \u2192 **Networking** section.\n4. Under **Public IP**, confirm it is enabled. Copy the **Public IP address** shown.\n5. If your machine's IP isn't already listed under **Authorized networks**, click **Add network**, enter your IP (e.g. `203.0.113.42/32`), and click **Done \u2192 Save**.\n6. Note your **database name**, **database user**, and **password** (created under **Users** in the left sidebar or during instance setup).\n7. Paste the public IP into the **Host** field below. Leave port as `5432` unless you changed it.\n8. Toggle **Require SSL** if your instance enforces SSL (recommended for production).\n\n### Notes\n- Authorized networks changes can take up to 60 seconds to propagate.\n- If you need to restrict access further, consider using the **Cloud SQL Auth Proxy** method instead.\n",
+        "help_url": "https://cloud.google.com/sql/docs/postgres/connect-admin-ip",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "34.123.45.67",
+            "description": "Public IP address of your Cloud SQL instance. Find it in Cloud Console \u2192 Cloud SQL \u2192 Instances \u2192 your instance \u2192 Overview."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "PostgreSQL port. Default is 5432 unless you configured a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "Name of the PostgreSQL database to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "description": "Database user account. Find or create users under Cloud SQL \u2192 Instances \u2192 your instance \u2192 Users."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable to enforce an encrypted SSL/TLS connection. Recommended for production instances. Check your instance's SSL settings under Connections \u2192 Security."
+          }
+        ]
+      },
+      {
+        "id": "auth-proxy",
+        "label": "Cloud SQL Auth Proxy",
+        "description": "Connect via the Cloud SQL Auth Proxy running locally. The proxy handles IAM-based authentication and encrypts traffic without needing to add authorized networks or manage SSL certificates manually.",
+        "recommended": false,
+        "how_to": "## Connect via Cloud SQL Auth Proxy\n\nThe Cloud SQL Auth Proxy creates a secure tunnel from your machine to Cloud SQL using IAM credentials, so you don't need to whitelist IPs or manage SSL certificates.\n\n### Prerequisites\n- [gcloud CLI](https://cloud.google.com/sdk/docs/install) installed and authenticated (`gcloud auth application-default login`).\n- The proxy binary downloaded and running.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) \u2192 **Cloud SQL \u2192 Instances**.\n2. Click your instance and copy the **Connection name** from the Overview page. It looks like `project-id:region:instance-id`.\n3. Download the [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy#install) for your OS.\n4. Start the proxy in a terminal, binding to a local port:\n   ```\n   ./cloud-sql-proxy --port 5432 project-id:region:instance-id\n   ```\n5. The proxy listens on `127.0.0.1:5432`. Use that as the **Host** and **Port** below.\n6. Enter your **database name**, **username**, and **password** as normal.\n7. SSL can be left off (`false`) since the proxy handles encryption internally.\n\n### Notes\n- The proxy process must be running whenever Anton connects. Consider running it as a background service.\n- Your gcloud account needs the **Cloud SQL Client** IAM role on the project.\n- See [Google's proxy documentation](https://cloud.google.com/sql/docs/postgres/sql-proxy) for service-account key authentication if you don't want to use user credentials.\n",
+        "help_url": "https://cloud.google.com/sql/docs/postgres/sql-proxy",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Proxy Host",
+            "type": "text",
+            "required": true,
+            "default": "127.0.0.1",
+            "placeholder": "127.0.0.1",
+            "description": "Hostname where the Cloud SQL Auth Proxy is listening. Typically 127.0.0.1 when running locally."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "Local port the Cloud SQL Auth Proxy is bound to (set with --port when starting the proxy)."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "Name of the PostgreSQL database to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "description": "Database user account. Manage users under Cloud SQL \u2192 Instances \u2192 your instance \u2192 Users."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "The Auth Proxy encrypts traffic automatically. Leave off unless your DBA has configured additional SSL requirements at the database level."
+          }
+        ]
+      },
+      {
+        "id": "private-ip",
+        "label": "Private IP (VPC)",
+        "description": "Connect using the instance's private VPC IP. Suitable when Anton runs inside the same VPC or a peered network, with no public internet exposure.",
+        "recommended": false,
+        "how_to": "## Connect via Private IP\n\nUse this method when Anton is running inside the same Google Cloud VPC (or a VPC-peered network) as your Cloud SQL instance.\n\n### Prerequisites\n- Your Cloud SQL instance must have **Private IP** enabled.\n- Anton's host must be on the same VPC or a peered network reachable from it.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) \u2192 **Cloud SQL \u2192 Instances**.\n2. Click your instance \u2192 **Connections** tab \u2192 **Networking**.\n3. Confirm **Private IP** is enabled and note the private IP address shown (e.g. `10.0.0.5`).\n4. If Private IP isn't enabled, click **Edit instance \u2192 Connections \u2192 Private IP**, select the VPC network, and save. This may take a few minutes.\n5. Paste the private IP into **Host** below. Use port `5432` (default).\n6. Enter your database name, username, and password.\n7. Enable **Require SSL** if your instance enforces SSL (check under **Connections \u2192 Security**).\n\n### Notes\n- Private IP connectivity requires VPC peering between your host's network and the Cloud SQL service network, which is set up automatically when you enable Private IP.\n- Firewall rules on the VPC must allow TCP on port 5432 from Anton's host IP.\n",
+        "help_url": "https://cloud.google.com/sql/docs/postgres/private-ip",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Private IP Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "10.0.0.5",
+            "description": "Private VPC IP of your Cloud SQL instance. Found under Cloud SQL \u2192 Instances \u2192 your instance \u2192 Connections \u2192 Networking \u2192 Private IP."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "PostgreSQL port. Default is 5432."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "Name of the PostgreSQL database to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "description": "Database user account."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable SSL encryption. Recommended even on private networks. Check your instance's SSL mode under Connections \u2192 Security."
+          }
+        ]
+      }
+    ]
+  }
+}

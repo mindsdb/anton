@@ -1,0 +1,103 @@
+{
+  "id": "neo4j",
+  "label": "Neo4j",
+  "aliases": [
+    "neo4j graph",
+    "neo4j aura",
+    "graph database",
+    "neo4j db"
+  ],
+  "keywords": [
+    "graph",
+    "database",
+    "cypher",
+    "nodes",
+    "edges",
+    "relationships",
+    "bolt",
+    "aura",
+    "gdb"
+  ],
+  "description": "Connect to a Neo4j graph database using a Bolt or Neo4j URI, username, and password.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#008CC1",
+  "form": {
+    "form_id": "neo4j-connector",
+    "title": "Connect Neo4j",
+    "subtitle": "Provide your Neo4j connection URI, credentials, and optional database name to get started.",
+    "logo": "database",
+    "logo_color": "#008CC1",
+    "methods": [
+      {
+        "id": "connection-uri",
+        "label": "Connection URI + Credentials",
+        "description": "Paste your Bolt or Neo4j URI along with your username and password. Works for self-hosted instances and Neo4j Aura cloud databases alike.",
+        "recommended": true,
+        "how_to": "## Connect via URI and Credentials\n\nNeo4j exposes a binary Bolt protocol endpoint. You'll need the URI, a username, and a password.\n\n### Self-hosted Neo4j\n\n1. By default Neo4j listens on `bolt://localhost:7687`. Check your `neo4j.conf` for the `server.bolt.listen_address` setting to confirm the host and port.\n2. The default username is `neo4j`. You set your password on first login or via `ALTER CURRENT USER SET PASSWORD`.\n3. If you have multiple databases, note the name of the one you want Anton to query (default is `neo4j`).\n\n### Neo4j Aura (cloud)\n\n1. Log in at [console.neo4j.io](https://console.neo4j.io).\n2. Click your instance to open the **Details** panel.\n3. Copy the **Connection URI** \u2014 it looks like `neo4j+s://xxxxxxxx.databases.neo4j.io`.\n4. Your username is `neo4j`. If you've forgotten the password, click **Reset Password** on the instance card.\n5. Aura instances use a single default database; leave the **Database** field blank unless you've created named databases.\n\n### Notes\n\n- Use `bolt://` or `neo4j://` for unencrypted connections (self-hosted, local dev).\n- Use `bolt+s://` or `neo4j+s://` for TLS-encrypted connections (Aura, production).\n- The database field is optional \u2014 if left blank, Neo4j uses the server's default database.\n",
+        "help_url": "https://neo4j.com/docs/operations-manual/current/configuration/connectors/",
+        "fields": [
+          {
+            "name": "connection_uri",
+            "label": "Connection URI",
+            "type": "url",
+            "required": true,
+            "placeholder": "bolt://localhost:7687 or neo4j+s://xxxxxxxx.databases.neo4j.io",
+            "description": "The Bolt or Neo4j protocol URI for your database. Use bolt+s:// or neo4j+s:// for TLS-encrypted connections."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "neo4j",
+            "default": "neo4j",
+            "description": "The Neo4j user to authenticate as. Defaults to 'neo4j' on most installations."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the specified Neo4j user."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": false,
+            "placeholder": "neo4j",
+            "description": "The target database name. Leave blank to use the server's default database (usually 'neo4j')."
+          }
+        ]
+      },
+      {
+        "id": "aura-api-key",
+        "label": "Neo4j Aura API Key",
+        "description": "Authenticate with Neo4j Aura using a client ID and client secret from the Aura Console. Useful for managing Aura instances programmatically rather than querying graph data directly.",
+        "recommended": false,
+        "how_to": "## Neo4j Aura API Key (Console API)\n\nThis method uses the Aura Console REST API \u2014 it lets Anton manage Aura instances (create, pause, resume) rather than run Cypher queries. For querying graph data, use **Connection URI + Credentials** instead.\n\n### Steps\n\n1. Log in at [console.neo4j.io](https://console.neo4j.io).\n2. Click your account name in the top-right corner and select **Account settings**.\n3. Navigate to the **API keys** section.\n4. Click **Create API key**, give it a name like `Anton`, and confirm.\n5. The console displays a **Client ID** and **Client secret** \u2014 copy both immediately. The secret is shown only once.\n6. Paste them into the fields below.\n\n### Notes\n\n- These credentials control your entire Aura account (billing, instance lifecycle). Treat the client secret like a password.\n- This API is separate from the Bolt connection used for Cypher queries. You may need both methods configured depending on your use case.\n- If you lose the client secret, delete the key and create a new one.\n",
+        "help_url": "https://neo4j.com/docs/aura/platform/api/authentication/",
+        "fields": [
+          {
+            "name": "aura_client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Client ID from the Aura Console \u2192 Account settings \u2192 API keys."
+          },
+          {
+            "name": "aura_client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Client secret paired with the Client ID. Shown only once at creation \u2014 store it safely."
+          }
+        ]
+      }
+    ]
+  }
+}

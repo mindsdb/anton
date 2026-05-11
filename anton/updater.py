@@ -15,7 +15,7 @@ _RELEASES_LATEST_URL = "https://api.github.com/repos/mindsdb/anton/releases/late
 _GITHUB_API_HEADERS = {"Accept": "application/vnd.github+json"}
 
 
-def check_and_update(console, settings) -> bool:
+def check_and_update(console, settings, extras: list[str] | None = None) -> bool:
     """Check for a newer version of Anton and self-update if available.
 
     Runs in a thread with a hard timeout so it never blocks startup,
@@ -37,7 +37,7 @@ def check_and_update(console, settings) -> bool:
 
     def _worker():
         try:
-            _check_and_update(result, settings)
+            _check_and_update(result, settings, extras=extras)
         except Exception:
             pass
 
@@ -57,7 +57,14 @@ def check_and_update(console, settings) -> bool:
     return "new_version" in result
 
 
-def _check_and_update(result: dict, settings) -> None:
+def _package_spec(latest_tag: str, extras: list[str] | None = None) -> str:
+    extra_suffix = ""
+    if extras:
+        extra_suffix = "[" + ",".join(sorted(set(extras))) + "]"
+    return f"anton{extra_suffix} @ git+https://github.com/mindsdb/anton.git@{latest_tag}"
+
+
+def _check_and_update(result: dict, settings, extras: list[str] | None = None) -> None:
     messages: list[str] = []
     result["messages"] = messages
 
@@ -90,7 +97,7 @@ def _check_and_update(result: dict, settings) -> None:
 
     try:
         proc = subprocess.run(
-            ["uv", "tool", "install", f"git+https://github.com/mindsdb/anton.git@{latest_tag}", "--force"],
+            ["uv", "tool", "install", _package_spec(latest_tag, extras), "--force"],
             capture_output=True,
             timeout=_TOTAL_TIMEOUT,
         )

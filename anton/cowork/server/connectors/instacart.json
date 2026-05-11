@@ -1,0 +1,77 @@
+{
+  "id": "instacart",
+  "label": "Instacart",
+  "aliases": [
+    "instacart connect",
+    "instacart partner api",
+    "instacart retail api"
+  ],
+  "keywords": [
+    "grocery",
+    "delivery",
+    "retail",
+    "partner",
+    "ecommerce",
+    "instacart",
+    "fulfillment",
+    "marketplace"
+  ],
+  "description": "Connect to Instacart Connect to manage retail catalog, orders, and fulfillment through the Instacart partner API.",
+  "category": "mobility",
+  "logo": "send",
+  "logo_color": "#43B02A",
+  "form": {
+    "form_id": "instacart-connector",
+    "title": "Connect Instacart",
+    "subtitle": "Authenticate with your Instacart Connect API key and retailer ID issued by your Instacart partner onboarding team.",
+    "logo": "send",
+    "logo_color": "#43B02A",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste the API key and retailer ID issued by your Instacart Connect partner team. This is the only supported auth path \u2014 Instacart Connect is not self-serve.",
+        "recommended": true,
+        "how_to": "## Connect with your Instacart Connect API Key\n\nInstacart Connect is a partner-only program. Credentials are issued by Instacart's onboarding team during your integration engagement \u2014 there is no self-serve portal to generate them.\n\n### Prerequisites\n\n- An active Instacart Connect partnership agreement.\n- Completed onboarding with your Instacart partner solutions engineer.\n\n### Steps\n\n1. Reach out to your Instacart Connect partner contact or solutions engineer if you have not already received credentials.\n2. Instacart will provide two values via a secure channel:\n   - **API Key** \u2014 a long secret token used to authenticate all API requests.\n   - **Retailer ID** \u2014 a numeric or string identifier scoping requests to your retail account.\n3. Copy the **API Key** and paste it into the **API Key** field below.\n4. Copy the **Retailer ID** and paste it into the **Retailer ID** field below.\n5. Select the **Environment** that matches the credentials provided (Sandbox for testing, Production for live data).\n6. Click **Submit** to save the connection.\n\n### Notes\n\n- Sandbox and Production environments use separate credentials \u2014 do not mix them.\n- If your API key is revoked or rotated by Instacart, you must paste the new key and re-save the connector.\n- For access issues, contact [Instacart Connect support](https://www.instacart.com/company/instacart-connect/) through your partner account.\n",
+        "help_url": "https://instacart.github.io/instacart-connect-api-docs/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ic_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "The secret API key issued by your Instacart Connect partner onboarding team."
+          },
+          {
+            "name": "retailer_id",
+            "label": "Retailer ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "12345",
+            "description": "Your Instacart Connect retailer identifier, provided by your Instacart partner team."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Select Sandbox to test against non-live data, or Production for real fulfillment operations.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production"
+              },
+              {
+                "value": "sandbox",
+                "label": "Sandbox"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

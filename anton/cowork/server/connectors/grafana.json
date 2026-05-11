@@ -1,0 +1,96 @@
+{
+  "id": "grafana",
+  "label": "Grafana",
+  "aliases": [
+    "grafana cloud",
+    "grafana labs",
+    "grafana dashboards",
+    "grafana alerts"
+  ],
+  "keywords": [
+    "dashboards",
+    "alerting",
+    "observability",
+    "metrics",
+    "monitoring",
+    "visualization",
+    "panels",
+    "data sources",
+    "grafana cloud",
+    "self-hosted"
+  ],
+  "description": "Connect to Grafana to query dashboards, panels, and alerts from a Grafana Cloud stack or self-hosted instance.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#F46800",
+  "form": {
+    "form_id": "grafana-connector",
+    "title": "Connect Grafana",
+    "subtitle": "Paste your Grafana URL and a service account token (or API key) to give Anton access to your dashboards and alerts.",
+    "logo": "sparkle",
+    "logo_color": "#F46800",
+    "methods": [
+      {
+        "id": "service-account-token",
+        "label": "Service Account Token",
+        "description": "Recommended for Grafana 9+ and all Grafana Cloud stacks. Create a service account with the minimum role needed, generate a token, and paste it here. Revocable without changing any user credentials.",
+        "recommended": true,
+        "how_to": "## Connect via Service Account Token\n\nService accounts are the modern, preferred auth method in Grafana 9 and later (including all Grafana Cloud stacks). Tokens are scoped to a role and can be revoked independently.\n\n### Steps\n\n1. Open your Grafana instance (`https://<stack>.grafana.net` for Cloud, or your self-hosted URL).\n2. In the left sidebar go to **Administration \u2192 Users and access \u2192 Service accounts**.\n3. Click **Add service account**. Give it a name like `anton` and set the **Role** to **Viewer** (or **Editor** if Anton needs to modify dashboards/alerts).\n4. Click **Create**. On the service account detail page, click **Add service account token**.\n5. Give the token a display name and optionally set an expiry. Click **Generate token**.\n6. **Copy the token immediately** \u2014 it is shown only once.\n7. Paste the token into **Service Account Token** below and enter your Grafana instance URL.\n\n### Notes\n\n- For Grafana Cloud the URL is `https://<your-stack-name>.grafana.net`.\n- For self-hosted instances use the root URL, e.g. `https://grafana.example.com`.\n- If you lose the token, delete it in the service account page and generate a new one.\n- Viewer role is sufficient for reading dashboards and alerts; no write access is granted.",
+        "help_url": "https://grafana.com/docs/grafana/latest/administration/service-accounts/",
+        "fields": [
+          {
+            "name": "grafana_url",
+            "label": "Grafana URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://yourstack.grafana.net",
+            "description": "Root URL of your Grafana instance. Cloud stacks use https://<stack>.grafana.net; self-hosted instances use your configured root URL."
+          },
+          {
+            "name": "service_account_token",
+            "label": "Service Account Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Token generated under Administration \u2192 Users and access \u2192 Service accounts. Shown only once at creation time."
+          }
+        ]
+      },
+      {
+        "id": "api-key",
+        "label": "API Key (Legacy)",
+        "description": "For older Grafana instances (pre-9) that do not support service accounts. API keys are org-scoped and role-limited. Deprecated in Grafana 10+ in favour of service account tokens.",
+        "recommended": false,
+        "how_to": "## Connect via API Key (Legacy)\n\nAPI keys are the legacy auth mechanism, still supported on Grafana instances running version 8.x or earlier, and available (but discouraged) on some 9.x and 10.x deployments.\n\n### Steps\n\n1. Open your Grafana instance and go to **Configuration (gear icon) \u2192 API Keys** in the left sidebar.\n   - On some versions this is under **Administration \u2192 API keys**.\n2. Click **Add API key**.\n3. Enter a **Key name** (e.g. `anton`), set the **Role** to **Viewer** (or **Editor**), and optionally set a **Time to live**.\n4. Click **Add**. **Copy the key immediately** \u2014 it is shown only once.\n5. Paste the key into **API Key** below and enter your Grafana URL.\n\n### Notes\n\n- API key creation may be disabled by your Grafana admin. If the **API Keys** menu item is absent, use the **Service Account Token** method instead.\n- API keys are tied to an organization; make sure you are in the correct org before generating the key.\n- Grafana Cloud users should prefer the Service Account Token method \u2014 API keys are being phased out.",
+        "help_url": "https://grafana.com/docs/grafana/latest/administration/api-keys/",
+        "fields": [
+          {
+            "name": "grafana_url",
+            "label": "Grafana URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://yourstack.grafana.net",
+            "description": "Root URL of your Grafana instance. Cloud stacks use https://<stack>.grafana.net; self-hosted instances use your configured root URL."
+          },
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Legacy API key generated under Configuration \u2192 API Keys. Shown only once at creation time."
+          },
+          {
+            "name": "org_id",
+            "label": "Organization ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "1",
+            "default": "1",
+            "description": "Numeric Grafana organization ID the API key belongs to. Defaults to 1 for single-org instances. Find it under Administration \u2192 Organizations."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "id": "clay",
+  "label": "Clay",
+  "aliases": [
+    "clay.com",
+    "clay enrichment",
+    "clay waterfalls"
+  ],
+  "keywords": [
+    "enrichment",
+    "outbound",
+    "waterfall",
+    "prospecting",
+    "data",
+    "leads",
+    "sales",
+    "api"
+  ],
+  "description": "Data enrichment and waterfall platform for outbound sales \u2014 enrich leads, build prospect lists, and automate data workflows.",
+  "category": "enrichment",
+  "logo": "search",
+  "logo_color": "#7C3AED",
+  "form": {
+    "form_id": "clay-connector",
+    "title": "Connect Clay",
+    "subtitle": "Paste your Clay API key to let Anton read and enrich data from your Clay workspace.",
+    "logo": "search",
+    "logo_color": "#7C3AED",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from your Clay Workspace settings. The simplest and fastest way to connect \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect Clay with an API Key\n\n### Steps\n\n1. Log in to [Clay](https://app.clay.com).\n2. Click your workspace name or avatar in the top-left corner to open workspace settings.\n3. Navigate to **Settings \u2192 API Keys**.\n4. Click **Create API Key**, give it a name like `Anton`, and confirm.\n5. Copy the generated key \u2014 it is shown once, so save it somewhere safe.\n6. Paste the key into the **API Key** field below and click **Submit**.\n\n### Notes\n\n- API keys are scoped to your workspace. Anyone with the key can act on behalf of your workspace \u2014 treat it like a password.\n- If you lose the key, generate a new one from the same **Settings \u2192 API Keys** page and update it in Anton.\n- Clay does not currently offer fine-grained key scopes; the key grants full API access to the workspace.\n",
+        "help_url": "https://docs.clay.com/reference/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "clay_sk_...",
+            "description": "Found in Clay \u2192 Settings \u2192 API Keys. Shown only once at creation time."
+          },
+          {
+            "name": "workspace_name",
+            "label": "Workspace Name",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-team",
+            "description": "Optional. Your Clay workspace name or slug, used to disambiguate if you belong to multiple workspaces."
+          }
+        ]
+      }
+    ]
+  }
+}

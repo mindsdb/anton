@@ -1,0 +1,88 @@
+{
+  "id": "apollo",
+  "label": "Apollo.io",
+  "aliases": [
+    "apollo",
+    "apollo io",
+    "apolloio"
+  ],
+  "keywords": [
+    "outbound",
+    "prospecting",
+    "sequences",
+    "sales",
+    "leads",
+    "email",
+    "enrichment",
+    "crm",
+    "contacts",
+    "cadence"
+  ],
+  "description": "Automate outbound prospecting and sequences using Apollo.io's contact database and engagement tools.",
+  "category": "sales-engagement",
+  "logo": "send",
+  "logo_color": "#3B5BDB",
+  "form": {
+    "form_id": "apollo-connector",
+    "title": "Connect Apollo.io",
+    "subtitle": "Paste your Apollo.io API key to give Anton access to contacts, sequences, and enrichment.",
+    "logo": "send",
+    "logo_color": "#3B5BDB",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Apollo.io API key. Found in Settings \u2192 Integrations \u2192 API. Quickest way to connect \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect with an Apollo.io API Key\n\nApollo.io exposes a REST API secured by a personal API key tied to your account.\n\n### Steps\n\n1. Log in to [Apollo.io](https://app.apollo.io/).\n2. Click your avatar or name in the bottom-left corner to open the account menu.\n3. Go to **Settings \u2192 Integrations \u2192 API**.\n4. You'll see a section labeled **API Key**. If no key exists yet, click **Generate API Key**.\n5. Copy the displayed key.\n6. Paste it into the **API Key** field below.\n\n### Notes\n\n- The API key grants access to your Apollo account at your user permission level \u2014 keep it secret.\n- Apollo keys do not expire automatically, but you can regenerate them from the same page, which will invalidate the old key.\n- If your organization uses team workspaces, make sure you're generating the key in the correct workspace.\n- Read [Apollo's API documentation](https://apolloio.github.io/apollo-api-docs/) for full scope and rate-limit details.\n",
+        "help_url": "https://apolloio.github.io/apollo-api-docs/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-apollo-api-key",
+            "description": "Found in Apollo.io \u2192 Settings \u2192 Integrations \u2192 API. Keep this secret \u2014 it grants full API access at your permission level."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0",
+        "description": "Connect via OAuth 2.0 using your own Apollo OAuth application credentials. Best for multi-user setups or when you want token-based revocable access.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.apollo.io/oauth/authorize",
+          "token_url": "https://app.apollo.io/oauth/token",
+          "scopes": [
+            "read",
+            "write"
+          ]
+        },
+        "how_to": "## Connect with Apollo.io OAuth 2.0\n\nOAuth 2.0 requires you to register an application in Apollo and bring your own client credentials.\n\n### Steps\n\n1. Log in to [Apollo.io](https://app.apollo.io/).\n2. Go to **Settings \u2192 Integrations \u2192 API** and look for the **OAuth Applications** section.\n3. Click **Create OAuth Application**.\n4. Fill in the application name (e.g. `Anton`) and set the redirect URI to `http://127.0.0.1` (Anton uses a local redirect).\n5. Copy the generated **Client ID** and **Client Secret**.\n6. Paste both into the fields below, then click **Submit** to open the Apollo authorization screen in your browser.\n7. Approve access; Anton will store the resulting tokens automatically.\n\n### Notes\n\n- OAuth tokens can be revoked from Apollo's connected apps settings without affecting your API key.\n- If Apollo's OAuth application feature is not available on your plan, use the **API Key** method instead.\n",
+        "help_url": "https://apolloio.github.io/apollo-api-docs/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-apollo-oauth-client-id",
+            "description": "From Apollo.io \u2192 Settings \u2192 Integrations \u2192 API \u2192 OAuth Applications."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID from the same Apollo OAuth application."
+          }
+        ]
+      }
+    ]
+  }
+}

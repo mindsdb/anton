@@ -1,0 +1,229 @@
+{
+  "id": "azure_sql",
+  "label": "Azure SQL Database",
+  "aliases": [
+    "azure sql",
+    "microsoft azure sql",
+    "azure sql server",
+    "azure database",
+    "mssql azure",
+    "sql azure"
+  ],
+  "keywords": [
+    "sql",
+    "azure",
+    "microsoft",
+    "database",
+    "sql server",
+    "relational",
+    "mssql",
+    "cloud",
+    "paas"
+  ],
+  "description": "Connect to a Microsoft-managed Azure SQL Database instance using host, port, credentials, and encrypted TLS.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#0078D4",
+  "form": {
+    "form_id": "azure_sql-connector",
+    "title": "Connect Azure SQL Database",
+    "subtitle": "Provide your Azure SQL server hostname, database name, and credentials to establish an encrypted connection.",
+    "logo": "database",
+    "logo_color": "#0078D4",
+    "methods": [
+      {
+        "id": "sql-auth",
+        "label": "SQL Authentication",
+        "description": "Connect with a SQL login username and password. The simplest path \u2014 paste your server hostname, database name, and credentials directly from the Azure Portal.",
+        "recommended": true,
+        "how_to": "## SQL Authentication\n\nUse a SQL login (username + password) to connect. This works for both Azure SQL Database server admins and lower-privilege SQL users.\n\n### Find your connection details\n\n1. Open the [Azure Portal](https://portal.azure.com) and navigate to **SQL databases**.\n2. Click your database, then select **Overview** in the left panel.\n3. Copy the **Server name** \u2014 it looks like `yourserver.database.windows.net`.\n4. Note the **Database name** shown on the same page.\n\n### Get or create a SQL user\n\n5. If you want to use the server admin, you set the admin login when you created the server. Retrieve it under **Settings \u2192 Properties** (the login name, not password).\n6. To create a lower-privilege user, connect with an admin tool (e.g. Azure Data Studio or SSMS) and run:\n   ```sql\n   CREATE USER anton WITH PASSWORD = 'StrongPass123!';\n   GRANT SELECT ON SCHEMA::dbo TO anton;\n   ```\n\n### Firewall rules\n\n7. In the Azure Portal, go to your SQL server \u2192 **Security \u2192 Networking**.\n8. Under **Firewall rules**, add the IP address of the machine running Anton, or enable **Allow Azure services** if Anton runs in Azure.\n\n### Fill in the form\n\n9. Paste the server hostname, port (default `1433`), database name, username, and password below. Encryption is always enabled \u2014 Azure SQL requires it.\n\n### Notes\n- Passwords must meet Azure complexity requirements.\n- The server admin cannot be used to access `master` database operations by default on shared tiers.",
+        "help_url": "https://learn.microsoft.com/en-us/azure/azure-sql/database/connect-query-portal",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Server hostname",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourserver.database.windows.net",
+            "description": "Found in Azure Portal \u2192 SQL databases \u2192 Overview \u2192 Server name."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1433",
+            "placeholder": "1433",
+            "description": "Azure SQL uses port 1433 by default. Change only if your server uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-database",
+            "description": "The specific database to connect to, as shown in Azure Portal \u2192 SQL databases."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "sqladmin",
+            "description": "The SQL login username. Use the server admin login or a dedicated SQL user you created."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the SQL login. Stored encrypted locally and never sent to Anton servers."
+          },
+          {
+            "name": "encrypt",
+            "label": "Require encryption (TLS)",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Azure SQL always requires encrypted connections. Keep this enabled."
+          },
+          {
+            "name": "trust_server_certificate",
+            "label": "Trust server certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Skip server certificate validation. Not recommended for production \u2014 leave off to validate Azure's TLS certificate."
+          }
+        ]
+      },
+      {
+        "id": "azure-ad-password",
+        "label": "Azure Active Directory \u2014 Password",
+        "description": "Authenticate with an Azure AD (Entra ID) user principal and password. Required when your Azure SQL server enforces Azure AD-only authentication.",
+        "recommended": false,
+        "how_to": "## Azure Active Directory Password Authentication\n\nUse this method when your Azure SQL server is configured with **Azure AD-only authentication** (SQL logins are disabled) or when you want to authenticate as an Entra ID user.\n\n### Prerequisites\n\n1. Your Azure SQL server must have **Azure Active Directory admin** set. In the Azure Portal, go to your SQL server \u2192 **Settings \u2192 Azure Active Directory** and confirm an AAD admin is configured.\n2. The user you want to connect as must exist as an **external user** (Azure AD user) in the database. Connect as the AAD admin and run:\n   ```sql\n   CREATE USER [user@yourdomain.com] FROM EXTERNAL PROVIDER;\n   GRANT SELECT ON SCHEMA::dbo TO [user@yourdomain.com];\n   ```\n\n### Find your connection details\n\n3. Open **SQL databases \u2192 Overview** and copy the **Server name** (`yourserver.database.windows.net`).\n4. Note the **Database name**.\n\n### Firewall\n\n5. Under your SQL server \u2192 **Security \u2192 Networking**, ensure your machine's IP is allowed.\n\n### Fill in the form\n\n6. Enter the server hostname, port (`1433`), database, your Azure AD email as the username, and your Azure AD password below.\n\n### Notes\n- Multi-factor authentication (MFA) accounts cannot use password flow. Use a service principal or a non-MFA account.\n- Guest accounts from external tenants may not be supported.",
+        "help_url": "https://learn.microsoft.com/en-us/azure/azure-sql/database/authentication-aad-configure",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Server hostname",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourserver.database.windows.net",
+            "description": "Found in Azure Portal \u2192 SQL databases \u2192 Overview \u2192 Server name."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1433",
+            "placeholder": "1433",
+            "description": "Azure SQL uses port 1433 by default."
+          },
+          {
+            "name": "database",
+            "label": "Database name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-database",
+            "description": "The specific database to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Azure AD username",
+            "type": "text",
+            "required": true,
+            "placeholder": "user@yourdomain.com",
+            "description": "Your Azure AD (Entra ID) email address \u2014 must exist as an external user in the target database."
+          },
+          {
+            "name": "password",
+            "label": "Azure AD password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Your Azure AD account password. MFA-enabled accounts are not supported with this method."
+          },
+          {
+            "name": "encrypt",
+            "label": "Require encryption (TLS)",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Azure SQL always requires encrypted connections. Keep this enabled."
+          }
+        ]
+      },
+      {
+        "id": "service-principal",
+        "label": "Azure AD Service Principal",
+        "description": "Authenticate as an Azure AD app registration (client ID + secret). Best for automated or headless access without a user account.",
+        "recommended": false,
+        "how_to": "## Azure AD Service Principal Authentication\n\nUse an Entra ID (Azure AD) app registration to authenticate Anton as a non-interactive service identity. Ideal for automation and CI/CD scenarios.\n\n### Register an app in Entra ID\n\n1. Open the [Azure Portal](https://portal.azure.com) \u2192 **Azure Active Directory \u2192 App registrations \u2192 New registration**.\n2. Give it a name (e.g. `Anton SQL`), leave the redirect URI blank, and click **Register**.\n3. Copy the **Application (client) ID** and **Directory (tenant) ID** from the Overview page.\n4. Go to **Certificates & secrets \u2192 New client secret**. Add a description, set an expiry, and click **Add**.\n5. Copy the **Value** immediately \u2014 it won't be shown again.\n\n### Grant database access\n\n6. Connect to your Azure SQL server as an AAD admin and run:\n   ```sql\n   CREATE USER [Anton SQL] FROM EXTERNAL PROVIDER;\n   GRANT SELECT ON SCHEMA::dbo TO [Anton SQL];\n   ```\n   Replace `Anton SQL` with your app registration's display name exactly.\n\n### Ensure your SQL server allows AAD auth\n\n7. Azure Portal \u2192 your SQL server \u2192 **Settings \u2192 Azure Active Directory** \u2014 confirm an AAD admin is set.\n\n### Firewall\n\n8. Add your machine's IP under the SQL server \u2192 **Security \u2192 Networking \u2192 Firewall rules**.\n\n### Notes\n- Client secrets expire. Rotate before expiry and update the secret in Anton.\n- The tenant ID is the GUID on the Entra ID Overview page.",
+        "help_url": "https://learn.microsoft.com/en-us/azure/azure-sql/database/authentication-aad-service-principal",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Server hostname",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourserver.database.windows.net",
+            "description": "Found in Azure Portal \u2192 SQL databases \u2192 Overview \u2192 Server name."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1433",
+            "placeholder": "1433",
+            "description": "Azure SQL uses port 1433 by default."
+          },
+          {
+            "name": "database",
+            "label": "Database name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-database",
+            "description": "The specific database to connect to."
+          },
+          {
+            "name": "tenant_id",
+            "label": "Tenant ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Your Azure AD Directory (tenant) ID \u2014 found in Azure Portal \u2192 Azure Active Directory \u2192 Overview."
+          },
+          {
+            "name": "client_id",
+            "label": "Application (client) ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The app registration's Application ID from Entra ID \u2192 App registrations \u2192 Overview."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The secret value you copied when creating the client secret. Shown only once at creation time."
+          },
+          {
+            "name": "encrypt",
+            "label": "Require encryption (TLS)",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Azure SQL always requires encrypted connections. Keep this enabled."
+          }
+        ]
+      }
+    ]
+  }
+}

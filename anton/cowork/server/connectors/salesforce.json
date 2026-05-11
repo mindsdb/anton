@@ -1,0 +1,102 @@
+{
+  "id": "salesforce",
+  "label": "Salesforce",
+  "aliases": ["sfdc", "sales force", "sf"],
+  "keywords": ["crm", "sales", "leads", "opportunities", "accounts", "contacts", "cases", "soql"],
+  "description": "Read and write objects in your Salesforce org — Leads, Accounts, Contacts, Opportunities, custom objects.",
+  "category": "crm",
+  "logo": "globe",
+  "logo_color": "#00A1E0",
+  "form": {
+    "form_id": "salesforce-connector",
+    "title": "Connect Salesforce",
+    "subtitle": "Authorize Anton to read and update your Salesforce org.",
+    "logo": "globe",
+    "logo_color": "#00A1E0",
+    "methods": [
+      {
+        "id": "oauth",
+        "label": "Sign in with Salesforce",
+        "description": "OAuth 2.0 web-server flow with PKCE — a browser pops open for you to log into your Salesforce org and grant Anton scoped access. Currently requires you to register a Connected App in your org (steps below); we'll switch to a hosted client in a future release.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://login.salesforce.com/services/oauth2/authorize",
+          "token_url": "https://login.salesforce.com/services/oauth2/token",
+          "scopes": ["api", "refresh_token", "offline_access"],
+          "extra_auth_params": {
+            "prompt": "login consent"
+          }
+        },
+        "how_to": "## Sign in with Salesforce (OAuth 2.0)\n\nThe modern, recommended path. Anton spawns a tiny local server, opens Salesforce's login + consent screen in your browser, and exchanges the resulting authorization code for a refresh token — never sent to Anton's servers.\n\n### Pattern A — using Anton's hosted Connected App\n\nWhen the connector spec ships with a `client_id`, you don't see any fields here. Click **Submit**, your browser opens to your Salesforce login (production or sandbox), you grant the requested scopes, and Anton stores a refresh token locally.\n\n### Pattern B — bring your own Connected App\n\nIf this method shows two fields below (**Consumer key** and **Consumer secret**), Anton doesn't ship a hosted Connected App — register your own:\n\n1. Sign in to Salesforce as an admin → **Setup** (gear icon, top right) → **App Manager**.\n2. Click **New Connected App** at the top right.\n3. Fill in **Connected App Name**, **API Name**, and **Contact Email**.\n4. Tick **Enable OAuth Settings**, then:\n   - **Callback URL**: `http://127.0.0.1:8000/callback` (Anton picks a free loopback port at runtime; Salesforce matches the host part — if your org rejects the wildcard port, set up a few common ones like 8000, 8001, 8765 separated by newlines).\n   - **Selected OAuth Scopes**: add **Manage user data via APIs (`api`)**, **Perform requests at any time (`refresh_token`, `offline_access`)**.\n   - Tick **Require Secret for Web Server Flow** and **Require Secret for Refresh Token Flow**.\n   - Tick **Require Proof Key for Code Exchange (PKCE)**.\n5. Save. Salesforce takes a few minutes to provision the app — wait for it.\n6. Open the Connected App, click **Manage Consumer Details** (you may need to verify identity), and copy the **Consumer Key** and **Consumer Secret** into the fields below.\n7. Click **Submit**. Anton runs the same browser flow with your Connected App.\n\n### Sandbox vs production\n\nThe spec defaults to `login.salesforce.com` (production). For a sandbox, change `auth_url` and `token_url` to `https://test.salesforce.com/services/oauth2/...` in the connector JSON, or maintain a parallel `salesforce_sandbox` connector.\n\n### Revoking later\n\nAdmins can revoke at **Setup → Connected Apps OAuth Usage**. Individual users can revoke their own grants at **Personal Information → Connections**. The next task that hits Salesforce will fail with an auth error and prompt you to re-authorize.\n",
+        "help_url": "https://help.salesforce.com/s/articleView?id=sf.connected_app_create_api_integration.htm",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Consumer key (Client ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "3MVG9...",
+            "description": "From your Connected App → Manage Consumer Details."
+          },
+          {
+            "name": "client_secret",
+            "label": "Consumer secret (Client secret)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Consumer key; same Manage Consumer Details panel."
+          }
+        ]
+      },
+      {
+        "id": "username-password",
+        "label": "Username + password (legacy)",
+        "description": "Salesforce's username-password OAuth flow — paste your username, password, security token, and Connected App credentials. Salesforce is deprecating this for new orgs; prefer the browser flow above unless you're scripting against a legacy environment.",
+        "how_to": "## Username-password flow (legacy)\n\nSalesforce calls this the **OAuth 2.0 Username-Password flow**. It's being deprecated for new orgs in favor of the web-server flow above. Use it only when:\n\n- Your org disables interactive logins (CI/CD scripts).\n- You're hitting a legacy environment that doesn't support PKCE.\n\nYou STILL need a Connected App with API scopes enabled — the username-password just replaces the browser step.\n\n### Steps\n\n1. Set up a Connected App following steps 1-6 in the **Sign in with Salesforce** how-to above.\n2. In the Connected App, also tick **Permitted Users → All users may self-authorize** (or **Admin approved users are pre-authorized** + assign your user) AND **Allow OAuth Username-Password Flows** under the **API (Enable OAuth Settings)** section.\n3. Get a **Security token** — Salesforce → your profile menu (top right) → **Settings → My Personal Information → Reset My Security Token**. Salesforce emails the new token to your account email.\n4. Paste **Username**, **Password**, **Security token**, **Consumer key**, and **Consumer secret** below.\n\n### Notes\n\n- The password Anton stores is your raw Salesforce password concatenated with the security token — that's how Salesforce's username-password flow expects it.\n- If your org enforces IP restrictions, you may not need the security token; for safety, fill it anyway.\n- Read [Salesforce's username-password flow guide](https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_username_password_flow.htm) — note the deprecation banners.\n",
+        "help_url": "https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_username_password_flow.htm",
+        "fields": [
+          {
+            "name": "username",
+            "label": "Salesforce username",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@yourcompany.com.production",
+            "description": "Your Salesforce login (the email-shaped one, including any sandbox suffix like .sandbox)."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Your Salesforce password."
+          },
+          {
+            "name": "security_token",
+            "label": "Security token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "From Salesforce → My Personal Information → Reset My Security Token. Salesforce emails it to you."
+          },
+          {
+            "name": "client_id",
+            "label": "Consumer key (Client ID)",
+            "type": "text",
+            "required": true,
+            "description": "From your Connected App → Manage Consumer Details."
+          },
+          {
+            "name": "client_secret",
+            "label": "Consumer secret (Client secret)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Consumer key."
+          }
+        ]
+      }
+    ]
+  }
+}

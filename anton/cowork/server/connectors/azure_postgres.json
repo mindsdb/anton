@@ -1,0 +1,107 @@
+{
+  "id": "azure_postgres",
+  "label": "Azure Postgres",
+  "aliases": [
+    "azure postgresql",
+    "azure database for postgresql",
+    "azure flexible server",
+    "azure postgres flexible"
+  ],
+  "keywords": [
+    "postgresql",
+    "postgres",
+    "azure",
+    "microsoft",
+    "database",
+    "sql",
+    "flexible server",
+    "relational",
+    "cloud database"
+  ],
+  "description": "Connect to an Azure Database for PostgreSQL Flexible Server using host, port, database name, and credentials over SSL.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#0078D4",
+  "form": {
+    "form_id": "azure_postgres-connector",
+    "title": "Connect Azure Postgres",
+    "subtitle": "Connect Anton to your Azure Database for PostgreSQL Flexible Server instance.",
+    "logo": "database",
+    "logo_color": "#0078D4",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Host & credentials",
+        "description": "Paste your server hostname, port, database name, and credentials. SSL is enforced by Azure \u2014 no extra setup needed.",
+        "recommended": true,
+        "how_to": "## Connect with host & credentials\n\nAzure Database for PostgreSQL Flexible Server requires SSL. Gather the connection details from the Azure Portal before filling in the fields below.\n\n## Steps\n\n1. Open the [Azure Portal](https://portal.azure.com) and navigate to **Azure Database for PostgreSQL flexible servers**.\n2. Select your server instance.\n3. In the left menu, click **Overview**. Copy the **Server name** \u2014 it looks like `yourdb.postgres.database.azure.com`.\n4. Note the **Admin username** shown on the Overview page (format: `adminuser`).\n5. The port is **5432** by default. Confirm under **Connection strings** if you've changed it.\n6. Click **Databases** in the left menu to find the target database name (or use `postgres` for the default).\n7. If you forgot the admin password, reset it under **Settings \u2192 Reset password**.\n8. Ensure SSL is enabled: go to **Settings \u2192 Server parameters**, search for `ssl_enforcement_enabled`, and confirm it is `ON` (it is enforced by default on Flexible Server).\n9. If connecting from outside Azure, add your IP under **Networking \u2192 Firewall rules \u2192 Add current client IP**.\n10. Paste all values into the fields below and click **Connect**.\n\n## Notes\n\n- The admin username typically follows the format `adminuser` (no @servername suffix \u2014 Flexible Server differs from Single Server in this regard).\n- SSL mode `require` is the minimum; use `verify-full` for stricter certificate verification.\n- If your server is in a VNet with no public endpoint, you'll need a private endpoint or VPN to reach it from Anton.",
+        "help_url": "https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/connect-python",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Server hostname",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourdb.postgres.database.azure.com",
+            "description": "Found on the Azure Portal \u2192 your Flexible Server \u2192 Overview \u2192 Server name."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "Default PostgreSQL port is 5432. Change only if you've configured a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database name",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "description": "The name of the database to connect to. Use 'postgres' if you haven't created a custom one yet."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "adminuser",
+            "description": "The admin or app username. On Flexible Server, do not append @servername \u2014 just the username itself."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The password for the above user. Reset it in Azure Portal \u2192 Settings \u2192 Reset password if needed."
+          },
+          {
+            "name": "ssl_mode",
+            "label": "SSL mode",
+            "type": "select",
+            "required": true,
+            "default": "require",
+            "description": "SSL is mandatory on Azure Flexible Server. 'require' encrypts the connection; 'verify-full' also validates the server certificate.",
+            "options": [
+              {
+                "value": "require",
+                "label": "require (recommended)"
+              },
+              {
+                "value": "verify-full",
+                "label": "verify-full (strict)"
+              },
+              {
+                "value": "verify-ca",
+                "label": "verify-ca"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

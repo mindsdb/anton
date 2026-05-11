@@ -1,0 +1,159 @@
+{
+  "id": "supabase",
+  "label": "Supabase",
+  "aliases": [
+    "supabase postgres",
+    "supabase db",
+    "supabase database"
+  ],
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "database",
+    "sql",
+    "realtime",
+    "auth",
+    "storage",
+    "managed",
+    "supabase"
+  ],
+  "description": "Connect to your Supabase project's managed Postgres database using a connection string or individual credentials.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#3ECF8E",
+  "form": {
+    "form_id": "supabase-connector",
+    "title": "Connect Supabase",
+    "subtitle": "Link Anton to your Supabase project's Postgres database.",
+    "logo": "database",
+    "logo_color": "#3ECF8E",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste the full Postgres connection string from your Supabase project settings. Quickest way to get connected \u2014 one field, no assembly required.",
+        "recommended": true,
+        "how_to": "## Get your Supabase connection string\n\n1. Open [Supabase Dashboard](https://supabase.com/dashboard) and select your project.\n2. Go to **Project Settings** (gear icon in the left sidebar) \u2192 **Database**.\n3. Scroll to the **Connection string** section.\n4. Choose the **URI** tab.\n5. Copy the full string \u2014 it looks like `postgresql://postgres:[YOUR-PASSWORD]@db.<project-ref>.supabase.co:5432/postgres`.\n6. If the password placeholder `[YOUR-PASSWORD]` appears, replace it with your database password (set when you created the project, or reset under **Database \u2192 Database Password**).\n7. Paste the string into the field below.\n\n### Notes\n\n- Use the **Transaction** mode URI (port 6543) if you plan to run many short-lived queries; use the direct URI (port 5432) for long-running or migration workloads.\n- If you're on the free plan and your project is paused, you'll need to unpause it in the dashboard first.\n",
+        "help_url": "https://supabase.com/docs/guides/database/connecting-to-postgres",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "postgresql://postgres:[YOUR-PASSWORD]@db.<project-ref>.supabase.co:5432/postgres",
+            "description": "Full Postgres URI from Project Settings \u2192 Database \u2192 Connection string \u2192 URI tab."
+          }
+        ]
+      },
+      {
+        "id": "individual-credentials",
+        "label": "Host / Port / Database / User / Password",
+        "description": "Enter your Supabase database credentials field by field. Useful if you need fine-grained control or a connection manager that doesn't accept raw URI strings.",
+        "recommended": false,
+        "how_to": "## Get individual Supabase database credentials\n\n1. Open [Supabase Dashboard](https://supabase.com/dashboard) and select your project.\n2. Go to **Project Settings** \u2192 **Database**.\n3. Scroll to the **Connection info** section \u2014 all individual fields are listed there.\n4. Copy the values one by one:\n   - **Host**: `db.<project-ref>.supabase.co`\n   - **Port**: `5432` (direct) or `6543` (transaction pooler)\n   - **Database name**: `postgres`\n   - **User**: `postgres`\n   - **Password**: your project database password\n5. Fill in the fields below and click **Submit**.\n\n### Notes\n\n- If you've never set a database password, go to **Project Settings \u2192 Database \u2192 Database Password** and reset it.\n- For SSL, Supabase requires `sslmode=require` \u2014 Anton enables this by default when connecting to Supabase hosts.\n",
+        "help_url": "https://supabase.com/docs/guides/database/connecting-to-postgres",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "db.<project-ref>.supabase.co",
+            "description": "Found in Project Settings \u2192 Database \u2192 Connection info."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "placeholder": "5432",
+            "default": "5432",
+            "description": "Use 5432 for a direct connection or 6543 for the transaction pooler."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "default": "postgres",
+            "description": "The name of the database to connect to. Defaults to postgres on Supabase."
+          },
+          {
+            "name": "user",
+            "label": "Database User",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "default": "postgres",
+            "description": "The Postgres role to authenticate as. Defaults to postgres on Supabase."
+          },
+          {
+            "name": "password",
+            "label": "Database Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Your project database password. Reset it in Project Settings \u2192 Database \u2192 Database Password if forgotten."
+          },
+          {
+            "name": "ssl_mode",
+            "label": "SSL Mode",
+            "type": "select",
+            "required": false,
+            "default": "require",
+            "description": "Supabase requires SSL. Leave as require unless you have a specific reason to change it.",
+            "options": [
+              {
+                "value": "require",
+                "label": "require (recommended)"
+              },
+              {
+                "value": "verify-ca",
+                "label": "verify-ca"
+              },
+              {
+                "value": "verify-full",
+                "label": "verify-full"
+              },
+              {
+                "value": "disable",
+                "label": "disable (not recommended)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "service-role-api-key",
+        "label": "REST API (Service Role Key)",
+        "description": "Use Supabase's auto-generated REST API with your service role key. Suitable for querying data via PostgREST without a direct Postgres connection.",
+        "recommended": false,
+        "how_to": "## Get your Supabase service role key\n\n1. Open [Supabase Dashboard](https://supabase.com/dashboard) and select your project.\n2. Go to **Project Settings** \u2192 **API**.\n3. Under **Project API keys**, copy the **service_role** key (labeled \"secret\").\n4. Also copy the **Project URL** from the top of the same page \u2014 it looks like `https://<project-ref>.supabase.co`.\n5. Paste both values into the fields below.\n\n### Notes\n\n- The **service_role** key bypasses Row Level Security (RLS). Keep it secret and never expose it in client-side code.\n- The **anon** key is restricted by RLS and is NOT suitable for Anton \u2014 use the service_role key.\n- This method queries data through PostgREST (Supabase's auto-generated REST layer) rather than a direct Postgres connection. Some complex SQL queries may not be expressible via the REST API; use the Connection String method for those.\n",
+        "help_url": "https://supabase.com/docs/guides/api",
+        "fields": [
+          {
+            "name": "project_url",
+            "label": "Project URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://<project-ref>.supabase.co",
+            "description": "Found in Project Settings \u2192 API \u2192 Project URL."
+          },
+          {
+            "name": "service_role_key",
+            "label": "Service Role Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+            "description": "The secret service_role key from Project Settings \u2192 API \u2192 Project API keys. Bypasses Row Level Security \u2014 keep it safe."
+          }
+        ]
+      }
+    ]
+  }
+}

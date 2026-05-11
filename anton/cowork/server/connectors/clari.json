@@ -1,0 +1,60 @@
+{
+  "id": "clari",
+  "label": "Clari",
+  "aliases": [
+    "clari revenue",
+    "clari forecasting",
+    "clari copilot"
+  ],
+  "keywords": [
+    "forecasting",
+    "pipeline",
+    "revenue",
+    "sales",
+    "intelligence",
+    "crm",
+    "deal",
+    "quota",
+    "commit"
+  ],
+  "description": "Connect Clari to pull pipeline forecasts, deal signals, and revenue intelligence into Anton.",
+  "category": "revenue-intel",
+  "logo": "sparkle",
+  "logo_color": "#4F46E5",
+  "form": {
+    "form_id": "clari-connector",
+    "title": "Connect Clari",
+    "subtitle": "Paste your Clari API key and tenant slug to start syncing forecast and pipeline data.",
+    "logo": "sparkle",
+    "logo_color": "#4F46E5",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Clari API key and tenant slug. Generated in Settings \u2192 Integrations \u2192 API \u2014 requires admin or CSM-gated access.",
+        "recommended": true,
+        "how_to": "## Connect Clari via API Key\n\nClari API access is typically admin- or CSM-gated. If the Integrations section isn't visible in your Settings, contact your Clari admin or Clari CSM to enable API access for your account.\n\n### Steps\n\n1. Log in to your Clari instance.\n2. Click your avatar or account name (top-right) and go to **Settings**.\n3. Navigate to **Integrations \u2192 API**.\n4. If an API key already exists, copy it. Otherwise, click **Generate API Key** (or **Create Token**).\n5. Copy the key \u2014 it may only be shown once. Store it somewhere safe.\n6. Find your **Tenant Slug**: this is the subdomain of your Clari URL, e.g. `acme` from `acme.clari.com`. Your Clari admin can confirm it.\n7. Paste both values into the fields below and click **Submit**.\n\n### Notes\n\n- If you lose the API key, you'll need to regenerate it \u2014 old keys are typically invalidated on regeneration.\n- API access scope depends on your Clari plan and admin configuration. If you see permission errors, ask your Clari admin to grant broader API access.\n- The tenant slug is required to route requests to the correct Clari environment.",
+        "help_url": "https://developer.clari.com/documentation",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ck_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Clari Settings \u2192 Integrations \u2192 API. May require admin privileges to generate."
+          },
+          {
+            "name": "tenant_slug",
+            "label": "Tenant Slug",
+            "type": "text",
+            "required": true,
+            "placeholder": "acme",
+            "description": "The subdomain of your Clari instance, e.g. 'acme' from acme.clari.com. Ask your Clari admin if unsure."
+          }
+        ]
+      }
+    ]
+  }
+}

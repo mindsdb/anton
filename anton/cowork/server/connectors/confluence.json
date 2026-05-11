@@ -1,0 +1,144 @@
+{
+  "id": "confluence",
+  "label": "Confluence",
+  "aliases": [
+    "atlassian confluence",
+    "confluence wiki",
+    "confluence cloud",
+    "atlassian wiki"
+  ],
+  "keywords": [
+    "wiki",
+    "documentation",
+    "knowledge base",
+    "atlassian",
+    "pages",
+    "spaces",
+    "confluence",
+    "docs",
+    "notes"
+  ],
+  "description": "Read, search, and manage Confluence pages and spaces from your Atlassian Cloud or Server instance.",
+  "category": "productivity",
+  "logo": "doc",
+  "logo_color": "#0052CC",
+  "form": {
+    "form_id": "confluence-connector",
+    "title": "Connect Confluence",
+    "subtitle": "Authorize Anton to read and manage your Confluence pages and spaces.",
+    "logo": "doc",
+    "logo_color": "#0052CC",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste an Atlassian API token with your login email and subdomain. The fastest path \u2014 no OAuth client setup required.",
+        "recommended": true,
+        "how_to": "## Connect with an Atlassian API Token\n\nAtlassian API tokens act as per-user passwords scoped to the Atlassian account. No admin approval needed \u2014 any Confluence user can generate one.\n\n### Steps\n\n1. Log in to your Atlassian account and open [API token management](https://id.atlassian.com/manage-profile/security/api-tokens).\n2. Click **Create API token**.\n3. Give it a name like `Anton` and click **Create**.\n4. Copy the token shown (it will not be displayed again).\n5. Paste the token into **API Token** below.\n6. Enter the **email address** you use to log in to Atlassian.\n7. Enter your **Atlassian subdomain** \u2014 the part before `.atlassian.net` in your Confluence URL (e.g. `mycompany` for `mycompany.atlassian.net`).\n\n### Notes\n\n- The token authenticates as you, so Anton can access everything your account can in Confluence.\n- If you lose the token, generate a new one from the same page and update it in Anton.\n- For Confluence Server or Data Center, use the **Personal Access Token** method instead \u2014 API tokens are Atlassian Cloud only.\n",
+        "help_url": "https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/",
+        "fields": [
+          {
+            "name": "subdomain",
+            "label": "Atlassian Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "mycompany",
+            "description": "The part before .atlassian.net in your Confluence URL (e.g. mycompany for mycompany.atlassian.net)."
+          },
+          {
+            "name": "email",
+            "label": "Login Email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@yourcompany.com",
+            "description": "The email address associated with your Atlassian account."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated at id.atlassian.com \u2192 Security \u2192 API tokens. Shown only once \u2014 copy it immediately."
+          }
+        ]
+      },
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token (Server / Data Center)",
+        "description": "For Confluence Server or Data Center instances hosted on your own infrastructure. Generate a PAT from your Confluence profile and enter your base URL.",
+        "recommended": false,
+        "how_to": "## Connect with a Personal Access Token (Server / Data Center)\n\nConfluence Server 7.9+ and Data Center support Personal Access Tokens (PATs) \u2014 long-lived tokens tied to your user account.\n\n### Steps\n\n1. Log in to your self-hosted Confluence instance.\n2. Click your **profile avatar** (top right) \u2192 **Profile**.\n3. Go to **Settings \u2192 Personal Access Tokens \u2192 Create token**.\n4. Give the token a name like `Anton`, set an optional expiry, and click **Create**.\n5. Copy the token shown \u2014 it will not be shown again.\n6. Enter your Confluence **Base URL** (e.g. `https://confluence.mycompany.com`).\n7. Enter your Confluence **username** (not an email \u2014 this is your Confluence login name).\n8. Paste the PAT into **Personal Access Token** below.\n\n### Notes\n\n- PATs are tied to your user account and expire if you set an expiry during creation.\n- Ensure your Confluence instance is accessible from the machine running Anton (VPN may be required).\n- This method does not work for Atlassian Cloud \u2014 use **API Token** instead.\n",
+        "help_url": "https://confluence.atlassian.com/enterprise/using-personal-access-tokens-1026032365.html",
+        "fields": [
+          {
+            "name": "base_url",
+            "label": "Confluence Base URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://confluence.mycompany.com",
+            "description": "The root URL of your self-hosted Confluence instance, without a trailing slash."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "jsmith",
+            "description": "Your Confluence login username (not an email address)."
+          },
+          {
+            "name": "personal_access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated in Confluence \u2192 Profile \u2192 Settings \u2192 Personal Access Tokens. Shown only once."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Atlassian Cloud)",
+        "description": "Use an Atlassian OAuth 2.0 app to grant Anton access without sharing credentials. Requires creating an OAuth app in the Atlassian Developer Console.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://auth.atlassian.com/authorize",
+          "token_url": "https://auth.atlassian.com/oauth/token",
+          "scopes": [
+            "read:confluence-content.all",
+            "write:confluence-content",
+            "read:confluence-space.summary",
+            "read:confluence-user",
+            "offline_access"
+          ],
+          "extra_auth_params": {
+            "audience": "api.atlassian.com",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Connect with OAuth 2.0 (Atlassian Cloud)\n\nThis method uses an Atlassian OAuth 2.0 (3LO) app from the Atlassian Developer Console. More setup than an API token, but credentials are never shared directly.\n\n### Steps\n\n1. Go to [developer.atlassian.com](https://developer.atlassian.com/console/myapps/) and click **Create \u2192 OAuth 2.0 integration**.\n2. Give the app a name like `Anton` and accept the terms.\n3. Under **Permissions**, add **Confluence API** and enable these scopes:\n   - `read:confluence-content.all`\n   - `write:confluence-content`\n   - `read:confluence-space.summary`\n   - `read:confluence-user`\n4. Under **Authorization**, add a callback URL. For Anton use `http://localhost:3000/oauth/callback` (or the URL Anton instructs you to use).\n5. Go to **Settings** and copy the **Client ID** and **Secret**.\n6. Paste both into the fields below, then click **Submit**.\n7. A browser window will open \u2014 log in to Atlassian and grant access.\n\n### Notes\n\n- `offline_access` scope is requested automatically to issue a refresh token.\n- The app must be in **Production** (or have your account as a developer) to work properly.\n- Atlassian Cloud only \u2014 Server/Data Center does not support this OAuth flow.\n",
+        "help_url": "https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "abcdef1234567890abcdef1234567890",
+            "description": "From your Atlassian Developer Console app \u2192 Settings \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID \u2014 found in the same Settings page of your Atlassian OAuth app."
+          }
+        ]
+      }
+    ]
+  }
+}

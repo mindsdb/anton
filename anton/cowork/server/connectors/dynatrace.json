@@ -1,0 +1,109 @@
+{
+  "id": "dynatrace",
+  "label": "Dynatrace",
+  "aliases": [
+    "dynatrace apm",
+    "dynatrace observability",
+    "dynatrace monitoring",
+    "dt"
+  ],
+  "keywords": [
+    "observability",
+    "apm",
+    "monitoring",
+    "performance",
+    "full-stack",
+    "traces",
+    "metrics",
+    "logs",
+    "infrastructure",
+    "kubernetes",
+    "cloud"
+  ],
+  "description": "Connect to Dynatrace for full-stack observability and APM data including metrics, traces, logs, and infrastructure health.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#1496FF",
+  "form": {
+    "form_id": "dynatrace-connector",
+    "title": "Connect Dynatrace",
+    "subtitle": "Paste your Dynatrace API token and environment URL to start pulling observability data.",
+    "logo": "sparkle",
+    "logo_color": "#1496FF",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste a Dynatrace API token with the required scopes alongside your environment URL. The simplest and most common path for all Dynatrace deployment types.",
+        "recommended": true,
+        "how_to": "## Generate a Dynatrace API Token\n\n1. Open your Dynatrace environment (e.g. `https://abc12345.live.dynatrace.com`).\n2. Navigate to **Settings \u2192 Access tokens** (or use the shortcut: click your account icon \u2192 **Access tokens**).\n3. Click **Generate new token**.\n4. Give it a descriptive name like `Anton Integration`.\n5. Under **Select scopes from the list below**, enable the scopes you need. Common ones include:\n   - `metrics.read` \u2014 read metric data\n   - `logs.read` \u2014 read log data\n   - `entities.read` \u2014 read monitored entities\n   - `problems.read` \u2014 read problem feed\n   - `DataExport` \u2014 export raw data\n   - `ReadConfig` \u2014 read configuration\n6. Click **Generate token**. Copy the token immediately \u2014 it is shown **only once**.\n7. Paste the token into the **API Token** field below.\n8. Enter your environment URL (e.g. `https://abc12345.live.dynatrace.com`) into the **Environment URL** field.\n\n## Notes\n\n- For Managed deployments, your URL is typically `https://your-domain/e/YOUR_ENV_ID`.\n- For Grail/Platform environments, the base URL format may differ \u2014 check your browser's address bar while in the Dynatrace UI.\n- If the token is lost, delete it and generate a new one; Anton can be updated with the new token at any time.\n- Follow the principle of least privilege \u2014 only enable scopes Anton actually needs.",
+        "help_url": "https://docs.dynatrace.com/docs/manage/access-control/access-tokens",
+        "fields": [
+          {
+            "name": "environment_url",
+            "label": "Environment URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://abc12345.live.dynatrace.com",
+            "description": "Your Dynatrace environment base URL. For SaaS it looks like https://<env-id>.live.dynatrace.com; for Managed use https://<host>/e/<env-id>."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "dt0c01.XXXXXXXXXXXXXXXXXXXX...",
+            "description": "Generated under Settings \u2192 Access tokens. Must include the scopes required for the data you want Anton to access (e.g. metrics.read, logs.read, entities.read)."
+          }
+        ]
+      },
+      {
+        "id": "oauth-client",
+        "label": "OAuth 2.0 Client Credentials",
+        "description": "Use a Dynatrace OAuth 2.0 client (client ID + secret) for platform API access. Required for newer Grail-based APIs and Dynatrace Platform environments.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://sso.dynatrace.com/sso/oauth2/authorize",
+          "token_url": "https://sso.dynatrace.com/sso/oauth2/token",
+          "scopes": [
+            "storage:metrics:read",
+            "storage:logs:read",
+            "storage:entities:read",
+            "storage:events:read",
+            "storage:bizevents:read"
+          ]
+        },
+        "how_to": "## Create a Dynatrace OAuth 2.0 Client\n\nThis method is required when using Grail-based APIs (e.g. the Dynatrace Platform or DQL queries) and is not needed for classic SaaS environments.\n\n1. Open your Dynatrace account at [myaccount.dynatrace.com](https://myaccount.dynatrace.com).\n2. Go to **Identity & access management \u2192 OAuth clients**.\n3. Click **Create client**.\n4. Enter a name (e.g. `Anton`) and optionally a description.\n5. Under **Scopes**, add the scopes you need:\n   - `storage:metrics:read`\n   - `storage:logs:read`\n   - `storage:entities:read`\n   - `storage:events:read`\n6. Set the **Redirect URI** to `http://127.0.0.1` (Anton uses a local redirect for the code exchange).\n7. Click **Save**. Copy the **Client ID** and **Client secret** \u2014 the secret is shown only once.\n8. Also note your **Account URN** (shown on the client details page) as you may need it for certain API calls.\n9. Paste the Client ID and Client secret into the fields below, then click **Authorize**.\n\n## Notes\n\n- OAuth clients live at the Dynatrace account level, not per environment \u2014 ensure the correct environment is scoped if your account spans multiple.\n- If the client secret is lost, regenerate it from the OAuth clients page and update Anton.",
+        "help_url": "https://docs.dynatrace.com/docs/manage/access-control/oauth-clients",
+        "fields": [
+          {
+            "name": "environment_url",
+            "label": "Environment URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://abc12345.apps.dynatrace.com",
+            "description": "Your Dynatrace Platform environment URL. For Grail/Platform this typically ends in .apps.dynatrace.com."
+          },
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "dt0s02.XXXXXXXXXX",
+            "description": "Found under Identity & access management \u2192 OAuth clients in myaccount.dynatrace.com."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Shown once when the OAuth client is created. Regenerate from the client details page if lost."
+          }
+        ]
+      }
+    ]
+  }
+}

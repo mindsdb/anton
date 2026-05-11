@@ -1,0 +1,93 @@
+{
+  "id": "graylog",
+  "label": "Graylog",
+  "aliases": [
+    "graylog2",
+    "gray log",
+    "graylog open source"
+  ],
+  "keywords": [
+    "logs",
+    "log management",
+    "observability",
+    "monitoring",
+    "search",
+    "siem",
+    "alerts",
+    "streams",
+    "open source"
+  ],
+  "description": "Connect to Graylog to search logs, manage streams, and trigger alerts from your log management platform.",
+  "category": "observability",
+  "logo": "list",
+  "logo_color": "#FF3633",
+  "form": {
+    "form_id": "graylog-connector",
+    "title": "Connect Graylog",
+    "subtitle": "Authorize Anton to query and manage your Graylog log management instance.",
+    "logo": "list",
+    "logo_color": "#FF3633",
+    "methods": [
+      {
+        "id": "access-token",
+        "label": "API Access Token",
+        "description": "Paste your Graylog API URL and an access token generated from System \u2192 Authentication \u2192 Tokens. Simplest and most secure path \u2014 no password stored.",
+        "recommended": true,
+        "how_to": "## Connect with a Graylog Access Token\n\nGraylog supports long-lived access tokens that can be used in place of a username and password. This is the recommended method.\n\n### Steps\n\n1. Log in to your Graylog web interface.\n2. Navigate to **System \u2192 Authentication \u2192 Tokens** (or click your username in the top-right corner \u2192 **Edit profile \u2192 Tokens**).\n3. Click **Create token**, give it a descriptive name like `Anton`, and click **Create**.\n4. Copy the token value shown \u2014 it is only displayed once.\n5. Find your Graylog API base URL. This is typically the same host and port as the web interface, e.g. `https://graylog.yourcompany.com:9000`. If your admin has configured a separate API endpoint, use that instead.\n6. Paste the base URL into **Graylog API URL** and the token into **Access Token** below.\n\n### Notes\n\n- The token is used as a username with the literal string `token` as the password via HTTP Basic Auth \u2014 Anton handles this automatically.\n- Tokens can be revoked at any time from the same **Tokens** page.\n- If the Tokens page is missing, your Graylog version or role may not support it \u2014 use **Username & Password** instead.\n",
+        "help_url": "https://go2docs.graylog.org/current/setting_up_graylog/rest_api.htm",
+        "fields": [
+          {
+            "name": "api_url",
+            "label": "Graylog API URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://graylog.yourcompany.com:9000",
+            "description": "Base URL of your Graylog instance, including protocol and port. No trailing slash needed."
+          },
+          {
+            "name": "access_token",
+            "label": "Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated from System \u2192 Authentication \u2192 Tokens (or your profile page). Shown only once at creation."
+          }
+        ]
+      },
+      {
+        "id": "username-password",
+        "label": "Username & Password",
+        "description": "Authenticate with your Graylog username and password directly. Useful if you haven't set up access tokens or are using a local admin account.",
+        "recommended": false,
+        "how_to": "## Connect with Username & Password\n\nUse this method if you prefer to authenticate with your existing Graylog credentials rather than generating a token.\n\n### Steps\n\n1. Find your Graylog API base URL \u2014 typically the same host and port as the web interface, e.g. `https://graylog.yourcompany.com:9000`.\n2. Enter the username you use to log in to Graylog (e.g. `admin`).\n3. Enter your Graylog password.\n4. Click **Submit**. Anton will use HTTP Basic Auth to authenticate against the Graylog REST API.\n\n### Notes\n\n- For security, prefer the **API Access Token** method so you don't store your main account password.\n- If your Graylog instance uses LDAP or SSO, username/password may not work via the API \u2014 generate a token instead.\n- Ensure the account has sufficient role permissions (at minimum **Reader** for log search, **Admin** for full access).\n",
+        "help_url": "https://go2docs.graylog.org/current/setting_up_graylog/rest_api.htm",
+        "fields": [
+          {
+            "name": "api_url",
+            "label": "Graylog API URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://graylog.yourcompany.com:9000",
+            "description": "Base URL of your Graylog instance, including protocol and port. No trailing slash needed."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "admin",
+            "description": "Your Graylog login username."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Your Graylog login password. Consider using an access token instead for better security."
+          }
+        ]
+      }
+    ]
+  }
+}

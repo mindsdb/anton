@@ -1,0 +1,53 @@
+{
+  "id": "elevenlabs",
+  "label": "ElevenLabs",
+  "aliases": [
+    "eleven labs",
+    "11labs",
+    "elevenlabs ai",
+    "eleven labs ai"
+  ],
+  "keywords": [
+    "voice",
+    "tts",
+    "text-to-speech",
+    "speech synthesis",
+    "voice cloning",
+    "ai voice",
+    "audio",
+    "narration",
+    "elevenlabs"
+  ],
+  "description": "Generate and clone lifelike AI voices using ElevenLabs' speech synthesis API.",
+  "category": "ai",
+  "logo": "mic",
+  "logo_color": "#F5A623",
+  "form": {
+    "form_id": "elevenlabs-connector",
+    "title": "Connect ElevenLabs",
+    "subtitle": "Paste your ElevenLabs API key to start generating and cloning AI voices.",
+    "logo": "mic",
+    "logo_color": "#F5A623",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your ElevenLabs API key (xi_\u2026) from your Profile page. Takes 30 seconds and no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Get your ElevenLabs API Key\n\n1. Log in at [elevenlabs.io](https://elevenlabs.io).\n2. Click your **Profile avatar** in the top-right corner.\n3. Select **Profile** from the dropdown.\n4. Scroll down to the **API Key** section.\n5. Click **Copy** next to your key (it starts with `xi_`).\n6. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Your API key inherits the permissions of your account tier (Free, Starter, Creator, etc.).\n- If you suspect the key is compromised, regenerate it from the same Profile page \u2014 the old key is immediately invalidated.\n- Free-tier accounts have monthly character limits; check your usage on the **Subscription** page.\n- Keep the key secret \u2014 anyone with it can consume your quota and access your cloned voices.\n",
+        "help_url": "https://elevenlabs.io/docs/api-reference/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xi_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at elevenlabs.io \u2192 Profile \u2192 API Key. Starts with xi_."
+          }
+        ]
+      }
+    ]
+  }
+}

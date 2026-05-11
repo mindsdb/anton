@@ -1,0 +1,152 @@
+{
+  "id": "logz_io",
+  "label": "Logz.io",
+  "aliases": [
+    "logzio",
+    "logz",
+    "hosted elk",
+    "logz observability"
+  ],
+  "keywords": [
+    "logs",
+    "metrics",
+    "traces",
+    "elk",
+    "elasticsearch",
+    "kibana",
+    "prometheus",
+    "apm",
+    "observability",
+    "monitoring",
+    "log management",
+    "alerting"
+  ],
+  "description": "Connect to Logz.io's hosted ELK, Prometheus, and APM platform to ship logs and query observability data.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#00A7E1",
+  "form": {
+    "form_id": "logz_io-connector",
+    "title": "Connect Logz.io",
+    "subtitle": "Paste your shipping token and API token to start ingesting logs and querying observability data.",
+    "logo": "sparkle",
+    "logo_color": "#00A7E1",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "Shipping Token + API Token",
+        "description": "Paste your Logz.io log shipping token (for ingestion) and API token (for queries), then select your account region. The simplest and most common setup path.",
+        "recommended": true,
+        "how_to": "## Connect with Shipping Token + API Token\n\nYou need two separate tokens from Logz.io: a **shipping token** for sending logs and a **API token** for querying data via the Logz.io REST API.\n\n### Get your Shipping Token\n\n1. Log in to [app.logz.io](https://app.logz.io/).\n2. Click your account name in the top-right \u2192 **Settings \u2192 General settings**.\n3. Under **Shipping tokens**, copy the **Default** token (or create a dedicated one).\n\n### Get your API Token\n\n1. In Logz.io, go to **Settings \u2192 Tools \u2192 API tokens**.\n2. Click **Add API token**, give it a name like `Anton`, and click **Add**.\n3. Copy the generated token \u2014 it is shown in full only once.\n\n### Select your Region\n\n- Choose the region that matches your Logz.io account.\n- If unsure, check your Logz.io login URL: `app.logz.io` = US, `app-eu.logz.io` = EU, `app-au.logz.io` = AU, `app-ca.logz.io` = CA, `app-wa.logz.io` = WA.\n\n### Notes\n\n- The API token is shown once at creation time \u2014 if lost, delete it and create a new one.\n- Shipping tokens and API tokens are independent; both are needed for full read/write access.\n- Workspace admins can scope API token permissions under **Settings \u2192 Tools \u2192 API tokens**.\n",
+        "help_url": "https://docs.logz.io/docs/user-guide/admin/authentication-tokens/api-tokens/",
+        "fields": [
+          {
+            "name": "shipping_token",
+            "label": "Log Shipping Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "aBcDeFgHiJkLmNoPqRsTuVwX",
+            "description": "Found in Settings \u2192 General settings \u2192 Shipping tokens. Used to authenticate log ingestion (Logstash, Filebeat, etc.)."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xXxXxXxXxXxXxXxXxXxXxXxX",
+            "description": "Found in Settings \u2192 Tools \u2192 API tokens. Used to query logs, alerts, and dashboards via the Logz.io REST API."
+          },
+          {
+            "name": "region",
+            "label": "Account Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select the region of your Logz.io account. Must match the region shown in your Logz.io login URL.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (app.logz.io)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (app-eu.logz.io)"
+              },
+              {
+                "value": "au",
+                "label": "AU \u2014 Australia (app-au.logz.io)"
+              },
+              {
+                "value": "ca",
+                "label": "CA \u2014 Canada (app-ca.logz.io)"
+              },
+              {
+                "value": "wa",
+                "label": "WA \u2014 West Europe (app-wa.logz.io)"
+              }
+            ]
+          },
+          {
+            "name": "account_id",
+            "label": "Account ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "123456",
+            "description": "Your numeric Logz.io account ID. Required for some sub-account API calls. Found in Settings \u2192 General settings."
+          }
+        ]
+      },
+      {
+        "id": "shipping-token-only",
+        "label": "Shipping Token Only (Ingest only)",
+        "description": "Use only a log shipping token if you only need to send logs to Logz.io without querying data back. Suitable for one-way log pipeline setups.",
+        "recommended": false,
+        "how_to": "## Connect with Shipping Token Only\n\nUse this method if you only need to ship logs to Logz.io and do not require query or read access via the API.\n\n### Get your Shipping Token\n\n1. Log in to [app.logz.io](https://app.logz.io/).\n2. Click your account name \u2192 **Settings \u2192 General settings**.\n3. Under **Shipping tokens**, copy the **Default** token or create a dedicated one for Anton.\n\n### Select your Region\n\n- Match the region to your Logz.io account's login URL.\n- `app.logz.io` = US, `app-eu.logz.io` = EU, and so on.\n\n### Notes\n\n- Without an API token, Anton can only push data to Logz.io \u2014 it cannot read back logs, alerts, or dashboards.\n- To add query access later, switch to the **Shipping Token + API Token** method.\n",
+        "help_url": "https://docs.logz.io/docs/user-guide/admin/authentication-tokens/log-shipping-tokens/",
+        "fields": [
+          {
+            "name": "shipping_token",
+            "label": "Log Shipping Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "aBcDeFgHiJkLmNoPqRsTuVwX",
+            "description": "Found in Settings \u2192 General settings \u2192 Shipping tokens. Authenticates log ingestion only."
+          },
+          {
+            "name": "region",
+            "label": "Account Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select the region matching your Logz.io account.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (app.logz.io)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (app-eu.logz.io)"
+              },
+              {
+                "value": "au",
+                "label": "AU \u2014 Australia (app-au.logz.io)"
+              },
+              {
+                "value": "ca",
+                "label": "CA \u2014 Canada (app-ca.logz.io)"
+              },
+              {
+                "value": "wa",
+                "label": "WA \u2014 West Europe (app-wa.logz.io)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

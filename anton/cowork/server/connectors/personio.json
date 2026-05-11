@@ -1,0 +1,71 @@
+{
+  "id": "personio",
+  "label": "Personio",
+  "aliases": [
+    "personio hr",
+    "personio hris",
+    "personio hrm"
+  ],
+  "keywords": [
+    "hr",
+    "hris",
+    "hrm",
+    "human resources",
+    "employees",
+    "payroll",
+    "europe",
+    "people",
+    "workforce",
+    "recruitment",
+    "attendance"
+  ],
+  "description": "Connect to Personio to read and manage employee data, absences, attendance, and HR records.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#3DB39E",
+  "form": {
+    "form_id": "personio-connector",
+    "title": "Connect Personio",
+    "subtitle": "Paste your Personio API credentials to give Anton access to your HR data.",
+    "logo": "check",
+    "logo_color": "#3DB39E",
+    "methods": [
+      {
+        "id": "api-credentials",
+        "label": "API Client ID & Secret",
+        "description": "Generate a client ID and secret from Personio's Integrations settings and paste them here. The simplest and recommended path \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect via Personio API Credentials\n\nPersonio uses a client-credentials flow: you generate a client ID and secret in the UI, then Anton exchanges them for a short-lived bearer token automatically.\n\n### Steps\n\n1. Log in to your Personio account as an admin.\n2. Go to **Settings** (gear icon, top right) \u2192 **Integrations** \u2192 **API**.\n3. If no API credentials exist yet, click **Generate new credentials**.\n4. Copy the **Client ID** and **Client Secret** shown. The secret is only displayed once \u2014 store it somewhere safe before closing the dialog.\n5. Under **Access rights**, make sure the credential has the scopes Anton needs (e.g. Employees read, Absences read/write, Attendance read/write).\n6. Paste both values into the fields below and click **Submit**.\n\n### Notes\n\n- Anton uses the credentials to request a bearer token from `https://api.personio.de/v1/auth` and refreshes it automatically before it expires.\n- Credentials are scoped to the access rights you configure in Personio \u2014 restrict them to only what Anton needs.\n- If you rotate the credentials in Personio, re-open this connector and paste the new values.\n- Personio's API is available on all plans but advanced endpoints may require a higher-tier subscription.",
+        "help_url": "https://developer.personio.de/docs/getting-started-with-the-personio-api",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-personio-client-id",
+            "description": "Found in Settings \u2192 Integrations \u2192 API. Identifies your API integration."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-personio-client-secret",
+            "description": "Shown once when the credentials are generated. Paired with the Client ID above."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.personio.de/v1",
+            "default": "https://api.personio.de/v1",
+            "description": "Leave as default unless your Personio account uses a custom API endpoint (rare)."
+          }
+        ]
+      }
+    ]
+  }
+}

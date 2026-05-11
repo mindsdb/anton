@@ -1,0 +1,126 @@
+{
+  "id": "firestore",
+  "label": "Firestore",
+  "aliases": [
+    "google firestore",
+    "cloud firestore",
+    "firebase firestore",
+    "gcp firestore"
+  ],
+  "keywords": [
+    "database",
+    "document",
+    "nosql",
+    "google",
+    "gcp",
+    "firebase",
+    "cloud",
+    "realtime",
+    "collections"
+  ],
+  "description": "Read and write documents in a Google Cloud Firestore database using a service account.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#FFCA28",
+  "form": {
+    "form_id": "firestore-connector",
+    "title": "Connect Firestore",
+    "subtitle": "Authorize Anton to access your Firestore collections via a GCP service account.",
+    "logo": "database",
+    "logo_color": "#FFCA28",
+    "methods": [
+      {
+        "id": "service-account",
+        "label": "Service Account JSON",
+        "description": "Paste a GCP service account key (JSON) with Firestore access. The simplest and most reliable path \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect via Service Account JSON\n\nThis is the recommended path. You create a service account in Google Cloud, grant it Firestore access, download a JSON key, and paste it below.\n\n## Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **IAM & Admin \u2192 Service Accounts \u2192 Create service account**.\n3. Give it a name like `anton-firestore` and click **Create and continue**.\n4. On the **Grant access** step, assign one of these roles:\n   - `Cloud Datastore User` \u2014 read/write access to Firestore in Datastore mode\n   - `Firebase Admin SDK Administrator Service Agent` \u2014 broader Firebase/Firestore access\n   - Or simply `Cloud Firestore Editor` / `Cloud Firestore Viewer` depending on your needs\n5. Click **Done**.\n6. Open the service account you just created, go to the **Keys** tab.\n7. Click **Add key \u2192 Create new key \u2192 JSON**, then click **Create**.\n8. A `.json` file downloads automatically \u2014 open it and copy its entire contents.\n9. Paste the JSON into the **Service Account JSON** field below.\n10. Enter your **GCP Project ID** (visible in the Cloud Console top nav, e.g. `my-project-123`).\n\n## Notes\n\n- The JSON key is the security boundary. Treat it like a password and rotate it in Cloud Console if you suspect exposure.\n- If Firestore is in **Native mode** vs **Datastore mode**, the same service account works for both \u2014 just ensure the correct role is assigned.\n- The key is shown only once at download time. If you lose it, generate a new one from the Keys tab.",
+        "help_url": "https://cloud.google.com/firestore/docs/security/iam",
+        "fields": [
+          {
+            "name": "service_account_json",
+            "label": "Service Account JSON",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "{ \"type\": \"service_account\", \"project_id\": \"...\", ... }",
+            "description": "Paste the full contents of the JSON key file downloaded from GCP IAM & Admin \u2192 Service Accounts \u2192 Keys."
+          },
+          {
+            "name": "project_id",
+            "label": "GCP Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-project-123",
+            "description": "Your Google Cloud project ID \u2014 visible in the Cloud Console header or on the project dashboard."
+          },
+          {
+            "name": "database_id",
+            "label": "Database ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "(default)",
+            "default": "(default)",
+            "description": "The Firestore database ID. Leave as (default) unless you created a named database."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Google Sign-In)",
+        "description": "Authorize via your Google account in the browser. Requires setting up a Google Cloud OAuth client \u2014 more steps than the service account path.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/datastore",
+            "https://www.googleapis.com/auth/cloud-platform"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Connect via OAuth 2.0\n\nUse this method if you prefer authorizing with your Google account rather than a service account key. You must supply your own Google Cloud OAuth client credentials.\n\n## Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **APIs & Services \u2192 Library** and enable the **Cloud Firestore API**.\n3. Go to **APIs & Services \u2192 OAuth consent screen** and configure an internal or external app. Add your email as a test user if external.\n4. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID**.\n5. Choose **Desktop app** as the application type and give it a name.\n6. Copy the **Client ID** and **Client secret** shown.\n7. Paste them into the fields below, along with your **GCP Project ID**.\n8. Click **Submit**. A browser window opens for Google's consent screen \u2014 approve the requested scopes.\n\n## Notes\n\n- Scopes requested: `datastore` (Firestore read/write) and `cloud-platform` (broad GCP access).\n- Refresh tokens are issued automatically so Anton can reconnect without re-authorizing.\n- To revoke, visit [Google Account Permissions](https://myaccount.google.com/permissions) and remove Anton.",
+        "help_url": "https://developers.google.com/identity/protocols/oauth2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Use a Desktop app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID \u2014 copied from the same row in Cloud Console Credentials."
+          },
+          {
+            "name": "project_id",
+            "label": "GCP Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-project-123",
+            "description": "Your Google Cloud project ID \u2014 visible in the Cloud Console header or project dashboard."
+          },
+          {
+            "name": "database_id",
+            "label": "Database ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "(default)",
+            "default": "(default)",
+            "description": "The Firestore database ID. Leave as (default) unless you created a named database."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,146 @@
+{
+  "id": "zipkin",
+  "label": "Zipkin",
+  "aliases": [
+    "zipkin tracing",
+    "twitter zipkin",
+    "openzip",
+    "distributed tracing"
+  ],
+  "keywords": [
+    "tracing",
+    "distributed tracing",
+    "observability",
+    "spans",
+    "latency",
+    "microservices",
+    "twitter",
+    "zipkin"
+  ],
+  "description": "Connect to a Zipkin server to query distributed traces and span data.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#FF6B35",
+  "form": {
+    "form_id": "zipkin-connector",
+    "title": "Connect Zipkin",
+    "subtitle": "Point Anton at your Zipkin server to browse and query distributed traces.",
+    "logo": "sparkle",
+    "logo_color": "#FF6B35",
+    "methods": [
+      {
+        "id": "server-url",
+        "label": "Zipkin Server URL",
+        "description": "Paste your Zipkin server's base URL. Works for self-hosted instances with no authentication and for hosted services where you also supply an API token.",
+        "recommended": true,
+        "how_to": "## Connect via Zipkin Server URL\n\nThis is the simplest path for both self-hosted and managed Zipkin deployments.\n\n### Self-hosted Zipkin\n\n1. Confirm your Zipkin server is running and reachable (default port is `9411`).\n2. Copy the base URL, e.g. `http://localhost:9411` or `http://zipkin.internal:9411`.\n3. Paste it into the **Server URL** field below.\n4. Leave **API Token** blank \u2014 self-hosted Zipkin does not require one by default.\n5. Click **Submit**. Anton will call `/api/v2/services` to verify connectivity.\n\n### Hosted / managed Zipkin (e.g. Zipkin-as-a-service providers)\n\n1. Log in to your hosted Zipkin dashboard.\n2. Copy the base URL shown in the dashboard or settings page.\n3. Locate your API token or access key (usually under **Settings \u2192 API Keys** or **Account \u2192 Access Tokens**).\n4. Paste the URL into **Server URL** and the token into **API Token** below.\n5. Click **Submit**.\n\n### Notes\n\n- The URL should NOT include a trailing path like `/api/v2` \u2014 Anton appends paths automatically.\n- If your Zipkin is behind a reverse proxy with a custom base path, include that path in the URL (e.g. `https://observability.example.com/zipkin`).\n- Ensure the server is reachable from the machine running Anton (firewall rules, VPN, etc.).\n",
+        "help_url": "https://zipkin.io/zipkin-api/",
+        "fields": [
+          {
+            "name": "server_url",
+            "label": "Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "http://localhost:9411",
+            "description": "Base URL of your Zipkin server. Do not include a trailing slash or /api/v2 path."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "your-api-token",
+            "description": "Optional. Required only for hosted or secured Zipkin instances that enforce token-based authentication."
+          },
+          {
+            "name": "api_version",
+            "label": "API Version",
+            "type": "select",
+            "required": true,
+            "default": "v2",
+            "description": "Zipkin API version to use. v2 is recommended for all modern Zipkin deployments.",
+            "options": [
+              {
+                "value": "v2",
+                "label": "v2 (recommended)"
+              },
+              {
+                "value": "v1",
+                "label": "v1 (legacy)"
+              }
+            ]
+          },
+          {
+            "name": "verify_ssl",
+            "label": "Verify SSL certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Disable only if your Zipkin server uses a self-signed certificate. Not recommended for production."
+          }
+        ]
+      },
+      {
+        "id": "basic-auth",
+        "label": "Basic Authentication",
+        "description": "Connect to a Zipkin server secured with HTTP Basic Auth \u2014 provide the server URL along with a username and password.",
+        "recommended": false,
+        "how_to": "## Connect via Basic Authentication\n\nUse this method if your Zipkin server (or the reverse proxy in front of it) is protected with HTTP Basic Auth.\n\n### Steps\n\n1. Obtain the base URL of your Zipkin server, e.g. `https://zipkin.example.com`.\n2. Get the username and password configured on the server or proxy (check with your infrastructure or DevOps team).\n3. Paste the URL into **Server URL**, and enter the credentials in **Username** and **Password**.\n4. Click **Submit**. Anton will include an `Authorization: Basic ...` header on every request.\n\n### Notes\n\n- Basic Auth credentials are stored locally in Anton's encrypted vault.\n- If your proxy uses a different scheme (digest, mutual TLS, etc.), use the **Server URL** method with a token or contact your admin.\n- Disable **Verify SSL** only if you're on a private network with a self-signed cert \u2014 otherwise leave it on.\n",
+        "help_url": "https://zipkin.io/zipkin-api/",
+        "fields": [
+          {
+            "name": "server_url",
+            "label": "Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://zipkin.example.com",
+            "description": "Base URL of your Zipkin server. Do not include a trailing slash or /api/v2 path."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "zipkin-user",
+            "description": "HTTP Basic Auth username configured on your Zipkin server or reverse proxy."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "HTTP Basic Auth password. Stored encrypted in Anton's local vault."
+          },
+          {
+            "name": "api_version",
+            "label": "API Version",
+            "type": "select",
+            "required": true,
+            "default": "v2",
+            "description": "Zipkin API version to use. v2 is recommended for all modern Zipkin deployments.",
+            "options": [
+              {
+                "value": "v2",
+                "label": "v2 (recommended)"
+              },
+              {
+                "value": "v1",
+                "label": "v1 (legacy)"
+              }
+            ]
+          },
+          {
+            "name": "verify_ssl",
+            "label": "Verify SSL certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Disable only if your Zipkin server uses a self-signed certificate. Not recommended for production."
+          }
+        ]
+      }
+    ]
+  }
+}

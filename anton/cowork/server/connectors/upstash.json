@@ -1,0 +1,79 @@
+{
+  "id": "upstash",
+  "label": "Upstash",
+  "aliases": [
+    "upstash redis",
+    "upstash kafka",
+    "serverless redis",
+    "serverless kafka"
+  ],
+  "keywords": [
+    "redis",
+    "kafka",
+    "serverless",
+    "database",
+    "cache",
+    "key-value",
+    "rest",
+    "cloud",
+    "upstash"
+  ],
+  "description": "Connect to Upstash serverless Redis or Kafka databases using the REST API or standard Redis protocol.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#00E9A3",
+  "form": {
+    "form_id": "upstash-connector",
+    "title": "Connect Upstash",
+    "subtitle": "Authenticate with your Upstash REST endpoint and token, or a Redis connection string.",
+    "logo": "database",
+    "logo_color": "#00E9A3",
+    "methods": [
+      {
+        "id": "rest-api",
+        "label": "REST API (URL + Token)",
+        "description": "Paste the REST URL and REST token from the Upstash Console. No Redis client needed \u2014 works over plain HTTPS. Simplest setup for most use cases.",
+        "recommended": true,
+        "how_to": "## Connect via Upstash REST API\n\nUpstash exposes each database over HTTPS with a dedicated token. This is the easiest path \u2014 no Redis driver or TLS config required.\n\n### Steps\n\n1. Open the [Upstash Console](https://console.upstash.com/) and sign in.\n2. Click the database you want to connect (or create a new one).\n3. Scroll to the **REST API** section on the database details page.\n4. Copy the **REST URL** \u2014 it looks like `https://<name>-<region>.upstash.io`.\n5. Copy the **REST Token** shown directly below the URL (click the eye icon to reveal it).\n6. Paste both values into the fields below.\n\n### Notes\n\n- The token is scoped to this single database. Rotate it from the same Console page if it's ever exposed.\n- REST API supports all standard Redis commands encoded as JSON \u2014 no special client library needed.\n- For Kafka databases, use the Kafka REST Proxy URL and token shown on the **REST API** tab of your Kafka cluster.",
+        "help_url": "https://upstash.com/docs/redis/features/restapi",
+        "fields": [
+          {
+            "name": "rest_url",
+            "label": "REST URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-db-name.upstash.io",
+            "description": "Found in Upstash Console \u2192 select your database \u2192 REST API section."
+          },
+          {
+            "name": "rest_token",
+            "label": "REST Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The read-write token shown beneath the REST URL. Treat it like a password \u2014 anyone with it can read and write your database."
+          }
+        ]
+      },
+      {
+        "id": "redis-connection-string",
+        "label": "Redis Connection String",
+        "description": "Use a standard Redis connection string (rediss://) for compatibility with Redis protocol clients. Copy it directly from the Upstash Console.",
+        "recommended": false,
+        "how_to": "## Connect via Redis Connection String\n\nUpstash supports the standard Redis protocol over TLS. Use this method if you prefer a classic `rediss://` URI or need compatibility with existing Redis tooling.\n\n### Steps\n\n1. Open the [Upstash Console](https://console.upstash.com/) and sign in.\n2. Click the database you want to connect.\n3. In the **Connect** section, find the **Connection String** tab or look for the `rediss://` URI.\n4. Click the copy icon next to the full connection string \u2014 it includes your password embedded in the URL.\n5. Paste the full string into the **Connection String** field below.\n\n### Notes\n\n- The connection string contains your password in plain text inside the URI. Store it securely and never commit it to source control.\n- Always use `rediss://` (with double-s) \u2014 Upstash requires TLS; plain `redis://` connections will be rejected.\n- If you need separate host, port, and password fields for a specific client library, use the values shown in the Console's **Connect** panel instead.",
+        "help_url": "https://upstash.com/docs/redis/howto/connectclient",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "rediss://default:<password>@<host>:<port>",
+            "description": "Full Redis connection URI from Upstash Console \u2192 your database \u2192 Connect. Must start with rediss:// (TLS required)."
+          }
+        ]
+      }
+    ]
+  }
+}

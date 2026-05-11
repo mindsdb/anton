@@ -1,0 +1,69 @@
+{
+  "id": "lyft",
+  "label": "Lyft",
+  "aliases": [
+    "lyft rides",
+    "lyft business",
+    "lyft for work"
+  ],
+  "keywords": [
+    "rideshare",
+    "rides",
+    "mobility",
+    "transportation",
+    "lyft",
+    "business travel",
+    "car"
+  ],
+  "description": "Connect Lyft to request rides, read ride history, and manage Lyft Business accounts.",
+  "category": "mobility",
+  "logo": "send",
+  "logo_color": "#FF00BF",
+  "form": {
+    "form_id": "lyft-connector",
+    "title": "Connect Lyft",
+    "subtitle": "Authorize Anton to access your Lyft rides and account via your Lyft developer app.",
+    "logo": "send",
+    "logo_color": "#FF00BF",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Lyft (OAuth 2.0)",
+        "description": "Opens Lyft's consent screen in your browser so Anton can request and read rides on your behalf. You'll need a Lyft developer app (Client ID + Client Secret) from the Lyft Developer Portal \u2014 takes about 5 minutes to set up.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://api.lyft.com/oauth/authorize",
+          "token_url": "https://api.lyft.com/oauth/token",
+          "scopes": [
+            "public",
+            "profile",
+            "rides.request",
+            "rides.read"
+          ]
+        },
+        "how_to": "## Sign in with Lyft (OAuth 2.0 \u2014 Bring Your Own App)\n\nAnton doesn't ship a hosted Lyft OAuth client, so you'll register a free developer app first. It takes about 5 minutes.\n\n### 1. Create a Lyft Developer App\n\n1. Go to [www.lyft.com/developers](https://www.lyft.com/developers) and sign in with your Lyft account.\n2. Click **Create new app**.\n3. Fill in an app name (e.g. `Anton`) and description. The redirect URI must be `http://localhost` or a loopback address \u2014 Anton handles this automatically.\n4. Click **Save**. You'll land on the app's detail page.\n\n### 2. Copy Your Credentials\n\n5. On the app detail page, copy the **Client ID** and **Client Secret** into the fields below.\n\n### 3. Authorize\n\n6. Click **Submit**. Anton opens Lyft's consent screen in your browser.\n7. Log in and approve the requested scopes:\n   - `public` \u2014 public Lyft data\n   - `profile` \u2014 your Lyft profile\n   - `rides.request` \u2014 request rides on your behalf\n   - `rides.read` \u2014 view your ride history\n8. After approving, the browser redirects back and Anton stores your access and refresh tokens locally.\n\n### Notes\n\n- The Client Secret is sensitive \u2014 anyone with it can act as your app. Keep it out of shared documents.\n- If your token expires or is revoked, re-run this flow to re-authorize.\n- For Lyft Business accounts, make sure you sign in with the account that has business permissions.",
+        "help_url": "https://developer.lyft.com/docs/authentication",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-lyft-client-id",
+            "description": "From the Lyft Developer Portal \u2014 app detail page \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-lyft-client-secret",
+            "description": "Paired with the Client ID. Found on the same app detail page in the Lyft Developer Portal."
+          }
+        ]
+      }
+    ]
+  }
+}

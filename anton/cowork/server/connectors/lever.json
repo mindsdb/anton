@@ -1,0 +1,110 @@
+{
+  "id": "lever",
+  "label": "Lever",
+  "aliases": [
+    "lever ats",
+    "lever hiring",
+    "lever recruiting"
+  ],
+  "keywords": [
+    "ats",
+    "applicant tracking",
+    "recruiting",
+    "hiring",
+    "candidates",
+    "jobs",
+    "hr",
+    "talent acquisition"
+  ],
+  "description": "Connect to Lever to read and manage candidates, requisitions, and pipeline stages from your ATS.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#00B4A2",
+  "form": {
+    "form_id": "lever-connector",
+    "title": "Connect Lever",
+    "subtitle": "Authenticate Anton with your Lever account to access recruiting data.",
+    "logo": "check",
+    "logo_color": "#00B4A2",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Lever API key generated from Settings \u2192 Integrations \u2192 API credentials. Simplest and fastest setup \u2014 no OAuth app required.",
+        "recommended": true,
+        "how_to": "## Generate a Lever API Key\n\nLever issues API keys from the account settings panel. You need **Super Admin** or **Admin** access to create them.\n\n### Steps\n\n1. Log in to Lever at [hire.lever.co](https://hire.lever.co).\n2. Click your name or avatar in the top-right corner and go to **Settings**.\n3. In the left sidebar, navigate to **Integrations \u2192 API credentials**.\n4. Click **Generate new key**.\n5. Give the key a descriptive name like `Anton`.\n6. Select the scopes you need. For full read access, enable **All data (read)**. For write access (posting notes, creating opportunities), also enable **Candidates (write)**.\n7. Click **Create**. Copy the key immediately \u2014 Lever shows it only once.\n8. Paste the key into the **API Key** field below.\n\n### Notes\n\n- Lever uses HTTP Basic Auth: the API key is the username, the password is left blank. Anton handles this automatically.\n- If you lose the key, revoke it from the same **API credentials** page and generate a new one.\n- Sandbox environment keys are separate \u2014 use `api.sandbox.lever.co` as the base URL if testing.\n- Read [Lever's API authentication docs](https://hire.lever.co/developer/documentation#authentication) for full details.\n",
+        "help_url": "https://hire.lever.co/developer/documentation#authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "lv_prod_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Lever \u2192 Settings \u2192 Integrations \u2192 API credentials. Shown only once at creation."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Choose Production for live data or Sandbox for testing.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production (api.lever.co)"
+              },
+              {
+                "value": "sandbox",
+                "label": "Sandbox (api.sandbox.lever.co)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Use a custom Lever OAuth 2.0 app for delegated access. Requires creating an OAuth client in Lever's partner portal \u2014 more setup, but allows per-user authorization flows.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://auth.lever.co/authorize",
+          "token_url": "https://auth.lever.co/oauth/token",
+          "scopes": [
+            "offline_access",
+            "opportunities:read:admin",
+            "candidates:read:admin",
+            "postings:read:admin",
+            "users:read:admin"
+          ],
+          "extra_auth_params": {
+            "audience": "https://api.lever.co/v1/"
+          }
+        },
+        "how_to": "## Set Up Lever OAuth 2.0\n\nLever's OAuth flow requires you to register an application through their partner program. This is more involved than a simple API key \u2014 use the **API Key** method unless you specifically need delegated per-user access.\n\n### Steps\n\n1. Apply for partner/OAuth access at [Lever's developer portal](https://hire.lever.co/developer) or contact Lever support to get OAuth credentials.\n2. Once approved, you'll receive a **Client ID** and **Client Secret** for your registered application.\n3. In your OAuth app settings, add a redirect URI pointing to `http://localhost` (Anton uses a local redirect).\n4. Enter the **Client ID** and **Client Secret** in the fields below.\n5. Click **Submit**. Anton will open Lever's authorization screen in your browser.\n6. Log in and grant the requested permissions.\n7. Anton will exchange the authorization code for an access token and refresh token automatically.\n\n### Notes\n\n- The `offline_access` scope is required to receive a refresh token for long-lived access.\n- Lever's OAuth is Auth0-based; the `audience` parameter is required for the API.\n- Tokens can be revoked from Lever's **Settings \u2192 Integrations** panel.\n",
+        "help_url": "https://hire.lever.co/developer/documentation#oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Client ID from your registered Lever OAuth application."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Client secret paired with your Lever OAuth Client ID."
+          }
+        ]
+      }
+    ]
+  }
+}

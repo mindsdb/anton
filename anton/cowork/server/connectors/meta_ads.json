@@ -1,0 +1,110 @@
+{
+  "id": "meta_ads",
+  "label": "Meta Ads",
+  "aliases": [
+    "facebook ads",
+    "instagram ads",
+    "fb ads",
+    "meta advertising",
+    "facebook advertising"
+  ],
+  "keywords": [
+    "facebook",
+    "instagram",
+    "meta",
+    "ads",
+    "advertising",
+    "campaigns",
+    "marketing",
+    "social",
+    "paid social",
+    "retargeting"
+  ],
+  "description": "Connect to Meta's Marketing API to read and manage Facebook and Instagram ad campaigns.",
+  "category": "ads",
+  "logo": "sparkle",
+  "logo_color": "#0081FB",
+  "form": {
+    "form_id": "meta_ads-connector",
+    "title": "Connect Meta Ads",
+    "subtitle": "Authorize Anton to access your Facebook and Instagram ad accounts via the Meta Marketing API.",
+    "logo": "sparkle",
+    "logo_color": "#0081FB",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth via Meta App (BYOK)",
+        "description": "Connect using a Meta for Developers app you own. Provides secure, scoped access to ad account data via OAuth 2.0 \u2014 no passwords stored, revocable from Meta Business Settings at any time.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://www.facebook.com/v19.0/dialog/oauth",
+          "token_url": "https://graph.facebook.com/v19.0/oauth/access_token",
+          "scopes": [
+            "ads_read",
+            "ads_management",
+            "business_management"
+          ],
+          "extra_auth_params": {
+            "response_type": "code"
+          }
+        },
+        "how_to": "## Connect via Meta OAuth (Bring Your Own App)\n\nMeta requires you to create a Meta for Developers app to run the OAuth flow. This is a one-time setup.\n\n## 1. Create a Meta App\n\n1. Go to [Meta for Developers](https://developers.facebook.com/) and log in.\n2. Click **My Apps \u2192 Create App**.\n3. Select **Business** as the app type and click **Next**.\n4. Give it a name (e.g., `Anton`) and select your Business Account, then click **Create App**.\n\n## 2. Add the Marketing API Product\n\n1. In your app dashboard, click **Add Product** and find **Marketing API**.\n2. Click **Set Up** on the Marketing API card.\n3. Under **Marketing API \u2192 Tools**, note that `ads_read`, `ads_management`, and `business_management` permissions are what Anton requires.\n\n## 3. Configure OAuth Redirect\n\n1. In the left sidebar go to **App Settings \u2192 Basic**.\n2. Add `http://localhost` (and any local redirect port Anton uses) to the **App Domains** field.\n3. Go to **Facebook Login \u2192 Settings** and add `http://localhost/callback` to **Valid OAuth Redirect URIs**.\n\n## 4. Get Your App Credentials\n\n1. Go to **App Settings \u2192 Basic**.\n2. Copy your **App ID** (this is the Client ID) and click **Show** to reveal your **App Secret** (Client Secret).\n3. Paste both into the fields below and click **Submit**.\n\n## Notes\n\n- Your app must be in **Live** mode (not Development) for other users to authorize it. For personal use, Development mode is fine.\n- Tokens can be revoked in [Meta Business Integrations](https://www.facebook.com/settings?tab=business_tools).\n- The Marketing API requires your ad account to be linked to a Business Manager.",
+        "help_url": "https://developers.facebook.com/docs/marketing-apis/get-started",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "App ID (Client ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "1234567890123456",
+            "description": "Found in Meta for Developers \u2192 Your App \u2192 App Settings \u2192 Basic \u2192 App ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "App Secret (Client Secret)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Found in App Settings \u2192 Basic \u2192 App Secret. Click 'Show' to reveal it."
+          },
+          {
+            "name": "ad_account_id",
+            "label": "Ad Account ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "act_1234567890",
+            "description": "Optional. The ad account to default to (format: act_XXXXXXXXXX). Found in Meta Ads Manager \u2192 Account Overview."
+          }
+        ]
+      },
+      {
+        "id": "system-user-token",
+        "label": "System User Access Token",
+        "description": "Use a long-lived System User token generated from Meta Business Manager. Best for automated pipelines and server-to-server integrations where OAuth browser flows are impractical.",
+        "recommended": false,
+        "how_to": "## Generate a System User Access Token\n\nSystem User tokens are long-lived (60 days or non-expiring) and designed for server-side integrations. This method skips the browser OAuth flow entirely.\n\n## Prerequisites\n\n- You must be an admin of a **Meta Business Manager** account.\n- A Meta app with the Marketing API product added (see the OAuth method for setup steps).\n\n## Steps\n\n1. Open [Meta Business Manager](https://business.facebook.com/) and go to **Business Settings**.\n2. Under **Users**, click **System Users \u2192 Add**.\n3. Name it (e.g., `Anton Integration`) and set the role to **Admin**.\n4. Click **Generate New Token** next to your system user.\n5. Select your **App** from the dropdown.\n6. Enable the following permissions: `ads_read`, `ads_management`, `business_management`.\n7. Click **Generate Token**. Copy the token immediately \u2014 it is shown only once.\n8. Paste the token into the **Access Token** field below.\n\n## Notes\n\n- Set the token to **Never Expire** if you want a non-rotating credential; otherwise it expires in 60 days.\n- The system user must be assigned to the relevant Ad Accounts in Business Settings \u2192 Accounts \u2192 Ad Accounts.\n- If the token is compromised, revoke it in Business Settings \u2192 System Users and generate a new one.",
+        "help_url": "https://developers.facebook.com/docs/marketing-api/system-users",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "System User Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "EAABsbCS...",
+            "description": "Long-lived access token generated from Meta Business Manager \u2192 System Users. Copy it immediately after generation \u2014 it is shown only once."
+          },
+          {
+            "name": "ad_account_id",
+            "label": "Ad Account ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "act_1234567890",
+            "description": "Optional. The ad account to default to (format: act_XXXXXXXXXX). Found in Meta Ads Manager \u2192 Account Overview."
+          }
+        ]
+      }
+    ]
+  }
+}

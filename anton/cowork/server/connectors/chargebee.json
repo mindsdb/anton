@@ -1,0 +1,60 @@
+{
+  "id": "chargebee",
+  "label": "Chargebee",
+  "aliases": [
+    "charge bee",
+    "chargebee billing",
+    "chargebee subscriptions"
+  ],
+  "keywords": [
+    "billing",
+    "subscription",
+    "payments",
+    "invoicing",
+    "recurring",
+    "saas",
+    "revenue",
+    "mrr",
+    "churn"
+  ],
+  "description": "Connect to Chargebee to read and manage subscription billing, invoices, customers, and revenue data.",
+  "category": "billing",
+  "logo": "key",
+  "logo_color": "#FF7A59",
+  "form": {
+    "form_id": "chargebee-connector",
+    "title": "Connect Chargebee",
+    "subtitle": "Paste your Chargebee API key and site name to give Anton access to your subscription billing data.",
+    "logo": "key",
+    "logo_color": "#FF7A59",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Chargebee live or test API key along with your site subdomain. No OAuth setup required \u2014 the simplest and fastest way to connect.",
+        "recommended": true,
+        "how_to": "## Connect with a Chargebee API Key\n\nChargebee issues per-site API keys that you paste directly into Anton. No OAuth setup needed.\n\n### Steps\n\n1. Log in to your Chargebee dashboard at `https://<your-site>.chargebee.com`.\n2. Click your site name in the top-right corner \u2192 **Settings**.\n3. Navigate to **Configure Chargebee \u2192 API Keys & Webhooks \u2192 API Keys**.\n4. Under **Full-Access Keys** (for full read/write) or **Read-Only Keys** (recommended for Anton), click **Add API Key**.\n5. Give it a name like `Anton Integration` and confirm.\n6. Copy the key that starts with `live_` (production) or `test_` (test site).\n7. Paste the key into the **API Key** field below.\n8. Enter your **Site Name** \u2014 this is the subdomain portion of your Chargebee URL (e.g. `mycompany` from `mycompany.chargebee.com`).\n\n### Notes\n\n- The API key is shown only once at creation time. Store it securely \u2014 if you lose it, generate a new one from the same page.\n- Use a **Read-Only** key if you only need Anton to read billing data; this limits blast radius if the key is ever leaked.\n- Test-site keys (prefixed `test_`) work against your Chargebee test environment and will not touch live data.\n",
+        "help_url": "https://apidocs.chargebee.com/docs/api#api_authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "live_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Chargebee Full-Access or Read-Only API key. Found under Settings \u2192 Configure Chargebee \u2192 API Keys & Webhooks \u2192 API Keys."
+          },
+          {
+            "name": "site_name",
+            "label": "Site Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mycompany",
+            "description": "The subdomain of your Chargebee site. For example, if your dashboard is at mycompany.chargebee.com, enter mycompany."
+          }
+        ]
+      }
+    ]
+  }
+}

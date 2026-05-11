@@ -1,0 +1,90 @@
+{
+  "id": "digitalocean",
+  "label": "DigitalOcean",
+  "aliases": [
+    "digital ocean",
+    "DO",
+    "digitalocean cloud",
+    "do cloud"
+  ],
+  "keywords": [
+    "cloud",
+    "droplets",
+    "vps",
+    "spaces",
+    "app platform",
+    "kubernetes",
+    "infrastructure",
+    "hosting",
+    "server",
+    "object storage"
+  ],
+  "description": "Manage DigitalOcean Droplets, Spaces, App Platform, databases, and other cloud resources.",
+  "category": "cloud",
+  "logo": "cube",
+  "logo_color": "#0080FF",
+  "form": {
+    "form_id": "digitalocean-connector",
+    "title": "Connect DigitalOcean",
+    "subtitle": "Authorize Anton to manage your DigitalOcean cloud resources.",
+    "logo": "cube",
+    "logo_color": "#0080FF",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Paste a DigitalOcean personal access token. Quickest setup \u2014 generate a token in the API panel and paste it here. No OAuth app required.",
+        "recommended": true,
+        "how_to": "## Generate a Personal Access Token\n\n1. Log in to [cloud.digitalocean.com](https://cloud.digitalocean.com).\n2. Click **API** in the left sidebar.\n3. Under the **Tokens** tab, click **Generate New Token**.\n4. Give it a name (e.g. `Anton`) and set an expiry if desired.\n5. Choose the **Scopes**: select `read` and `write` for the resources Anton needs to manage (Droplets, Spaces, App Platform, etc.).\n6. Click **Generate Token**. Copy the token immediately \u2014 it is shown only once.\n7. Paste it into the **Personal Access Token** field below.\n\n## Notes\n\n- The token is shown only once. If you lose it, revoke it and generate a new one.\n- Prefer scoped tokens (read-only if Anton only needs to query resources) to limit exposure.\n- Tokens can be revoked at any time from the same **API \u2192 Tokens** panel.",
+        "help_url": "https://docs.digitalocean.com/reference/api/create-personal-access-token/",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "dop_v1_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "From cloud.digitalocean.com \u2192 API \u2192 Tokens \u2192 Generate New Token. Shown only once \u2014 copy it before closing the dialog."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own App)",
+        "description": "Use a DigitalOcean OAuth application to authorize Anton. Requires creating an OAuth app in the DigitalOcean control panel and supplying its client credentials.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://cloud.digitalocean.com/v1/oauth/authorize",
+          "token_url": "https://cloud.digitalocean.com/v1/oauth/token",
+          "scopes": [
+            "read",
+            "write"
+          ]
+        },
+        "how_to": "## Set up a DigitalOcean OAuth Application\n\n1. Log in to [cloud.digitalocean.com](https://cloud.digitalocean.com).\n2. Click your avatar (top right) \u2192 **API** \u2192 **OAuth Applications** tab.\n3. Click **Register Application**.\n4. Fill in a name (e.g. `Anton`) and set the **Callback URL** to `http://127.0.0.1` (Anton uses a local redirect).\n5. Click **Save**. Copy the **Client ID** and **Client Secret** shown on the next screen.\n6. Paste both into the fields below and click **Submit**.\n7. Anton opens your browser to DigitalOcean's consent screen \u2014 approve the requested scopes.\n\n## Notes\n\n- The client secret is shown once. Store it securely.\n- Revoking the OAuth application in the control panel will immediately invalidate Anton's access.\n- For simpler setup, use the **Personal Access Token** method instead.",
+        "help_url": "https://docs.digitalocean.com/reference/api/oauth/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your_oauth_client_id",
+            "description": "From cloud.digitalocean.com \u2192 API \u2192 OAuth Applications \u2192 your app's Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_oauth_client_secret",
+            "description": "Paired with the Client ID. Shown once when the app is created \u2014 store it safely."
+          }
+        ]
+      }
+    ]
+  }
+}

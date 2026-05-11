@@ -1,0 +1,100 @@
+{
+  "id": "circleci",
+  "label": "CircleCI",
+  "aliases": [
+    "circle ci",
+    "circle-ci",
+    "circleci cd",
+    "circle continuous integration"
+  ],
+  "keywords": [
+    "ci",
+    "cd",
+    "continuous integration",
+    "continuous delivery",
+    "pipelines",
+    "builds",
+    "devops",
+    "deployment",
+    "testing",
+    "automation"
+  ],
+  "description": "Trigger and monitor CircleCI pipelines, workflows, and jobs from Anton.",
+  "category": "engineering",
+  "logo": "refresh",
+  "logo_color": "#343434",
+  "form": {
+    "form_id": "circleci-connector",
+    "title": "Connect CircleCI",
+    "subtitle": "Paste your CircleCI personal API token to give Anton access to your pipelines.",
+    "logo": "refresh",
+    "logo_color": "#343434",
+    "methods": [
+      {
+        "id": "personal-api-token",
+        "label": "Personal API Token",
+        "description": "Generate a personal API token from CircleCI User Settings and paste it here. Quickest setup \u2014 no OAuth app required.",
+        "recommended": true,
+        "how_to": "## Generate a CircleCI Personal API Token\n\n1. Log in to [CircleCI](https://app.circleci.com/).\n2. Click your avatar in the bottom-left corner and select **User Settings**.\n3. In the left sidebar, click **Personal API Tokens**.\n4. Click **Create New Token**.\n5. Enter a name like `Anton` and click **Add API Token**.\n6. Copy the token shown \u2014 it is displayed **only once**.\n7. Paste it into the **API Token** field below.\n\n## Notes\n\n- The token inherits your personal permissions \u2014 it can access any project you have access to.\n- If you lose the token, delete it in **User Settings \u2192 Personal API Tokens** and generate a new one.\n- For server (self-hosted) installations, use your own CircleCI server URL in the **API Base URL** field.\n",
+        "help_url": "https://circleci.com/docs/managing-api-tokens/",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Enter your CircleCI personal API token",
+            "description": "Found in CircleCI \u2192 User Settings \u2192 Personal API Tokens. Shown only once at creation."
+          },
+          {
+            "name": "api_base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://circleci.com",
+            "default": "https://circleci.com",
+            "description": "Leave as default unless you are on a self-hosted CircleCI Server installation."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Connect via OAuth 2.0 using your own CircleCI OAuth app credentials. More setup required \u2014 recommended only for org-wide or automated deployments.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://circleci.com/oauth/authorize",
+          "token_url": "https://circleci.com/oauth/token",
+          "scopes": [
+            "read:user",
+            "read:project",
+            "write:pipeline"
+          ]
+        },
+        "how_to": "## OAuth 2.0 with a CircleCI OAuth App\n\n1. Go to [CircleCI Developer Hub](https://circleci.com/developer/) and log in.\n2. Navigate to **Organization Settings \u2192 OAuth Apps** (or contact CircleCI support to register an OAuth app if the option is not visible).\n3. Create a new OAuth application:\n   - Set the **Redirect URI** to `http://127.0.0.1` (Anton handles the local redirect).\n   - Note the generated **Client ID** and **Client Secret**.\n4. Paste those values into the fields below.\n5. Click **Submit** \u2014 a browser window will open for you to authorize Anton.\n\n## Notes\n\n- OAuth app registration may require a CircleCI plan that supports it. Check your org settings.\n- If OAuth setup is not available for your account, use the **Personal API Token** method instead.\n",
+        "help_url": "https://circleci.com/docs/openid-connect-tokens/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "Your CircleCI OAuth app client ID",
+            "description": "From CircleCI Organization Settings \u2192 OAuth Apps."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Your CircleCI OAuth app client secret",
+            "description": "Paired with the client ID from the same OAuth app registration."
+          }
+        ]
+      }
+    ]
+  }
+}

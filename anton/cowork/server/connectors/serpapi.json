@@ -1,0 +1,96 @@
+{
+  "id": "serpapi",
+  "label": "SerpAPI",
+  "aliases": [
+    "serp api",
+    "serp-api",
+    "search engine results api",
+    "google scraper api"
+  ],
+  "keywords": [
+    "search",
+    "google",
+    "bing",
+    "yahoo",
+    "baidu",
+    "serp",
+    "scraping",
+    "web search",
+    "results",
+    "seo"
+  ],
+  "description": "Fetch scraped search engine results from Google, Bing, Yahoo, Baidu, and more via the SerpAPI service.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "serpapi-connector",
+    "title": "Connect SerpAPI",
+    "subtitle": "Paste your SerpAPI key to start pulling live search engine results.",
+    "logo": "search",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your SerpAPI key \u2014 found in your dashboard under API Key. Takes 30 seconds and works for all supported search engines.",
+        "recommended": true,
+        "how_to": "## Get your SerpAPI key\n\n1. Log in (or sign up) at [serpapi.com](https://serpapi.com).\n2. Click your avatar or go to **Dashboard** in the top navigation.\n3. Select **API Key** in the left sidebar (or visit [serpapi.com/manage-api-key](https://serpapi.com/manage-api-key) directly).\n4. Copy the key shown in the **Your Private API Key** box.\n5. Paste it into the **API Key** field below and click **Submit**.\n\n### Notes\n\n- The free plan includes 100 searches/month. Paid plans unlock higher quotas and additional engines.\n- Your key grants full access to your account quota \u2014 treat it like a password and don't share it.\n- If you suspect exposure, regenerate the key from the same dashboard page; update the value in Anton afterward.",
+        "help_url": "https://serpapi.com/manage-api-key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_serpapi_key_here",
+            "description": "Found at serpapi.com \u2192 Dashboard \u2192 API Key. Kept encrypted on your device."
+          },
+          {
+            "name": "default_engine",
+            "label": "Default Search Engine",
+            "type": "select",
+            "required": false,
+            "default": "google",
+            "description": "The engine Anton uses when no engine is specified in a request.",
+            "options": [
+              {
+                "value": "google",
+                "label": "Google"
+              },
+              {
+                "value": "bing",
+                "label": "Bing"
+              },
+              {
+                "value": "yahoo",
+                "label": "Yahoo"
+              },
+              {
+                "value": "baidu",
+                "label": "Baidu"
+              },
+              {
+                "value": "duckduckgo",
+                "label": "DuckDuckGo"
+              },
+              {
+                "value": "yandex",
+                "label": "Yandex"
+              }
+            ]
+          },
+          {
+            "name": "default_location",
+            "label": "Default Location",
+            "type": "text",
+            "required": false,
+            "placeholder": "New York, United States",
+            "description": "Optional. Geo-target results to a city, region, or country. Leave blank for global results."
+          }
+        ]
+      }
+    ]
+  }
+}

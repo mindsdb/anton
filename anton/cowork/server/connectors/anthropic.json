@@ -1,0 +1,103 @@
+{
+  "id": "anthropic",
+  "label": "Anthropic",
+  "aliases": [
+    "claude",
+    "claude ai",
+    "claude 3",
+    "anthropic ai",
+    "claude opus",
+    "claude sonnet",
+    "claude haiku"
+  ],
+  "keywords": [
+    "ai",
+    "llm",
+    "language model",
+    "claude",
+    "anthropic",
+    "completion",
+    "chat",
+    "inference",
+    "generative"
+  ],
+  "description": "Connect to Anthropic's Claude models for text generation, chat, and reasoning tasks.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#CC785C",
+  "form": {
+    "form_id": "anthropic-connector",
+    "title": "Connect Anthropic",
+    "subtitle": "Paste your Anthropic API key to give Anton access to Claude models.",
+    "logo": "brain",
+    "logo_color": "#CC785C",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from the Anthropic Console. Takes 30 seconds \u2014 no OAuth setup, no extra config.",
+        "recommended": true,
+        "how_to": "## Get your Anthropic API key\n\n1. Open [console.anthropic.com](https://console.anthropic.com) and sign in.\n2. Click **API Keys** in the left sidebar.\n3. Click **Create Key**, give it a name like `Anton`, and click **Create Key**.\n4. Copy the key \u2014 it starts with `sk-ant-` and is shown **only once**. If you lose it, you'll need to create a new one.\n5. Paste it into the **API Key** field below.\n\n## Notes\n\n- Optionally select a default model below; you can override it per-request inside Anton.\n- API usage is billed to your Anthropic account. Set spend limits in the Console under **Settings \u2192 Limits** to avoid surprises.\n- To revoke access, return to **API Keys** in the Console and delete the key.",
+        "help_url": "https://docs.anthropic.com/en/api/getting-started",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "sk-ant-api03-\u2026",
+            "description": "Found in console.anthropic.com \u2192 API Keys. Shown only once \u2014 copy it before closing the dialog."
+          },
+          {
+            "name": "default_model",
+            "label": "Default Model",
+            "type": "select",
+            "required": false,
+            "default": "claude-opus-4-5",
+            "description": "The Claude model Anton uses by default. Can be overridden per-request.",
+            "options": [
+              {
+                "value": "claude-opus-4-5",
+                "label": "Claude Opus 4.5 (most capable)"
+              },
+              {
+                "value": "claude-sonnet-4-5",
+                "label": "Claude Sonnet 4.5 (balanced)"
+              },
+              {
+                "value": "claude-haiku-3-5",
+                "label": "Claude Haiku 3.5 (fastest)"
+              },
+              {
+                "value": "claude-opus-4-0",
+                "label": "Claude Opus 4"
+              },
+              {
+                "value": "claude-sonnet-3-7",
+                "label": "Claude Sonnet 3.7"
+              },
+              {
+                "value": "claude-sonnet-3-5",
+                "label": "Claude Sonnet 3.5"
+              },
+              {
+                "value": "claude-haiku-3-0",
+                "label": "Claude Haiku 3"
+              }
+            ]
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "default": "https://api.anthropic.com",
+            "placeholder": "https://api.anthropic.com",
+            "description": "Override only if you're routing through a proxy or using a custom endpoint. Leave blank for the default Anthropic API."
+          }
+        ]
+      }
+    ]
+  }
+}

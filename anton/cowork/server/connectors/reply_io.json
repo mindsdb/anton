@@ -1,0 +1,55 @@
+{
+  "id": "reply_io",
+  "label": "Reply.io",
+  "aliases": [
+    "replyio",
+    "reply io",
+    "reply",
+    "reply app"
+  ],
+  "keywords": [
+    "sales",
+    "engagement",
+    "outreach",
+    "email",
+    "sequences",
+    "cadence",
+    "multichannel",
+    "linkedin",
+    "sdr",
+    "prospecting",
+    "automation"
+  ],
+  "description": "Automate multi-channel sales outreach via email, LinkedIn, calls, and SMS using Reply.io sequences.",
+  "category": "sales-engagement",
+  "logo": "send",
+  "logo_color": "#3B4EFF",
+  "form": {
+    "form_id": "reply_io-connector",
+    "title": "Connect Reply.io",
+    "subtitle": "Paste your Reply.io API key to give Anton access to your sequences, contacts, and stats.",
+    "logo": "send",
+    "logo_color": "#3B4EFF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Reply.io API key \u2014 found in Settings \u2192 API & Integrations. No OAuth setup needed; takes about 30 seconds.",
+        "recommended": true,
+        "how_to": "## Find your Reply.io API key\n\n1. Log in to [Reply.io](https://app.reply.io).\n2. Click your avatar or workspace name in the bottom-left corner to open account settings.\n3. Navigate to **Settings \u2192 API & Integrations**.\n4. Under the **API** section you'll see your API key. Click **Copy** (or reveal it first if masked).\n5. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- The API key is tied to your user account. If you are on a team plan, ensure the account has the permissions required for the actions Anton will perform (e.g. managing contacts, triggering sequences).\n- Reply.io does not currently support multiple API keys or scoped tokens \u2014 the single key grants full account access, so keep it safe.\n- If you regenerate your key in Reply.io settings, update it here to avoid authentication errors.\n",
+        "help_url": "https://support.reply.io/en/articles/2756883-reply-api-documentation",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Reply.io \u2192 Settings \u2192 API & Integrations. Grants full account access \u2014 treat it like a password."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "id": "neon",
+  "label": "Neon",
+  "aliases": [
+    "neon postgres",
+    "neon db",
+    "neondb",
+    "neon serverless",
+    "serverless postgres"
+  ],
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "serverless",
+    "database",
+    "branching",
+    "sql",
+    "neon",
+    "cloud"
+  ],
+  "description": "Connect to a Neon serverless Postgres database using a connection string or individual credentials.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#00E599",
+  "form": {
+    "form_id": "neon-connector",
+    "title": "Connect Neon",
+    "subtitle": "Link Anton to your Neon serverless Postgres database.",
+    "logo": "database",
+    "logo_color": "#00E599",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste the full Postgres connection string from the Neon Console. The fastest way to connect \u2014 no separate fields needed.",
+        "recommended": true,
+        "how_to": "## Get your Neon connection string\n\n1. Open the [Neon Console](https://console.neon.tech/) and select your **Project**.\n2. Click **Connection Details** in the left sidebar (or the dashboard overview card).\n3. In the **Connection string** panel, select the **branch**, **role**, and **database** you want Anton to use.\n4. Click the **copy** icon to copy the full connection string. It looks like:\n   `postgresql://username:password@ep-xxxx.us-east-2.aws.neon.tech/dbname?sslmode=require`\n5. Paste it into the **Connection String** field below.\n\n## Notes\n\n- The string includes your password in plain text \u2014 keep it secret and do not commit it to source control.\n- Neon generates a unique hostname per **branch**. If you create a new branch, you'll need a new connection string for it.\n- `sslmode=require` is set by default in Neon's strings \u2014 do not remove it.\n- If your password contains special characters, they will be URL-encoded in the string automatically by the Neon Console.",
+        "help_url": "https://neon.tech/docs/connect/connect-from-any-app",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "postgresql://user:password@ep-xxxx.us-east-2.aws.neon.tech/dbname?sslmode=require",
+            "description": "Full Postgres connection URI from Neon Console \u2192 Project \u2192 Connection Details."
+          }
+        ]
+      },
+      {
+        "id": "individual-credentials",
+        "label": "Host / Port / Database / User / Password",
+        "description": "Enter each connection parameter separately. Useful when you already have the individual host, port, database name, and credentials from the Neon Console.",
+        "recommended": false,
+        "how_to": "## Find your Neon connection parameters\n\n1. Open the [Neon Console](https://console.neon.tech/) and select your **Project**.\n2. Click **Connection Details** in the left sidebar.\n3. Select the **branch**, **role**, and **database** you want to connect to.\n4. Switch to the **Parameters only** view (or expand the connection string manually) to find:\n   - **Host**: something like `ep-xxxx.us-east-2.aws.neon.tech`\n   - **Port**: `5432` (Neon's default)\n   - **Database**: the database name you selected\n   - **User**: the role name you selected\n   - **Password**: copy it from the masked field by clicking the eye or copy icon\n5. Fill in each field below.\n\n## Notes\n\n- Always use SSL (`sslmode=require`) when connecting to Neon \u2014 leave **Use SSL** enabled.\n- The password is shown once per session in the Console; if you lose it, reset the role's password under **Settings \u2192 Roles**.\n- Port is almost always `5432` for Neon; only change it if your project uses a custom proxy.",
+        "help_url": "https://neon.tech/docs/connect/connect-from-any-app",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "ep-xxxx.us-east-2.aws.neon.tech",
+            "description": "The Neon endpoint hostname from Connection Details."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "Postgres port. Neon default is 5432."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "neondb",
+            "description": "The name of the database to connect to."
+          },
+          {
+            "name": "username",
+            "label": "User",
+            "type": "text",
+            "required": true,
+            "placeholder": "neondb_owner",
+            "description": "The Postgres role (user) name from Neon Console \u2192 Connection Details."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The role's password. Find or reset it in Neon Console \u2192 Settings \u2192 Roles."
+          },
+          {
+            "name": "ssl",
+            "label": "Use SSL (sslmode=require)",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Neon requires SSL. Keep this enabled unless you know what you're doing."
+          }
+        ]
+      }
+    ]
+  }
+}

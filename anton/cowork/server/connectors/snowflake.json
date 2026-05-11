@@ -1,0 +1,99 @@
+{
+  "id": "snowflake",
+  "label": "Snowflake",
+  "aliases": [
+    "snowflake db",
+    "snowflake database",
+    "snowflakedb",
+    "snow flake"
+  ],
+  "keywords": [
+    "data warehouse",
+    "cloud",
+    "sql",
+    "analytics",
+    "warehouse",
+    "database",
+    "olap",
+    "columnar"
+  ],
+  "description": "Connect to your Snowflake cloud data warehouse to run queries and access your data.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#29B5E8",
+  "form": {
+    "form_id": "snowflake-connector",
+    "title": "Connect Snowflake",
+    "subtitle": "Enter your Snowflake account credentials to start querying your data warehouse.",
+    "logo": "database",
+    "logo_color": "#29B5E8",
+    "methods": [
+      {
+        "id": "user-password",
+        "label": "Username & Password",
+        "description": "Authenticate with your Snowflake username, password, and account identifier. The simplest path \u2014 no extra setup required.",
+        "recommended": true,
+        "how_to": "## Connect with Username & Password\n\nYou'll need your Snowflake account identifier, username, and password. Optional settings let you pin a default warehouse, database, schema, and role.\n\n### Find your account identifier\n\n1. Log in to the [Snowflake web UI](https://app.snowflake.com).\n2. Click your name in the bottom-left corner \u2192 **Account** panel.\n3. Your account identifier appears under **Account** \u2014 it looks like `abc12345.us-east-1` (organization-style) or just `abc12345` for older accounts.\n4. Copy the identifier exactly as shown \u2014 this is what goes in the **Account Identifier** field below.\n\n### Recommended optional settings\n\n- **Warehouse** \u2014 the virtual warehouse to use for queries (e.g. `COMPUTE_WH`). If left blank, Snowflake uses the default for your role.\n- **Database** \u2014 default database context (e.g. `MY_DB`).\n- **Schema** \u2014 default schema within that database (e.g. `PUBLIC`).\n- **Role** \u2014 the Snowflake role to assume (e.g. `SYSADMIN`). Defaults to your user's default role if omitted.\n\n### Notes\n\n- Account identifiers are case-insensitive but must not include `.snowflakecomputing.com` \u2014 Anton appends that suffix automatically.\n- If your org uses Okta or another SSO provider as the primary login, you may need to create a separate Snowflake-native user with a password under **Admin \u2192 Users & Roles \u2192 Users \u2192 + User**.\n- Key-pair authentication is not yet supported. Request it via feedback if you need it.\n",
+        "help_url": "https://docs.snowflake.com/en/user-guide/admin-account-identifier",
+        "fields": [
+          {
+            "name": "account_identifier",
+            "label": "Account Identifier",
+            "type": "text",
+            "required": true,
+            "placeholder": "abc12345.us-east-1",
+            "description": "Found in Snowflake UI \u2192 your name (bottom-left) \u2192 Account. Do not include .snowflakecomputing.com."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "JANE_DOE",
+            "description": "Your Snowflake login username (not your email, unless they match)."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Your Snowflake account password. Stored encrypted locally."
+          },
+          {
+            "name": "warehouse",
+            "label": "Default Warehouse",
+            "type": "text",
+            "required": false,
+            "placeholder": "COMPUTE_WH",
+            "description": "Virtual warehouse used for query execution. Leave blank to use your user's default."
+          },
+          {
+            "name": "database",
+            "label": "Default Database",
+            "type": "text",
+            "required": false,
+            "placeholder": "MY_DATABASE",
+            "description": "Default database context for queries. Can be overridden per-query."
+          },
+          {
+            "name": "schema",
+            "label": "Default Schema",
+            "type": "text",
+            "required": false,
+            "placeholder": "PUBLIC",
+            "description": "Default schema within the database. Can be overridden per-query."
+          },
+          {
+            "name": "role",
+            "label": "Role",
+            "type": "text",
+            "required": false,
+            "placeholder": "SYSADMIN",
+            "description": "Snowflake role to assume. Defaults to your user's default role if left blank."
+          }
+        ]
+      }
+    ]
+  }
+}

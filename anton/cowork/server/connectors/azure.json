@@ -1,0 +1,138 @@
+{
+  "id": "azure",
+  "label": "Azure",
+  "aliases": [
+    "microsoft azure",
+    "ms azure",
+    "azure cloud",
+    "azure portal",
+    "microsoft cloud"
+  ],
+  "keywords": [
+    "azure",
+    "microsoft",
+    "cloud",
+    "service principal",
+    "tenant",
+    "subscription",
+    "app registration",
+    "entra",
+    "active directory",
+    "aad",
+    "resource manager",
+    "arm"
+  ],
+  "description": "Connect to Microsoft Azure using a service principal to manage resources, query data, and automate cloud operations.",
+  "category": "cloud",
+  "logo": "cube",
+  "logo_color": "#0078D4",
+  "form": {
+    "form_id": "azure-connector",
+    "title": "Connect Azure",
+    "subtitle": "Authenticate with a service principal (app registration) to grant Anton scoped access to your Azure environment.",
+    "logo": "cube",
+    "logo_color": "#0078D4",
+    "methods": [
+      {
+        "id": "service-principal-secret",
+        "label": "Service Principal (Client Secret)",
+        "description": "Paste your Entra ID tenant ID, app registration client ID, and client secret. The simplest way to connect Azure \u2014 no OAuth browser flow required.",
+        "recommended": true,
+        "how_to": "## Connect via Service Principal Client Secret\n\nThis method uses an Azure Entra ID (formerly Azure AD) app registration with a client secret. It is the recommended path for programmatic access.\n\n## 1. Create an App Registration\n\n1. Open the [Azure Portal](https://portal.azure.com) and search for **Microsoft Entra ID** (formerly Azure Active Directory).\n2. Go to **App registrations \u2192 New registration**.\n3. Give it a name like `Anton`, leave the default account type, and click **Register**.\n4. On the app's **Overview** page, copy:\n   - **Application (client) ID** \u2192 paste into **Client ID** below.\n   - **Directory (tenant) ID** \u2192 paste into **Tenant ID** below.\n\n## 2. Create a Client Secret\n\n1. In the app registration, go to **Certificates & secrets \u2192 Client secrets \u2192 New client secret**.\n2. Add a description (e.g. `Anton`) and choose an expiry. Click **Add**.\n3. Copy the **Value** column immediately \u2014 it is only shown once.\n4. Paste it into **Client Secret** below.\n\n## 3. Assign a Role (optional but recommended)\n\n1. Go to **Subscriptions** and open your target subscription.\n2. Click **Access control (IAM) \u2192 Add role assignment**.\n3. Pick a role (e.g. **Reader** for read-only, **Contributor** for write access).\n4. Assign it to the app registration you just created.\n5. Copy the **Subscription ID** from the subscription's Overview page and paste it below.\n\n## Notes\n\n- If your secret expires, generate a new one in the portal and update Anton \u2014 the old one will stop working.\n- Prefer the **Reader** role unless Anton needs to create or modify resources.\n- For multi-tenant setups, you can leave **Subscription ID** blank and Anton will list available subscriptions at runtime.",
+        "help_url": "https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal",
+        "fields": [
+          {
+            "name": "tenant_id",
+            "label": "Tenant ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Your Azure Entra ID (Azure AD) Directory (tenant) ID. Found on the Entra ID Overview page or under App registrations \u2192 your app \u2192 Overview."
+          },
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The Application (client) ID of your app registration. Found on App registrations \u2192 your app \u2192 Overview."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Your client secret value",
+            "description": "The secret value created under Certificates & secrets \u2192 Client secrets. Shown only once \u2014 copy it immediately after creation."
+          },
+          {
+            "name": "subscription_id",
+            "label": "Subscription ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Optional. Scopes Anton to a specific Azure subscription. Found on the Subscriptions page in the portal. Leave blank to access all subscriptions the service principal can see."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own Client)",
+        "description": "Use the Microsoft identity platform OAuth 2.0 authorization code flow. Requires your own app registration client ID and client secret \u2014 a browser window opens for interactive sign-in.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+          "token_url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+          "scopes": [
+            "https://management.azure.com/user_impersonation",
+            "offline_access",
+            "openid",
+            "profile"
+          ],
+          "extra_auth_params": {
+            "response_type": "code",
+            "prompt": "select_account"
+          }
+        },
+        "how_to": "## OAuth 2.0 Authorization Code Flow\n\nThis method opens a browser for interactive Microsoft sign-in. You must still supply your own app registration credentials (Anton does not ship a hosted client for Azure).\n\n## 1. Create an App Registration\n\n1. Open the [Azure Portal](https://portal.azure.com) \u2192 **Microsoft Entra ID \u2192 App registrations \u2192 New registration**.\n2. Name it `Anton OAuth`, select **Accounts in this organizational directory only** (or multi-tenant if needed).\n3. Under **Redirect URI**, select **Public client/native (mobile & desktop)** and enter `http://localhost`.\n4. Click **Register**.\n5. Copy the **Application (client) ID** and **Directory (tenant) ID** from the Overview page.\n\n## 2. Add a Client Secret\n\n1. Go to **Certificates & secrets \u2192 Client secrets \u2192 New client secret**.\n2. Set a description and expiry, click **Add**, and copy the **Value** immediately.\n\n## 3. Grant API Permissions\n\n1. Go to **API permissions \u2192 Add a permission \u2192 Azure Service Management \u2192 user_impersonation**.\n2. Click **Add permissions**. Grant admin consent if prompted.\n\n## 4. Connect in Anton\n\n1. Paste the **Client ID** and **Client Secret** into the fields below.\n2. Click **Submit** \u2014 a browser window opens to Microsoft's sign-in page.\n3. Sign in with your Azure account and approve the permissions.\n4. Anton stores the refresh token locally for future use.\n\n## Notes\n\n- Tokens expire; Anton will refresh them automatically using the `offline_access` scope.\n- To revoke access, visit [My Apps](https://myapps.microsoft.com) \u2192 the app \u2192 **Revoke permissions**.",
+        "help_url": "https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Application (client) ID from your Entra ID app registration Overview page."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Client secret value from Certificates & secrets. Shown only once in the portal."
+          },
+          {
+            "name": "tenant_id",
+            "label": "Tenant ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Optional. Leave blank to use the common endpoint (multi-tenant). Set this to restrict sign-in to a single directory."
+          },
+          {
+            "name": "subscription_id",
+            "label": "Subscription ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Optional. Scopes Anton to a specific Azure subscription after authentication."
+          }
+        ]
+      }
+    ]
+  }
+}

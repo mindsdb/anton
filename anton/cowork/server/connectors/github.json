@@ -1,0 +1,137 @@
+{
+  "id": "github",
+  "label": "GitHub",
+  "aliases": [
+    "gh",
+    "git hub",
+    "github.com",
+    "git"
+  ],
+  "keywords": [
+    "source code",
+    "repository",
+    "pull request",
+    "issues",
+    "version control",
+    "git",
+    "commits",
+    "branches",
+    "code review",
+    "open source"
+  ],
+  "description": "Connect to GitHub to read repositories, pull requests, issues, and commits.",
+  "category": "engineering",
+  "logo": "code",
+  "logo_color": "#24292F",
+  "form": {
+    "form_id": "github-connector",
+    "title": "Connect GitHub",
+    "subtitle": "Authorize Anton to access your GitHub repositories, pull requests, and issues.",
+    "logo": "code",
+    "logo_color": "#24292F",
+    "methods": [
+      {
+        "id": "fine-grained-pat",
+        "label": "Fine-grained personal access token",
+        "description": "Paste a fine-grained personal access token (github_pat_\u2026) scoped to exactly the repositories and permissions you choose. Simplest and most secure path \u2014 no OAuth client setup required.",
+        "recommended": true,
+        "how_to": "## Fine-grained personal access token\n\nFine-grained tokens let you scope access to specific repositories and only the permissions Anton needs \u2014 far safer than classic tokens.\n\n### Steps\n\n1. Go to [GitHub Settings](https://github.com/settings) \u2192 scroll down to **Developer settings** (bottom of the left sidebar).\n2. Open **Personal access tokens \u2192 Fine-grained tokens**.\n3. Click **Generate new token**.\n4. Give it a name like `Anton` and set an expiration (90 days is a reasonable default).\n5. Under **Resource owner**, pick your personal account or an org you belong to.\n6. Under **Repository access**, choose **Only select repositories** and tick the repos Anton should see, or pick **All repositories**.\n7. Under **Permissions \u2192 Repository permissions**, enable at minimum:\n   - **Contents** \u2192 Read-only (for code and commits)\n   - **Pull requests** \u2192 Read-only\n   - **Issues** \u2192 Read-only\n   - Add **Metadata** \u2192 Read-only (required automatically)\n8. Click **Generate token**. GitHub shows the token once \u2014 copy it immediately.\n9. Paste it into the **Personal access token** field below.\n\n### Notes\n\n- The token starts with `github_pat_`. If yours starts with `ghp_`, you generated a classic token instead \u2014 see the **Classic personal access token** method.\n- Tokens expire. When one expires, generate a new one and update the field in Anton.\n- If the repo is owned by an org, the org admin may need to approve the token under **Organization settings \u2192 Personal access tokens**.\n",
+        "help_url": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Personal access token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "github_pat_\u2026",
+            "description": "Fine-grained token from GitHub Settings \u2192 Developer settings \u2192 Personal access tokens \u2192 Fine-grained tokens. Shown only once at creation."
+          },
+          {
+            "name": "base_url",
+            "label": "GitHub base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://github.com",
+            "default": "https://github.com",
+            "description": "Leave as the default for github.com. Change only if you use GitHub Enterprise Server (e.g. https://github.yourcompany.com)."
+          }
+        ]
+      },
+      {
+        "id": "classic-pat",
+        "label": "Classic personal access token",
+        "description": "Use a classic token (ghp_\u2026) if fine-grained tokens are not available for your org or use case. Scopes are coarser-grained than fine-grained tokens.",
+        "recommended": false,
+        "how_to": "## Classic personal access token\n\nClassic tokens are the older GitHub auth mechanism. They still work but grant broader access than fine-grained tokens. Prefer fine-grained if your org supports them.\n\n### Steps\n\n1. Go to [GitHub Settings](https://github.com/settings) \u2192 **Developer settings** \u2192 **Personal access tokens \u2192 Tokens (classic)**.\n2. Click **Generate new token (classic)**.\n3. Give it a descriptive note like `Anton` and set an expiration.\n4. Select the scopes Anton needs:\n   - `repo` \u2014 full access to repositories (or `public_repo` for public repos only)\n   - `read:org` \u2014 if you need org-level data\n   - `read:user` \u2014 basic user info\n5. Click **Generate token**. Copy the token (starts with `ghp_`) \u2014 it is shown only once.\n6. Paste it into the **Personal access token** field below.\n\n### Notes\n\n- The `repo` scope grants write access as well as read. If Anton only needs to read, be aware there is no read-only sub-scope for classic tokens \u2014 use fine-grained tokens for narrower access.\n- If your org requires SSO, click **Configure SSO** next to the token after generating it and authorize the org.\n",
+        "help_url": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-personal-access-token-classic",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Personal access token (classic)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ghp_\u2026",
+            "description": "Classic token from GitHub Settings \u2192 Developer settings \u2192 Personal access tokens \u2192 Tokens (classic). Shown only once at creation."
+          },
+          {
+            "name": "base_url",
+            "label": "GitHub base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://github.com",
+            "default": "https://github.com",
+            "description": "Leave as the default for github.com. Change only if you use GitHub Enterprise Server."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth (GitHub App)",
+        "description": "OAuth 2.0 flow using your own GitHub OAuth App. Opens a browser window for GitHub authorization. Requires creating an OAuth App in GitHub Developer settings first.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://github.com/login/oauth/authorize",
+          "token_url": "https://github.com/login/oauth/access_token",
+          "scopes": [
+            "repo",
+            "read:org",
+            "read:user"
+          ]
+        },
+        "how_to": "## OAuth via GitHub OAuth App (BYOK)\n\nThis flow opens GitHub's consent page in your browser. You must first create a GitHub OAuth App and supply its credentials.\n\n### Create a GitHub OAuth App\n\n1. Go to [GitHub Settings](https://github.com/settings) \u2192 **Developer settings** \u2192 **OAuth Apps** \u2192 **New OAuth App**.\n2. Fill in:\n   - **Application name**: `Anton`\n   - **Homepage URL**: `http://localhost`\n   - **Authorization callback URL**: `http://localhost:9898/oauth/callback` (Anton uses this local redirect)\n3. Click **Register application**.\n4. On the app page, copy the **Client ID**.\n5. Click **Generate a new client secret**, copy the value immediately \u2014 it is shown only once.\n6. Paste both into the fields below, then click **Submit** to start the browser flow.\n\n### Scopes requested\n\n- `repo` \u2014 read and write access to repositories\n- `read:org` \u2014 read org membership and teams\n- `read:user` \u2014 read your public profile\n\n### Notes\n\n- GitHub OAuth tokens do not expire by default, but you can revoke them at **Settings \u2192 Applications \u2192 Authorized OAuth Apps**.\n- For GitHub Enterprise Server, change the base URL field to your instance URL.\n",
+        "help_url": "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "Iv1.abc1234567890def",
+            "description": "From your GitHub OAuth App page under Developer settings \u2192 OAuth Apps."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Generated on the OAuth App page. Shown only once \u2014 store it somewhere safe."
+          },
+          {
+            "name": "base_url",
+            "label": "GitHub base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://github.com",
+            "default": "https://github.com",
+            "description": "Leave as the default for github.com. Change only if you use GitHub Enterprise Server."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "id": "mixpanel",
+  "label": "Mixpanel",
+  "aliases": [
+    "mix panel",
+    "mixpanel analytics",
+    "product analytics mixpanel"
+  ],
+  "keywords": [
+    "analytics",
+    "product analytics",
+    "events",
+    "funnels",
+    "retention",
+    "cohorts",
+    "tracking",
+    "user behavior"
+  ],
+  "description": "Query Mixpanel event data, funnels, retention, and cohorts using a service account.",
+  "category": "analytics",
+  "logo": "sparkle",
+  "logo_color": "#7856FF",
+  "form": {
+    "form_id": "mixpanel-connector",
+    "title": "Connect Mixpanel",
+    "subtitle": "Authenticate with a Mixpanel service account to access your project's analytics data.",
+    "logo": "sparkle",
+    "logo_color": "#7856FF",
+    "methods": [
+      {
+        "id": "service-account",
+        "label": "Service Account",
+        "description": "Paste your Mixpanel service account username, secret, and project ID. The recommended approach \u2014 no OAuth setup required, works for all Mixpanel plans.",
+        "recommended": true,
+        "how_to": "## Connect via Mixpanel Service Account\n\nMixpanel service accounts are project-scoped credentials that let Anton query your data without using your personal login.\n\n### Steps\n\n1. Open [Mixpanel](https://mixpanel.com) and navigate to your project.\n2. Go to **Project Settings** (gear icon, top-left) \u2192 **Service Accounts**.\n3. Click **Add Service Account**, give it a name like `Anton`, and click **Create**.\n4. Mixpanel displays the **Username** and **Secret** \u2014 copy both now. The secret is shown only once.\n5. Find your **Project ID**: it appears in the URL (`/project/<id>/`) or under **Project Settings \u2192 Overview**.\n6. Paste the username, secret, and project ID into the fields below.\n7. Select your **Data Residency Region** \u2014 choose **EU** if your Mixpanel project is hosted in the EU (eu.mixpanel.com), otherwise leave it as **US**.\n\n### Notes\n\n- The secret is shown only at creation time. If you lose it, delete the service account and create a new one.\n- Service accounts have read-only access by default, which is all Anton needs.\n- EU-region projects must use the EU endpoint or requests will fail with auth errors.",
+        "help_url": "https://developer.mixpanel.com/reference/service-accounts",
+        "fields": [
+          {
+            "name": "service_account_username",
+            "label": "Service Account Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton.abc123.mp-service-account",
+            "description": "Found under Project Settings \u2192 Service Accounts after creating the account."
+          },
+          {
+            "name": "service_account_secret",
+            "label": "Service Account Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Shown once at creation time. If lost, delete and recreate the service account."
+          },
+          {
+            "name": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "1234567",
+            "description": "Numeric ID found in the project URL or under Project Settings \u2192 Overview."
+          },
+          {
+            "name": "region",
+            "label": "Data Residency Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select EU if your project is hosted at eu.mixpanel.com, otherwise US.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (mixpanel.com)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (eu.mixpanel.com)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

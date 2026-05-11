@@ -1,0 +1,63 @@
+{
+  "id": "clearbit",
+  "label": "Clearbit",
+  "aliases": [
+    "clearbit enrichment",
+    "hubspot breeze intelligence",
+    "breeze intelligence",
+    "clearbit by hubspot"
+  ],
+  "keywords": [
+    "enrichment",
+    "person",
+    "company",
+    "firmographic",
+    "demographic",
+    "b2b",
+    "data",
+    "prospecting",
+    "reveal",
+    "hubspot"
+  ],
+  "description": "Enrich leads and accounts with person and company data using Clearbit (now HubSpot Breeze Intelligence).",
+  "category": "enrichment",
+  "logo": "search",
+  "logo_color": "#3B4EF8",
+  "form": {
+    "form_id": "clearbit-connector",
+    "title": "Connect Clearbit",
+    "subtitle": "Paste your Clearbit secret API key to start enriching contacts and companies.",
+    "logo": "search",
+    "logo_color": "#3B4EF8",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "Secret API Key",
+        "description": "Paste your Clearbit secret key (sk_\u2026) from the Clearbit dashboard. No OAuth setup required \u2014 the fastest way to get started.",
+        "recommended": true,
+        "how_to": "## Find your Clearbit Secret API Key\n\n1. Log in to your Clearbit account at [app.clearbit.com](https://app.clearbit.com).\n2. Click your avatar or name in the top-right corner, then select **API**.\n3. Under **API Keys**, locate your **Secret key** \u2014 it starts with `sk_`.\n4. Click **Copy** next to the key.\n5. Paste it into the **Secret API Key** field below and click **Save**.\n\n## Notes\n\n- Your secret key grants full API access to your Clearbit account. Keep it private and never share it.\n- If you suspect the key has been exposed, go to the same **API** page and click **Regenerate** to issue a new one. Update the key in Anton afterward.\n- Clearbit accounts migrated to HubSpot Breeze Intelligence still use the same `sk_\u2026` key format and API endpoints.\n- Free-tier accounts have rate limits; check your plan in the Clearbit dashboard under **Usage**.\n",
+        "help_url": "https://dashboard.clearbit.com/docs#authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "Secret API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Clearbit secret key beginning with sk_. Found in app.clearbit.com \u2192 API \u2192 API Keys."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://person.clearbit.com",
+            "default": "https://person.clearbit.com",
+            "description": "Override only if you have a custom Clearbit endpoint. Leave blank to use the default."
+          }
+        ]
+      }
+    ]
+  }
+}

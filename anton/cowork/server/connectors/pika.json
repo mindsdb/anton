@@ -1,0 +1,61 @@
+{
+  "id": "pika",
+  "label": "Pika",
+  "aliases": [
+    "pika art",
+    "pika.art",
+    "pika ai",
+    "pika video"
+  ],
+  "keywords": [
+    "ai",
+    "video",
+    "generation",
+    "text-to-video",
+    "image-to-video",
+    "generative",
+    "diffusion",
+    "creative"
+  ],
+  "description": "Generate AI-powered videos from text prompts or images using Pika's creative video model.",
+  "category": "ai",
+  "logo": "image",
+  "logo_color": "#6C3CE1",
+  "form": {
+    "form_id": "pika-connector",
+    "title": "Connect Pika",
+    "subtitle": "Paste your Pika API key to start generating AI videos from Anton.",
+    "logo": "image",
+    "logo_color": "#6C3CE1",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Pika API key from pika.art \u2192 Developers. Simplest and recommended path once API access is granted.",
+        "recommended": true,
+        "how_to": "## Connect with a Pika API Key\n\nPika's API is currently in limited early access (waitlist). Once your account is approved, you can generate a key from the developer settings.\n\n### Steps\n\n1. Log in to [pika.art](https://pika.art).\n2. Click your profile avatar or navigate to **Settings \u2192 Developers** (or the **API** tab if available in your plan).\n3. Click **Generate API Key** (or **Create new key**).\n4. Copy the key shown \u2014 it may only be displayed once. Store it somewhere safe.\n5. Paste the key into the **API Key** field below.\n\n### Notes\n\n- If you don't see the Developers section yet, your account is still on the waitlist. Join at [pika.art](https://pika.art) and wait for approval.\n- Keep your API key private \u2014 anyone with the key can generate videos against your quota.\n- To revoke access, return to **Settings \u2192 Developers** and delete or regenerate the key.\n",
+        "help_url": "https://pika.art/api",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "pk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at pika.art \u2192 Settings \u2192 Developers. API access is currently waitlisted."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.pika.art",
+            "default": "https://api.pika.art",
+            "description": "Override only if Pika provides a custom or regional endpoint. Leave as default otherwise."
+          }
+        ]
+      }
+    ]
+  }
+}

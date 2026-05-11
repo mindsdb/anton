@@ -1,0 +1,87 @@
+{
+  "id": "cohere",
+  "label": "Cohere",
+  "aliases": [
+    "cohere ai",
+    "cohere.ai",
+    "command r",
+    "command r plus"
+  ],
+  "keywords": [
+    "ai",
+    "llm",
+    "embeddings",
+    "reranking",
+    "nlp",
+    "command",
+    "generate",
+    "semantic search",
+    "machine learning"
+  ],
+  "description": "Connect to Cohere's Command models, embeddings, and reranking APIs using your Cohere API key.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#39594D",
+  "form": {
+    "form_id": "cohere-connector",
+    "title": "Connect Cohere",
+    "subtitle": "Paste your Cohere API key to enable Command model generation, embeddings, and reranking.",
+    "logo": "brain",
+    "logo_color": "#39594D",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from your Cohere dashboard. Takes 30 seconds \u2014 no OAuth flow, no extra setup required.",
+        "recommended": true,
+        "how_to": "## Get a Cohere API Key\n\n1. Open [dashboard.cohere.com](https://dashboard.cohere.com) and sign in (or create a free account).\n2. In the left sidebar, click **API Keys**.\n3. Click **+ New API Key**, give it a name like `Anton`, and click **Generate**.\n4. Copy the key shown \u2014 it will not be displayed again in full after you leave the page.\n5. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Trial keys work immediately but have rate limits. Upgrade to a production key for higher throughput.\n- To scope access, Cohere lets you create multiple keys \u2014 consider a dedicated key per application.\n- You can revoke a key at any time from the **API Keys** page without affecting other keys.\n- If you're using a private deployment or an Azure/AWS marketplace endpoint, also fill in the optional **Base URL** field.\n",
+        "help_url": "https://docs.cohere.com/docs/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at dashboard.cohere.com \u2192 API Keys. Keep this secret \u2014 anyone with it can bill your account."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL (optional)",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.cohere.com/v1",
+            "description": "Override the default API endpoint \u2014 useful for Azure AI, AWS Bedrock, or private deployments. Leave blank to use Cohere's hosted API."
+          },
+          {
+            "name": "default_model",
+            "label": "Default Model",
+            "type": "select",
+            "required": false,
+            "default": "command-r-plus",
+            "description": "The Command model Anton will use for generation tasks unless overridden per-request.",
+            "options": [
+              {
+                "value": "command-r-plus",
+                "label": "Command R+ (most capable)"
+              },
+              {
+                "value": "command-r",
+                "label": "Command R (balanced)"
+              },
+              {
+                "value": "command",
+                "label": "Command (lightweight)"
+              },
+              {
+                "value": "command-light",
+                "label": "Command Light (fastest)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "id": "fifteen_five",
+  "label": "15Five",
+  "aliases": [
+    "15 five",
+    "fifteenfive",
+    "15-five"
+  ],
+  "keywords": [
+    "performance management",
+    "check-ins",
+    "okr",
+    "hr",
+    "employee engagement",
+    "goals",
+    "reviews",
+    "1on1",
+    "feedback"
+  ],
+  "description": "Connect 15Five to sync performance check-ins, OKRs, and employee feedback data.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#4CAF50",
+  "form": {
+    "form_id": "fifteen_five-connector",
+    "title": "Connect 15Five",
+    "subtitle": "Paste your 15Five personal API token to start syncing check-ins, OKRs, and performance data.",
+    "logo": "check",
+    "logo_color": "#4CAF50",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "Personal API Token",
+        "description": "Paste your personal API token from 15Five Account Settings. No OAuth setup required \u2014 just copy and paste.",
+        "recommended": true,
+        "how_to": "## Generate a 15Five Personal API Token\n\n1. Log in to your 15Five account at [app.15five.com](https://app.15five.com).\n2. Click your avatar or initials in the top-right corner and select **Account Settings**.\n3. In the left sidebar, navigate to **Integrations \u2192 API**.\n4. Click **Generate Token** (or copy an existing token if one is already shown).\n5. Copy the token \u2014 it may only be shown once. If you lose it, you can regenerate a new one from the same page.\n6. Paste the token into the **API Token** field below.\n\n## Notes\n\n- The token is scoped to your personal 15Five account. Admin-level accounts will have access to company-wide data.\n- If you regenerate the token, the old one is immediately invalidated \u2014 update Anton with the new token.\n- Refer to the [15Five API documentation](https://developer.15five.com/) for details on available endpoints and rate limits.",
+        "help_url": "https://developer.15five.com/",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your 15Five personal API token here",
+            "description": "Found in Account Settings \u2192 Integrations \u2192 API. Keep this secret \u2014 it grants access to your 15Five data."
+          },
+          {
+            "name": "subdomain",
+            "label": "Company Subdomain",
+            "type": "text",
+            "required": false,
+            "placeholder": "yourcompany",
+            "description": "Optional. Your 15Five subdomain (the part before .15five.com). Leave blank if unsure."
+          }
+        ]
+      }
+    ]
+  }
+}

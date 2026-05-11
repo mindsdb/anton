@@ -1,0 +1,90 @@
+{
+  "id": "coralogix",
+  "label": "Coralogix",
+  "aliases": [
+    "coralogix logs",
+    "coralogix metrics",
+    "coralogix tracing",
+    "coralogix observability"
+  ],
+  "keywords": [
+    "logs",
+    "metrics",
+    "tracing",
+    "observability",
+    "monitoring",
+    "apm",
+    "log management",
+    "telemetry",
+    "opentelemetry"
+  ],
+  "description": "Connect to Coralogix to query logs, metrics, and traces across your observability platform.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#FF6B35",
+  "form": {
+    "form_id": "coralogix-connector",
+    "title": "Connect Coralogix",
+    "subtitle": "Paste your Coralogix API key and region domain to start querying logs, metrics, and traces.",
+    "logo": "sparkle",
+    "logo_color": "#FF6B35",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Coralogix API key and choose your regional domain. The simplest path \u2014 takes under a minute from your Coralogix settings page.",
+        "recommended": true,
+        "how_to": "## Connect with a Coralogix API Key\n\nCoralogix uses API keys scoped to your team. You'll need both a key and the correct regional domain for your account.\n\n### Step 1 \u2014 Copy your API key\n\n1. Log in to your Coralogix account.\n2. Go to **Settings** (gear icon, bottom-left) \u2192 **API Keys**.\n3. You'll see keys grouped by type:\n   - **Logs Query Key** \u2014 for querying stored logs via the DataPrime / Elasticsearch-compatible API.\n   - **Alerts / Rules API Key** \u2014 for managing alerts programmatically.\n   - For most integrations, use the **Logs Query Key** or create a dedicated key under **Send Your Data**.\n4. Click **Generate New Key** if you need a fresh one, give it a name like `anton`, and copy the value.\n\n### Step 2 \u2014 Find your region domain\n\nCoralogix hosts data in multiple regions. Match your account's login URL:\n\n| Login URL | Region domain |\n|---|---|\n| `app.coralogix.com` | `coralogix.com` |\n| `app.eu2.coralogix.com` | `eu2.coralogix.com` |\n| `app.coralogix.us` | `coralogix.us` |\n| `app.cx498.coralogix.com` | `cx498.coralogix.com` |\n| `app.coralogix.in` | `app.coralogix.in` |\n\n### Step 3 \u2014 Paste into Anton\n\n1. Enter your **API Key** and **Region Domain** in the fields below.\n2. Click **Submit**.\n\n### Notes\n\n- API keys are shown once on creation in some plans \u2014 store them in a password manager.\n- Using the wrong region domain will result in 401 or 404 errors even with a valid key.\n- Rotate a key under **Settings \u2192 API Keys \u2192 Revoke** and generate a replacement.\n",
+        "help_url": "https://coralogix.com/docs/user-team-management/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Found under Settings \u2192 API Keys in your Coralogix account."
+          },
+          {
+            "name": "region_domain",
+            "label": "Region Domain",
+            "type": "select",
+            "required": true,
+            "description": "Select the region that matches your Coralogix account login URL.",
+            "options": [
+              {
+                "value": "coralogix.com",
+                "label": "US1 \u2014 coralogix.com"
+              },
+              {
+                "value": "eu2.coralogix.com",
+                "label": "EU2 \u2014 eu2.coralogix.com"
+              },
+              {
+                "value": "coralogix.us",
+                "label": "US2 \u2014 coralogix.us"
+              },
+              {
+                "value": "cx498.coralogix.com",
+                "label": "AP1 \u2014 cx498.coralogix.com"
+              },
+              {
+                "value": "app.coralogix.in",
+                "label": "IN \u2014 app.coralogix.in"
+              }
+            ]
+          },
+          {
+            "name": "custom_region_domain",
+            "label": "Custom Region Domain (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "your-custom.coralogix.com",
+            "description": "Only fill this if your region is not in the list above. Overrides the dropdown selection."
+          }
+        ]
+      }
+    ]
+  }
+}

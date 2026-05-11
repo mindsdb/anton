@@ -1,0 +1,111 @@
+{
+  "id": "gitlab",
+  "label": "GitLab",
+  "aliases": [
+    "git lab",
+    "gitlab.com",
+    "self-hosted gitlab",
+    "gitlab ce",
+    "gitlab ee"
+  ],
+  "keywords": [
+    "git",
+    "source code",
+    "version control",
+    "ci",
+    "cd",
+    "pipelines",
+    "issues",
+    "merge requests",
+    "devops",
+    "repositories"
+  ],
+  "description": "Connect to GitLab to access repositories, CI/CD pipelines, issues, and merge requests on gitlab.com or a self-hosted instance.",
+  "category": "engineering",
+  "logo": "code",
+  "logo_color": "#FC6D26",
+  "form": {
+    "form_id": "gitlab-connector",
+    "title": "Connect GitLab",
+    "subtitle": "Paste a personal access token to give Anton access to your GitLab repos, pipelines, and issues.",
+    "logo": "code",
+    "logo_color": "#FC6D26",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Paste a GitLab personal access token (glpat-\u2026) from User Settings \u2192 Access Tokens. Works with gitlab.com and self-hosted instances. Simplest and fastest setup path.",
+        "recommended": true,
+        "how_to": "## Create a GitLab Personal Access Token\n\n### Steps\n\n1. Log in to your GitLab account (gitlab.com or your self-hosted URL).\n2. Click your avatar in the top-right corner \u2192 **Edit profile**.\n3. In the left sidebar, go to **Access Tokens**.\n4. Click **Add new token**.\n5. Give the token a name (e.g. `Anton`) and optionally set an expiry date.\n6. Select the required scopes:\n   - `read_user` \u2014 read your profile\n   - `read_api` or `api` \u2014 access repos, issues, pipelines (use `api` for full read/write)\n7. Click **Create personal access token**.\n8. Copy the generated token (starts with `glpat-`). **It is shown only once.**\n9. Paste the token into the **Personal Access Token** field below.\n10. If you are using a self-hosted GitLab instance, enter your instance URL (e.g. `https://gitlab.yourcompany.com`) in the **Instance URL** field.\n\n### Notes\n\n- The token is shown only once. If you lose it, revoke it and generate a new one.\n- For read-only use, the `read_api` scope is sufficient and safer.\n- Group access tokens and project access tokens follow the same format and work the same way here.",
+        "help_url": "https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "glpat-xxxxxxxxxxxxxxxxxxxx",
+            "description": "From GitLab \u2192 Edit profile \u2192 Access Tokens. Must include at least the read_api or api scope."
+          },
+          {
+            "name": "instance_url",
+            "label": "Instance URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://gitlab.com",
+            "default": "https://gitlab.com",
+            "description": "Leave as https://gitlab.com for the hosted service, or enter your self-hosted GitLab base URL."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Authorize Anton via GitLab's OAuth 2.0 flow using your own GitLab OAuth application. Requires creating an application in GitLab's admin or user settings and supplying the client ID and secret.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://gitlab.com/oauth/authorize",
+          "token_url": "https://gitlab.com/oauth/token",
+          "scopes": [
+            "read_user",
+            "read_api"
+          ],
+          "extra_auth_params": {
+            "response_type": "code"
+          }
+        },
+        "how_to": "## OAuth 2.0 with Your Own GitLab Application\n\n### Create a GitLab OAuth Application\n\n1. Log in to GitLab.\n2. Go to your avatar \u2192 **Edit profile** \u2192 **Applications** (for a user-level app) or **Admin Area \u2192 Applications** (for an instance-level app).\n3. Click **New application**.\n4. Set a name (e.g. `Anton`) and enter the redirect URI: `http://127.0.0.1` (Anton uses a local redirect).\n5. Select scopes: `read_user` and `read_api` (or `api` for full access).\n6. Click **Save application**.\n7. Copy the **Application ID** (Client ID) and **Secret**.\n8. Paste them into the fields below.\n9. Click **Submit** \u2014 Anton will open your browser to GitLab's consent screen.\n\n### Notes\n\n- For self-hosted instances, replace `gitlab.com` in the OAuth URLs with your instance hostname.\n- OAuth tokens expire; Anton will use the refresh token to renew access automatically.\n- The Personal Access Token method is simpler for most users.",
+        "help_url": "https://docs.gitlab.com/ee/api/oauth2.html",
+        "fields": [
+          {
+            "name": "instance_url",
+            "label": "Instance URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://gitlab.com",
+            "default": "https://gitlab.com",
+            "description": "Leave as https://gitlab.com for the hosted service, or enter your self-hosted GitLab base URL. Used to build the OAuth authorization and token endpoints."
+          },
+          {
+            "name": "client_id",
+            "label": "Application ID (Client ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "abc123def456...",
+            "description": "The Application ID shown after creating your GitLab OAuth application."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The secret shown once when you create the GitLab OAuth application."
+          }
+        ]
+      }
+    ]
+  }
+}

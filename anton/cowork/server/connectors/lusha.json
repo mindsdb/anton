@@ -1,0 +1,51 @@
+{
+  "id": "lusha",
+  "label": "Lusha",
+  "aliases": [
+    "lusha api",
+    "lusha enrichment",
+    "lusha contacts"
+  ],
+  "keywords": [
+    "enrichment",
+    "contact",
+    "email",
+    "phone",
+    "b2b",
+    "prospecting",
+    "data",
+    "leads"
+  ],
+  "description": "Enrich contacts with verified emails and phone numbers using Lusha's API.",
+  "category": "enrichment",
+  "logo": "search",
+  "logo_color": "#FF6B35",
+  "form": {
+    "form_id": "lusha-connector",
+    "title": "Connect Lusha",
+    "subtitle": "Paste your Lusha API key to start enriching contacts with emails and phone numbers.",
+    "logo": "search",
+    "logo_color": "#FF6B35",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Lusha API key \u2014 found in Profile \u2192 API Access. Quickest way to connect with no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Lusha API Key\n\nLusha provides a personal API key tied to your account. You can find it in a few clicks.\n\n### Steps\n\n1. Log in to your Lusha account at [app.lusha.com](https://app.lusha.com).\n2. Click your avatar or name in the top-right corner to open your profile menu.\n3. Select **Profile** from the dropdown.\n4. Scroll down to the **API Access** section (or navigate directly to the API tab).\n5. Copy the API key shown there.\n6. Paste it into the **API Key** field below and click **Submit**.\n\n### Notes\n\n- Your API key is tied to your Lusha seat and quota \u2014 each call counts against your plan's enrichment credits.\n- If you rotate or regenerate the key in Lusha, update it here to avoid authentication errors.\n- Team admins can find API keys for managed seats under **Admin \u2192 API** in the Lusha dashboard.\n- Keep the key private; anyone with it can consume your enrichment credits.\n",
+        "help_url": "https://www.lusha.com/docs/api/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Lusha \u2192 Profile \u2192 API Access. Keep this secret \u2014 it is tied to your account's enrichment credits."
+          }
+        ]
+      }
+    ]
+  }
+}

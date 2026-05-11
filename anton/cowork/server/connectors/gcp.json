@@ -1,0 +1,115 @@
+{
+  "id": "gcp",
+  "label": "Google Cloud",
+  "aliases": [
+    "google cloud platform",
+    "gcp",
+    "gcs",
+    "google compute engine",
+    "google cloud storage",
+    "google cloud services"
+  ],
+  "keywords": [
+    "cloud",
+    "google",
+    "gcs",
+    "compute",
+    "storage",
+    "infrastructure",
+    "platform",
+    "service account",
+    "bigquery",
+    "gke",
+    "kubernetes",
+    "pubsub",
+    "firestore"
+  ],
+  "description": "Connect to Google Cloud Platform services including Cloud Storage, Compute Engine, Pub/Sub, and more using a service account.",
+  "category": "cloud",
+  "logo": "cube",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "gcp-connector",
+    "title": "Connect Google Cloud",
+    "subtitle": "Authorize Anton to interact with Google Cloud Platform services using a service account.",
+    "logo": "cube",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "service-account",
+        "label": "Service Account JSON",
+        "description": "Paste a GCP service account key file (JSON) and your project ID. The simplest and most portable path \u2014 works with any GCP service Anton supports.",
+        "recommended": true,
+        "how_to": "## Connect with a Service Account JSON key\n\nA service account key lets Anton authenticate as a dedicated, permission-scoped identity on your GCP project. No browser sign-in required.\n\n### Steps\n\n1. Open the [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **IAM & Admin \u2192 Service Accounts**.\n3. Click **Create service account** (or select an existing one).\n4. Give it a descriptive name like `anton-access` and click **Create and continue**.\n5. On the **Grant access** step, assign the roles Anton needs. Common choices:\n   - **Storage Object Viewer / Storage Object Admin** for Cloud Storage\n   - **Compute Viewer** for Compute Engine\n   - **Pub/Sub Subscriber** for Pub/Sub\n   - Or **Project Viewer** for broad read-only access.\n6. Click **Done**.\n7. Open the service account, go to the **Keys** tab, and click **Add key \u2192 Create new key \u2192 JSON**.\n8. The JSON key file downloads automatically. Open it and paste its entire contents into the **Service account JSON** field below.\n9. Enter your **GCP Project ID** (visible in the top project picker bar, e.g. `my-project-123456`).\n\n### Notes\n\n- The JSON key is shown and downloadable only once. Store a backup in a secure vault.\n- If the key is compromised, go to **IAM & Admin \u2192 Service Accounts \u2192 Keys** and delete it, then create a new one.\n- Assign only the minimum roles needed for Anton's tasks \u2014 least privilege is best practice.\n- For multi-region projects, confirm the resources Anton accesses are in the region you expect.",
+        "help_url": "https://cloud.google.com/iam/docs/creating-managing-service-account-keys",
+        "fields": [
+          {
+            "name": "service_account_json",
+            "label": "Service Account JSON",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "{ \"type\": \"service_account\", \"project_id\": \"...\", ... }",
+            "description": "Paste the full contents of the JSON key file downloaded from IAM & Admin \u2192 Service Accounts \u2192 Keys."
+          },
+          {
+            "name": "project_id",
+            "label": "GCP Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-project-123456",
+            "description": "Your Google Cloud project ID. Visible in the project picker at the top of the Cloud Console."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "Sign in with Google (OAuth 2.0)",
+        "description": "Use your own Google Cloud OAuth client to authorize Anton via a browser consent screen. Useful when service account keys are disallowed by your org policy.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "openid"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Sign in with Google (OAuth 2.0 \u2014 BYOK)\n\nThis method lets Anton act as your user identity against GCP APIs. You must bring your own OAuth client from Google Cloud Console.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and pick your project.\n2. Go to **APIs & Services \u2192 Library** and enable the APIs you need (e.g. **Cloud Storage API**, **Compute Engine API**).\n3. Go to **APIs & Services \u2192 OAuth consent screen**.\n   - Choose **Internal** if your org uses Google Workspace; otherwise **External**.\n   - Fill in app name and contact email. Add your email as a test user if External.\n4. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID**.\n   - Application type: **Desktop app**.\n   - Click **Create** and copy the **Client ID** and **Client secret**.\n5. Paste both values into the fields below, then click **Submit**.\n6. A browser window opens to Google's consent screen \u2014 approve the requested scopes.\n7. Anton stores the resulting refresh token locally.\n\n### Notes\n\n- The `cloud-platform` scope grants broad access matching your user's IAM permissions. You cannot narrow it further at the OAuth level \u2014 restrict access via IAM roles on the project instead.\n- If consent is needed again (e.g. after token expiry), Anton will prompt you to re-authorize.",
+        "help_url": "https://developers.google.com/identity/protocols/oauth2/native-app",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Use a Desktop app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID \u2014 copied from the same credential entry in Cloud Console."
+          },
+          {
+            "name": "project_id",
+            "label": "GCP Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-project-123456",
+            "description": "Your Google Cloud project ID. Visible in the project picker at the top of the Cloud Console."
+          }
+        ]
+      }
+    ]
+  }
+}

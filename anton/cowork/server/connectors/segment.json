@@ -1,0 +1,125 @@
+{
+  "id": "segment",
+  "label": "Segment",
+  "aliases": [
+    "twilio segment",
+    "segment.io",
+    "segment cdp",
+    "customer data platform"
+  ],
+  "keywords": [
+    "cdp",
+    "events",
+    "tracking",
+    "analytics",
+    "customer data",
+    "pipeline",
+    "ingestion",
+    "twilio",
+    "source",
+    "destination"
+  ],
+  "description": "Send and manage customer event data through Segment's customer data platform.",
+  "category": "data",
+  "logo": "database",
+  "logo_color": "#52BD95",
+  "form": {
+    "form_id": "segment-connector",
+    "title": "Connect Segment",
+    "subtitle": "Stream events into Segment or manage your workspace via the Public API.",
+    "logo": "database",
+    "logo_color": "#52BD95",
+    "methods": [
+      {
+        "id": "write-key",
+        "label": "Source Write Key",
+        "description": "Paste your Segment source's Write Key to send events directly into that source. The simplest way to get data flowing \u2014 no OAuth, no extra setup.",
+        "recommended": true,
+        "how_to": "## Find your Source Write Key\n\nThe Write Key authenticates event ingestion for a specific Segment source. Each source has its own unique key.\n\n### Steps\n\n1. Log in to [Segment](https://app.segment.com) and go to your workspace.\n2. In the left sidebar, click **Connections \u2192 Sources**.\n3. Click the source you want Anton to write events to (or create a new one).\n4. Open the **Settings** tab for that source.\n5. Under **API Keys**, copy the **Write Key**.\n6. Paste it into the **Write Key** field below.\n\n### Notes\n\n- Each source has its own Write Key \u2014 make sure you pick the right source.\n- The Write Key only grants permission to send events into that source; it cannot read data or modify workspace settings.\n- If you suspect a key has been exposed, regenerate it from the same Settings tab. Anton will need the new key re-pasted.\n- For workspace-level operations (creating sources, viewing destinations, etc.), add a **Workspace Access Token** using the **Public API Token** method instead.",
+        "help_url": "https://segment.com/docs/connections/find-writekey/",
+        "fields": [
+          {
+            "name": "write_key",
+            "label": "Write Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "7eqCDRxZ3kNg...",
+            "description": "Found in your Segment source Settings \u2192 API Keys. Scoped to a single source."
+          },
+          {
+            "name": "source_name",
+            "label": "Source Name (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "My Production Source",
+            "description": "A human-readable label to help identify which source this key belongs to."
+          }
+        ]
+      },
+      {
+        "id": "public-api-token",
+        "label": "Public API Token",
+        "description": "Use a Segment workspace access token to call the Segment Public API \u2014 list sources, manage destinations, query delivery logs, and more. Paste a token generated from your workspace settings.",
+        "recommended": false,
+        "how_to": "## Generate a Segment Public API Token\n\nThe Public API token lets Anton interact with your workspace programmatically \u2014 beyond just sending events.\n\n### Steps\n\n1. Log in to [Segment](https://app.segment.com) and open your workspace.\n2. Click your workspace name in the top-left corner, then go to **Settings**.\n3. In the left sidebar, navigate to **Access Management \u2192 Tokens**.\n4. Click **Create Token**.\n5. Give the token a descriptive name (e.g., `Anton Integration`).\n6. Assign the appropriate **Role** for what Anton needs:\n   - **Source Admin** to manage sources\n   - **Workspace Owner** for full access\n   - Use the least-privilege role that meets your needs.\n7. Click **Create**. The token is shown **only once** \u2014 copy it immediately.\n8. Paste the token into the **Access Token** field below.\n\n### Notes\n\n- The token is shown only at creation time. If you lose it, you must revoke and create a new one.\n- Tokens are scoped to your workspace; they do not grant access to other workspaces.\n- To combine event ingestion with workspace management, fill in both the **Write Key** method above and this token.\n- Revoke tokens from the same **Access Management \u2192 Tokens** page if they are no longer needed.",
+        "help_url": "https://segment.com/docs/api/public-api/",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ssp_...",
+            "description": "Generated from Segment workspace Settings \u2192 Access Management \u2192 Tokens. Shown only once at creation."
+          },
+          {
+            "name": "workspace_slug",
+            "label": "Workspace Slug (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-company",
+            "description": "The slug of your Segment workspace, visible in your workspace URL (app.segment.com/YOUR-SLUG). Used to scope API calls."
+          }
+        ]
+      },
+      {
+        "id": "write-key-and-api-token",
+        "label": "Write Key + Public API Token",
+        "description": "Combine a source Write Key for event ingestion with a workspace access token for full Public API access. Use this when Anton needs to both send events and manage your Segment workspace.",
+        "recommended": false,
+        "how_to": "## Combined Write Key and Public API Token\n\nThis method provides Anton with both event-sending access (via a source Write Key) and workspace management access (via a Public API token).\n\n### Get your Write Key\n\n1. In [Segment](https://app.segment.com), go to **Connections \u2192 Sources**.\n2. Select your source and open its **Settings** tab.\n3. Under **API Keys**, copy the **Write Key**.\n\n### Get your Public API Token\n\n1. Go to workspace **Settings \u2192 Access Management \u2192 Tokens**.\n2. Click **Create Token**, name it (e.g. `Anton`), assign a role, and click **Create**.\n3. Copy the token immediately \u2014 it is shown only once.\n\n### Fill in the fields below\n\n- Paste the Write Key into **Write Key**.\n- Paste the API token into **Access Token**.\n- Optionally add your workspace slug for scoped API calls.\n\n### Notes\n\n- Keep both credentials secure. Either alone limits Anton's access; together they grant broad access to your workspace.\n- Rotate keys from their respective pages in Segment if you suspect exposure.",
+        "help_url": "https://segment.com/docs/api/public-api/",
+        "fields": [
+          {
+            "name": "write_key",
+            "label": "Write Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "7eqCDRxZ3kNg...",
+            "description": "Found in your Segment source Settings \u2192 API Keys. Used for event ingestion."
+          },
+          {
+            "name": "access_token",
+            "label": "Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ssp_...",
+            "description": "Generated from workspace Settings \u2192 Access Management \u2192 Tokens. Used for Public API access."
+          },
+          {
+            "name": "workspace_slug",
+            "label": "Workspace Slug (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-company",
+            "description": "Your workspace slug as it appears in app.segment.com/YOUR-SLUG."
+          }
+        ]
+      }
+    ]
+  }
+}

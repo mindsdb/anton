@@ -1,0 +1,65 @@
+{
+  "id": "salesloft",
+  "label": "Salesloft",
+  "aliases": [
+    "sales loft",
+    "salesloft cadences",
+    "salesloft engagement"
+  ],
+  "keywords": [
+    "sales",
+    "engagement",
+    "cadences",
+    "outreach",
+    "sequences",
+    "email",
+    "dialer",
+    "crm",
+    "prospecting"
+  ],
+  "description": "Connect to Salesloft to automate cadences, sync prospect activity, and pull engagement data into Anton.",
+  "category": "sales-engagement",
+  "logo": "send",
+  "logo_color": "#00B2A9",
+  "form": {
+    "form_id": "salesloft-connector",
+    "title": "Connect Salesloft",
+    "subtitle": "Authorize Anton to access your Salesloft account via OAuth 2.0.",
+    "logo": "send",
+    "logo_color": "#00B2A9",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Salesloft (OAuth 2.0)",
+        "description": "Connect via Salesloft's OAuth 2.0 flow. Requires you to register a Salesloft OAuth app and supply your own Client ID and Client Secret \u2014 no API key path exists.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.salesloft.com/oauth/authorize",
+          "token_url": "https://accounts.salesloft.com/oauth/token",
+          "scopes": []
+        },
+        "how_to": "## Connect Salesloft via OAuth 2.0 (Bring Your Own App)\n\nSalesloft only supports OAuth 2.0 for API access \u2014 there is no API key or personal access token. You must register an OAuth application in Salesloft to get credentials.\n\n## 1. Register a Salesloft OAuth App\n\n1. Log in to [Salesloft](https://app.salesloft.com) as an admin.\n2. Navigate to **Settings \u2192 Integrations \u2192 API** (or go to [https://app.salesloft.com/settings/integrations/api](https://app.salesloft.com/settings/integrations/api)).\n3. Click **Create New App**.\n4. Give the app a name like `Anton`.\n5. Under **Redirect URIs**, add `http://localhost` (Anton uses a local redirect to capture the authorization code).\n6. Save the app \u2014 Salesloft will display your **Application ID (Client ID)** and **Secret (Client Secret)**.\n\n## 2. Note Required Scopes\n\nSalesloft does not use granular scope strings in the OAuth URL \u2014 all authorized scopes are controlled by what your app is granted in the app settings. No scope query parameters are needed.\n\n## 3. Enter Credentials in Anton\n\n1. Copy your **Client ID** and **Client Secret** from the Salesloft app page.\n2. Paste them into the fields below.\n3. Click **Submit** \u2014 Anton will open your browser to Salesloft's consent screen.\n4. Log in and click **Authorize** to complete the connection.\n\n## Notes\n\n- Tokens are stored locally and refreshed automatically using the refresh token.\n- If you revoke access, go to **Salesloft Settings \u2192 Integrations \u2192 API**, find your app, and remove it. Re-authorize in Anton to reconnect.\n- Only Salesloft admins can register OAuth apps.",
+        "help_url": "https://developers.salesloft.com/docs/api/authentication/oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-salesloft-application-id",
+            "description": "Found on your registered Salesloft OAuth app page under Settings \u2192 Integrations \u2192 API."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The secret paired with your Client ID from the same Salesloft app page. Shown once \u2014 store it safely."
+          }
+        ]
+      }
+    ]
+  }
+}

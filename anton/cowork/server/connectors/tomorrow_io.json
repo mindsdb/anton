@@ -1,0 +1,63 @@
+{
+  "id": "tomorrow_io",
+  "label": "Tomorrow.io",
+  "aliases": [
+    "tomorrow",
+    "climacell",
+    "tomorrow weather",
+    "climacell weather"
+  ],
+  "keywords": [
+    "weather",
+    "climate",
+    "forecast",
+    "hyperlocal",
+    "temperature",
+    "precipitation",
+    "wind",
+    "humidity",
+    "intelligence",
+    "meteorology"
+  ],
+  "description": "Access hyperlocal weather forecasts and climate intelligence data via the Tomorrow.io API.",
+  "category": "public-data",
+  "logo": "sun",
+  "logo_color": "#0099FF",
+  "form": {
+    "form_id": "tomorrow_io-connector",
+    "title": "Connect Tomorrow.io",
+    "subtitle": "Paste your Tomorrow.io API key to start pulling hyperlocal weather and climate data.",
+    "logo": "sun",
+    "logo_color": "#0099FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Tomorrow.io API key \u2014 the fastest way to connect. Found in app.tomorrow.io under Settings \u2192 Development \u2192 API Keys.",
+        "recommended": true,
+        "how_to": "## Connect with a Tomorrow.io API Key\n\n1. Log in to your Tomorrow.io account at [app.tomorrow.io](https://app.tomorrow.io).\n2. Click your profile icon or go to **Settings** in the left sidebar.\n3. Navigate to **Development \u2192 API Keys** (or just **API Keys** depending on your plan).\n4. Click **Generate Key** or copy an existing key.\n5. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Free-tier keys have rate limits (e.g. 25 calls/hour, 500 calls/day). Check your plan for exact limits.\n- Keep your key secret \u2014 anyone with it can consume your quota.\n- If you need to rotate your key, generate a new one in the same settings panel and update it here.\n- See [Tomorrow.io API docs](https://docs.tomorrow.io/reference/api-authentication) for full authentication details.",
+        "help_url": "https://docs.tomorrow.io/reference/api-authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your Tomorrow.io API key",
+            "description": "Found at app.tomorrow.io \u2192 Settings \u2192 Development \u2192 API Keys."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.tomorrow.io/v4",
+            "default": "https://api.tomorrow.io/v4",
+            "description": "Override only if Tomorrow.io has issued you a custom endpoint. Leave as default for standard accounts."
+          }
+        ]
+      }
+    ]
+  }
+}

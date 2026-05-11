@@ -1,0 +1,94 @@
+{
+  "id": "openweather",
+  "label": "OpenWeather",
+  "aliases": [
+    "openweathermap",
+    "open weather map",
+    "owm",
+    "open weather"
+  ],
+  "keywords": [
+    "weather",
+    "forecast",
+    "temperature",
+    "climate",
+    "historical",
+    "meteorology",
+    "rain",
+    "wind",
+    "humidity",
+    "api"
+  ],
+  "description": "Fetch real-time weather forecasts and historical climate data from OpenWeatherMap.",
+  "category": "public-data",
+  "logo": "sun",
+  "logo_color": "#EB6E4B",
+  "form": {
+    "form_id": "openweather-connector",
+    "title": "Connect OpenWeather",
+    "subtitle": "Paste your OpenWeatherMap API key to access forecasts and historical weather data.",
+    "logo": "sun",
+    "logo_color": "#EB6E4B",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your OpenWeatherMap API key. Free and paid keys both work \u2014 just copy it from your account dashboard and paste it here.",
+        "recommended": true,
+        "how_to": "## Get your OpenWeatherMap API key\n\n1. Go to [openweathermap.org](https://openweathermap.org) and sign in (or create a free account).\n2. Click your username in the top-right corner and select **My API keys**.\n3. A default key called `Default` is already created for new accounts. Copy it, or click **Generate** to create a named key (e.g. `Anton`).\n4. Paste the key into the **API Key** field below.\n\n## Notes\n\n- New keys can take up to 2 hours to activate after account creation. If calls fail immediately, wait and retry.\n- Free-tier keys give access to Current Weather, 5-day Forecast, and limited historical data. One Call API 3.0 and full historical data require a paid plan \u2014 subscribe at **Services \u2192 One Call API** in the dashboard.\n- Keep your key private; anyone with it can consume your quota. Regenerate it from **My API keys** if exposed.\n",
+        "help_url": "https://openweathermap.org/appid",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+            "description": "32-character key from openweathermap.org \u2192 your username \u2192 My API keys."
+          },
+          {
+            "name": "api_version",
+            "label": "API Version",
+            "type": "select",
+            "required": false,
+            "default": "2.5",
+            "description": "Which OpenWeatherMap API version to use. 3.0 (One Call) requires a separate subscription.",
+            "options": [
+              {
+                "value": "2.5",
+                "label": "2.5 (free tier, most endpoints)"
+              },
+              {
+                "value": "3.0",
+                "label": "3.0 (One Call API \u2014 paid)"
+              }
+            ]
+          },
+          {
+            "name": "units",
+            "label": "Unit System",
+            "type": "select",
+            "required": false,
+            "default": "metric",
+            "description": "Default unit system for temperature and wind speed responses.",
+            "options": [
+              {
+                "value": "metric",
+                "label": "Metric (\u00b0C, m/s)"
+              },
+              {
+                "value": "imperial",
+                "label": "Imperial (\u00b0F, mph)"
+              },
+              {
+                "value": "standard",
+                "label": "Standard (Kelvin, m/s)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

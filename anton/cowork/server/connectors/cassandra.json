@@ -1,0 +1,133 @@
+{
+  "id": "cassandra",
+  "label": "Cassandra",
+  "aliases": [
+    "apache cassandra",
+    "cassandra db",
+    "cassandradb",
+    "wide-column db"
+  ],
+  "keywords": [
+    "cassandra",
+    "database",
+    "distributed",
+    "wide-column",
+    "nosql",
+    "apache",
+    "keyspace",
+    "cql"
+  ],
+  "description": "Connect to a Cassandra distributed wide-column database cluster using contact points, keyspace, and credentials.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#1287B1",
+  "form": {
+    "form_id": "cassandra-connector",
+    "title": "Connect Cassandra",
+    "subtitle": "Provide your cluster contact points, keyspace, and credentials to connect Anton to Cassandra.",
+    "logo": "database",
+    "logo_color": "#1287B1",
+    "methods": [
+      {
+        "id": "credentials",
+        "label": "Username & Password",
+        "description": "Connect directly by supplying your Cassandra contact points, keyspace, username, and password. The simplest and most common path for any Cassandra cluster.",
+        "recommended": true,
+        "how_to": "## Connect with Cassandra Credentials\n\nUse this method for any Cassandra cluster that has native authentication enabled (`PasswordAuthenticator` or a compatible authenticator).\n\n### Steps\n\n1. Identify your **contact points** \u2014 one or more `host:port` pairs for nodes in your cluster. Port `9042` is the default CQL native transport port.\n   - Example: `cass-node1.example.com:9042, cass-node2.example.com:9042`\n   - For local dev: `127.0.0.1:9042`\n   - For DataStax Astra or managed services, check your cluster's **Connect** tab for the endpoint.\n2. Determine your **keyspace** \u2014 the logical namespace your tables live in. You can list keyspaces with `DESCRIBE KEYSPACES;` in `cqlsh`.\n3. Locate or create a Cassandra user with the appropriate permissions:\n   - `CREATE ROLE anton WITH PASSWORD = '...' AND LOGIN = true;`\n   - `GRANT SELECT ON KEYSPACE your_keyspace TO anton;` (add `MODIFY` if writes are needed)\n4. Enter the values below and click **Submit**.\n\n### Notes\n\n- Contact points are comma-separated; Anton will try each in order and use the first reachable node to bootstrap the driver's cluster topology discovery.\n- If your cluster uses SSL/TLS, enable the **Use TLS** toggle below.\n- For DataStax Astra, use the **Secure Connect Bundle** method instead \u2014 Astra does not expose raw CQL ports.\n- Credentials are stored encrypted in Anton's local vault.\n",
+        "help_url": "https://cassandra.apache.org/doc/latest/cassandra/operating/security.html",
+        "fields": [
+          {
+            "name": "contact_points",
+            "label": "Contact Points",
+            "type": "text",
+            "required": true,
+            "placeholder": "cass1.example.com:9042, cass2.example.com:9042",
+            "description": "Comma-separated list of host:port pairs for one or more nodes in your cluster. Port 9042 is the default."
+          },
+          {
+            "name": "keyspace",
+            "label": "Keyspace",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_keyspace",
+            "description": "The Cassandra keyspace (namespace) Anton should connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "cassandra",
+            "description": "Cassandra role/user with login privileges. Default superuser is 'cassandra' \u2014 create a dedicated role for Anton in production."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the Cassandra user above."
+          },
+          {
+            "name": "use_tls",
+            "label": "Use TLS",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Enable if your cluster requires SSL/TLS connections on the CQL port."
+          },
+          {
+            "name": "datacenter",
+            "label": "Local Datacenter",
+            "type": "text",
+            "required": false,
+            "placeholder": "datacenter1",
+            "description": "The name of the local datacenter for the driver's load-balancing policy. Leave blank to use the default ('datacenter1'). Check your cluster with 'SELECT data_center FROM system.local;' in cqlsh."
+          }
+        ]
+      },
+      {
+        "id": "secure-connect-bundle",
+        "label": "Secure Connect Bundle (DataStax Astra)",
+        "description": "For DataStax Astra clusters. Upload or paste the path to your Secure Connect Bundle ZIP, along with your Astra client credentials.",
+        "recommended": false,
+        "how_to": "## Connect via DataStax Astra Secure Connect Bundle\n\nAstra clusters don't expose raw CQL ports. Instead, DataStax provides a **Secure Connect Bundle** (a ZIP file) that encapsulates TLS certificates and endpoint metadata.\n\n### Steps\n\n1. Log in to [DataStax Astra](https://astra.datastax.com) and open your database.\n2. Click **Connect** \u2192 **Drivers** \u2192 choose any CQL driver \u2192 download the **Secure Connect Bundle** ZIP for your region.\n3. In the **Token Management** section of your Astra database, generate a new token with the **Database Administrator** or appropriate role. Note the **Client ID** and **Client Secret** \u2014 the secret is shown only once.\n4. Enter your **keyspace** name (visible on the database Overview page).\n5. Paste the full file path to the downloaded ZIP into **Secure Connect Bundle Path** below, then fill in the Client ID and Client Secret.\n\n### Notes\n\n- The Secure Connect Bundle is region-specific. If you have a multi-region database, download the bundle for the region closest to where Anton runs.\n- The Client Secret is shown only once at generation time. If lost, generate a new token.\n- Your Astra username in the CQL driver context is the **Client ID**, not your Astra login email.\n",
+        "help_url": "https://docs.datastax.com/en/astra-db-serverless/drivers/secure-connect-bundle.html",
+        "fields": [
+          {
+            "name": "secure_connect_bundle_path",
+            "label": "Secure Connect Bundle Path",
+            "type": "text",
+            "required": true,
+            "placeholder": "/path/to/secure-connect-my-db.zip",
+            "description": "Full local file path to the Secure Connect Bundle ZIP downloaded from the Astra console."
+          },
+          {
+            "name": "keyspace",
+            "label": "Keyspace",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_keyspace",
+            "description": "The Astra keyspace (namespace) Anton should connect to."
+          },
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "token-client-id",
+            "description": "The Client ID from your Astra application token. Used as the CQL username."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The Client Secret from your Astra application token. Shown only once at generation \u2014 store it safely."
+          }
+        ]
+      }
+    ]
+  }
+}

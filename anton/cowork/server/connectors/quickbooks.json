@@ -1,0 +1,89 @@
+{
+  "id": "quickbooks",
+  "label": "QuickBooks Online",
+  "aliases": [
+    "quickbooks",
+    "qbo",
+    "intuit quickbooks",
+    "quickbooks accounting"
+  ],
+  "keywords": [
+    "accounting",
+    "invoices",
+    "expenses",
+    "bookkeeping",
+    "intuit",
+    "finance",
+    "payroll",
+    "billing",
+    "tax"
+  ],
+  "description": "Connect QuickBooks Online to read and write accounting data including invoices, expenses, customers, and reports.",
+  "category": "accounting",
+  "logo": "key",
+  "logo_color": "#2CA01C",
+  "form": {
+    "form_id": "quickbooks-connector",
+    "title": "Connect QuickBooks Online",
+    "subtitle": "Authorize Anton to access your QuickBooks Online company data via Intuit's OAuth 2.0.",
+    "logo": "key",
+    "logo_color": "#2CA01C",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Intuit (OAuth 2.0)",
+        "description": "Open a browser window to authorize Anton through Intuit's OAuth 2.0 consent screen. Requires a free Intuit Developer app to supply a Client ID and Client Secret \u2014 no passwords stored, revocable from your Intuit account at any time.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://appcenter.intuit.com/connect/oauth2",
+          "token_url": "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+          "scopes": [
+            "com.intuit.quickbooks.accounting"
+          ],
+          "extra_auth_params": {
+            "response_type": "code"
+          }
+        },
+        "how_to": "## Connect QuickBooks Online via OAuth 2.0\n\nYou need a free Intuit Developer app to get a Client ID and Client Secret. This takes about 5 minutes.\n\n### Step 1 \u2014 Create an Intuit Developer app\n\n1. Go to [Intuit Developer](https://developer.intuit.com/) and sign in (use your QuickBooks account or create a free developer account).\n2. Click **Dashboard \u2192 Create an app**.\n3. Select **QuickBooks Online and Payments** as the platform.\n4. Give the app a name like `Anton` and click **Create app**.\n\n### Step 2 \u2014 Get your credentials\n\n1. Inside the app, go to **Keys & credentials**.\n2. Choose the **Production** tab (or **Sandbox** for testing).\n3. Copy the **Client ID** and **Client Secret** \u2014 paste them into the fields below.\n\n### Step 3 \u2014 Add a redirect URI\n\n1. Still in **Keys & credentials**, scroll to **Redirect URIs**.\n2. Add `http://localhost` (Anton uses a local redirect to capture the OAuth code).\n3. Click **Save**.\n\n### Step 4 \u2014 Authorize\n\n1. Fill in the Client ID and Client Secret below and click **Submit**.\n2. A browser window opens to Intuit's consent screen.\n3. Sign in with your QuickBooks account and select the company you want to connect.\n4. Click **Connect**. Anton receives a refresh token and stores it locally.\n\n### Notes\n\n- The refresh token expires after 100 days of inactivity \u2014 reconnect if Anton reports an auth error.\n- To revoke access, visit [Intuit Account \u2192 Connected Apps](https://accounts.intuit.com/app/account-manager/security) and remove Anton.\n- Production apps may require Intuit's app review before connecting live company data. Sandbox credentials work immediately for testing.\n",
+        "help_url": "https://developer.intuit.com/app/developer/qbo/docs/develop/authentication-and-authorization/oauth-2.0",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "ABcd1234EFgh5678IJkl9012...",
+            "description": "From Intuit Developer \u2192 your app \u2192 Keys & credentials \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "From the same Keys & credentials page, paired with your Client ID."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Use Sandbox for testing with sample data; Production to connect your real QuickBooks company.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production"
+              },
+              {
+                "value": "sandbox",
+                "label": "Sandbox"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

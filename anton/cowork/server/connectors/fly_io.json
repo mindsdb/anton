@@ -1,0 +1,62 @@
+{
+  "id": "fly_io",
+  "label": "Fly.io",
+  "aliases": [
+    "fly",
+    "flyio",
+    "fly.io",
+    "fly io"
+  ],
+  "keywords": [
+    "edge",
+    "platform",
+    "deploy",
+    "apps",
+    "containers",
+    "hosting",
+    "cloud",
+    "fly",
+    "machines",
+    "workers"
+  ],
+  "description": "Deploy and manage edge applications on Fly.io's global platform using your API token.",
+  "category": "cloud",
+  "logo": "cube",
+  "logo_color": "#7C3AED",
+  "form": {
+    "form_id": "fly_io-connector",
+    "title": "Connect Fly.io",
+    "subtitle": "Paste your Fly.io API token to let Anton manage and inspect your edge applications.",
+    "logo": "cube",
+    "logo_color": "#7C3AED",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste a Fly.io personal access token. Generate one with `flyctl auth token` in your terminal or from the Access Tokens page in your Fly.io dashboard. Simplest and fastest setup.",
+        "recommended": true,
+        "how_to": "## Get your Fly.io API Token\n\nFly.io uses personal access tokens (PATs) for API authentication. You can get one in two ways:\n\n### Option A \u2014 flyctl CLI\n\n1. Install `flyctl` if you haven't: https://fly.io/docs/hands-on/install-flyctl/\n2. Log in with `flyctl auth login`.\n3. Run `flyctl auth token` in your terminal.\n4. Copy the printed token string.\n\n### Option B \u2014 Web Dashboard\n\n1. Open [https://fly.io/user/personal_access_tokens](https://fly.io/user/personal_access_tokens) (or go to **fly.io \u2192 Account \u2192 Access Tokens**).\n2. Click **Create token**.\n3. Give it a name like `Anton` and click **Create**.\n4. Copy the token \u2014 it is shown only once.\n\n### Paste into Anton\n\n5. Paste the token into the **API Token** field below.\n6. Optionally set your **Organization slug** if you want Anton to scope requests to a specific org (leave blank to use your personal org).\n\n### Notes\n\n- Tokens are shown once on creation. If you lose it, revoke the old token and create a new one from the Access Tokens page.\n- To revoke, go to **Account \u2192 Access Tokens**, find the token, and click **Delete**.\n",
+        "help_url": "https://fly.io/docs/flyctl/auth-token/",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "fo1_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Fly.io personal access token. Run `flyctl auth token` or generate one at fly.io/user/personal_access_tokens."
+          },
+          {
+            "name": "org_slug",
+            "label": "Organization Slug",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-org",
+            "description": "Optional. The slug of the Fly.io organization to scope requests to. Leave blank to use your personal organization."
+          }
+        ]
+      }
+    ]
+  }
+}

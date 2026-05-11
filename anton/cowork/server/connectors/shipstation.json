@@ -1,0 +1,68 @@
+{
+  "id": "shipstation",
+  "label": "ShipStation",
+  "aliases": [
+    "ship station",
+    "shipstation api",
+    "shipstation shipping"
+  ],
+  "keywords": [
+    "shipping",
+    "logistics",
+    "ecommerce",
+    "carrier",
+    "label",
+    "fulfillment",
+    "orders",
+    "tracking",
+    "warehouse"
+  ],
+  "description": "Multi-carrier shipping and label printing platform for ecommerce, connecting orders to carriers and automating fulfillment.",
+  "category": "logistics",
+  "logo": "upload",
+  "logo_color": "#41A8E0",
+  "form": {
+    "form_id": "shipstation-connector",
+    "title": "Connect ShipStation",
+    "subtitle": "Paste your ShipStation API key and secret to start syncing orders, shipments, and labels.",
+    "logo": "upload",
+    "logo_color": "#41A8E0",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key + Secret",
+        "description": "Paste your ShipStation API key and secret from Account Settings \u2192 API Settings. No OAuth setup required \u2014 the simplest and recommended path.",
+        "recommended": true,
+        "how_to": "## Connect with API Key + Secret\n\nShipStation uses HTTP Basic Auth with your API key as the username and API secret as the password. Both are available in your ShipStation account settings.\n\n### Steps\n\n1. Log in to [ShipStation](https://app.shipstation.com/).\n2. Click your account name in the top-right corner and select **Account Settings**.\n3. In the left sidebar, navigate to **Account \u2192 API Settings**.\n4. If you don't see an existing key, click **Generate New API Key** \u2014 this creates both the key and secret together.\n5. Copy the **API Key** and **API Secret** values.\n6. Paste them into the fields below.\n\n### Notes\n\n- The API secret is shown on the API Settings page and can be regenerated at any time. Regenerating invalidates the old secret immediately \u2014 update Anton if you do this.\n- If you are on a multi-user account, each user can have their own API key scoped to their permissions.\n- ShipStation's API has a rate limit of 40 requests per 30 seconds per store. Anton respects this automatically.\n",
+        "help_url": "https://help.shipstation.com/hc/en-us/articles/360025856212-ShipStation-API",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "text",
+            "required": true,
+            "placeholder": "abcd1234efgh5678",
+            "description": "Found in ShipStation \u2192 Account Settings \u2192 API Settings."
+          },
+          {
+            "name": "api_secret",
+            "label": "API Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "abcd1234efgh5678",
+            "description": "Paired with your API key \u2014 found on the same API Settings page."
+          },
+          {
+            "name": "store_id",
+            "label": "Store ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "123456",
+            "description": "Numeric ShipStation store ID to scope requests to a specific store. Leave blank to access all stores on the account."
+          }
+        ]
+      }
+    ]
+  }
+}

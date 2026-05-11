@@ -1,0 +1,139 @@
+{
+  "id": "azure_cosmos_db",
+  "label": "Azure Cosmos DB",
+  "aliases": [
+    "cosmos db",
+    "cosmosdb",
+    "azure cosmos",
+    "microsoft cosmos db",
+    "azure nosql",
+    "azure document db",
+    "documentdb"
+  ],
+  "keywords": [
+    "azure",
+    "microsoft",
+    "cosmos",
+    "nosql",
+    "document",
+    "database",
+    "distributed",
+    "multi-model",
+    "cloud",
+    "json",
+    "globally distributed"
+  ],
+  "description": "Connect to a Microsoft Azure Cosmos DB account to query and manage globally-distributed, multi-model data.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#0078D4",
+  "form": {
+    "form_id": "azure_cosmos_db-connector",
+    "title": "Connect Azure Cosmos DB",
+    "subtitle": "Paste your Cosmos DB account endpoint and primary key from the Azure Portal to get started.",
+    "logo": "database",
+    "logo_color": "#0078D4",
+    "methods": [
+      {
+        "id": "account-key",
+        "label": "Account Endpoint + Primary Key",
+        "description": "Paste your Cosmos DB account endpoint URI and primary key directly from the Azure Portal. The fastest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with Account Endpoint and Primary Key\n\nThis is the simplest and most direct way to authenticate with Azure Cosmos DB.\n\n### Steps\n\n1. Open the [Azure Portal](https://portal.azure.com) and navigate to your **Cosmos DB account**.\n2. In the left sidebar, click **Settings \u2192 Keys**.\n3. Copy the **URI** \u2014 this is your account endpoint (e.g. `https://your-account.documents.azure.com:443/`).\n4. Copy the **PRIMARY KEY** (a long base-64 string). Avoid using the read-only key unless you only need read access.\n5. Paste both values into the fields below.\n6. Optionally specify a **Database ID** and **Container ID** to scope Anton to a specific dataset; leave blank to connect at the account level.\n\n### Notes\n\n- The primary key grants full data-plane access to all databases in the account. If you need read-only access, use the **PRIMARY READ-ONLY KEY** from the same page.\n- Keys can be regenerated in the Azure Portal under **Settings \u2192 Keys \u2192 Regenerate Primary Key** \u2014 if you do, re-paste the new key here.\n- If your Cosmos DB account uses a **virtual network** or **IP firewall**, make sure the machine running Anton is in the allowed range.\n- For production use, consider creating a **role assignment** via Azure RBAC and using the service principal method instead.\n",
+        "help_url": "https://learn.microsoft.com/en-us/azure/cosmos-db/secure-access-to-data",
+        "fields": [
+          {
+            "name": "account_endpoint",
+            "label": "Account Endpoint URI",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-account.documents.azure.com:443/",
+            "description": "Found in Azure Portal \u2192 Cosmos DB account \u2192 Settings \u2192 Keys \u2192 URI."
+          },
+          {
+            "name": "primary_key",
+            "label": "Primary Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Found in Azure Portal \u2192 Cosmos DB account \u2192 Settings \u2192 Keys \u2192 PRIMARY KEY. Use the read-only key if you only need read access."
+          },
+          {
+            "name": "database_id",
+            "label": "Database ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-database",
+            "description": "Optional. The name of the specific Cosmos DB database to connect to. Leave blank to connect at the account level."
+          },
+          {
+            "name": "container_id",
+            "label": "Container ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-container",
+            "description": "Optional. The name of the specific container (collection) within the database. Requires Database ID to be set."
+          }
+        ]
+      },
+      {
+        "id": "service-principal",
+        "label": "Azure Service Principal (RBAC)",
+        "description": "Authenticate using an Azure Active Directory service principal with Cosmos DB RBAC role assignments. Better for team or production environments where key rotation is undesirable.",
+        "recommended": false,
+        "how_to": "## Connect with an Azure Service Principal\n\nUse this method to authenticate via Azure Active Directory without sharing raw account keys.\n\n### Prerequisites\n\n- You need an Azure AD **App Registration** (service principal) with a client secret.\n- The service principal must be assigned a Cosmos DB **data-plane role** (e.g. `Cosmos DB Built-in Data Contributor`).\n\n### Steps\n\n1. In the [Azure Portal](https://portal.azure.com), open **Azure Active Directory \u2192 App registrations \u2192 New registration**.\n2. Give it a name (e.g. `anton-cosmosdb`), then click **Register**.\n3. Note the **Application (client) ID** and **Directory (tenant) ID** from the Overview page.\n4. Go to **Certificates & secrets \u2192 New client secret**, set an expiry, and copy the **Value** immediately \u2014 it won't be shown again.\n5. In your Cosmos DB account, open **Access control (IAM)** or use the **Data Explorer \u2192 Manage role assignments** to assign the service principal the `Cosmos DB Built-in Data Contributor` (or `Reader`) role.\n6. Paste the tenant ID, client ID, client secret, and account endpoint into the fields below.\n\n### Notes\n\n- The client secret expires \u2014 check the expiry date you set and rotate before it lapses.\n- For tighter scope, assign only the minimum role needed (e.g. read-only).\n- RBAC data-plane roles are distinct from Azure resource-level IAM roles \u2014 make sure you assign the Cosmos DB-specific data role, not just a subscription-level role.\n",
+        "help_url": "https://learn.microsoft.com/en-us/azure/cosmos-db/how-to-setup-rbac",
+        "fields": [
+          {
+            "name": "account_endpoint",
+            "label": "Account Endpoint URI",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-account.documents.azure.com:443/",
+            "description": "Found in Azure Portal \u2192 Cosmos DB account \u2192 Settings \u2192 Keys \u2192 URI."
+          },
+          {
+            "name": "tenant_id",
+            "label": "Tenant ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Your Azure Active Directory tenant ID, found in AAD \u2192 Overview \u2192 Directory (tenant) ID."
+          },
+          {
+            "name": "client_id",
+            "label": "Client ID (Application ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The Application (client) ID of your AAD App Registration."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The client secret value from AAD \u2192 App registrations \u2192 Certificates & secrets. Shown only once at creation."
+          },
+          {
+            "name": "database_id",
+            "label": "Database ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-database",
+            "description": "Optional. The name of the specific Cosmos DB database to connect to."
+          },
+          {
+            "name": "container_id",
+            "label": "Container ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-container",
+            "description": "Optional. The name of the specific container within the database. Requires Database ID to be set."
+          }
+        ]
+      }
+    ]
+  }
+}

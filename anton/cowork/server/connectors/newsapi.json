@@ -1,0 +1,53 @@
+{
+  "id": "newsapi",
+  "label": "NewsAPI",
+  "aliases": [
+    "news api",
+    "news-api",
+    "newsapi.org",
+    "news aggregator"
+  ],
+  "keywords": [
+    "news",
+    "headlines",
+    "articles",
+    "media",
+    "press",
+    "journalism",
+    "rss",
+    "feeds",
+    "current events"
+  ],
+  "description": "Fetch aggregated news headlines and full articles from thousands of sources via the NewsAPI.org service.",
+  "category": "public-data",
+  "logo": "doc",
+  "logo_color": "#333333",
+  "form": {
+    "form_id": "newsapi-connector",
+    "title": "Connect NewsAPI",
+    "subtitle": "Paste your NewsAPI key to start pulling headlines and articles from thousands of global sources.",
+    "logo": "doc",
+    "logo_color": "#333333",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your NewsAPI key directly \u2014 no OAuth flow, no credentials to manage. Grab the key from your newsapi.org account dashboard and you're ready in seconds.",
+        "recommended": true,
+        "how_to": "## Get your NewsAPI key\n\n1. Go to [newsapi.org](https://newsapi.org) and sign in (or create a free account).\n2. After logging in, click your account name in the top-right corner and select **Account** from the dropdown.\n3. Your API key is displayed on the **Account** page under the **API Key** section. Copy it.\n4. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Free-tier keys are limited to 100 requests per day and return articles up to 30 days old. Upgrade your plan at newsapi.org for higher limits and real-time articles.\n- Developer (free) plan results are delayed by ~15 minutes and restricted to 20 sources per query.\n- The key is shown persistently on the Account page \u2014 you can return any time to copy it again.\n- If you suspect your key has been compromised, contact NewsAPI support to rotate it.",
+        "help_url": "https://newsapi.org/docs/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "abcdef1234567890abcdef1234567890",
+            "description": "Your NewsAPI key from newsapi.org \u2192 Account \u2192 API Key. It is a 32-character hex string."
+          }
+        ]
+      }
+    ]
+  }
+}

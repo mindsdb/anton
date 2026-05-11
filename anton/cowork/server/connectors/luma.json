@@ -1,0 +1,64 @@
+{
+  "id": "luma",
+  "label": "Luma AI",
+  "aliases": [
+    "lumalabs",
+    "luma labs",
+    "dream machine",
+    "genie 3d",
+    "luma video"
+  ],
+  "keywords": [
+    "video",
+    "generation",
+    "ai",
+    "3d",
+    "dream machine",
+    "genie",
+    "text-to-video",
+    "image-to-video",
+    "nerf",
+    "synthetic media"
+  ],
+  "description": "Generate videos with Dream Machine and 3D assets with Genie using Luma AI's generative media API.",
+  "category": "ai",
+  "logo": "image",
+  "logo_color": "#6C47FF",
+  "form": {
+    "form_id": "luma-connector",
+    "title": "Connect Luma AI",
+    "subtitle": "Paste your Luma AI API key to start generating videos and 3D assets.",
+    "logo": "image",
+    "logo_color": "#6C47FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Luma AI API key from the Dream Machine dashboard. Quickest setup \u2014 no OAuth or extra configuration needed.",
+        "recommended": true,
+        "how_to": "## Get your Luma AI API key\n\n1. Sign in at [lumalabs.ai](https://lumalabs.ai).\n2. Go to **Dream Machine** from the top navigation.\n3. Open **Settings** (gear icon, bottom-left) \u2192 **API**.\n4. Click **Generate API Key** (or copy an existing one).\n5. Copy the key and paste it into the **API Key** field below.\n\n## Notes\n\n- The key grants access to both Dream Machine (video) and Genie (3D) generation endpoints.\n- Keys are tied to your account's credit balance \u2014 monitor usage in the same **API** settings panel.\n- If you rotate or regenerate the key, update it here to avoid auth errors.\n- Keep the key secret; anyone with it can consume your Luma credits.",
+        "help_url": "https://docs.lumalabs.ai/docs/api",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "luma-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at lumalabs.ai \u2192 Dream Machine \u2192 Settings \u2192 API. Grants access to video and 3D generation."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.lumalabs.ai",
+            "default": "https://api.lumalabs.ai",
+            "description": "Override only if you're using a custom or regional Luma AI endpoint. Leave as default in most cases."
+          }
+        ]
+      }
+    ]
+  }
+}

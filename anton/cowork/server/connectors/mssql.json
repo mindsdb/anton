@@ -1,0 +1,215 @@
+{
+  "id": "mssql",
+  "label": "SQL Server",
+  "aliases": [
+    "microsoft sql server",
+    "azure sql",
+    "mssql",
+    "ms sql",
+    "sqlserver",
+    "azure sql database"
+  ],
+  "keywords": [
+    "sql",
+    "database",
+    "microsoft",
+    "azure",
+    "mssql",
+    "relational",
+    "tsql",
+    "t-sql",
+    "rdbms"
+  ],
+  "description": "Connect to Microsoft SQL Server or Azure SQL Database using host, port, credentials, and optional SSL encryption.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#CC2927",
+  "form": {
+    "form_id": "mssql-connector",
+    "title": "Connect SQL Server",
+    "subtitle": "Enter your SQL Server or Azure SQL connection details to start querying your database.",
+    "logo": "database",
+    "logo_color": "#CC2927",
+    "methods": [
+      {
+        "id": "sql-auth",
+        "label": "SQL Server Authentication",
+        "description": "Connect with a SQL Server login (username + password). Works for on-premises SQL Server, Azure SQL Database, and Azure SQL Managed Instance.",
+        "recommended": true,
+        "how_to": "## SQL Server Authentication\n\nThe simplest path: provide your server details and a SQL login.\n\n### Steps\n\n1. Find your server hostname or IP. For Azure SQL this looks like `yourserver.database.windows.net`; for on-prem it may be a hostname or IP address.\n2. Confirm the port \u2014 SQL Server defaults to **1433**. Named instances may use a dynamic port; check SQL Server Configuration Manager \u2192 SQL Server Network Configuration \u2192 Protocols \u2192 TCP/IP \u2192 IP Addresses.\n3. Ensure TCP/IP is enabled in SQL Server Configuration Manager (on-prem) or that your Azure SQL firewall allows your IP (Azure Portal \u2192 SQL Server \u2192 Networking \u2192 Firewall rules).\n4. Confirm the SQL login exists and has access to the target database: `SELECT name FROM sys.sql_logins;`\n5. Fill in the fields below. Enable **Encrypt connection (SSL)** unless your network is fully private \u2014 Azure SQL requires it.\n\n### Gotchas\n\n- Azure SQL always requires encryption; leave the toggle on.\n- If you use a named instance (e.g. `HOST\\SQLEXPRESS`), put the hostname in **Host** and leave **Port** at 1433 \u2014 or configure a fixed port for that instance.\n- `sa` login works but is discouraged; create a least-privilege login instead.",
+        "help_url": "https://learn.microsoft.com/en-us/sql/relational-databases/security/choose-an-authentication-mode",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourserver.database.windows.net",
+            "description": "Hostname or IP address of your SQL Server. For Azure SQL, copy from the Azure Portal \u2192 SQL Database \u2192 Overview \u2192 Server name."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1433",
+            "placeholder": "1433",
+            "description": "TCP port SQL Server listens on. Default is 1433."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "Name of the database to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "sqluser",
+            "description": "SQL Server login name. For Azure SQL this is often in the format user@servername."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the SQL Server login."
+          },
+          {
+            "name": "encrypt",
+            "label": "Encrypt connection (SSL)",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable TLS encryption. Required for Azure SQL; recommended for all connections."
+          },
+          {
+            "name": "trust_server_certificate",
+            "label": "Trust server certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Skip SSL certificate validation. Only enable on private/dev networks with self-signed certs \u2014 never in production."
+          }
+        ]
+      },
+      {
+        "id": "windows-auth",
+        "label": "Windows / Active Directory Authentication",
+        "description": "Authenticate using a Windows domain account or Azure Active Directory credentials. Suitable for on-premises SQL Server joined to a domain or Azure SQL with AAD integration.",
+        "recommended": false,
+        "how_to": "## Windows / Active Directory Authentication\n\nUse a domain account (on-prem) or an Azure Active Directory user (Azure SQL).\n\n### On-premises Windows Authentication\n\n1. Your SQL Server must be configured to allow Windows Authentication (mixed or Windows-only mode).\n2. Provide the domain and username in the format `DOMAIN\\username` or just `username` if the machine is already on the domain.\n3. Ensure the Windows account has been granted access in SQL Server: `CREATE LOGIN [DOMAIN\\user] FROM WINDOWS;`\n\n### Azure SQL with AAD Password Authentication\n\n1. In the Azure Portal, confirm your SQL Server has an **Azure Active Directory admin** set (SQL Server \u2192 Azure Active Directory).\n2. The connecting user must exist as a contained database user: `CREATE USER [user@domain.com] FROM EXTERNAL PROVIDER;`\n3. Enter the AAD username (email) and password in the fields below and set **Authentication type** to `azure-active-directory-password`.\n\n### Gotchas\n\n- Kerberos-based Windows Auth requires the client machine to be domain-joined; Anton running on a non-domain machine will fall back to NTLM or fail.\n- For Azure SQL, prefer SQL auth or AAD with MFA via OAuth rather than AAD password auth where possible.",
+        "help_url": "https://learn.microsoft.com/en-us/azure/azure-sql/database/authentication-aad-overview",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "sqlserver.corp.local",
+            "description": "Hostname or IP address of the SQL Server."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1433",
+            "placeholder": "1433",
+            "description": "TCP port SQL Server listens on. Default is 1433."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "Name of the database to connect to."
+          },
+          {
+            "name": "auth_type",
+            "label": "Authentication type",
+            "type": "select",
+            "required": true,
+            "default": "ntlm",
+            "options": [
+              {
+                "value": "ntlm",
+                "label": "Windows (NTLM)"
+              },
+              {
+                "value": "azure-active-directory-password",
+                "label": "Azure Active Directory \u2014 Password"
+              }
+            ],
+            "description": "Choose Windows domain authentication for on-prem, or AAD Password for Azure SQL."
+          },
+          {
+            "name": "domain",
+            "label": "Domain",
+            "type": "text",
+            "required": false,
+            "placeholder": "CORP",
+            "description": "Windows domain name (NTLM only). Leave blank if not applicable."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "jdoe or jdoe@corp.com",
+            "description": "Windows username (without domain prefix) or AAD email address."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Domain account or AAD password."
+          },
+          {
+            "name": "encrypt",
+            "label": "Encrypt connection (SSL)",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable TLS encryption. Required for Azure SQL."
+          },
+          {
+            "name": "trust_server_certificate",
+            "label": "Trust server certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Skip SSL certificate validation. Only enable on private/dev networks with self-signed certs."
+          }
+        ]
+      },
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste a full ADO.NET or JDBC connection string. Handy when you already have one from Azure Portal or your DBA.",
+        "recommended": false,
+        "how_to": "## Connection String\n\nPaste a pre-built connection string directly \u2014 useful when your Azure Portal, DBA, or existing app config already has one ready.\n\n### Where to find it\n\n**Azure SQL (Azure Portal)**\n1. Open the Azure Portal \u2192 navigate to your SQL Database.\n2. In the left menu, click **Connection strings**.\n3. Copy the **ADO.NET** string. It looks like:\n   `Server=tcp:yourserver.database.windows.net,1433;Initial Catalog=mydb;User ID=myuser;Password=mypassword;Encrypt=True;`\n4. Replace `{your_password}` placeholder if present.\n\n**On-premises SQL Server**\nBuild it manually:\n`Server=myhost,1433;Database=mydb;User Id=myuser;Password=mypassword;Encrypt=True;`\n\n### Gotchas\n\n- Do not commit connection strings with passwords into source control.\n- Anton stores the string encrypted at rest, but treat it like a password.\n- Named instance syntax: `Server=myhost\\SQLEXPRESS,1433;`",
+        "help_url": "https://learn.microsoft.com/en-us/azure/azure-sql/database/connect-query-content-reference-guide",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "Server=tcp:yourserver.database.windows.net,1433;Initial Catalog=mydb;User ID=myuser;Password=mypassword;Encrypt=True;",
+            "description": "Full ADO.NET connection string. Paste exactly as provided \u2014 Anton will parse host, port, database, and credentials from it."
+          }
+        ]
+      }
+    ]
+  }
+}

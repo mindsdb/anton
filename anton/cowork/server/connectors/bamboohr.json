@@ -1,0 +1,62 @@
+{
+  "id": "bamboohr",
+  "label": "BambooHR",
+  "aliases": [
+    "bamboo hr",
+    "bamboo",
+    "bamboo human resources",
+    "bamboohr hris"
+  ],
+  "keywords": [
+    "hris",
+    "hr",
+    "human resources",
+    "employees",
+    "payroll",
+    "onboarding",
+    "pto",
+    "time-off",
+    "smb",
+    "people"
+  ],
+  "description": "Connect to BambooHR to read employee records, time-off data, and org structure from your HRIS.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#73C41D",
+  "form": {
+    "form_id": "bamboohr-connector",
+    "title": "Connect BambooHR",
+    "subtitle": "Paste your BambooHR API key and company subdomain to start syncing employee data.",
+    "logo": "check",
+    "logo_color": "#73C41D",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Generate a personal API key from your BambooHR profile and paste it here along with your company subdomain. No OAuth setup required \u2014 the simplest path.",
+        "recommended": true,
+        "how_to": "## Connect BambooHR with an API Key\n\nBambooHR lets any user generate a personal API key directly from their profile. No admin setup or OAuth app required.\n\n### Steps\n\n1. Log in to your BambooHR account at `https://yourcompany.bamboohr.com`.\n2. Click your name or avatar in the top-right corner to open the profile menu.\n3. Select **API Keys** from the dropdown.\n4. Click **Add New Key**, give it a descriptive name like `Anton`, and click **Generate Key**.\n5. Copy the key shown \u2014 it is only displayed once. If you lose it, you must generate a new one.\n6. Paste the key into the **API Key** field below.\n7. Enter your company subdomain (the part before `.bamboohr.com`) in the **Company Subdomain** field \u2014 e.g. if your URL is `acme.bamboohr.com`, enter `acme`.\n\n### Notes\n\n- The API key inherits the permissions of the BambooHR user who generated it. For full data access, use an account with the appropriate role.\n- If you rotate or delete the key in BambooHR, you must update it here as well.\n- BambooHR API docs: [https://documentation.bamboohr.com/docs](https://documentation.bamboohr.com/docs)\n",
+        "help_url": "https://documentation.bamboohr.com/docs/getting-started",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-bamboohr-api-key",
+            "description": "Generated from your BambooHR profile \u2192 API Keys. Shown only once \u2014 copy it before closing."
+          },
+          {
+            "name": "subdomain",
+            "label": "Company Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "acme",
+            "description": "The part before .bamboohr.com in your BambooHR URL. E.g. for acme.bamboohr.com, enter acme."
+          }
+        ]
+      }
+    ]
+  }
+}

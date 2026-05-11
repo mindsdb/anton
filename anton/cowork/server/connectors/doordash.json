@@ -1,0 +1,105 @@
+{
+  "id": "doordash",
+  "label": "DoorDash",
+  "aliases": [
+    "door dash",
+    "doordash drive",
+    "dd drive",
+    "doordash marketplace"
+  ],
+  "keywords": [
+    "delivery",
+    "food",
+    "logistics",
+    "last-mile",
+    "courier",
+    "on-demand",
+    "restaurant",
+    "marketplace",
+    "drive"
+  ],
+  "description": "Connect to DoorDash Drive and Marketplace APIs to create, track, and manage on-demand deliveries.",
+  "category": "mobility",
+  "logo": "send",
+  "logo_color": "#FF3008",
+  "form": {
+    "form_id": "doordash-connector",
+    "title": "Connect DoorDash",
+    "subtitle": "Authenticate with your DoorDash Developer credentials to manage deliveries via Drive or Marketplace.",
+    "logo": "send",
+    "logo_color": "#FF3008",
+    "methods": [
+      {
+        "id": "api-key-jwt",
+        "label": "Developer Key + Signing Secret (JWT)",
+        "description": "Paste your Developer ID and signing secret from the DoorDash Developer Portal. Anton generates HS256-signed JWTs for each API request \u2014 no OAuth flow needed.",
+        "recommended": true,
+        "how_to": "## DoorDash Developer Key + Signing Secret\n\nDoorDash Drive and Marketplace use short-lived HS256 JWTs for authentication. Anton handles signing automatically \u2014 you just supply two credentials from the Developer Portal.\n\n### Steps\n\n1. Go to [developer.doordash.com](https://developer.doordash.com) and sign in.\n2. In the left sidebar, navigate to **Drive Portal \u2192 Credentials** (for Drive/delivery-as-a-service) or **Marketplace \u2192 Credentials** (for Marketplace integrations).\n3. Locate your **Developer ID** (also called `developer_id` or `access_key`). Copy it.\n4. Under the same credentials page, find or generate your **Signing Secret**. Click **Reveal** or **Generate New Secret** if one doesn't exist.\n   - \u26a0\ufe0f The signing secret is shown only once when first generated. Copy it immediately and store it somewhere safe.\n5. Paste both values into the fields below.\n6. Select the **Environment** \u2014 use **Sandbox** while testing; switch to **Production** when you go live.\n\n### Notes\n\n- Anton constructs a JWT with `iss` = your Developer ID and signs it with your secret using HS256 before each API call.\n- If you regenerate the signing secret in the portal, update Anton's stored value or all requests will fail with 401 errors.\n- Sandbox and Production use separate credential sets; make sure the environment selector matches the credentials you pasted.\n- See [DoorDash authentication docs](https://developer.doordash.com/en-US/docs/drive/reference/authentication/) for the full JWT spec.\n",
+        "help_url": "https://developer.doordash.com/en-US/docs/drive/reference/authentication/",
+        "fields": [
+          {
+            "name": "developer_id",
+            "label": "Developer ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "description": "Found in Drive Portal \u2192 Credentials or Marketplace \u2192 Credentials. Also referred to as Access Key or Developer ID."
+          },
+          {
+            "name": "signing_secret",
+            "label": "Signing Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_signing_secret_here",
+            "description": "The secret used to sign HS256 JWTs. Shown once when generated \u2014 regenerate in the Developer Portal if lost."
+          },
+          {
+            "name": "key_id",
+            "label": "Key ID (kid)",
+            "type": "text",
+            "required": false,
+            "placeholder": "optional-key-id",
+            "description": "Optional JWT key ID header. Required by some DoorDash API versions \u2014 check your credential details page to see if a Key ID is listed alongside your credentials."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "sandbox",
+            "description": "Sandbox for testing; Production for live deliveries. Each environment uses separate credentials.",
+            "options": [
+              {
+                "value": "sandbox",
+                "label": "Sandbox"
+              },
+              {
+                "value": "production",
+                "label": "Production"
+              }
+            ]
+          },
+          {
+            "name": "integration_type",
+            "label": "Integration Type",
+            "type": "select",
+            "required": true,
+            "default": "drive",
+            "description": "Drive for delivery-as-a-service (white-label); Marketplace for restaurant/merchant listings.",
+            "options": [
+              {
+                "value": "drive",
+                "label": "DoorDash Drive (Delivery-as-a-Service)"
+              },
+              {
+                "value": "marketplace",
+                "label": "DoorDash Marketplace"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

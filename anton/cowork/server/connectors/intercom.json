@@ -1,0 +1,128 @@
+{
+  "id": "intercom",
+  "label": "Intercom",
+  "aliases": [
+    "intercom app",
+    "intercom messenger",
+    "intercom support"
+  ],
+  "keywords": [
+    "messaging",
+    "customer support",
+    "help center",
+    "chat",
+    "inbox",
+    "conversations",
+    "support",
+    "crm",
+    "live chat"
+  ],
+  "description": "Connect to Intercom to read conversations, contacts, and help center articles from your workspace.",
+  "category": "support",
+  "logo": "chats",
+  "logo_color": "#1F8EED",
+  "form": {
+    "form_id": "intercom-connector",
+    "title": "Connect Intercom",
+    "subtitle": "Paste your Intercom Access Token to give Anton access to conversations, contacts, and your help center.",
+    "logo": "chats",
+    "logo_color": "#1F8EED",
+    "methods": [
+      {
+        "id": "access-token",
+        "label": "Access Token",
+        "description": "Paste a permanent Access Token from the Intercom Developer Hub. No OAuth flow needed \u2014 copy, paste, done. Works for both personal and team workspaces.",
+        "recommended": true,
+        "how_to": "## Generate an Intercom Access Token\n\n### Steps\n\n1. Open [Intercom Developer Hub](https://app.intercom.com/a/developer-signup) and sign in.\n2. In the top-right, click your avatar \u2192 **Your apps** (or go directly to [developers.intercom.com/building-apps](https://developers.intercom.com/building-apps)).\n3. Select an existing app or click **New app** \u2014 give it a name like `Anton`.\n4. In the left sidebar, click **Authentication**.\n5. Under **Access token**, click **Generate token** if one doesn't already exist.\n6. Copy the token \u2014 it begins with `dG9r...` (base64) or a similar prefix.\n7. Paste it into the **Access Token** field below.\n8. Choose your workspace **Region** (US, EU, or AU) \u2014 this must match where your Intercom data is hosted.\n\n### Notes\n\n- The token is tied to the app and grants access to whichever workspace the app is installed in.\n- Tokens do not expire but can be rotated from the same Authentication page.\n- If you need narrower access, create a dedicated app with only the required scopes enabled under **Permissions** before generating the token.\n- EU and AU regions have separate API base URLs \u2014 Anton uses your region selection to route requests correctly.\n",
+        "help_url": "https://developers.intercom.com/docs/build-an-integration/learn-more/authentication/",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "dG9rOi...",
+            "description": "Found in Developer Hub \u2192 Your app \u2192 Authentication. Rotate it there if compromised."
+          },
+          {
+            "name": "region",
+            "label": "Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select the region where your Intercom workspace is hosted. Must match your account's data residency setting.",
+            "options": [
+              {
+                "value": "us",
+                "label": "United States (US)"
+              },
+              {
+                "value": "eu",
+                "label": "Europe (EU)"
+              },
+              {
+                "value": "au",
+                "label": "Australia (AU)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Install App)",
+        "description": "Use your own Intercom OAuth client to authorize via browser. Best for multi-workspace or production integrations where you want users to grant access through Intercom's standard install flow.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.intercom.com/oauth",
+          "token_url": "https://api.intercom.io/auth/eagle/token",
+          "scopes": []
+        },
+        "how_to": "## OAuth 2.0 \u2014 Bring Your Own OAuth Client\n\nThis method opens Intercom's standard app installation flow in your browser. You need an Intercom app with OAuth enabled in the Developer Hub.\n\n### Steps\n\n1. Go to [Intercom Developer Hub](https://app.intercom.com/a/developer-signup) and open or create your app.\n2. In the left sidebar, click **Authentication**.\n3. Enable **Use OAuth** and add `http://localhost` (or your redirect URI) under **Redirect URLs**.\n4. Copy the **Client ID** and **Client Secret** shown on the Authentication page.\n5. Paste them into the fields below.\n6. Select your workspace **Region**.\n7. Click **Submit** \u2014 a browser window will open Intercom's consent screen.\n8. Authorize the app and Anton will store the resulting access token.\n\n### Notes\n\n- Intercom OAuth tokens do not expire by default for installed apps, but can be revoked by the workspace admin.\n- Scopes are configured on the app's **Permissions** page in the Developer Hub \u2014 set them before running the OAuth flow.\n",
+        "help_url": "https://developers.intercom.com/docs/build-an-integration/learn-more/authentication/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "a1b2c3d4e5f6...",
+            "description": "From Developer Hub \u2192 Your app \u2192 Authentication \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "From Developer Hub \u2192 Your app \u2192 Authentication \u2192 Client Secret."
+          },
+          {
+            "name": "region",
+            "label": "Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select the region where your Intercom workspace is hosted.",
+            "options": [
+              {
+                "value": "us",
+                "label": "United States (US)"
+              },
+              {
+                "value": "eu",
+                "label": "Europe (EU)"
+              },
+              {
+                "value": "au",
+                "label": "Australia (AU)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

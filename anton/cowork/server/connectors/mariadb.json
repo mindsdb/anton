@@ -1,0 +1,113 @@
+{
+  "id": "mariadb",
+  "label": "MariaDB",
+  "aliases": [
+    "maria db",
+    "maria database",
+    "mariadb server",
+    "mysql compatible"
+  ],
+  "keywords": [
+    "database",
+    "sql",
+    "relational",
+    "mysql",
+    "mariadb",
+    "rdbms",
+    "db",
+    "query",
+    "table"
+  ],
+  "description": "Connect to a MariaDB relational database using host, port, credentials, and optional SSL.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#C0765A",
+  "form": {
+    "form_id": "mariadb-connector",
+    "title": "Connect MariaDB",
+    "subtitle": "Enter your MariaDB host, credentials, and optional SSL settings to connect.",
+    "logo": "database",
+    "logo_color": "#C0765A",
+    "methods": [
+      {
+        "id": "host-password",
+        "label": "Host & Password",
+        "description": "Provide your MariaDB host, port, database name, username, and password. Optionally enable SSL for encrypted connections.",
+        "recommended": true,
+        "how_to": "## Connect with Host & Password\n\nThe standard way to connect Anton to a MariaDB server. You'll need connection details from your database host or admin.\n\n### Steps\n\n1. Identify your MariaDB **host** \u2014 this is the hostname or IP address of the server (e.g. `db.example.com` or `127.0.0.1`).\n2. Confirm the **port** \u2014 MariaDB defaults to `3306`. Change it only if your server is configured differently.\n3. Enter the **database name** you want Anton to connect to.\n4. Provide a **username** and **password** with the appropriate privileges for that database.\n5. If your server requires encrypted connections, toggle **Use SSL** on.\n6. Click **Submit** to test and save the connection.\n\n### Notes\n\n- For cloud-hosted MariaDB (e.g. AWS RDS, PlanetScale, DigitalOcean), find connection details in the provider's database dashboard.\n- If connecting from outside the server's network, ensure your IP is whitelisted in the firewall or security group rules.\n- Use a dedicated read-only or limited-privilege user for Anton rather than the root account.\n- SSL is strongly recommended for connections over the public internet.\n",
+        "help_url": "https://mariadb.com/kb/en/connecting-to-mariadb/",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "db.example.com or 127.0.0.1",
+            "description": "Hostname or IP address of your MariaDB server."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": false,
+            "placeholder": "3306",
+            "default": "3306",
+            "description": "MariaDB port. Defaults to 3306 if left blank."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "The specific database schema Anton should connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton_user",
+            "description": "MariaDB user with access to the target database."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Password for the MariaDB user."
+          },
+          {
+            "name": "use_ssl",
+            "label": "Use SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Enable SSL/TLS encryption for the connection. Recommended for connections over the public internet."
+          }
+        ]
+      },
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste a full MariaDB connection URI. Useful when your host or tooling already provides one.",
+        "recommended": false,
+        "how_to": "## Connect with a Connection String\n\nSome hosting providers (e.g. PlanetScale, AWS RDS, Railway) give you a ready-made connection URI. Paste it here instead of filling in individual fields.\n\n### Format\n\nA MariaDB connection string looks like:\n\n`mysql://username:password@host:3306/database_name`\n\nWith SSL:\n\n`mysql://username:password@host:3306/database_name?ssl=true`\n\n### Steps\n\n1. Log in to your database provider's dashboard.\n2. Find the **Connection string** or **Connection URI** section for your database.\n3. Copy the full URI and paste it into the **Connection String** field below.\n4. Click **Submit** to test and save the connection.\n\n### Notes\n\n- Make sure the URI includes the username and password \u2014 some providers show them separately.\n- If the URI contains special characters in the password, they should be percent-encoded (e.g. `@` becomes `%40`).\n- The connection string is stored securely and never transmitted to Anton's servers.\n",
+        "help_url": "https://mariadb.com/kb/en/connecting-to-mariadb/",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "mysql://username:password@host:3306/database_name",
+            "description": "Full MariaDB connection URI including credentials, host, port, and database name."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,153 @@
+{
+  "id": "clickhouse",
+  "label": "ClickHouse",
+  "aliases": [
+    "click house",
+    "clickhouse cloud",
+    "clickhouse db",
+    "clickhouse database"
+  ],
+  "keywords": [
+    "columnar",
+    "olap",
+    "database",
+    "analytics",
+    "data warehouse",
+    "sql",
+    "real-time",
+    "self-hosted",
+    "cloud"
+  ],
+  "description": "Connect to a ClickHouse columnar OLAP database for high-performance analytical queries.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#FAFF69",
+  "form": {
+    "form_id": "clickhouse-connector",
+    "title": "Connect ClickHouse",
+    "subtitle": "Enter your ClickHouse host, credentials, and database to start querying.",
+    "logo": "database",
+    "logo_color": "#FAFF69",
+    "methods": [
+      {
+        "id": "clickhouse-cloud",
+        "label": "ClickHouse Cloud",
+        "description": "Connect to a managed ClickHouse Cloud service instance. Uses HTTPS (port 8443) and a native ClickHouse user with password. Recommended for ClickHouse Cloud customers.",
+        "recommended": true,
+        "how_to": "## Connect to ClickHouse Cloud\n\n1. Sign in to [ClickHouse Cloud Console](https://console.clickhouse.cloud/).\n2. Open your service, then go to **Connect \u2192 View connection details**.\n3. Select **Native** or **HTTPS** from the protocol tabs \u2014 for Anton, use **HTTPS**.\n4. Copy the **Host** (e.g. `abc123.us-east-1.aws.clickhouse.cloud`) and **Port** (default `8443`).\n5. Under **Security \u2192 Database credentials**, create or copy an existing user. Note the **Username** and **Password** (shown only on creation \u2014 save it somewhere safe).\n6. Enter your **Database** name (default is `default` if you haven't created one).\n7. Paste all values into the fields below and click **Submit**.\n\n### Notes\n\n- ClickHouse Cloud enforces TLS \u2014 leave **Use HTTPS** checked.\n- If you reset the password in the console, update the password field in Anton to avoid auth errors.\n- Firewall rules live under **Settings \u2192 Network access**; make sure your IP is allowed.",
+        "help_url": "https://clickhouse.com/docs/en/cloud/get-started/connect-an-app",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "abc123.us-east-1.aws.clickhouse.cloud",
+            "description": "Your ClickHouse Cloud service hostname, found in Connect \u2192 View connection details."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "8443",
+            "placeholder": "8443",
+            "description": "HTTPS port for ClickHouse Cloud is 8443 by default."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "default",
+            "description": "The ClickHouse database name to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "default",
+            "description": "ClickHouse user with access to the target database."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the ClickHouse user. Stored securely and never sent to Anton servers."
+          },
+          {
+            "name": "use_https",
+            "label": "Use HTTPS (TLS)",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable TLS/HTTPS for the connection. Required for ClickHouse Cloud; leave on for most setups."
+          }
+        ]
+      },
+      {
+        "id": "self-hosted",
+        "label": "Self-Hosted ClickHouse",
+        "description": "Connect to a ClickHouse server you manage on your own infrastructure. Supports both HTTP (8123) and HTTPS (8443) and custom ports.",
+        "recommended": false,
+        "how_to": "## Connect to a Self-Hosted ClickHouse Instance\n\n1. Confirm your ClickHouse server is running and reachable from this machine.\n2. Find your **host** \u2014 either a hostname (`clickhouse.internal`) or IP address.\n3. Determine the port:\n   - HTTP (no TLS): **8123** (default)\n   - HTTPS (with TLS): **8443** (default)\n   - Custom ports are set in `config.xml` under `<http_port>` or `<https_port>`.\n4. Note the **database** you want to query (use `default` if unsure).\n5. Identify a **username** and **password** with access. ClickHouse ships with a `default` user \u2014 check `users.xml` or `users.d/` for credentials.\n6. If using HTTPS, ensure your server has a valid TLS certificate or that self-signed certs are handled (Anton will warn on untrusted certs).\n7. Fill in all fields below and click **Submit**.\n\n### Notes\n\n- Toggle **Use HTTPS** off if your server only listens on plain HTTP.\n- For Docker-based setups, make sure the port is exposed (`-p 8123:8123` or `-p 8443:8443`).\n- Firewall or security-group rules must allow inbound traffic on the chosen port from your machine's IP.",
+        "help_url": "https://clickhouse.com/docs/en/install",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "clickhouse.mycompany.com",
+            "description": "Hostname or IP address of your ClickHouse server."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "8123",
+            "placeholder": "8123",
+            "description": "HTTP port is 8123; HTTPS port is 8443. Change if your server uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "default",
+            "description": "The ClickHouse database name to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "default",
+            "description": "ClickHouse user with read (and optionally write) access to the target database."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "",
+            "description": "Password for the ClickHouse user. Leave blank if your server allows passwordless access (not recommended)."
+          },
+          {
+            "name": "use_https",
+            "label": "Use HTTPS (TLS)",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Enable to connect over HTTPS/TLS. Requires your server to be configured with a TLS certificate."
+          }
+        ]
+      }
+    ]
+  }
+}

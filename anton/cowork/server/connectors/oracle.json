@@ -1,0 +1,172 @@
+{
+  "id": "oracle",
+  "label": "Oracle Database",
+  "aliases": [
+    "oracle db",
+    "oracle rdbms",
+    "oracle sql",
+    "orcl",
+    "oracle 19c",
+    "oracle 21c",
+    "oracle xe"
+  ],
+  "keywords": [
+    "database",
+    "sql",
+    "relational",
+    "enterprise",
+    "rdbms",
+    "oracle",
+    "pl/sql",
+    "data warehouse"
+  ],
+  "description": "Connect to an Oracle Database instance using host, port, service name or SID, and credentials.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#F80000",
+  "form": {
+    "form_id": "oracle-connector",
+    "title": "Connect Oracle Database",
+    "subtitle": "Provide your Oracle host, port, service name or SID, and login credentials.",
+    "logo": "database",
+    "logo_color": "#F80000",
+    "methods": [
+      {
+        "id": "service-name",
+        "label": "Service Name (recommended)",
+        "description": "Connect using the Oracle service name \u2014 the modern, preferred identifier for most Oracle 12c+ databases, RAC clusters, and cloud-hosted instances.",
+        "recommended": true,
+        "how_to": "## Connect via Oracle Service Name\n\nThe service name is the standard way to identify an Oracle database in modern deployments (Oracle 12c and later, RAC, Oracle Autonomous DB, etc.).\n\n### Steps\n\n1. Ask your DBA or check your `tnsnames.ora` file for the **service name**. It looks like `ORCL`, `mydb.example.com`, or a long string like `abcxyz_high` for Autonomous Database.\n2. Confirm the **hostname or IP address** of the Oracle listener (e.g., `db.example.com`).\n3. The default listener port is **1521** \u2014 verify with your DBA if it differs.\n4. Enter a database user with the appropriate read/write privileges. The account must be able to log in from the host running Anton.\n5. Paste all values into the fields below and click **Submit**.\n\n### Notes\n\n- Service names are preferred over SIDs for Oracle 12c+ and all cloud deployments.\n- If your database uses Oracle Wallet or mTLS (e.g., Autonomous Database), use the **TNS Connection String** method instead and supply the wallet path in your environment.\n- Ensure the Oracle listener port is open in any firewall between Anton and the database server.\n",
+        "help_url": "https://docs.oracle.com/en/database/oracle/oracle-database/19/netag/identifying-and-accessing-database.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "db.example.com or 192.168.1.10",
+            "description": "Hostname or IP address of the Oracle listener."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1521",
+            "placeholder": "1521",
+            "description": "Oracle listener port. Default is 1521."
+          },
+          {
+            "name": "service_name",
+            "label": "Service Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "ORCL or mydb.example.com",
+            "description": "The Oracle service name (not SID). Check tnsnames.ora or ask your DBA."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "app_user",
+            "description": "Oracle database user with appropriate privileges."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the Oracle database user. Stored securely in Anton's local vault."
+          }
+        ]
+      },
+      {
+        "id": "sid",
+        "label": "SID (Legacy)",
+        "description": "Connect using the Oracle System Identifier (SID) \u2014 the older, instance-level identifier. Use this for legacy Oracle 11g databases or on-premise instances where a service name is not configured.",
+        "recommended": false,
+        "how_to": "## Connect via Oracle SID\n\nThe SID (System Identifier) is the legacy way to address a specific Oracle instance. Use this only if your database doesn't expose a service name.\n\n### Steps\n\n1. Find your SID \u2014 commonly `ORCL`, `XE`, or a short custom string. Check `tnsnames.ora` or ask your DBA.\n2. Confirm the **hostname or IP address** of the Oracle listener.\n3. The default port is **1521** \u2014 confirm with your DBA.\n4. Enter the Oracle user credentials.\n5. Fill in all fields below and click **Submit**.\n\n### Notes\n\n- SID-based connections are deprecated in Oracle 12c+ in favor of service names.\n- If the connection is refused, the listener may be configured for service-name routing only \u2014 try the **Service Name** method instead.\n",
+        "help_url": "https://docs.oracle.com/en/database/oracle/oracle-database/19/netag/identifying-and-accessing-database.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "db.example.com or 192.168.1.10",
+            "description": "Hostname or IP address of the Oracle listener."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1521",
+            "placeholder": "1521",
+            "description": "Oracle listener port. Default is 1521."
+          },
+          {
+            "name": "sid",
+            "label": "SID",
+            "type": "text",
+            "required": true,
+            "placeholder": "ORCL",
+            "description": "The Oracle System Identifier for the target instance (e.g., ORCL, XE)."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "app_user",
+            "description": "Oracle database user with appropriate privileges."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the Oracle database user. Stored securely in Anton's local vault."
+          }
+        ]
+      },
+      {
+        "id": "tns-connection-string",
+        "label": "TNS Connection String",
+        "description": "Paste a full TNS connect descriptor or Easy Connect Plus string. Useful for complex configurations like Oracle RAC, Autonomous Database with wallet, or multi-host setups.",
+        "recommended": false,
+        "how_to": "## Connect via TNS Connection String\n\nUse this method when you have a full TNS descriptor (from `tnsnames.ora`) or an Easy Connect Plus string, particularly for Oracle Autonomous Database, RAC, or failover setups.\n\n### Steps\n\n1. Locate your connection string from one of:\n   - Your `tnsnames.ora` file (the block inside parentheses after the alias)\n   - Oracle Cloud Console \u2192 Database \u2192 DB Connection \u2192 Download client credentials, then check `tnsnames.ora` inside the wallet zip\n   - Your DBA\n2. Example Easy Connect Plus string: `myhost:1521/myservice` or `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=myhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=myservice)))`\n3. For Autonomous Database, also set the `TNS_ADMIN` environment variable on the machine running Anton to point to the unzipped wallet directory (Anton will pick this up automatically).\n4. Paste the full string into the **TNS Connection String** field below, along with your credentials.\n\n### Notes\n\n- Do not include the username or password inside the connection string \u2014 enter them in the dedicated fields.\n- If using mTLS/wallet, the wallet files must be accessible on the filesystem of the Anton host.\n",
+        "help_url": "https://docs.oracle.com/en/database/oracle/oracle-database/19/netag/configuring-and-administering-oracle-net-listener.html",
+        "fields": [
+          {
+            "name": "tns_connection_string",
+            "label": "TNS Connection String",
+            "type": "textarea",
+            "required": true,
+            "placeholder": "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=myhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=myservice)))",
+            "description": "Full TNS descriptor or Easy Connect Plus string. Do not include username/password here."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "app_user",
+            "description": "Oracle database user with appropriate privileges."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the Oracle database user. Stored securely in Anton's local vault."
+          }
+        ]
+      }
+    ]
+  }
+}

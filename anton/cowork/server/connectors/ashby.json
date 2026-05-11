@@ -1,0 +1,52 @@
+{
+  "id": "ashby",
+  "label": "Ashby",
+  "aliases": [
+    "ashby ats",
+    "ashby hq",
+    "ashbyhq"
+  ],
+  "keywords": [
+    "ats",
+    "applicant tracking",
+    "recruiting",
+    "hiring",
+    "candidates",
+    "jobs",
+    "hr",
+    "talent",
+    "interviews"
+  ],
+  "description": "Connect to Ashby to read and manage candidates, job postings, and hiring pipelines.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#5A45FF",
+  "form": {
+    "form_id": "ashby-connector",
+    "title": "Connect Ashby",
+    "subtitle": "Paste your Ashby API key to give Anton access to your recruiting data.",
+    "logo": "check",
+    "logo_color": "#5A45FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from Ashby Admin \u2192 Integrations \u2192 API Keys. Simplest and fastest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate an Ashby API Key\n\n1. Log in to your Ashby account at [app.ashbyhq.com](https://app.ashbyhq.com).\n2. Click your organization name in the top-left corner, then go to **Admin**.\n3. In the left sidebar, navigate to **Integrations \u2192 API Keys**.\n4. Click **Create API Key**.\n5. Give the key a descriptive name like `Anton` so you can identify it later.\n6. Select the scopes your use case needs (e.g. **Candidates**, **Jobs**, **Applications**).\n7. Click **Create** \u2014 the key is shown only once. Copy it immediately.\n8. Paste the key into the **API Key** field below.\n\n## Notes\n\n- If you lose the key, you must generate a new one; Ashby does not show it again after creation.\n- To revoke access, return to **Admin \u2192 Integrations \u2192 API Keys** and delete the key.\n- API keys are scoped to your organization \u2014 make sure your account has admin rights to create them.",
+        "help_url": "https://developers.ashbyhq.com/docs/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ashby_api_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Ashby Admin \u2192 Integrations \u2192 API Keys. Shown only once at creation time."
+          }
+        ]
+      }
+    ]
+  }
+}

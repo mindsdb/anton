@@ -1,0 +1,98 @@
+{
+  "id": "pipedrive",
+  "label": "Pipedrive",
+  "aliases": [
+    "pipedrive crm",
+    "pipe drive",
+    "pipedrive sales"
+  ],
+  "keywords": [
+    "crm",
+    "sales",
+    "pipeline",
+    "deals",
+    "contacts",
+    "leads",
+    "activities",
+    "revenue"
+  ],
+  "description": "Sales-focused CRM for managing deals, contacts, and pipelines.",
+  "category": "crm",
+  "logo": "link",
+  "logo_color": "#2C4BFF",
+  "form": {
+    "form_id": "pipedrive-connector",
+    "title": "Connect Pipedrive",
+    "subtitle": "Paste your Pipedrive API token and company subdomain to get started.",
+    "logo": "link",
+    "logo_color": "#2C4BFF",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "Personal API Token",
+        "description": "Paste your Pipedrive personal API token and company subdomain. No OAuth setup required \u2014 the simplest and fastest path.",
+        "recommended": true,
+        "how_to": "## Find your Pipedrive API Token\n\n1. Log in to your Pipedrive account.\n2. Click your **avatar** (top-right corner) \u2192 **Personal preferences**.\n3. Navigate to the **API** tab.\n4. Copy the token shown under **Your personal API token**. It is a 40-character hex string.\n5. Paste it into the **API Token** field below.\n\n## Find your Company Subdomain\n\n1. Look at your browser's address bar when logged into Pipedrive \u2014 it reads `https://<your-company>.pipedrive.com`.\n2. Copy just the subdomain part (e.g. `acme`) and paste it into the **Company Subdomain** field below.\n\n## Notes\n\n- The token grants full API access as your user. Keep it secret.\n- If you suspect the token is compromised, regenerate it on the same **API** tab \u2014 Anton will prompt you to re-enter the new one.\n- Read [Pipedrive's API token guide](https://pipedrive.readme.io/docs/how-to-find-the-api-token) for full details.\n",
+        "help_url": "https://pipedrive.readme.io/docs/how-to-find-the-api-token",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "a1b2c3d4e5f6...",
+            "description": "40-character personal API token from Pipedrive \u2192 Personal preferences \u2192 API tab."
+          },
+          {
+            "name": "company_subdomain",
+            "label": "Company Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "acme",
+            "description": "The part before .pipedrive.com in your Pipedrive URL, e.g. 'acme' for acme.pipedrive.com."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (App credentials)",
+        "description": "Use a Pipedrive Marketplace app's client credentials to authorize via browser. Suitable for multi-user setups or when you need to avoid storing personal API tokens.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://oauth.pipedrive.com/oauth/authorize",
+          "token_url": "https://oauth.pipedrive.com/oauth/token",
+          "scopes": [
+            "deals:full",
+            "contacts:full",
+            "activities:full",
+            "pipelines:read",
+            "users:read"
+          ]
+        },
+        "how_to": "## Set up Pipedrive OAuth\n\nYou'll need to create a Pipedrive Marketplace app to get OAuth credentials.\n\n1. Go to [Pipedrive Developer Hub](https://developers.pipedrive.com/) and sign in.\n2. Click **Create an app** \u2192 give it a name like `Anton Integration`.\n3. Under **OAuth & Access scopes**, add the scopes you need (deals, contacts, activities, pipelines, users).\n4. Set the **Callback URL** to `http://localhost` (Anton uses a local redirect).\n5. On the app's **Overview** page, copy the **Client ID** and **Client secret**.\n6. Paste both into the fields below and click **Submit** \u2014 Anton will open a browser authorization window.\n\n## Notes\n\n- Access tokens expire after 1 hour; Anton uses the refresh token to renew automatically.\n- Revoking the app from Pipedrive Marketplace settings will immediately invalidate the connection.\n",
+        "help_url": "https://pipedrive.readme.io/docs/marketplace-oauth-authorization",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "abc123def456",
+            "description": "Found on your Pipedrive Marketplace app's Overview page."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-client-secret",
+            "description": "Paired with the Client ID; found on the same Marketplace app Overview page."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "id": "bugsnag",
+  "label": "BugSnag",
+  "aliases": [
+    "bugsnag",
+    "bug snag",
+    "smartbear bugsnag",
+    "bugsnag error monitoring"
+  ],
+  "keywords": [
+    "error",
+    "monitoring",
+    "crash",
+    "exception",
+    "observability",
+    "smartbear",
+    "debugging",
+    "alerts",
+    "stack trace"
+  ],
+  "description": "Monitor, triage, and resolve application errors and crashes from BugSnag (SmartBear).",
+  "category": "observability",
+  "logo": "brain",
+  "logo_color": "#4C4CFF",
+  "form": {
+    "form_id": "bugsnag-connector",
+    "title": "Connect BugSnag",
+    "subtitle": "Paste your personal auth token to give Anton access to your BugSnag projects and error data.",
+    "logo": "brain",
+    "logo_color": "#4C4CFF",
+    "methods": [
+      {
+        "id": "personal-auth-token",
+        "label": "Personal Auth Token",
+        "description": "Paste a personal auth token from your BugSnag account settings. The fastest and simplest way to connect \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Generate a BugSnag Personal Auth Token\n\nBugSnag issues per-user personal auth tokens that grant API access scoped to your account's permissions.\n\n### Steps\n\n1. Log in to [BugSnag](https://app.bugsnag.com).\n2. Click your avatar or name in the top-right corner and choose **My Account**.\n3. Scroll to **Settings \u2192 Personal auth tokens**.\n4. Click **Generate new token**, give it a descriptive name like `Anton`, and confirm.\n5. Copy the token immediately \u2014 BugSnag only shows it once.\n6. Paste the token into the **Personal Auth Token** field below.\n\n### Notes\n\n- The token inherits your account's organization and project permissions. If you need access to a specific organization, make sure your account is a member.\n- If you lose the token, generate a new one from the same page and update it in Anton.\n- Revoking the token in BugSnag will immediately break Anton's connection \u2014 just paste a new one to restore it.\n",
+        "help_url": "https://bugsnagapi.docs.apiary.io/#introduction/authentication",
+        "fields": [
+          {
+            "name": "personal_auth_token",
+            "label": "Personal Auth Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-personal-auth-token",
+            "description": "Found in BugSnag \u2192 My Account \u2192 Settings \u2192 Personal auth tokens. Shown only once on creation."
+          },
+          {
+            "name": "organization_slug",
+            "label": "Organization Slug",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-company",
+            "description": "Optional. The slug for your BugSnag organization (visible in the URL when viewing your org). Leave blank to use the first organization associated with your token."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BugSnag App)",
+        "description": "Authorize via BugSnag's OAuth 2.0 flow using your own BugSnag OAuth application. Requires creating an OAuth app in BugSnag's developer settings.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.bugsnag.com/oauth/authorize",
+          "token_url": "https://app.bugsnag.com/oauth/token",
+          "scopes": [
+            "read:errors",
+            "read:projects",
+            "read:organizations"
+          ]
+        },
+        "how_to": "## OAuth 2.0 via BugSnag OAuth App\n\nThis method requires you to create a BugSnag OAuth application and supply its credentials. Use the **Personal Auth Token** method unless you specifically need OAuth.\n\n### Steps\n\n1. Log in to [BugSnag](https://app.bugsnag.com) and navigate to your **Organization Settings**.\n2. Find the **Integrations** or **OAuth Applications** section and create a new OAuth application.\n3. Set the redirect URI to `http://127.0.0.1` (or the local redirect Anton uses).\n4. Note the generated **Client ID** and **Client Secret**.\n5. Enter them in the fields below and click **Submit** to launch the browser-based consent flow.\n\n### Notes\n\n- The user authorizing the flow must have appropriate organization permissions in BugSnag.\n- If BugSnag's OAuth application management is not available on your plan, use the Personal Auth Token method instead.\n",
+        "help_url": "https://bugsnagapi.docs.apiary.io/#introduction/authentication",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-bugsnag-oauth-client-id",
+            "description": "From your BugSnag OAuth application settings under Organization Settings."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-bugsnag-oauth-client-secret",
+            "description": "Paired with the Client ID from your BugSnag OAuth application."
+          }
+        ]
+      }
+    ]
+  }
+}

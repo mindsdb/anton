@@ -1,0 +1,98 @@
+{
+  "id": "front",
+  "label": "Front",
+  "aliases": [
+    "frontapp",
+    "front app",
+    "front inbox",
+    "front helpdesk"
+  ],
+  "keywords": [
+    "shared inbox",
+    "customer communication",
+    "email",
+    "helpdesk",
+    "support",
+    "messaging",
+    "team inbox",
+    "customer service"
+  ],
+  "description": "Connect to Front to read and manage shared inboxes, conversations, and customer messages.",
+  "category": "support",
+  "logo": "chats",
+  "logo_color": "#F6542F",
+  "form": {
+    "form_id": "front-connector",
+    "title": "Connect Front",
+    "subtitle": "Paste your Front API token to give Anton access to your shared inboxes and conversations.",
+    "logo": "chats",
+    "logo_color": "#F6542F",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste a Front API token generated from Settings \u2192 Developers \u2192 API tokens. The simplest and fastest way to connect \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Front API Token\n\nFront API tokens are personal tokens tied to your account. They are shown once at creation time, so copy yours before closing the dialog.\n\n### Steps\n\n1. Log in to Front and click your **workspace name** in the top-left corner.\n2. Go to **Settings** (gear icon) \u2192 **Developers** \u2192 **API tokens**.\n3. Click **New token**.\n4. Give the token a name like `Anton` so you can identify it later.\n5. Select the **scopes** Anton needs \u2014 at minimum `shared_resources:read` for reading conversations, or broader scopes if you want write access.\n6. Click **Create token**. Copy the token string \u2014 it is only shown once.\n7. Paste it into the **API Token** field below.\n\n### Notes\n\n- Tokens are scoped to the user who created them; they can only access inboxes and conversations that user can see.\n- If you need org-wide access, ask a Front admin to create the token or use an admin account.\n- To revoke, return to **Settings \u2192 Developers \u2192 API tokens** and delete the entry.\n- Front's API base URL is `https://api2.frontapp.com`; you can leave the field below at its default unless your account uses a custom endpoint.\n",
+        "help_url": "https://dev.frontapp.com/docs/create-and-revoke-api-tokens",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
+            "description": "Found in Front \u2192 Settings \u2192 Developers \u2192 API tokens. Shown only once at creation."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "default": "https://api2.frontapp.com",
+            "placeholder": "https://api2.frontapp.com",
+            "description": "Leave as default unless your Front account uses a custom or regional API endpoint."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own App)",
+        "description": "Use a Front OAuth app for delegated access. Requires creating an OAuth application in Front's developer settings and supplying a client ID and secret.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.frontapp.com/oauth/authorize",
+          "token_url": "https://app.frontapp.com/oauth/token",
+          "scopes": [
+            "shared_resources:read",
+            "shared_resources:write",
+            "private_resources:read"
+          ]
+        },
+        "how_to": "## Connect Front via OAuth 2.0\n\nOAuth is suitable when you want token refresh handled automatically or you're building a multi-user integration. You must first create an OAuth application in Front.\n\n### Steps\n\n1. Log in to Front and go to **Settings \u2192 Developers \u2192 OAuth applications**.\n2. Click **Create OAuth application**.\n3. Enter a name like `Anton` and set the redirect URI to `http://127.0.0.1` (Anton uses a local redirect).\n4. Copy the **Client ID** and **Client secret** from the application detail page.\n5. Paste both values into the fields below.\n6. Click **Submit** \u2014 a browser window will open Front's consent screen.\n7. Approve the requested scopes. Front redirects back to Anton with an authorization code, which Anton exchanges for access and refresh tokens.\n\n### Notes\n\n- Refresh tokens allow Anton to reconnect without re-prompting you after the access token expires.\n- Revoke access in Front under **Settings \u2192 Developers \u2192 OAuth applications** by removing the app or revoking the token.\n",
+        "help_url": "https://dev.frontapp.com/docs/oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-front-oauth-client-id",
+            "description": "From Front \u2192 Settings \u2192 Developers \u2192 OAuth applications \u2192 your app's Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-front-oauth-client-secret",
+            "description": "Paired with the Client ID; shown once in the OAuth application detail page."
+          }
+        ]
+      }
+    ]
+  }
+}

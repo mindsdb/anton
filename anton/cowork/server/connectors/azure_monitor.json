@@ -1,0 +1,179 @@
+{
+  "id": "azure_monitor",
+  "label": "Azure Monitor",
+  "aliases": [
+    "azure metrics",
+    "azure logs",
+    "application insights",
+    "azure observability",
+    "azure telemetry",
+    "azure log analytics"
+  ],
+  "keywords": [
+    "azure",
+    "monitor",
+    "metrics",
+    "logs",
+    "application insights",
+    "log analytics",
+    "telemetry",
+    "observability",
+    "microsoft",
+    "cloud",
+    "tracing",
+    "alerts",
+    "kusto",
+    "kql"
+  ],
+  "description": "Query Azure Monitor metrics, logs, and Application Insights telemetry using a service principal.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#0078D4",
+  "form": {
+    "form_id": "azure_monitor-connector",
+    "title": "Connect Azure Monitor",
+    "subtitle": "Authorize Anton to query Azure Monitor metrics, logs, and Application Insights via a service principal.",
+    "logo": "sparkle",
+    "logo_color": "#0078D4",
+    "methods": [
+      {
+        "id": "service-principal",
+        "label": "Service Principal (Client Credentials)",
+        "description": "Paste your Azure tenant ID, client ID, client secret, and subscription ID. This is the standard non-interactive auth path for Azure and works with any Azure AD-registered app that has the Monitoring Reader role.",
+        "recommended": true,
+        "how_to": "## Service Principal \u2014 Client Credentials\n\nThis is the recommended path for connecting Azure Monitor to Anton. You register an app in Azure Active Directory, assign it the **Monitoring Reader** role on your subscription, and paste the credentials below.\n\n## Steps\n\n1. Open the [Azure Portal](https://portal.azure.com) and navigate to **Azure Active Directory \u2192 App registrations \u2192 New registration**.\n2. Give the app a name (e.g. `anton-monitor`), leave the redirect URI blank, and click **Register**.\n3. On the app's overview page, copy the **Application (client) ID** and the **Directory (tenant) ID** \u2014 paste them into the fields below.\n4. Go to **Certificates & secrets \u2192 Client secrets \u2192 New client secret**. Set an expiry (12\u201324 months recommended), click **Add**, and immediately copy the **Value** shown \u2014 it is displayed only once.\n5. Navigate to **Subscriptions**, open the subscription you want Anton to monitor, and copy the **Subscription ID**.\n6. In that same subscription, go to **Access control (IAM) \u2192 Add role assignment**. Select the **Monitoring Reader** built-in role, assign it to the app you just registered, and save.\n7. If you also need Application Insights query access, add the **Reader** role at the resource group or Application Insights resource level as well.\n8. Paste all four values into the fields below and click **Submit**.\n\n## Notes\n\n- The client secret is shown only once \u2014 if you lose it, generate a new one in **Certificates & secrets** and update the field in Anton.\n- For Log Analytics workspace queries, ensure the workspace's **Access control mode** allows workspace-level permissions, or grant the service principal the **Log Analytics Reader** role on the workspace.\n- Anton queries the Azure Monitor REST API (`management.azure.com`) and the Log Analytics API (`api.loganalytics.io`) \u2014 ensure no network policy blocks outbound access to these endpoints.\n",
+        "help_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/rest-api-walkthrough",
+        "fields": [
+          {
+            "name": "tenant_id",
+            "label": "Tenant ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Your Azure Active Directory tenant ID. Found under Azure Active Directory \u2192 Overview \u2192 Directory ID."
+          },
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The Application (client) ID of the registered Azure AD app. Found on the app's Overview page."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste the secret value here",
+            "description": "The client secret value generated under Certificates & secrets. Shown only once \u2014 copy it immediately after creation."
+          },
+          {
+            "name": "subscription_id",
+            "label": "Subscription ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The Azure subscription ID you want Anton to monitor. Found under Subscriptions in the Azure Portal."
+          },
+          {
+            "name": "log_analytics_workspace_id",
+            "label": "Log Analytics Workspace ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Optional. The workspace ID for Log Analytics / Application Insights queries. Found in your Log Analytics workspace \u2192 Overview \u2192 Workspace ID."
+          },
+          {
+            "name": "cloud_environment",
+            "label": "Cloud Environment",
+            "type": "select",
+            "required": true,
+            "default": "AzurePublicCloud",
+            "description": "Select the Azure cloud environment your subscription belongs to.",
+            "options": [
+              {
+                "value": "AzurePublicCloud",
+                "label": "Azure Public Cloud (default)"
+              },
+              {
+                "value": "AzureUSGovernment",
+                "label": "Azure US Government"
+              },
+              {
+                "value": "AzureChinaCloud",
+                "label": "Azure China Cloud (21Vianet)"
+              },
+              {
+                "value": "AzureGermanCloud",
+                "label": "Azure German Cloud"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "managed-identity-token",
+        "label": "Managed Identity / Bearer Token",
+        "description": "Paste a short-lived Azure AD bearer token obtained from a managed identity or az CLI. Useful for testing or environments where Anton runs inside Azure with managed identity access.",
+        "recommended": false,
+        "how_to": "## Managed Identity / Bearer Token\n\nUse this method if Anton runs inside an Azure resource (VM, App Service, Container App) with a managed identity assigned, or if you want to paste a token obtained via the Azure CLI for quick testing.\n\n## Obtaining a token via Azure CLI\n\n1. Install and sign in to the [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli): `az login`.\n2. Run: `az account get-access-token --resource https://management.azure.com/`\n3. Copy the `accessToken` value from the JSON output.\n4. Paste it into the **Bearer Token** field below along with your **Subscription ID** and **Tenant ID**.\n\n## Using a managed identity (inside Azure)\n\n1. Assign a **system-assigned** or **user-assigned** managed identity to the Azure resource running Anton.\n2. Grant the identity the **Monitoring Reader** role on the target subscription or resource group.\n3. Retrieve a token from the instance metadata endpoint: `http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/`\n4. Paste the returned token below.\n\n## Notes\n\n- Azure AD bearer tokens expire after ~1 hour. You will need to refresh and re-paste the token periodically.\n- For long-lived access, use the **Service Principal** method instead.\n",
+        "help_url": "https://learn.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/how-to-use-vm-token",
+        "fields": [
+          {
+            "name": "bearer_token",
+            "label": "Bearer Token",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIs...",
+            "description": "A valid Azure AD access token for https://management.azure.com/. Expires after ~1 hour."
+          },
+          {
+            "name": "tenant_id",
+            "label": "Tenant ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Your Azure Active Directory tenant ID."
+          },
+          {
+            "name": "subscription_id",
+            "label": "Subscription ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The Azure subscription ID you want Anton to monitor."
+          },
+          {
+            "name": "cloud_environment",
+            "label": "Cloud Environment",
+            "type": "select",
+            "required": true,
+            "default": "AzurePublicCloud",
+            "description": "Select the Azure cloud environment your subscription belongs to.",
+            "options": [
+              {
+                "value": "AzurePublicCloud",
+                "label": "Azure Public Cloud (default)"
+              },
+              {
+                "value": "AzureUSGovernment",
+                "label": "Azure US Government"
+              },
+              {
+                "value": "AzureChinaCloud",
+                "label": "Azure China Cloud (21Vianet)"
+              },
+              {
+                "value": "AzureGermanCloud",
+                "label": "Azure German Cloud"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

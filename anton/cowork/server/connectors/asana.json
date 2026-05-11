@@ -1,0 +1,96 @@
+{
+  "id": "asana",
+  "label": "Asana",
+  "aliases": [
+    "asana app",
+    "asana projects",
+    "asana tasks",
+    "asana work management"
+  ],
+  "keywords": [
+    "project management",
+    "tasks",
+    "work management",
+    "productivity",
+    "team",
+    "goals",
+    "portfolio",
+    "milestones",
+    "to-do"
+  ],
+  "description": "Connect to Asana to read and manage projects, tasks, and team workspaces.",
+  "category": "productivity",
+  "logo": "list",
+  "logo_color": "#F06A6A",
+  "form": {
+    "form_id": "asana-connector",
+    "title": "Connect Asana",
+    "subtitle": "Authorize Anton to read and manage your Asana projects and tasks.",
+    "logo": "list",
+    "logo_color": "#F06A6A",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Paste a Personal Access Token (PAT) generated from your Asana developer settings. No OAuth setup required \u2014 the fastest way to connect.",
+        "recommended": true,
+        "how_to": "## Generate an Asana Personal Access Token\n\nPersonal Access Tokens give Anton full API access scoped to your Asana account. They're the simplest way to connect without any OAuth client setup.\n\n### Steps\n\n1. Log in to [Asana](https://app.asana.com) and click your **profile photo** in the top-right corner.\n2. Select **My Settings** from the dropdown.\n3. Switch to the **Apps** tab.\n4. Click **Manage Developer Apps** \u2014 this opens the developer console.\n5. Under **Personal access tokens**, click **New access token**.\n6. Give the token a name like `Anton` and click **Create token**.\n7. Copy the token shown \u2014 **it is only displayed once**.\n8. Paste the token into the **Personal Access Token** field below.\n\n### Notes\n\n- The token inherits the permissions of your Asana account \u2014 it can read and write any workspace, project, or task you have access to.\n- If you lose the token, revoke it in the same panel and generate a new one.\n- Tokens do not expire by default, but a Workspace admin can enforce expiry policies.\n- Read [Asana's PAT guide](https://developers.asana.com/docs/personal-access-token) for full details.\n",
+        "help_url": "https://developers.asana.com/docs/personal-access-token",
+        "fields": [
+          {
+            "name": "personal_access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "1/1234567890123:abcdef1234567890abcdef1234567890",
+            "description": "Found in Asana \u2192 My Settings \u2192 Apps \u2192 Manage Developer Apps \u2192 Personal access tokens."
+          },
+          {
+            "name": "workspace_gid",
+            "label": "Workspace GID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "123456789012345",
+            "description": "Optional. If your account belongs to multiple workspaces, provide the numeric GID of the one you want Anton to default to. Leave blank to use your primary workspace."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own Client)",
+        "description": "Connect via Asana's OAuth 2.0 flow using your own Asana app credentials. Suitable for teams or automated setups where a personal token isn't appropriate.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.asana.com/-/oauth_authorize",
+          "token_url": "https://app.asana.com/-/oauth_token",
+          "scopes": [
+            "default"
+          ],
+          "extra_auth_params": {}
+        },
+        "how_to": "## Connect via Asana OAuth 2.0\n\nThis method requires you to register an app in Asana's developer console and supply a Client ID and Client Secret. Anton then opens Asana's consent screen in your browser.\n\n### Steps\n\n1. Go to [Asana Developer Console](https://app.asana.com/0/my-apps) and click **+ Create new app**.\n2. Fill in an app name (e.g. `Anton`) and select your default workspace.\n3. Under **OAuth**, set the **Redirect URI** to `http://127.0.0.1` (Anton uses a local redirect for the desktop flow).\n4. Copy the **Client ID** and **Client secret** from the app's details page.\n5. Paste them into the fields below and click **Submit**.\n6. A browser window opens to Asana's authorization screen. Log in and click **Allow**.\n7. Anton completes the token exchange and stores the refresh token locally.\n\n### Notes\n\n- The `default` scope grants access to all Asana data your account can reach.\n- You can revoke access at any time from **My Settings \u2192 Apps \u2192 Authorized apps** in Asana.\n- Read [Asana's OAuth guide](https://developers.asana.com/docs/oauth) for full details.\n",
+        "help_url": "https://developers.asana.com/docs/oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "1234567890123456",
+            "description": "From Asana Developer Console \u2192 your app \u2192 OAuth section."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID; found on the same app details page in the developer console."
+          }
+        ]
+      }
+    ]
+  }
+}

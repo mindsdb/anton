@@ -1,0 +1,84 @@
+{
+  "id": "clickup",
+  "label": "ClickUp",
+  "aliases": [
+    "click up",
+    "clickup pm",
+    "clickup tasks"
+  ],
+  "keywords": [
+    "project management",
+    "tasks",
+    "productivity",
+    "kanban",
+    "sprints",
+    "docs",
+    "goals",
+    "workspace"
+  ],
+  "description": "Connect to ClickUp to read and manage tasks, projects, spaces, and lists across your workspace.",
+  "category": "productivity",
+  "logo": "list",
+  "logo_color": "#7B68EE",
+  "form": {
+    "form_id": "clickup-connector",
+    "title": "Connect ClickUp",
+    "subtitle": "Paste your personal API token to give Anton access to your ClickUp workspace.",
+    "logo": "list",
+    "logo_color": "#7B68EE",
+    "methods": [
+      {
+        "id": "personal-api-token",
+        "label": "Personal API Token",
+        "description": "Paste your ClickUp personal API token \u2014 found in Settings \u2192 Apps. No OAuth setup required; works for any ClickUp plan.",
+        "recommended": true,
+        "how_to": "## Get your ClickUp Personal API Token\n\n1. Log in to [ClickUp](https://app.clickup.com/).\n2. Click your **avatar** in the lower-left corner to open the user menu.\n3. Go to **Settings** (the gear icon).\n4. In the left sidebar, click **Apps**.\n5. Under **API Token**, click **Generate** (or **Regenerate** if you've had one before).\n6. Copy the token that appears \u2014 it starts with `pk_`.\n7. Paste it into the **API Token** field below.\n\n## Notes\n\n- The token grants access as your user account \u2014 treat it like a password.\n- If you regenerate the token, the old one is immediately invalidated. Update Anton with the new value.\n- Workspace admins can restrict API access at the workspace level; contact your admin if the token doesn't work.\n- Read more at [ClickUp API docs](https://clickup.com/api).",
+        "help_url": "https://help.clickup.com/hc/en-us/articles/6303426241687-Use-the-ClickUp-API",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "pk_xxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Your personal ClickUp API token. Found in Settings \u2192 Apps \u2192 API Token."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (App Authorization)",
+        "description": "Authorize via OAuth using your own ClickUp OAuth app. Suitable for teams or automations where a personal token is not appropriate.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.clickup.com/api",
+          "token_url": "https://api.clickup.com/api/v2/oauth/token",
+          "scopes": []
+        },
+        "how_to": "## Set up ClickUp OAuth 2.0\n\n1. Go to [ClickUp App Developer Portal](https://app.clickup.com/settings/apps) while logged in as a workspace owner or admin.\n2. Click **Create an App**.\n3. Give the app a name (e.g. `Anton Integration`) and set the **Redirect URI** to `http://127.0.0.1` (or the redirect Anton uses locally).\n4. Save the app. Copy the **Client ID** and **Client Secret** shown on the app detail page.\n5. Paste both values into the fields below, then click **Submit** to launch the OAuth consent flow in your browser.\n6. Approve access for your workspace when prompted.\n\n## Notes\n\n- ClickUp OAuth apps are created at the workspace level \u2014 only workspace owners/admins can create them.\n- The client secret is shown once; store it securely.\n- Token scopes in ClickUp are not granular \u2014 the token grants broad workspace access.",
+        "help_url": "https://clickup.com/api/developer-portal/authentication/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your_clickup_client_id",
+            "description": "From your ClickUp app settings under Settings \u2192 Apps \u2192 your created app."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_clickup_client_secret",
+            "description": "Paired with the Client ID. Shown once when you create the app \u2014 store it safely."
+          }
+        ]
+      }
+    ]
+  }
+}

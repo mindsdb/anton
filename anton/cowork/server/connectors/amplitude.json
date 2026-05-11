@@ -1,0 +1,76 @@
+{
+  "id": "amplitude",
+  "label": "Amplitude",
+  "aliases": [
+    "amplitude analytics",
+    "amplitude data"
+  ],
+  "keywords": [
+    "analytics",
+    "product analytics",
+    "events",
+    "funnels",
+    "retention",
+    "behavioral",
+    "tracking",
+    "user analytics"
+  ],
+  "description": "Query Amplitude product analytics data including events, funnels, and retention cohorts via the Amplitude API.",
+  "category": "analytics",
+  "logo": "sparkle",
+  "logo_color": "#1A86FF",
+  "form": {
+    "form_id": "amplitude-connector",
+    "title": "Connect Amplitude",
+    "subtitle": "Paste your Amplitude project API key and secret key to start pulling events, funnels, and retention data.",
+    "logo": "sparkle",
+    "logo_color": "#1A86FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key & Secret Key",
+        "description": "Paste your Amplitude project API key and secret key. Found in your project settings \u2014 takes 30 seconds and no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Find your Amplitude API Key and Secret Key\n\n1. Log in to [Amplitude](https://app.amplitude.com) and open the project you want to connect.\n2. Click **Settings** in the left sidebar, then select **Projects** under the Organization section.\n3. Click the name of your project.\n4. On the **General** tab you will see **API Key** and **Secret Key** listed directly.\n5. Copy both values and paste them into the fields below.\n6. Select your data residency **Region** \u2014 choose **EU** if your Amplitude organization is hosted in the EU data center (app.eu.amplitude.com), otherwise leave it as **US**.\n\n## Notes\n\n- The secret key is sensitive \u2014 treat it like a password and do not share it.\n- API keys are scoped to a single project; repeat this process for each project you want to connect.\n- If you need to rotate credentials, generate new ones in project settings and update them here.\n- Read [Amplitude's authentication docs](https://www.docs.developers.amplitude.com/analytics/apis/http-v2-api/#authentication) for more detail.",
+        "help_url": "https://www.docs.developers.amplitude.com/analytics/apis/http-v2-api/#authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "text",
+            "required": true,
+            "placeholder": "e.g. 1234567890abcdef1234567890abcdef",
+            "description": "Found in Amplitude \u2192 Settings \u2192 Projects \u2192 [your project] \u2192 General tab."
+          },
+          {
+            "name": "secret_key",
+            "label": "Secret Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "e.g. abcdef1234567890abcdef1234567890",
+            "description": "Paired with the API key. Treat this like a password \u2014 it grants full read access to your project data."
+          },
+          {
+            "name": "region",
+            "label": "Data Residency Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select US unless your Amplitude organization is hosted on the EU data center (app.eu.amplitude.com).",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (app.amplitude.com)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (app.eu.amplitude.com)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

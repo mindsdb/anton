@@ -1,0 +1,74 @@
+{
+  "id": "opsgenie",
+  "label": "Opsgenie",
+  "aliases": [
+    "ops genie",
+    "opsgenie atlassian",
+    "atlassian opsgenie",
+    "on-call",
+    "oncall",
+    "pagerduty alternative"
+  ],
+  "keywords": [
+    "incident",
+    "alerting",
+    "on-call",
+    "oncall",
+    "escalation",
+    "notification",
+    "atlassian",
+    "ops",
+    "paging",
+    "monitoring"
+  ],
+  "description": "Manage incidents, alerts, and on-call schedules in Atlassian Opsgenie.",
+  "category": "observability",
+  "logo": "phone",
+  "logo_color": "#172B4D",
+  "form": {
+    "form_id": "opsgenie-connector",
+    "title": "Connect Opsgenie",
+    "subtitle": "Paste your Opsgenie API key to let Anton create alerts, manage incidents, and query on-call schedules.",
+    "logo": "phone",
+    "logo_color": "#172B4D",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an Opsgenie API integration key from Settings \u2192 Integration list \u2192 API. Quickest path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate an Opsgenie API Key\n\n1. Log in to your Opsgenie account at [app.opsgenie.com](https://app.opsgenie.com) (or your Atlassian-hosted URL).\n2. Click **Settings** in the left sidebar.\n3. Go to **Integration list** (under the Integrations section).\n4. Click **Add new integration** in the top-right corner.\n5. Search for **API** in the integration list and select it.\n6. Give the integration a name like `Anton`.\n7. Set the **Access rights** (Read, Create, Update, Delete) based on what you want Anton to do \u2014 for full access, enable all.\n8. Click **Save integration**.\n9. Copy the **API Key** shown on the integration detail page.\n10. Paste it into the **API Key** field below.\n\n## Notes\n\n- If your account is on the **EU region**, switch the **Region** dropdown below to `EU` \u2014 the base URL differs (`api.eu.opsgenie.com` vs `api.opsgenie.com`).\n- The API key is tied to this integration; you can revoke it anytime by deleting the integration in Opsgenie.\n- Team-scoped integrations (created inside a Team's integration list) restrict the key to that team's alerts only \u2014 use the global integration list for full access.\n",
+        "help_url": "https://support.atlassian.com/opsgenie/docs/create-a-default-api-integration/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Copied from Settings \u2192 Integration list \u2192 API \u2192 your integration. Treat this like a password."
+          },
+          {
+            "name": "region",
+            "label": "Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "Select the region that matches your Opsgenie account. US uses api.opsgenie.com; EU uses api.eu.opsgenie.com.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (api.opsgenie.com)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (api.eu.opsgenie.com)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

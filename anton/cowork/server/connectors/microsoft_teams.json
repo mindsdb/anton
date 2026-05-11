@@ -1,0 +1,118 @@
+{
+  "id": "microsoft_teams",
+  "label": "Microsoft Teams",
+  "aliases": [
+    "ms teams",
+    "teams",
+    "microsoft chat",
+    "azure teams",
+    "office teams",
+    "m365 teams"
+  ],
+  "keywords": [
+    "messaging",
+    "collaboration",
+    "chat",
+    "channels",
+    "microsoft",
+    "office365",
+    "m365",
+    "azure",
+    "video",
+    "meetings",
+    "workspace"
+  ],
+  "description": "Read and send messages, post to channels, and browse teams in Microsoft Teams via the Microsoft Graph API.",
+  "category": "communication",
+  "logo": "chats",
+  "logo_color": "#6264A7",
+  "form": {
+    "form_id": "microsoft_teams-connector",
+    "title": "Connect Microsoft Teams",
+    "subtitle": "Authorize Anton to read and send messages in Microsoft Teams using your Azure AD / Entra ID app.",
+    "logo": "chats",
+    "logo_color": "#6264A7",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Microsoft (OAuth 2.0)",
+        "description": "Register an app in Azure AD / Entra ID, paste the client ID and secret below, then authorize Anton via Microsoft's consent screen. Tokens are stored locally and refreshed automatically.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+          "token_url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+          "scopes": [
+            "Chat.ReadWrite",
+            "ChannelMessage.Send",
+            "Team.ReadBasic.All",
+            "User.Read",
+            "offline_access"
+          ]
+        },
+        "how_to": "## Register an Azure AD / Entra ID app\n\nYou need a Microsoft application registration to obtain a Client ID and Client Secret for Anton.\n\n1. Go to [Azure Portal \u2192 Microsoft Entra ID \u2192 App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) and click **New registration**.\n2. Give it a name (e.g. `Anton`), choose **Accounts in this organizational directory only** (or **any tenant** for personal accounts), and click **Register**.\n3. On the app overview page, copy the **Application (client) ID** \u2014 this is your **Client ID**.\n4. Go to **Certificates & secrets \u2192 Client secrets \u2192 New client secret**. Set an expiry and click **Add**. Copy the **Value** immediately (it's only shown once).\n5. Go to **API permissions \u2192 Add a permission \u2192 Microsoft Graph \u2192 Delegated permissions**. Add:\n   - `Chat.ReadWrite`\n   - `ChannelMessage.Send`\n   - `Team.ReadBasic.All`\n   - `User.Read`\n   - `offline_access`\n6. Click **Grant admin consent** if your tenant requires it (recommended).\n7. Go to **Authentication \u2192 Add a platform \u2192 Mobile and desktop applications** and add `http://localhost` as a redirect URI.\n8. Paste the **Client ID** and **Client Secret** into the fields below, then click **Submit** to open the Microsoft consent screen.\n\n## Notes\n\n- The client secret expires on the schedule you chose. Rotate it in Entra ID and update the secret in Anton before it expires.\n- If your tenant enforces Conditional Access policies, ensure Anton's redirect URI is whitelisted.\n- `offline_access` is required so Microsoft issues a refresh token.\n",
+        "help_url": "https://learn.microsoft.com/en-us/graph/auth-register-app-v2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Application (Client) ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Found on the app overview page in Azure Portal \u2192 Entra ID \u2192 App registrations."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated under Certificates & secrets \u2192 Client secrets. Shown only once \u2014 copy it immediately."
+          },
+          {
+            "name": "tenant_id",
+            "label": "Tenant ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "common  or  xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Leave blank to use 'common' (supports personal and work accounts). Set to your directory tenant ID to restrict sign-in to your organization only."
+          }
+        ]
+      },
+      {
+        "id": "service-account-app",
+        "label": "App-only (Client Credentials / Bot)",
+        "description": "For unattended server-side access using application permissions. Requires an Azure AD app with admin-consented application-level Graph permissions \u2014 no user sign-in involved.",
+        "recommended": false,
+        "how_to": "## App-only access with client credentials\n\nUse this when Anton needs to act as a service identity (e.g. a bot) rather than on behalf of a specific user. Requires **application permissions** (not delegated) and tenant admin consent.\n\n1. In [Azure Portal \u2192 Entra ID \u2192 App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade), open your app (or create a new one).\n2. Go to **API permissions \u2192 Add a permission \u2192 Microsoft Graph \u2192 Application permissions**. Add:\n   - `Chat.Read.All`\n   - `ChannelMessage.Read.All`\n   - `Team.ReadBasic.All`\n3. Click **Grant admin consent for [your tenant]** \u2014 a global admin must approve.\n4. Go to **Certificates & secrets \u2192 Client secrets \u2192 New client secret** and copy the **Value**.\n5. Copy the **Application (client) ID** from the app overview.\n6. Copy the **Directory (tenant) ID** from the app overview \u2014 required for app-only flows (cannot use `common`).\n7. Paste all three values into the fields below.\n\n## Notes\n\n- App-only permissions are broader than delegated \u2014 use least-privilege and scope only what Anton needs.\n- The client secret expires; set a calendar reminder to rotate it before expiry.\n- Sending messages as a user is not possible with app-only tokens; Anton will post as the registered app/bot identity.\n",
+        "help_url": "https://learn.microsoft.com/en-us/graph/auth-v2-service",
+        "fields": [
+          {
+            "name": "tenant_id",
+            "label": "Directory (Tenant) ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Found on the app overview page in Azure Portal. Must be your specific tenant ID \u2014 'common' does not work for app-only flows."
+          },
+          {
+            "name": "client_id",
+            "label": "Application (Client) ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The Application ID of your Entra ID app registration."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated under Certificates & secrets \u2192 Client secrets in the Azure Portal."
+          }
+        ]
+      }
+    ]
+  }
+}

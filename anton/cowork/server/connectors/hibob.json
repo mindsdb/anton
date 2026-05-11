@@ -1,0 +1,69 @@
+{
+  "id": "hibob",
+  "label": "HiBob",
+  "aliases": [
+    "hi bob",
+    "bob hr",
+    "bob hris",
+    "hibob hris"
+  ],
+  "keywords": [
+    "hris",
+    "hr",
+    "human resources",
+    "people",
+    "employees",
+    "payroll",
+    "onboarding",
+    "workforce",
+    "org chart"
+  ],
+  "description": "Connect to HiBob to sync employee records, org data, and HR workflows from your modern HRIS.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#00C2C7",
+  "form": {
+    "form_id": "hibob-connector",
+    "title": "Connect HiBob",
+    "subtitle": "Paste a HiBob service user token to give Anton read access to your people data.",
+    "logo": "check",
+    "logo_color": "#00C2C7",
+    "methods": [
+      {
+        "id": "service-user-token",
+        "label": "Service user token",
+        "description": "Generate a dedicated service user in HiBob and paste its token here. No OAuth flow required \u2014 just copy and paste from Settings \u2192 Integrations \u2192 Service users.",
+        "recommended": true,
+        "how_to": "## Generate a HiBob service user token\n\nHiBob uses service users \u2014 bot-like accounts with their own API tokens \u2014 for integrations.\n\n### Steps\n\n1. Log in to HiBob as an admin.\n2. Go to **Settings** (gear icon, top-right) \u2192 **Integrations** \u2192 **Service users**.\n3. Click **+ New service user**.\n4. Give it a name like `Anton` and assign the appropriate read permissions for the data you want Anton to access (e.g. People, Payroll, Time off).\n5. Click **Generate token**. HiBob shows the token **once** \u2014 copy it immediately.\n6. Paste the token into the **Service user token** field below.\n7. Enter your HiBob company ID (visible in your HiBob URL: `app.hibob.com/company/<company-id>`).\n\n### Notes\n\n- The token is shown only once. If you lose it, delete the service user and create a new one.\n- Scope permissions narrowly \u2014 grant only the modules Anton needs to access.\n- Tokens do not expire by default but can be revoked at any time from the Service users page.",
+        "help_url": "https://apidocs.hibob.com/docs/api-service-users",
+        "fields": [
+          {
+            "name": "service_user_id",
+            "label": "Service user ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "service-user@your-company",
+            "description": "The service user's ID or email shown in Settings \u2192 Integrations \u2192 Service users."
+          },
+          {
+            "name": "service_user_token",
+            "label": "Service user token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your HiBob service user token",
+            "description": "Generated once when you create the service user. If lost, generate a new token from the Service users page."
+          },
+          {
+            "name": "company_id",
+            "label": "Company ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "your-company",
+            "description": "Optional. Found in your HiBob URL: app.hibob.com/company/<company-id>. Used to scope API requests correctly."
+          }
+        ]
+      }
+    ]
+  }
+}

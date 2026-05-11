@@ -1,0 +1,147 @@
+{
+  "id": "docusign",
+  "label": "DocuSign",
+  "aliases": [
+    "docu sign",
+    "docusign esign",
+    "docusign signature",
+    "e-signature",
+    "electronic signature"
+  ],
+  "keywords": [
+    "esignature",
+    "signature",
+    "documents",
+    "contracts",
+    "signing",
+    "envelope",
+    "agreement",
+    "legal"
+  ],
+  "description": "Send, sign, and manage electronic signature envelopes and contracts via DocuSign.",
+  "category": "documents",
+  "logo": "doc",
+  "logo_color": "#FFCC00",
+  "form": {
+    "form_id": "docusign-connector",
+    "title": "Connect DocuSign",
+    "subtitle": "Authorize Anton to send and manage DocuSign envelopes on your behalf.",
+    "logo": "doc",
+    "logo_color": "#FFCC00",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth 2.0 (Integration Key)",
+        "description": "Use your DocuSign Integration Key and Secret to authorize Anton via OAuth 2.0. Supports both demo (sandbox) and production environments. Recommended for all users.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://account.docusign.com/oauth/auth",
+          "token_url": "https://account.docusign.com/oauth/token",
+          "scopes": [
+            "signature",
+            "extended"
+          ]
+        },
+        "how_to": "## OAuth 2.0 with DocuSign Integration Key\n\nDocuSign calls its OAuth client ID an **Integration Key**. You create one in the DocuSign Admin console.\n\n### Steps\n\n1. Log in to your DocuSign account and open the [DocuSign Admin console](https://admindemo.docusign.com) (demo) or [production Admin](https://admin.docusign.com).\n2. In the left sidebar go to **Apps and Keys** (under Integrations).\n3. Click **Add App and Integration Key**. Give it a name like `Anton`.\n4. Under **Authentication**, select **Authorization Code Grant**.\n5. Click **Add Secret Key** and copy the generated secret \u2014 it is shown only once.\n6. Under **Redirect URIs**, click **Add URI** and enter `http://127.0.0.1` (Anton's local callback).\n7. Copy the **Integration Key** (the long UUID at the top of the app page).\n8. Paste the Integration Key and Secret into the fields below.\n9. Choose your environment \u2014 **Production** for live accounts, **Demo / Sandbox** for developer testing.\n10. Click **Submit**. Anton will open a browser tab to DocuSign's consent screen; log in and approve access.\n\n### Notes\n\n- Demo and production are completely separate environments with different hostnames (`account-d.docusign.com` vs `account.docusign.com`). Make sure your Integration Key was created in the same environment you select.\n- The `extended` scope grants offline access (refresh tokens) so Anton can act without repeated logins.\n- To revoke access later, return to **Apps and Keys**, open the app, and delete the secret key or revoke the app entirely.",
+        "help_url": "https://developers.docusign.com/platform/auth/authcode/authcode-get-token/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Integration Key (Client ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Found in DocuSign Admin \u2192 Apps and Keys. It is a UUID that identifies your app."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated under the Integration Key's Authentication section. Shown only once \u2014 copy it immediately."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Match this to the DocuSign account where you created the Integration Key.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production (account.docusign.com)"
+              },
+              {
+                "value": "demo",
+                "label": "Demo / Sandbox (account-d.docusign.com)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "jwt-service-account",
+        "label": "JWT Service Integration",
+        "description": "Server-to-server authentication using DocuSign's JWT Grant flow. Suitable for automated or headless workflows where no user interaction is possible.",
+        "recommended": false,
+        "how_to": "## JWT Service Integration (Server-to-Server)\n\nThe JWT Grant flow lets Anton act on behalf of a DocuSign user without an interactive browser login. Use this for fully automated pipelines.\n\n### Prerequisites\n\n- A DocuSign Integration Key with **JSON Web Token (JWT)** authentication enabled.\n- The user whose account Anton will act as must grant consent at least once.\n\n### Steps\n\n1. Log in to [DocuSign Admin](https://admin.docusign.com) \u2192 **Apps and Keys**.\n2. Click **Add App and Integration Key**, name it (e.g., `Anton-JWT`).\n3. Under **Authentication**, select **JSON Web Token (JWT)**.\n4. Click **Generate RSA** \u2014 DocuSign generates an RSA key pair. Download the **private key** (PEM format) immediately; it is not stored by DocuSign.\n5. Copy the **Integration Key** UUID.\n6. Find the **Account ID** (also called API Account ID) on the same Apps and Keys page or under your account settings.\n7. Find the **User ID** (Impersonate User ID) under **Admin \u2192 Users** for the user Anton will act as.\n8. Paste the private key PEM, Integration Key, Account ID, and User ID into the fields below.\n9. On first use, DocuSign requires the impersonated user to grant consent once. Anton will prompt you with a consent URL if needed.\n\n### Notes\n\n- The private key PEM is sensitive \u2014 treat it like a password.\n- Choose the correct environment; demo and production keys are not interchangeable.",
+        "help_url": "https://developers.docusign.com/platform/auth/jwt/jwt-get-token/",
+        "fields": [
+          {
+            "name": "integration_key",
+            "label": "Integration Key",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The UUID from DocuSign Admin \u2192 Apps and Keys for your JWT-enabled app."
+          },
+          {
+            "name": "account_id",
+            "label": "Account ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Your DocuSign API Account ID, found on the Apps and Keys page or under account settings."
+          },
+          {
+            "name": "user_id",
+            "label": "Impersonate User ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The DocuSign User ID of the account Anton will act as. Found under Admin \u2192 Users."
+          },
+          {
+            "name": "private_key_pem",
+            "label": "RSA Private Key (PEM)",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "description": "Paste the full RSA private key PEM generated in DocuSign Admin. Begins with -----BEGIN RSA PRIVATE KEY-----."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Must match the environment where your Integration Key was created.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production (account.docusign.com)"
+              },
+              {
+                "value": "demo",
+                "label": "Demo / Sandbox (account-d.docusign.com)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

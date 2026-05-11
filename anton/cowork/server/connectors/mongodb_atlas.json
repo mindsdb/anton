@@ -1,0 +1,120 @@
+{
+  "id": "mongodb_atlas",
+  "label": "MongoDB Atlas",
+  "aliases": [
+    "mongo atlas",
+    "mongodb cloud",
+    "mongo cloud",
+    "atlas mongodb",
+    "mongo db atlas"
+  ],
+  "keywords": [
+    "mongodb",
+    "atlas",
+    "nosql",
+    "document",
+    "database",
+    "cloud",
+    "mongo",
+    "cluster",
+    "replica set"
+  ],
+  "description": "Connect to a MongoDB Atlas cluster using a connection string to query and manage your cloud-hosted MongoDB databases.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#00ED64",
+  "form": {
+    "form_id": "mongodb_atlas-connector",
+    "title": "Connect MongoDB Atlas",
+    "subtitle": "Paste your Atlas connection string to let Anton query your MongoDB cloud cluster.",
+    "logo": "database",
+    "logo_color": "#00ED64",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste the mongodb+srv:// URI from Atlas Console. The fastest way to connect \u2014 no extra credentials needed beyond what's already embedded in the string.",
+        "recommended": true,
+        "how_to": "## Get your MongoDB Atlas connection string\n\n1. Log in to [MongoDB Atlas](https://cloud.mongodb.com) and open your project.\n2. In the left sidebar, click **Database** under the *Deployment* section.\n3. Find your cluster and click the **Connect** button.\n4. Choose **Connect your application**.\n5. Select **Driver: Python** (or any driver \u2014 the URI format is the same) and copy the connection string. It looks like:\n   `mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`\n6. Replace `<password>` with your database user's password before pasting.\n7. Paste the full string into the **Connection String** field below.\n\n## Allow your IP address\n\n1. In Atlas, go to **Security \u2192 Network Access**.\n2. Click **Add IP Address**.\n3. Add your current IP or use `0.0.0.0/0` to allow all IPs (not recommended for production).\n4. Click **Confirm**.\n\n## Notes\n\n- The database user is separate from your Atlas account login. Create one under **Security \u2192 Database Access** if needed.\n- Make sure the user has at least **Read** privileges on the target database.\n- If you omit the database name from the URI, Atlas connects to the `admin` database by default. Append `/<dbname>` before the `?` to target a specific database.",
+        "help_url": "https://www.mongodb.com/docs/atlas/getting-started/#connect-to-your-cluster",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/myDatabase?retryWrites=true&w=majority",
+            "description": "Full mongodb+srv:// URI including credentials. Found in Atlas Console \u2192 Database \u2192 Connect \u2192 Connect your application."
+          },
+          {
+            "name": "database_name",
+            "label": "Default Database",
+            "type": "text",
+            "required": false,
+            "placeholder": "myDatabase",
+            "description": "Optional. The database Anton will use by default. If not set, the database specified in the connection string (or 'admin') is used."
+          },
+          {
+            "name": "tls_enabled",
+            "label": "Require TLS",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Atlas clusters enforce TLS by default. Disable only if you have explicitly turned off TLS on the cluster (not recommended)."
+          }
+        ]
+      },
+      {
+        "id": "username-password",
+        "label": "Username & Password",
+        "description": "Supply the Atlas cluster hostname, database user credentials, and database name separately instead of as a single URI.",
+        "recommended": false,
+        "how_to": "## Connect with username and password\n\n1. Log in to [MongoDB Atlas](https://cloud.mongodb.com) and open your project.\n2. In the left sidebar, click **Database** under the *Deployment* section.\n3. Find your cluster and click the **Connect** button.\n4. Choose **Connect your application** and note the **hostname** portion of the URI (e.g. `cluster0.xxxxx.mongodb.net`).\n5. If you don't have a database user, go to **Security \u2192 Database Access \u2192 Add New Database User**. Create a user with a strong password and assign appropriate roles.\n6. Go to **Security \u2192 Network Access** and add your IP address so Atlas allows the connection.\n7. Enter the hostname, username, password, and target database name in the fields below.\n\n## Notes\n\n- The port for Atlas clusters is always `27017`.\n- Atlas enforces TLS \u2014 do not disable it unless your cluster configuration explicitly allows plaintext connections.\n- Assign the least-privileged role that meets your needs (e.g. `readAnyDatabase` for read-only access).",
+        "help_url": "https://www.mongodb.com/docs/atlas/security-add-mongodb-users/",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Cluster Hostname",
+            "type": "text",
+            "required": true,
+            "placeholder": "cluster0.xxxxx.mongodb.net",
+            "description": "The SRV hostname for your Atlas cluster, without the mongodb+srv:// prefix or port."
+          },
+          {
+            "name": "username",
+            "label": "Database Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "atlasAdmin",
+            "description": "The MongoDB database user created under Atlas \u2192 Security \u2192 Database Access."
+          },
+          {
+            "name": "password",
+            "label": "Database Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user above. This is NOT your Atlas account password."
+          },
+          {
+            "name": "database_name",
+            "label": "Database Name",
+            "type": "text",
+            "required": false,
+            "placeholder": "myDatabase",
+            "description": "Target database to connect to. Leave blank to connect to the 'admin' database."
+          },
+          {
+            "name": "tls_enabled",
+            "label": "Require TLS",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Atlas clusters enforce TLS by default. Keep this enabled unless explicitly disabled on your cluster."
+          }
+        ]
+      }
+    ]
+  }
+}

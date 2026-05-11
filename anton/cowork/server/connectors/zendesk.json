@@ -1,0 +1,112 @@
+{
+  "id": "zendesk",
+  "label": "Zendesk",
+  "aliases": [
+    "zendesk support",
+    "zendesk helpdesk",
+    "zendesk tickets",
+    "zd"
+  ],
+  "keywords": [
+    "tickets",
+    "helpdesk",
+    "support",
+    "customer service",
+    "crm",
+    "help desk",
+    "service desk"
+  ],
+  "description": "Connect to Zendesk to read, create, and update support tickets and customer records.",
+  "category": "support",
+  "logo": "chats",
+  "logo_color": "#03363D",
+  "form": {
+    "form_id": "zendesk-connector",
+    "title": "Connect Zendesk",
+    "subtitle": "Link Anton to your Zendesk account to manage tickets and customer conversations.",
+    "logo": "chats",
+    "logo_color": "#03363D",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your Zendesk API token along with your login email and subdomain. No OAuth setup required \u2014 generate a token in Admin Center in under a minute.",
+        "recommended": true,
+        "how_to": "## Generate a Zendesk API Token\n\n### Steps\n\n1. Log in to your Zendesk account and open **Admin Center** (the cog icon in the left sidebar).\n2. Navigate to **Apps and integrations \u2192 APIs \u2192 Zendesk API**.\n3. Make sure **Token Access** is enabled (toggle it on if not).\n4. Click **Add API token**.\n5. Give the token a description like `Anton` so you can identify it later.\n6. Copy the token \u2014 **it is only shown once**. If you lose it, you'll need to create a new one.\n7. Paste the token into the **API Token** field below.\n8. Enter the **email address** you use to log in to Zendesk.\n9. Enter your **subdomain** \u2014 the part before `.zendesk.com` in your Zendesk URL (e.g. `yourcompany` from `yourcompany.zendesk.com`).\n\n### Notes\n\n- The token is scoped to the permissions of the user whose email you provide. Use an admin email for full access.\n- You can revoke the token at any time in Admin Center \u2192 Apps and integrations \u2192 APIs \u2192 Zendesk API.\n- If your Zendesk instance uses SSO or restricts API access, check with your Zendesk admin.\n",
+        "help_url": "https://support.zendesk.com/hc/en-us/articles/4408889192858-Generating-a-new-API-token",
+        "fields": [
+          {
+            "name": "subdomain",
+            "label": "Zendesk Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourcompany",
+            "description": "The part before .zendesk.com in your Zendesk URL. E.g. for yourcompany.zendesk.com, enter yourcompany."
+          },
+          {
+            "name": "email",
+            "label": "Login Email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@yourcompany.com",
+            "description": "The email address you use to sign in to Zendesk. The API token will act with this user's permissions."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Generated in Admin Center \u2192 Apps and integrations \u2192 APIs \u2192 Zendesk API. Shown only once \u2014 copy it before closing the dialog."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Use your own Zendesk OAuth client to authorize Anton via a browser consent flow. Requires setting up an OAuth client in Admin Center first.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://{subdomain}.zendesk.com/oauth/authorizations/new",
+          "token_url": "https://{subdomain}.zendesk.com/oauth/tokens",
+          "scopes": [
+            "read",
+            "write"
+          ],
+          "extra_auth_params": {
+            "response_type": "code"
+          }
+        },
+        "how_to": "## Set Up OAuth 2.0 for Zendesk\n\n### Create an OAuth Client in Zendesk\n\n1. Log in to Zendesk and open **Admin Center**.\n2. Navigate to **Apps and integrations \u2192 APIs \u2192 OAuth clients**.\n3. Click **Add OAuth client**.\n4. Fill in:\n   - **Client name**: `Anton`\n   - **Redirect URL**: `http://localhost` (or the redirect Anton provides)\n5. Save the client. Copy the **Client ID** and **Client Secret** shown on the page.\n\n### Configure Anton\n\n1. Enter your **Zendesk subdomain** (e.g. `yourcompany` from `yourcompany.zendesk.com`).\n2. Paste the **Client ID** and **Client Secret** from the OAuth client you just created.\n3. Click **Submit**. A browser window will open asking you to authorize Anton.\n4. After approval, Anton stores the access token securely.\n\n### Notes\n\n- Scopes requested: `read` and `write`.\n- You can revoke access in Admin Center \u2192 Apps and integrations \u2192 APIs \u2192 OAuth clients.\n",
+        "help_url": "https://support.zendesk.com/hc/en-us/articles/4408845965210-Using-OAuth-authentication-with-your-application",
+        "fields": [
+          {
+            "name": "subdomain",
+            "label": "Zendesk Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourcompany",
+            "description": "The part before .zendesk.com in your Zendesk URL."
+          },
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your_oauth_client_id",
+            "description": "From Admin Center \u2192 Apps and integrations \u2192 APIs \u2192 OAuth clients."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID. Shown when the OAuth client is created in Admin Center."
+          }
+        ]
+      }
+    ]
+  }
+}

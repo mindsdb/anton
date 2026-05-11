@@ -1,0 +1,145 @@
+{
+  "id": "databricks",
+  "label": "Databricks",
+  "aliases": [
+    "databricks lakehouse",
+    "databricks sql",
+    "databricks warehouse",
+    "delta lake",
+    "databricks unity catalog"
+  ],
+  "keywords": [
+    "lakehouse",
+    "sql warehouse",
+    "delta lake",
+    "spark",
+    "databricks",
+    "data warehouse",
+    "analytics",
+    "unity catalog",
+    "dapi"
+  ],
+  "description": "Query and manage Databricks SQL warehouses and lakehouses using a personal access token and HTTP path.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#FF3621",
+  "form": {
+    "form_id": "databricks-connector",
+    "title": "Connect Databricks",
+    "subtitle": "Paste your workspace URL, personal access token, and SQL warehouse HTTP path to get started.",
+    "logo": "database",
+    "logo_color": "#FF3621",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Paste your Databricks workspace URL, a personal access token (starts with dapi\u2026), and the HTTP path of your SQL warehouse. Quickest way to connect \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Personal Access Token\n\nDatabricks personal access tokens (PATs) start with `dapi` and are the simplest way to authenticate programmatically.\n\n### 1 \u2014 Find your workspace URL\n\n1. Log in to your Databricks workspace.\n2. Copy the URL from your browser address bar up to and including `.azuredatabricks.net`, `.gcp.databricks.com`, or `.databricks.com` \u2014 for example: `https://adb-1234567890123456.7.azuredatabricks.net`.\n\n### 2 \u2014 Generate a personal access token\n\n1. In your Databricks workspace, click your avatar (top-right) \u2192 **Settings**.\n2. Navigate to **Developer \u2192 Access tokens \u2192 Manage**.\n3. Click **Generate new token**, add a comment like `Anton`, and choose a lifetime (or leave blank for no expiry).\n4. Copy the token \u2014 it starts with `dapi` and is shown **only once**.\n\n### 3 \u2014 Find the SQL warehouse HTTP path\n\n1. In the left sidebar, go to **SQL Warehouses** (or **Compute \u2192 SQL Warehouses**).\n2. Click your warehouse \u2192 **Connection details** tab.\n3. Copy the **HTTP Path** \u2014 it looks like `/sql/1.0/warehouses/abc123def456`.\n\n### Notes\n\n- Store the token securely \u2014 if lost, generate a new one and update this connector.\n- Workspace admins can revoke tokens under **Admin Console \u2192 Access control \u2192 Personal access tokens**.\n- If your workspace uses IP allowlisting, ensure Anton's host is permitted.",
+        "help_url": "https://docs.databricks.com/en/dev-tools/auth/pat.html",
+        "fields": [
+          {
+            "name": "workspace_url",
+            "label": "Workspace URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://adb-1234567890123456.7.azuredatabricks.net",
+            "description": "The base URL of your Databricks workspace, e.g. https://adb-xxxx.azuredatabricks.net or https://myorg.cloud.databricks.com."
+          },
+          {
+            "name": "access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "dapi\u2026",
+            "description": "Starts with dapi. Generated under Settings \u2192 Developer \u2192 Access tokens. Shown only once \u2014 store it safely."
+          },
+          {
+            "name": "http_path",
+            "label": "SQL Warehouse HTTP Path",
+            "type": "text",
+            "required": true,
+            "placeholder": "/sql/1.0/warehouses/abc123def456",
+            "description": "Found in your SQL Warehouse \u2192 Connection details tab. Identifies which warehouse Anton queries."
+          },
+          {
+            "name": "catalog",
+            "label": "Default Catalog",
+            "type": "text",
+            "required": false,
+            "placeholder": "main",
+            "description": "Optional Unity Catalog catalog name to use by default. Leave blank to use the warehouse's default."
+          },
+          {
+            "name": "schema",
+            "label": "Default Schema",
+            "type": "text",
+            "required": false,
+            "placeholder": "default",
+            "description": "Optional default schema (database) within the catalog. Leave blank to use the warehouse's default."
+          }
+        ]
+      },
+      {
+        "id": "service-principal-oauth",
+        "label": "Service Principal (OAuth M2M)",
+        "description": "Use a Databricks-managed service principal with OAuth machine-to-machine credentials. Better for shared team environments or CI pipelines where a personal token is inappropriate.",
+        "recommended": false,
+        "how_to": "## Connect with a Service Principal (OAuth M2M)\n\nDatabricks supports OAuth 2.0 machine-to-machine (M2M) flows via service principals. This avoids tying access to an individual user account.\n\n### 1 \u2014 Create a service principal\n\n1. In your Databricks workspace, go to **Settings \u2192 Identity & access \u2192 Service principals \u2192 Add service principal**.\n2. Give it a name like `Anton` and click **Add**.\n3. Note the **Application (client) ID** shown on the details page.\n\n### 2 \u2014 Generate an OAuth secret\n\n1. Open the service principal \u2192 **Secrets tab \u2192 Generate secret**.\n2. Copy the **Secret** value \u2014 it is shown only once.\n\n### 3 \u2014 Grant permissions\n\n1. Assign the service principal to your SQL warehouse: **SQL Warehouses \u2192 your warehouse \u2192 Permissions \u2192 Add** the service principal with at least **Can use** privilege.\n2. In Unity Catalog, grant the service principal the necessary catalog/schema/table privileges.\n\n### 4 \u2014 Find your workspace URL and HTTP path\n\nSame as the Personal Access Token method \u2014 see the SQL Warehouse \u2192 Connection details tab for the HTTP path.\n\n### Notes\n\n- The OAuth token endpoint is `https://<workspace-url>/oidc/v1/token`.\n- Service principal secrets can be rotated without impacting other users.\n- Workspace admins can manage service principals under **Admin Console \u2192 Service principals**.",
+        "help_url": "https://docs.databricks.com/en/dev-tools/auth/oauth-m2m.html",
+        "fields": [
+          {
+            "name": "workspace_url",
+            "label": "Workspace URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://adb-1234567890123456.7.azuredatabricks.net",
+            "description": "The base URL of your Databricks workspace."
+          },
+          {
+            "name": "client_id",
+            "label": "Service Principal Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "The Application (client) ID of the Databricks service principal."
+          },
+          {
+            "name": "client_secret",
+            "label": "Service Principal Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "dose\u2026",
+            "description": "OAuth secret generated under the service principal's Secrets tab. Shown only once."
+          },
+          {
+            "name": "http_path",
+            "label": "SQL Warehouse HTTP Path",
+            "type": "text",
+            "required": true,
+            "placeholder": "/sql/1.0/warehouses/abc123def456",
+            "description": "Found in your SQL Warehouse \u2192 Connection details tab."
+          },
+          {
+            "name": "catalog",
+            "label": "Default Catalog",
+            "type": "text",
+            "required": false,
+            "placeholder": "main",
+            "description": "Optional Unity Catalog catalog name. Leave blank to use the warehouse's default."
+          },
+          {
+            "name": "schema",
+            "label": "Default Schema",
+            "type": "text",
+            "required": false,
+            "placeholder": "default",
+            "description": "Optional default schema within the catalog. Leave blank to use the warehouse's default."
+          }
+        ]
+      }
+    ]
+  }
+}

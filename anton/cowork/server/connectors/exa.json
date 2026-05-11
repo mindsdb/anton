@@ -1,0 +1,52 @@
+{
+  "id": "exa",
+  "label": "Exa",
+  "aliases": [
+    "exa ai",
+    "exa search",
+    "neural search",
+    "exasearch"
+  ],
+  "keywords": [
+    "search",
+    "neural",
+    "ai",
+    "web",
+    "semantic",
+    "retrieval",
+    "agents",
+    "rag"
+  ],
+  "description": "Neural web search built for AI agents \u2014 query the web semantically and get clean, structured results.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#7C3AED",
+  "form": {
+    "form_id": "exa-connector",
+    "title": "Connect Exa",
+    "subtitle": "Paste your Exa API key to give Anton neural web-search capabilities.",
+    "logo": "search",
+    "logo_color": "#7C3AED",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Exa API key from the dashboard. No OAuth flow needed \u2014 copy and done.",
+        "recommended": true,
+        "how_to": "## Get your Exa API key\n\n1. Open [dashboard.exa.ai](https://dashboard.exa.ai) and sign in (or create a free account).\n2. In the left sidebar, click **API Keys**.\n3. Click **Create API Key**, give it a name like `Anton`, and confirm.\n4. Copy the key shown \u2014 it will not be displayed again.\n5. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Keys are project-scoped. If you belong to multiple Exa workspaces, make sure you're in the right one before creating the key.\n- To revoke access later, return to **API Keys** in the dashboard, find the `Anton` key, and delete it.\n- Check your plan's monthly search credit limit under **Billing** \u2014 Anton will surface API quota errors if you hit the cap.\n",
+        "help_url": "https://docs.exa.ai/reference/getting-started",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "exa-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at dashboard.exa.ai \u2192 API Keys. Shown only once \u2014 store it safely."
+          }
+        ]
+      }
+    ]
+  }
+}

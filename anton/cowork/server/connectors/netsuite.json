@@ -1,0 +1,91 @@
+{
+  "id": "netsuite",
+  "label": "NetSuite",
+  "aliases": [
+    "oracle netsuite",
+    "netsuite erp",
+    "oracle erp",
+    "ns",
+    "netsuite financials"
+  ],
+  "keywords": [
+    "erp",
+    "accounting",
+    "financials",
+    "oracle",
+    "inventory",
+    "billing",
+    "payroll",
+    "ledger",
+    "crm",
+    "revenue",
+    "suitecloud"
+  ],
+  "description": "Connect to Oracle NetSuite ERP to read and write financial, inventory, and operational data using Token-Based Authentication.",
+  "category": "accounting",
+  "logo": "key",
+  "logo_color": "#1A7DC4",
+  "form": {
+    "form_id": "netsuite-connector",
+    "title": "Connect NetSuite",
+    "subtitle": "Authenticate with Token-Based Authentication (TBA) to access your NetSuite account data.",
+    "logo": "key",
+    "logo_color": "#1A7DC4",
+    "methods": [
+      {
+        "id": "token-based-auth",
+        "label": "Token-Based Authentication (TBA)",
+        "description": "Paste your NetSuite Account ID, consumer key/secret, and token ID/secret. The recommended auth method for NetSuite integrations \u2014 no password sharing, scoped to a specific integration record.",
+        "recommended": true,
+        "how_to": "## Set up Token-Based Authentication in NetSuite\n\nTBA requires an Integration Record and a set of access tokens generated in your NetSuite account. You'll need Administrator or a role with Token Management permissions.\n\n### 1. Enable Token-Based Authentication\n\n1. Go to **Setup \u2192 Company \u2192 Enable Features**.\n2. Click the **SuiteCloud** tab.\n3. Under **Manage Authentication**, check **Token-Based Authentication**.\n4. Save.\n\n### 2. Create an Integration Record\n\n1. Go to **Setup \u2192 Integration \u2192 Manage Integrations \u2192 New**.\n2. Give it a name like `Anton`.\n3. Under **Authentication**, check **Token-Based Authentication**. Uncheck **TBA: Authorization Flow** unless you need it.\n4. Save. NetSuite shows a **Consumer Key** and **Consumer Secret** \u2014 copy both immediately. They are shown only once.\n\n### 3. Create an Access Token\n\n1. Go to **Setup \u2192 Users/Roles \u2192 Access Tokens \u2192 New**.\n2. Select the Integration Record you just created.\n3. Select the **User** and the **Role** Anton should operate as.\n4. Save. NetSuite shows a **Token ID** and **Token Secret** \u2014 copy both immediately. Shown only once.\n\n### 4. Find your Account ID\n\n- Go to **Setup \u2192 Company \u2192 Company Information**. Your Account ID is listed there (e.g. `1234567` or `1234567_SB1` for sandboxes).\n\n### 5. Paste everything below\n\nFill in all five fields. Anton stores them encrypted locally and uses OAuth 1.0 HMAC-SHA256 signing on every request.\n\n### Notes\n- Sandbox accounts use a suffix like `_SB1` in the Account ID \u2014 make sure to include it.\n- If a token is compromised, revoke it under **Setup \u2192 Users/Roles \u2192 Access Tokens** and generate a new one.\n- The role assigned to the token determines what data Anton can read or write \u2014 use the principle of least privilege.\n",
+        "help_url": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_4247337262.html",
+        "fields": [
+          {
+            "name": "account_id",
+            "label": "Account ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "1234567 or 1234567_SB1",
+            "description": "Found at Setup \u2192 Company \u2192 Company Information. Include the _SB1 suffix for sandbox accounts."
+          },
+          {
+            "name": "consumer_key",
+            "label": "Consumer Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste the consumer key from your Integration Record",
+            "description": "Generated when you saved the Integration Record. Shown only once \u2014 generate a new one if lost."
+          },
+          {
+            "name": "consumer_secret",
+            "label": "Consumer Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste the consumer secret from your Integration Record",
+            "description": "Paired with the consumer key. Also shown only once when the Integration Record was saved."
+          },
+          {
+            "name": "token_id",
+            "label": "Token ID",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste the token ID from your Access Token",
+            "description": "Generated when you saved the Access Token under Setup \u2192 Users/Roles \u2192 Access Tokens."
+          },
+          {
+            "name": "token_secret",
+            "label": "Token Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste the token secret from your Access Token",
+            "description": "Paired with the token ID. Shown only once at token creation time."
+          }
+        ]
+      }
+    ]
+  }
+}

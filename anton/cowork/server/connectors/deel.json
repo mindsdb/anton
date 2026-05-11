@@ -1,0 +1,101 @@
+{
+  "id": "deel",
+  "label": "Deel",
+  "aliases": [
+    "deel hr",
+    "deel payroll",
+    "deel eor",
+    "deel contractor"
+  ],
+  "keywords": [
+    "payroll",
+    "contractor",
+    "eor",
+    "employer of record",
+    "global hiring",
+    "hr",
+    "international",
+    "compliance",
+    "workforce",
+    "payments"
+  ],
+  "description": "Manage global contractor payments, EOR employees, and compliance through Deel's unified workforce platform.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#15D5C5",
+  "form": {
+    "form_id": "deel-connector",
+    "title": "Connect Deel",
+    "subtitle": "Paste your Deel API key to give Anton access to contractor, payroll, and EOR data.",
+    "logo": "check",
+    "logo_color": "#15D5C5",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Generate a personal API key from Deel's Developer settings and paste it here. No OAuth setup required \u2014 the fastest way to connect.",
+        "recommended": true,
+        "how_to": "## Generate a Deel API Key\n\n1. Log in to your Deel account at [app.deel.com](https://app.deel.com).\n2. Click your avatar or account name in the bottom-left corner, then go to **Settings**.\n3. In the left sidebar, navigate to **Developer \u2192 API**.\n4. Click **Generate API Token** (or **Create new token** if tokens already exist).\n5. Give the token a descriptive name like `Anton`.\n6. Set the desired permission scopes \u2014 at minimum enable **Read** access for the resources Anton needs (contracts, payments, workers). Enable **Write** if you want Anton to take actions on your behalf.\n7. Click **Generate**. The token is shown **once** \u2014 copy it immediately.\n8. Paste the token into the **API Key** field below.\n\n## Notes\n\n- Tokens are scoped per workspace. If you manage multiple Deel organizations, generate a token for each.\n- If you lose the token, delete it in Developer settings and generate a fresh one.\n- Deel enforces IP-based rate limits; avoid running many parallel requests.\n",
+        "help_url": "https://developer.deel.com/docs/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "deel_live_xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Deel \u2192 Settings \u2192 Developer \u2192 API. The key is shown only once at creation time."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.letsdeel.com",
+            "default": "https://api.letsdeel.com",
+            "description": "Leave as default unless Deel has directed you to a regional endpoint."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Client Credentials)",
+        "description": "Use a Deel OAuth app with a client ID and secret for server-to-server authentication. Suitable for organizations that need programmatic, non-user-scoped access.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.deel.com/oauth2/authorize",
+          "token_url": "https://app.deel.com/oauth2/token",
+          "scopes": [
+            "contracts:read",
+            "payments:read",
+            "workers:read",
+            "organizations:read"
+          ]
+        },
+        "how_to": "## Connect Deel via OAuth 2.0\n\n1. Log in to [app.deel.com](https://app.deel.com) and go to **Settings \u2192 Developer \u2192 OAuth Apps**.\n2. Click **Create OAuth App**.\n3. Enter a name (e.g. `Anton`) and set the redirect URI to the value Anton provides (displayed in the connector setup screen).\n4. Select the required scopes: `contracts:read`, `payments:read`, `workers:read`, and `organizations:read`. Add write scopes if Anton needs to create or update records.\n5. Save the app and copy the **Client ID** and **Client Secret** shown on the app detail page.\n6. Paste both values into the fields below and click **Connect**. Anton will open Deel's consent page in your browser.\n7. Approve the permissions. Deel redirects back to Anton and stores the resulting access and refresh tokens locally.\n\n## Notes\n\n- The client secret is shown once \u2014 save it before closing the page.\n- If you need to re-authorize, delete the OAuth app in Deel and create a new one.\n- OAuth tokens expire; Anton will automatically refresh them using the stored refresh token.\n",
+        "help_url": "https://developer.deel.com/docs/oauth2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-deel-client-id",
+            "description": "From Deel \u2192 Settings \u2192 Developer \u2192 OAuth Apps \u2192 your app's Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-deel-client-secret",
+            "description": "Shown once when the OAuth app is created. Paired with the Client ID above."
+          }
+        ]
+      }
+    ]
+  }
+}

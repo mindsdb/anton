@@ -1,0 +1,54 @@
+{
+  "id": "assemblyai",
+  "label": "AssemblyAI",
+  "aliases": [
+    "assembly ai",
+    "assembly-ai",
+    "assemblyai stt",
+    "speech to text ai"
+  ],
+  "keywords": [
+    "speech",
+    "transcription",
+    "audio",
+    "voice",
+    "stt",
+    "intelligence",
+    "ai",
+    "nlp",
+    "diarization",
+    "sentiment"
+  ],
+  "description": "Transcribe audio and extract intelligence from speech using AssemblyAI's API.",
+  "category": "ai",
+  "logo": "mic",
+  "logo_color": "#6B4FBB",
+  "form": {
+    "form_id": "assemblyai-connector",
+    "title": "Connect AssemblyAI",
+    "subtitle": "Paste your AssemblyAI API key to enable speech-to-text and audio intelligence.",
+    "logo": "mic",
+    "logo_color": "#6B4FBB",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your AssemblyAI API key. Quickest setup \u2014 find it in your account dashboard under API Keys.",
+        "recommended": true,
+        "how_to": "## Get your AssemblyAI API Key\n\n1. Sign in at [app.assemblyai.com](https://www.assemblyai.com/app).\n2. Click your account avatar or name in the top-right corner.\n3. Navigate to **Account \u2192 API Keys**.\n4. Copy the key shown (it starts with a long alphanumeric string).\n5. Paste it into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Your API key grants full access to your AssemblyAI account, including all transcription jobs and usage. Keep it secret.\n- If you suspect the key has been compromised, regenerate it from the same **API Keys** page \u2014 any integration using the old key will need to be updated.\n- Usage charges apply per audio minute transcribed; check your plan limits on the [Billing page](https://www.assemblyai.com/app/account/billing).\n",
+        "help_url": "https://www.assemblyai.com/docs/get-started#get-your-api-key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-assemblyai-api-key",
+            "description": "Found at app.assemblyai.com \u2192 Account \u2192 API Keys. Treat this like a password \u2014 it grants full API access."
+          }
+        ]
+      }
+    ]
+  }
+}

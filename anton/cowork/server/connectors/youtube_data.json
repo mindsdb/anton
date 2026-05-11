@@ -1,0 +1,95 @@
+{
+  "id": "youtube_data",
+  "label": "YouTube Data",
+  "aliases": [
+    "youtube",
+    "yt",
+    "youtube api",
+    "google youtube",
+    "youtube v3"
+  ],
+  "keywords": [
+    "video",
+    "channel",
+    "playlist",
+    "comments",
+    "search",
+    "youtube",
+    "google",
+    "media",
+    "streaming",
+    "content"
+  ],
+  "description": "Search and read videos, channels, playlists, and comments from the YouTube Data API v3.",
+  "category": "public-data",
+  "logo": "image",
+  "logo_color": "#FF0000",
+  "form": {
+    "form_id": "youtube_data-connector",
+    "title": "Connect YouTube Data",
+    "subtitle": "Authorize Anton to search and read YouTube content on your behalf.",
+    "logo": "image",
+    "logo_color": "#FF0000",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Google (OAuth 2.0)",
+        "description": "Opens a browser-based Google consent screen so Anton can read YouTube videos, channels, playlists, and comments. Requires a Google Cloud OAuth client you bring yourself \u2014 setup takes about 5 minutes.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/youtube.force-ssl",
+            "https://www.googleapis.com/auth/userinfo.email"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Sign in with Google \u2014 Bring Your Own OAuth Client\n\nAnton doesn't ship a hosted OAuth client for YouTube yet, so you'll create one in Google Cloud Console (free, ~5 minutes).\n\n### 1. Enable the YouTube Data API\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and pick or create a project.\n2. Go to **APIs & Services \u2192 Library**, search for **YouTube Data API v3**, and click **Enable**.\n\n### 2. Configure the OAuth consent screen\n\n1. Go to **APIs & Services \u2192 OAuth consent screen**.\n2. Choose **External** (or **Internal** for Workspace orgs) and click **Create**.\n3. Fill in the app name (e.g. `Anton`) and your email, then click **Save and Continue**.\n4. On the **Scopes** step, add:\n   - `youtube.readonly`\n   - `youtube.force-ssl`\n   - `userinfo.email`\n5. Under **Test users**, add your Google account email, then finish the wizard.\n\n### 3. Create an OAuth client ID\n\n1. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID**.\n2. Select **Desktop app** as the application type.\n3. Give it a name like `Anton Desktop` and click **Create**.\n4. Copy the **Client ID** and **Client secret** shown in the dialog.\n\n### 4. Paste into Anton\n\n1. Paste the Client ID and Client secret into the fields below.\n2. Click **Submit**. Anton opens your browser to Google's consent screen.\n3. Sign in, review the permissions, and click **Continue**.\n4. Anton stores the resulting refresh token locally \u2014 your credentials never leave your machine.\n\n### Notes\n\n- Refresh tokens are long-lived but will expire if your app stays in **Testing** mode and is unused for 7 days. Publish the consent screen to avoid this.\n- To revoke access, visit [Third-party apps with account access](https://myaccount.google.com/permissions) and remove the entry.\n",
+        "help_url": "https://developers.google.com/youtube/v3/guides/auth/installed-apps",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Use a Desktop app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID; copied from the same credentials dialog in Cloud Console."
+          }
+        ]
+      },
+      {
+        "id": "api-key",
+        "label": "API Key (read-only, public data only)",
+        "description": "Use a Google Cloud API key to query public YouTube data without signing in. Simpler to set up but restricted to unauthenticated public content \u2014 no private videos, subscriptions, or user-specific data.",
+        "recommended": false,
+        "how_to": "## Create a YouTube Data API Key\n\nAPI keys work for public, read-only YouTube data (videos, channels, playlists, public comments). They cannot access private content or act on behalf of a user.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and pick or create a project.\n2. Go to **APIs & Services \u2192 Library**, search for **YouTube Data API v3**, and click **Enable**.\n3. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 API key**.\n4. Google generates the key immediately \u2014 click **Copy**.\n5. (Optional but recommended) Click **Restrict key**:\n   - Under **API restrictions**, select **Restrict key** and choose **YouTube Data API v3**.\n   - Under **Application restrictions**, consider limiting to your IP or referrer.\n6. Paste the key into the **API Key** field below.\n\n### Notes\n\n- API keys have no expiry by default but can be deleted or regenerated in Cloud Console at any time.\n- The free quota is 10,000 units per day. Heavy searches or large list operations consume units quickly \u2014 check **APIs & Services \u2192 Quotas** to monitor usage.\n- If you need access to private videos or user account data, use **Sign in with Google** instead.\n",
+        "help_url": "https://developers.google.com/youtube/v3/getting-started#before-you-start",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "AIzaSy...",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Restrict it to YouTube Data API v3 for safety."
+          }
+        ]
+      }
+    ]
+  }
+}

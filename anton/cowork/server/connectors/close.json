@@ -1,0 +1,88 @@
+{
+  "id": "close",
+  "label": "Close",
+  "aliases": [
+    "close.io",
+    "closeio",
+    "close crm",
+    "close.com"
+  ],
+  "keywords": [
+    "crm",
+    "sales",
+    "calling",
+    "email",
+    "pipeline",
+    "leads",
+    "deals",
+    "sequences",
+    "sms"
+  ],
+  "description": "Sales-focused CRM with built-in calling, email, and SMS \u2014 connect via your personal API key.",
+  "category": "crm",
+  "logo": "link",
+  "logo_color": "#5C6AC4",
+  "form": {
+    "form_id": "close-connector",
+    "title": "Connect Close",
+    "subtitle": "Paste your Close API key to let Anton read and write your CRM data.",
+    "logo": "link",
+    "logo_color": "#5C6AC4",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a personal API key from Close Settings \u2192 API Keys. Simplest path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Close API Key\n\n1. Log in to your Close account at [app.close.com](https://app.close.com).\n2. Click your avatar or initials in the bottom-left corner, then open **Settings**.\n3. Navigate to **Your Profile \u2192 API Keys** (or go directly to [app.close.com/profile/api-keys](https://app.close.com/profile/api-keys)).\n4. Click **Generate New API Key**.\n5. Give it a descriptive name like `Anton`.\n6. Copy the key shown \u2014 it is only displayed once.\n7. Paste the key into the **API Key** field below.\n\n## Notes\n\n- API keys are scoped to your user account; they inherit your permissions within Close.\n- If you need org-wide access, use an admin account to generate the key.\n- To revoke access, return to **Settings \u2192 API Keys** and delete the key.\n- Close uses HTTP Basic Auth under the hood \u2014 the key acts as the username with a blank password.",
+        "help_url": "https://developer.close.com/topics/authentication/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Close at Settings \u2192 Your Profile \u2192 API Keys. Shown only once at creation time."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Use a Close OAuth 2.0 app you registered in the Close Developer Portal. Suitable for building integrations that access multiple Close organizations.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.close.com/oauth2/authorize",
+          "token_url": "https://api.close.com/oauth2/token",
+          "scopes": [
+            "read",
+            "write"
+          ]
+        },
+        "how_to": "## OAuth 2.0 \u2014 Bring Your Own Client\n\nUse this method if you need token-based access without exposing a raw API key, or if you are building a multi-org integration.\n\n1. Log in at [app.close.com](https://app.close.com) with an admin account.\n2. Navigate to **Settings \u2192 Integrations \u2192 OAuth Apps** (or the Close Developer Portal).\n3. Click **Create App** and fill in a name (e.g. `Anton`) and set the redirect URI to `http://127.0.0.1` (Anton's local callback).\n4. Copy the **Client ID** and **Client Secret** shown.\n5. Paste them into the fields below and click **Submit**.\n6. A browser window opens for you (or the end user) to authorize access.\n\n## Notes\n\n- Tokens can be revoked from **Settings \u2192 Integrations \u2192 OAuth Apps** at any time.\n- If you only need personal access to your own account, the **API Key** method above is much simpler.",
+        "help_url": "https://developer.close.com/topics/oauth2/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your_close_oauth_client_id",
+            "description": "From the Close Developer Portal \u2192 OAuth Apps \u2192 your app's Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired client secret from the same OAuth app in the Close Developer Portal."
+          }
+        ]
+      }
+    ]
+  }
+}

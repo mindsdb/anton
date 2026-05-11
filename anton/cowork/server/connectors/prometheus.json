@@ -1,0 +1,111 @@
+{
+  "id": "prometheus",
+  "label": "Prometheus",
+  "aliases": [
+    "prometheus metrics",
+    "prom",
+    "open-source metrics",
+    "time-series db"
+  ],
+  "keywords": [
+    "metrics",
+    "time-series",
+    "monitoring",
+    "alerting",
+    "observability",
+    "scraping",
+    "promql",
+    "open-source"
+  ],
+  "description": "Query and monitor metrics from a Prometheus server using PromQL over HTTP.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#E6522C",
+  "form": {
+    "form_id": "prometheus-connector",
+    "title": "Connect Prometheus",
+    "subtitle": "Point Anton at your Prometheus server URL to run PromQL queries and read metrics.",
+    "logo": "sparkle",
+    "logo_color": "#E6522C",
+    "methods": [
+      {
+        "id": "server-url",
+        "label": "Server URL (no auth)",
+        "description": "Paste the base URL of your Prometheus server. Use this when your instance is on a private network or already secured at the network layer with no HTTP authentication required.",
+        "recommended": true,
+        "how_to": "## Connect to Prometheus via Server URL\n\nThe simplest path \u2014 just tell Anton where your Prometheus HTTP API lives.\n\n### Steps\n\n1. Confirm your Prometheus server is running and reachable from this machine. By default it listens on port `9090`.\n2. Find the base URL \u2014 usually `http://localhost:9090` for local instances, or `http://<host>:9090` for remote ones.\n3. Paste the URL into the **Server URL** field below (no trailing slash needed).\n4. Click **Submit**. Anton will probe `<url>/api/v1/status/buildinfo` to verify connectivity.\n\n### Notes\n\n- If your Prometheus sits behind a reverse proxy with a path prefix (e.g. `/prometheus`), include that prefix: `https://example.com/prometheus`.\n- For TLS-enabled instances, use `https://` \u2014 make sure the certificate is trusted by the system running Anton.\n- If your instance requires a username and password, use the **Basic Auth** method instead.",
+        "help_url": "https://prometheus.io/docs/prometheus/latest/querying/api/",
+        "fields": [
+          {
+            "name": "server_url",
+            "label": "Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "http://localhost:9090",
+            "description": "Base URL of your Prometheus server. Anton appends /api/v1/... for all queries."
+          }
+        ]
+      },
+      {
+        "id": "basic-auth",
+        "label": "Basic Auth (username + password)",
+        "description": "Use this when your Prometheus instance or its reverse proxy is protected with HTTP Basic Authentication. Provide the server URL along with your username and password.",
+        "recommended": false,
+        "how_to": "## Connect to Prometheus with Basic Auth\n\nSome Prometheus deployments sit behind a reverse proxy (nginx, Caddy, etc.) or use Prometheus's built-in `web.config` to enforce HTTP Basic Authentication.\n\n### Steps\n\n1. Locate the base URL of your Prometheus server (e.g. `https://metrics.example.com`).\n2. Obtain the **username** and **password** configured for HTTP Basic Auth on the proxy or in `web.yml`.\n3. Fill in all three fields below \u2014 Server URL, Username, and Password.\n4. Click **Submit**. Anton will probe `<url>/api/v1/status/buildinfo` with the provided credentials.\n\n### Setting up Basic Auth on Prometheus (if not done yet)\n\n1. Generate a hashed password using `bcrypt` (e.g. `htpasswd -nB admin`).\n2. Create a `web.yml` file:\n   ```\n   basic_auth_users:\n     admin: <bcrypt-hash>\n   ```\n3. Start Prometheus with `--web.config.file=web.yml`.\n\n### Notes\n\n- Credentials are stored locally by Anton and sent over HTTPS \u2014 always use TLS for remote instances.\n- If your proxy handles auth separately, the Prometheus config itself does not need `web.yml`.\n- See the [Prometheus TLS and auth guide](https://prometheus.io/docs/prometheus/latest/configuration/https/) for full details.",
+        "help_url": "https://prometheus.io/docs/prometheus/latest/configuration/https/",
+        "fields": [
+          {
+            "name": "server_url",
+            "label": "Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://metrics.example.com",
+            "description": "Base URL of your Prometheus server, including scheme and port if non-standard."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "admin",
+            "description": "HTTP Basic Auth username configured on your Prometheus server or reverse proxy."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "HTTP Basic Auth password. Stored locally and never sent to Anton's servers."
+          }
+        ]
+      },
+      {
+        "id": "bearer-token",
+        "label": "Bearer Token",
+        "description": "Authenticate using a bearer token \u2014 common when Prometheus is fronted by a gateway or deployed on Kubernetes with token-based access control.",
+        "recommended": false,
+        "how_to": "## Connect to Prometheus with a Bearer Token\n\nUse this method when your Prometheus endpoint requires an `Authorization: Bearer <token>` header \u2014 typical for Kubernetes-hosted instances or API gateways.\n\n### Steps\n\n1. Obtain your bearer token from your platform:\n   - **Kubernetes**: run `kubectl create token <service-account>` or retrieve a long-lived token from a Secret.\n   - **API gateway / proxy**: copy the token from your gateway's dashboard or configuration.\n2. Paste the base URL of your Prometheus server into **Server URL**.\n3. Paste the token into **Bearer Token** below.\n4. Click **Submit**. Anton will probe `<url>/api/v1/status/buildinfo` with the `Authorization` header.\n\n### Notes\n\n- Tokens are stored locally by Anton. Use HTTPS to avoid leaking the token in transit.\n- Kubernetes service account tokens may expire \u2014 if queries start failing, regenerate and re-paste the token.\n- If your instance uses Basic Auth instead, switch to the **Basic Auth** method.",
+        "help_url": "https://prometheus.io/docs/guides/basic-auth/",
+        "fields": [
+          {
+            "name": "server_url",
+            "label": "Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://metrics.example.com",
+            "description": "Base URL of your Prometheus server, including scheme and port if non-standard."
+          },
+          {
+            "name": "bearer_token",
+            "label": "Bearer Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Token sent as 'Authorization: Bearer <token>' with every request. Stored locally."
+          }
+        ]
+      }
+    ]
+  }
+}

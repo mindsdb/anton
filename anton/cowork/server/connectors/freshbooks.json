@@ -1,0 +1,66 @@
+{
+  "id": "freshbooks",
+  "label": "FreshBooks",
+  "aliases": [
+    "fresh books",
+    "freshbooks accounting",
+    "freshbooks invoicing"
+  ],
+  "keywords": [
+    "accounting",
+    "invoicing",
+    "billing",
+    "small business",
+    "finance",
+    "expenses",
+    "payments",
+    "bookkeeping",
+    "cloud accounting"
+  ],
+  "description": "Cloud accounting software for small businesses \u2014 manage invoices, expenses, and payments.",
+  "category": "accounting",
+  "logo": "key",
+  "logo_color": "#0075DD",
+  "form": {
+    "form_id": "freshbooks-connector",
+    "title": "Connect FreshBooks",
+    "subtitle": "Authorize Anton to access your FreshBooks account via OAuth 2.0.",
+    "logo": "key",
+    "logo_color": "#0075DD",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth 2.0 (Bring Your Own Client)",
+        "description": "Connect via FreshBooks OAuth 2.0. Create a FreshBooks app to get a client ID and secret, then Anton opens a browser window for you to grant access. No password stored \u2014 revocable anytime from FreshBooks.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://auth.freshbooks.com/oauth/authorize",
+          "token_url": "https://api.freshbooks.com/auth/oauth/token",
+          "scopes": []
+        },
+        "how_to": "## Connect FreshBooks via OAuth 2.0\n\nYou'll need to register a FreshBooks developer app to get a client ID and secret.\n\n### Steps\n\n1. Go to [FreshBooks Developer Portal](https://my.freshbooks.com/#/developer) and sign in.\n2. Click **Create an App**.\n3. Fill in a name (e.g. `Anton`) and any required fields. For the **Redirect URI**, enter `http://localhost` (or the URI Anton instructs you to use during setup).\n4. Click **Save**. Your **Client ID** and **Client Secret** are shown on the app detail page.\n5. Copy both values and paste them into the fields below.\n6. Click **Submit**. Anton will open your browser to FreshBooks' consent screen.\n7. Sign in (if prompted) and click **Allow Access**.\n8. Anton receives the authorization code, exchanges it for tokens, and stores them locally.\n\n### Notes\n\n- FreshBooks issues refresh tokens with long lifetimes, but if access is revoked you'll need to re-authorize.\n- To revoke access, visit **FreshBooks \u2192 Settings \u2192 Connected Apps** and remove Anton.\n- Scopes are managed by your app's settings on the FreshBooks developer portal.",
+        "help_url": "https://www.freshbooks.com/api/authentication",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-freshbooks-client-id",
+            "description": "Found on your app's detail page at my.freshbooks.com/#/developer."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-freshbooks-client-secret",
+            "description": "Paired with your client ID \u2014 shown once when you create or reset the app secret."
+          }
+        ]
+      }
+    ]
+  }
+}

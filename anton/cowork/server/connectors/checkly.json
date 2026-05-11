@@ -1,0 +1,62 @@
+{
+  "id": "checkly",
+  "label": "Checkly",
+  "aliases": [
+    "checklyhq",
+    "checkly hq",
+    "synthetic monitoring",
+    "playwright monitoring"
+  ],
+  "keywords": [
+    "monitoring",
+    "synthetic",
+    "api",
+    "e2e",
+    "playwright",
+    "uptime",
+    "alerting",
+    "observability",
+    "testing",
+    "checks"
+  ],
+  "description": "Synthetic monitoring, API monitoring, and end-to-end Playwright testing powered by Checkly.",
+  "category": "observability",
+  "logo": "refresh",
+  "logo_color": "#45C9A6",
+  "form": {
+    "form_id": "checkly-connector",
+    "title": "Connect Checkly",
+    "subtitle": "Paste your Checkly API key and account ID to give Anton access to your monitors, checks, and results.",
+    "logo": "refresh",
+    "logo_color": "#45C9A6",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Checkly API key along with your account ID. Generated in seconds from Account Settings \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect via Checkly API Key\n\n### 1. Get your API key\n\n1. Log in to [app.checklyhq.com](https://app.checklyhq.com).\n2. Click your avatar or username in the bottom-left corner to open **Account Settings**.\n3. Navigate to **API Keys** (or directly visit `app.checklyhq.com/account/api-keys`).\n4. Click **Create API Key**, give it a descriptive name like `Anton`, and click **Create**.\n5. Copy the key immediately \u2014 it is shown only once.\n\n### 2. Find your Account ID\n\n1. While still in **Account Settings**, select the **General** tab.\n2. Your **Account ID** is listed near the top of the page (a short alphanumeric string).\n3. Copy it.\n\n### 3. Paste into Anton\n\nPaste both values into the fields below and click **Submit**.\n\n### Notes\n\n- API keys are tied to the account that created them. If you have multiple Checkly accounts (e.g. different orgs), make sure you copy from the right one.\n- Checkly does not currently support scoped API keys \u2014 the key grants full read/write access to the account.\n- If you suspect a key was exposed, delete it from the API Keys page and create a new one.\n",
+        "help_url": "https://www.checklyhq.com/docs/accounts-and-users/accounts/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "cu_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Generated at app.checklyhq.com \u2192 Account Settings \u2192 API Keys. Shown only once \u2014 copy it before closing the dialog."
+          },
+          {
+            "name": "account_id",
+            "label": "Account ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "a1b2c3d4e5",
+            "description": "Found in app.checklyhq.com \u2192 Account Settings \u2192 General. Required to scope API requests to your account."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "id": "weaviate",
+  "label": "Weaviate",
+  "aliases": [
+    "weaviate cloud",
+    "weaviate vector db",
+    "weaviate database"
+  ],
+  "keywords": [
+    "vector",
+    "database",
+    "embeddings",
+    "semantic search",
+    "similarity",
+    "ai",
+    "machine learning",
+    "open-source",
+    "managed",
+    "wcs"
+  ],
+  "description": "Connect to a Weaviate vector database cluster to store, search, and retrieve high-dimensional embeddings.",
+  "category": "vector-db",
+  "logo": "cube",
+  "logo_color": "#4CAF50",
+  "form": {
+    "form_id": "weaviate-connector",
+    "title": "Connect Weaviate",
+    "subtitle": "Paste your cluster URL and API key to start querying your Weaviate vector database.",
+    "logo": "cube",
+    "logo_color": "#4CAF50",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "Cluster URL + API Key",
+        "description": "Paste your Weaviate cluster endpoint and API key. Works for both Weaviate Cloud Services (WCS) managed clusters and self-hosted instances with API key auth enabled.",
+        "recommended": true,
+        "how_to": "## Connect with Cluster URL and API Key\n\n### Weaviate Cloud Services (WCS) \u2014 managed cluster\n\n1. Sign in to [Weaviate Cloud](https://console.weaviate.cloud/).\n2. Open your cluster from the **Clusters** list.\n3. Copy the **Cluster URL** shown on the cluster details page (looks like `https://your-cluster.weaviate.network`).\n4. Click **API Keys** in the left sidebar (or the **Details** tab).\n5. Copy the **Admin** key or create a new one with the scopes you need.\n6. Paste both values into the fields below.\n\n### Self-hosted Weaviate\n\n1. Make sure your Weaviate instance is running with API key authentication enabled. In `docker-compose.yml` or your config, set:\n   - `AUTHENTICATION_APIKEY_ENABLED=true`\n   - `AUTHENTICATION_APIKEY_ALLOWED_KEYS=your-secret-key`\n2. Your cluster URL is the host + port where Weaviate is reachable (e.g. `http://localhost:8080`).\n3. Paste the URL and the key you configured into the fields below.\n\n### Notes\n\n- Anonymous (no-auth) clusters: leave the **API Key** field blank if your instance runs without authentication.\n- Keys are stored locally in Anton only \u2014 never sent to Weaviate's servers except as a Bearer token header on each request.",
+        "help_url": "https://weaviate.io/developers/wcs/guides/authentication",
+        "fields": [
+          {
+            "name": "cluster_url",
+            "label": "Cluster URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-cluster.weaviate.network",
+            "description": "The full URL of your Weaviate instance, including protocol. For WCS, copy it from the cluster details page."
+          },
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Admin or read-only API key for the cluster. Leave blank only if your instance has no authentication enabled."
+          }
+        ]
+      },
+      {
+        "id": "oidc",
+        "label": "OIDC / OpenID Connect",
+        "description": "Authenticate with an OIDC provider (e.g. Okta, Azure AD, or WCS built-in) by supplying a client ID and secret. Best for teams with an identity provider already managing access.",
+        "recommended": false,
+        "how_to": "## Connect via OIDC\n\nWeaviate supports OIDC authentication as an alternative to static API keys. You will need an OIDC client registered with your identity provider.\n\n### Weaviate Cloud Services built-in OIDC\n\n1. Sign in to [Weaviate Cloud](https://console.weaviate.cloud/).\n2. Open your cluster \u2192 **Details** tab.\n3. Under **OIDC configuration**, note the **Token URL** (issuer endpoint).\n4. Register a new client application in your identity provider (e.g. Okta, Azure AD, or WCS itself).\n5. Copy the **Client ID** and **Client Secret** into the fields below.\n6. Set the **Token URL** to the issuer's token endpoint, e.g. `https://auth.wcs.api.weaviate.io/auth/realms/SeMI/.well-known/openid-configuration`.\n\n### Self-hosted with external IdP\n\n1. In your Weaviate config, set `AUTHENTICATION_OIDC_ENABLED=true` and point it to your IdP's issuer URL.\n2. Create a client in your IdP with the `client_credentials` grant type.\n3. Paste the client ID, secret, and token URL below.\n\n### Notes\n\n- The token URL is typically the IdP's `/token` endpoint, not the discovery document URL.\n- Tokens are short-lived; Anton will use the client secret to re-request a token when the current one expires.",
+        "help_url": "https://weaviate.io/developers/weaviate/configuration/authentication",
+        "fields": [
+          {
+            "name": "cluster_url",
+            "label": "Cluster URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-cluster.weaviate.network",
+            "description": "The full URL of your Weaviate instance."
+          },
+          {
+            "name": "token_url",
+            "label": "OIDC Token URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://auth.wcs.api.weaviate.io/auth/realms/SeMI/protocol/openid-connect/token",
+            "description": "The token endpoint of your identity provider. Find it in your IdP's OIDC discovery document under `token_endpoint`."
+          },
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-weaviate-client",
+            "description": "The OIDC client ID registered with your identity provider."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The OIDC client secret. Stored locally and used only to request access tokens."
+          }
+        ]
+      }
+    ]
+  }
+}

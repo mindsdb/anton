@@ -1,0 +1,97 @@
+{
+  "id": "pagerduty",
+  "label": "PagerDuty",
+  "aliases": [
+    "pager duty",
+    "pager-duty",
+    "pd",
+    "pagerduty incidents"
+  ],
+  "keywords": [
+    "incident",
+    "on-call",
+    "alerting",
+    "escalation",
+    "ops",
+    "devops",
+    "monitoring",
+    "oncall",
+    "paging",
+    "notifications"
+  ],
+  "description": "Connect to PagerDuty to manage incidents, on-call schedules, services, and escalation policies.",
+  "category": "observability",
+  "logo": "phone",
+  "logo_color": "#06AC38",
+  "form": {
+    "form_id": "pagerduty-connector",
+    "title": "Connect PagerDuty",
+    "subtitle": "Paste your PagerDuty REST API key to give Anton access to incidents and on-call data.",
+    "logo": "phone",
+    "logo_color": "#06AC38",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "REST API Key",
+        "description": "Paste a PagerDuty REST API key. Takes 30 seconds \u2014 no OAuth setup required. Supports both full-access and read-only keys.",
+        "recommended": true,
+        "how_to": "## Generate a PagerDuty REST API Key\n\nPagerDuty issues two kinds of REST API keys: **User API keys** (scoped to a single user's permissions) and **Account API keys** (scoped to the full account). Either works with Anton.\n\n### Account-level API key (recommended for broad access)\n\n1. Log in to your PagerDuty account.\n2. Navigate to **Integrations \u2192 API Access Keys** in the top menu.\n3. Click **Create New API Key**.\n4. Give the key a description like `Anton`.\n5. Choose **Full Access** or **Read-only** depending on whether you want Anton to be able to acknowledge/resolve incidents or just read data.\n6. Click **Create Key**. Copy the key immediately \u2014 it is only shown once.\n7. Paste the key into the **API Key** field below.\n\n### User API key (scoped to your account)\n\n1. Click your avatar in the top-right corner \u2192 **My Profile**.\n2. Scroll to the **User Settings** tab \u2192 **Create API User Token**.\n3. Give it a description, copy the token, and paste it below.\n\n### Notes\n\n- Account API keys are only visible to PagerDuty admins and account owners.\n- If you lose the key, you must regenerate it \u2014 old key cannot be retrieved.\n- Read-only keys cannot create, acknowledge, or resolve incidents.\n",
+        "help_url": "https://support.pagerduty.com/docs/api-access-keys",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "REST API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "u+xxxxxxxxxxxxxxxxxxxx",
+            "description": "Found under Integrations \u2192 API Access Keys. Shown only once at creation time."
+          },
+          {
+            "name": "subdomain",
+            "label": "PagerDuty Subdomain",
+            "type": "text",
+            "required": false,
+            "placeholder": "yourcompany",
+            "description": "The subdomain of your PagerDuty account (e.g. 'yourcompany' from yourcompany.pagerduty.com). Optional \u2014 Anton will infer it from the API key if left blank."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (App Integration)",
+        "description": "Authorize Anton via PagerDuty's OAuth 2.0 flow using your own registered PagerDuty app. Requires creating an app in the PagerDuty Developer Mode.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://identity.pagerduty.com/oauth/authorize",
+          "token_url": "https://identity.pagerduty.com/oauth/token",
+          "scopes": [
+            "read",
+            "write"
+          ]
+        },
+        "how_to": "## OAuth 2.0 via PagerDuty App Registration\n\nUse this method if your organization requires OAuth-based access instead of static API keys.\n\n### Prerequisites\n\n- You must have a PagerDuty account with **Developer Mode** enabled (available on Business and Enterprise plans).\n\n### Steps\n\n1. Log in to PagerDuty and go to **Integrations \u2192 Developer Tools \u2192 My Apps**.\n2. Click **Create New App**.\n3. Fill in a name (e.g. `Anton`) and description. Set **Category** to anything appropriate.\n4. Under **Functionality**, enable **OAuth 2.0** and select **Authorization Code Grant**.\n5. Add `http://localhost` as a **Redirect URL** (Anton uses a local callback server).\n6. Click **Save**. PagerDuty shows your **Client ID** and **Client Secret** \u2014 copy both.\n7. Paste the Client ID and Client Secret into the fields below, then click **Submit**.\n8. A browser window will open for you to authorize the app with your PagerDuty credentials.\n\n### Notes\n\n- Select `read` and `write` scopes to allow Anton to manage incidents; `read` alone is sufficient for read-only use.\n- OAuth tokens can be revoked from **My Profile \u2192 Connected Applications** in PagerDuty.\n",
+        "help_url": "https://developer.pagerduty.com/docs/app-integration-development/oauth-2-functionality/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "abc123xyz",
+            "description": "From your PagerDuty app under Integrations \u2192 Developer Tools \u2192 My Apps."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID from the same PagerDuty app registration page."
+          }
+        ]
+      }
+    ]
+  }
+}

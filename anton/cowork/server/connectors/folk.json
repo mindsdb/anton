@@ -1,0 +1,50 @@
+{
+  "id": "folk",
+  "label": "Folk",
+  "aliases": [
+    "folk crm",
+    "folkapp",
+    "folk app"
+  ],
+  "keywords": [
+    "crm",
+    "contacts",
+    "relationships",
+    "pipeline",
+    "people",
+    "network",
+    "outreach"
+  ],
+  "description": "Manage contacts, pipelines, and relationship intelligence inside Folk's people-first CRM.",
+  "category": "crm",
+  "logo": "link",
+  "logo_color": "#6C5CE7",
+  "form": {
+    "form_id": "folk-connector",
+    "title": "Connect Folk",
+    "subtitle": "Paste your Folk API key to give Anton access to your contacts and pipelines.",
+    "logo": "link",
+    "logo_color": "#6C5CE7",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Folk API key from Settings \u2192 Developers. The simplest and fastest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Folk API Key\n\n1. Open [folk](https://app.folk.app) and log in.\n2. Click your workspace name or avatar in the bottom-left corner to open workspace settings.\n3. Navigate to **Settings \u2192 Developers**.\n4. Click **Create API key** (or **New key**).\n5. Give it a name like `Anton` so you can identify it later.\n6. Copy the key \u2014 it is shown once. Paste it into the **API Key** field below.\n\n## Notes\n\n- The API key grants access to the contacts, pipelines, and notes visible to the account that created it.\n- If you lose the key, revoke it in the same Developers panel and create a new one.\n- Rotating the key will break the Anton integration until you paste the replacement key here.",
+        "help_url": "https://docs.folk.app/reference/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "folk_live_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Folk \u2192 Settings \u2192 Developers. Keep this secret \u2014 it grants full API access to your workspace."
+          }
+        ]
+      }
+    ]
+  }
+}

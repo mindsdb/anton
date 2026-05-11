@@ -1,0 +1,103 @@
+{
+  "id": "sumo_logic",
+  "label": "Sumo Logic",
+  "aliases": [
+    "sumologic",
+    "sumo",
+    "sumo-logic"
+  ],
+  "keywords": [
+    "logs",
+    "metrics",
+    "security",
+    "analytics",
+    "observability",
+    "siem",
+    "monitoring",
+    "tracing",
+    "cloud",
+    "soc"
+  ],
+  "description": "Connect to Sumo Logic to query logs, metrics, and security analytics using your Access ID and Access Key.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#00BEF2",
+  "form": {
+    "form_id": "sumo_logic-connector",
+    "title": "Connect Sumo Logic",
+    "subtitle": "Paste your Sumo Logic Access ID and Access Key to start querying logs, metrics, and security data.",
+    "logo": "sparkle",
+    "logo_color": "#00BEF2",
+    "methods": [
+      {
+        "id": "access-key",
+        "label": "Access ID & Access Key",
+        "description": "Paste a Sumo Logic Access ID and Access Key from Preferences \u2192 Access Keys. The simplest and most direct authentication path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Sumo Logic Access Key\n\nSumo Logic uses an Access ID + Access Key pair as credentials for API access. These are scoped to your user account.\n\n### Steps\n\n1. Log in to your Sumo Logic account.\n2. Click your name or avatar in the top-right corner and select **Preferences**.\n3. Scroll to the **Access Keys** section and click **Add Access Key**.\n4. Give the key a descriptive name like `Anton` and click **Create**.\n5. Sumo Logic displays your **Access ID** and **Access Key** \u2014 copy both immediately. The Access Key is shown only once.\n6. Paste both values into the fields below and choose the **Region** that matches your Sumo Logic deployment (check the URL in your browser: e.g. `service.us2.sumologic.com` \u2192 `us2`).\n\n### Notes\n\n- The Access Key is shown only at creation time. If you lose it, delete the old key and create a new one.\n- Access Keys inherit the permissions of the user who created them. Use a service account user if you want to restrict scope.\n- If your org uses SAML SSO, an admin may need to allow access key creation \u2014 check **Administration \u2192 Security \u2192 Policies**.\n- For role-based access control, ensure the user has at minimum the **View** permission on the data sources you want Anton to query.\n",
+        "help_url": "https://help.sumologic.com/docs/manage/security/access-keys/",
+        "fields": [
+          {
+            "name": "access_id",
+            "label": "Access ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "su1xxxxxxxxxxxxxx",
+            "description": "Your Sumo Logic Access ID \u2014 found in Preferences \u2192 Access Keys at creation time."
+          },
+          {
+            "name": "access_key",
+            "label": "Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Your Sumo Logic Access Key \u2014 shown only once when the key is created. If lost, delete and recreate it."
+          },
+          {
+            "name": "region",
+            "label": "Region / Deployment",
+            "type": "select",
+            "required": true,
+            "default": "us1",
+            "description": "Select the Sumo Logic deployment that matches your account URL (e.g. service.us2.sumologic.com \u2192 us2).",
+            "options": [
+              {
+                "value": "us1",
+                "label": "US1 \u2014 service.sumologic.com"
+              },
+              {
+                "value": "us2",
+                "label": "US2 \u2014 service.us2.sumologic.com"
+              },
+              {
+                "value": "eu",
+                "label": "EU \u2014 service.eu.sumologic.com"
+              },
+              {
+                "value": "au",
+                "label": "AU \u2014 service.au.sumologic.com"
+              },
+              {
+                "value": "jp",
+                "label": "JP \u2014 service.jp.sumologic.com"
+              },
+              {
+                "value": "ca",
+                "label": "CA \u2014 service.ca.sumologic.com"
+              },
+              {
+                "value": "de",
+                "label": "DE \u2014 service.de.sumologic.com"
+              },
+              {
+                "value": "in",
+                "label": "IN \u2014 service.in.sumologic.com"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

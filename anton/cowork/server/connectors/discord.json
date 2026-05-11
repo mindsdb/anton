@@ -1,0 +1,109 @@
+{
+  "id": "discord",
+  "label": "Discord",
+  "aliases": [
+    "discord app",
+    "discord bot",
+    "discord server",
+    "discord messaging"
+  ],
+  "keywords": [
+    "community",
+    "messaging",
+    "chat",
+    "server",
+    "bot",
+    "voice",
+    "gaming",
+    "channels",
+    "guild"
+  ],
+  "description": "Read and send messages in Discord servers using a bot token from the Discord Developer Portal.",
+  "category": "communication",
+  "logo": "chats",
+  "logo_color": "#5865F2",
+  "form": {
+    "form_id": "discord-connector",
+    "title": "Connect Discord",
+    "subtitle": "Authorize Anton to interact with your Discord server via a bot token.",
+    "logo": "chats",
+    "logo_color": "#5865F2",
+    "methods": [
+      {
+        "id": "bot-token",
+        "label": "Bot Token",
+        "description": "Paste a bot token from the Discord Developer Portal. Simplest path \u2014 create an app, copy the token, invite the bot to your server, and you're ready.",
+        "recommended": true,
+        "how_to": "## Connect via Discord Bot Token\n\nA bot token gives Anton permission to read and send messages in any server the bot has been invited to.\n\n## 1. Create a Discord Application\n\n1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and log in.\n2. Click **New Application**, give it a name like `Anton`, and click **Create**.\n\n## 2. Create a Bot User\n\n1. In the left sidebar, click **Bot**.\n2. Click **Add Bot** \u2192 **Yes, do it!**\n3. Under the bot's username, click **Reset Token** (you may need to confirm with 2FA).\n4. Copy the token \u2014 it is shown **only once**. Paste it into the **Bot Token** field below.\n5. Under **Privileged Gateway Intents**, enable **Message Content Intent** if you need Anton to read message content.\n\n## 3. Invite the Bot to Your Server\n\n1. In the left sidebar, click **OAuth2 \u2192 URL Generator**.\n2. Under **Scopes**, check `bot`.\n3. Under **Bot Permissions**, check the permissions Anton needs (e.g. **Read Messages/View Channels**, **Send Messages**, **Read Message History**).\n4. Copy the generated URL at the bottom and open it in your browser.\n5. Select the server you want to add the bot to and click **Authorize**.\n\n## Notes\n\n- The token is equivalent to a password \u2014 keep it secret. If it leaks, click **Reset Token** in the Developer Portal to invalidate it immediately.\n- The bot can only see channels it has been granted access to via server roles and permissions.\n- To access multiple servers, invite the bot to each one using the same URL Generator flow.\n",
+        "help_url": "https://discord.com/developers/docs/topics/oauth2#bots",
+        "fields": [
+          {
+            "name": "bot_token",
+            "label": "Bot Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-discord-bot-token",
+            "description": "Found in the Discord Developer Portal \u2192 your application \u2192 Bot \u2192 Reset Token. Shown only once \u2014 store it safely."
+          },
+          {
+            "name": "guild_id",
+            "label": "Server (Guild) ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "123456789012345678",
+            "description": "Optional. The numeric ID of your Discord server. Right-click the server icon in Discord \u2192 Copy Server ID (requires Developer Mode enabled in User Settings \u2192 Advanced)."
+          },
+          {
+            "name": "default_channel_id",
+            "label": "Default Channel ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "987654321098765432",
+            "description": "Optional. The numeric ID of the channel Anton should use by default. Right-click the channel name \u2192 Copy Channel ID."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth2 (User Token)",
+        "description": "Use Discord's OAuth2 flow with your own application credentials to act on behalf of a user. Requires creating an app in the Discord Developer Portal and supplying a client ID and secret.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://discord.com/oauth2/authorize",
+          "token_url": "https://discord.com/api/oauth2/token",
+          "scopes": [
+            "identify",
+            "guilds",
+            "messages.read",
+            "bot"
+          ],
+          "extra_auth_params": {
+            "permissions": "68608"
+          }
+        },
+        "how_to": "## Connect via Discord OAuth2\n\nThis method uses Discord's OAuth2 flow to authorize Anton as a user-facing application. It requires you to bring your own OAuth client credentials.\n\n## 1. Create an Application\n\n1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and click **New Application**.\n2. Give it a name like `Anton` and click **Create**.\n\n## 2. Configure OAuth2\n\n1. In the left sidebar, click **OAuth2 \u2192 General**.\n2. Under **Redirects**, add `http://localhost` (Anton uses a local redirect).\n3. Copy the **Client ID** from the top of this page.\n4. Click **Reset Secret** to generate a **Client Secret** \u2014 copy it now (shown once).\n\n## 3. Enter Credentials Below\n\nPaste the **Client ID** and **Client Secret** into the fields below, then click **Submit** to launch the browser-based authorization flow.\n\n## Notes\n\n- The `messages.read` scope is limited to DMs for user tokens; for full server access a bot token is recommended instead.\n- You can revoke access at any time via [Discord Authorized Apps](https://discord.com/settings/authorized-apps).\n",
+        "help_url": "https://discord.com/developers/docs/topics/oauth2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "111111111111111111",
+            "description": "From Discord Developer Portal \u2192 your application \u2192 OAuth2 \u2192 General. Listed as Client ID at the top."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "From Discord Developer Portal \u2192 your application \u2192 OAuth2 \u2192 General \u2192 Reset Secret. Shown only once."
+          }
+        ]
+      }
+    ]
+  }
+}

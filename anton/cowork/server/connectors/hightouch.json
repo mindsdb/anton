@@ -1,0 +1,59 @@
+{
+  "id": "hightouch",
+  "label": "Hightouch",
+  "aliases": [
+    "high touch",
+    "hightouchiq",
+    "reverse etl",
+    "data activation"
+  ],
+  "keywords": [
+    "reverse etl",
+    "data activation",
+    "sync",
+    "warehouse",
+    "pipeline",
+    "crm sync",
+    "audience"
+  ],
+  "description": "Sync data from your warehouse to any business tool using Hightouch's reverse ETL platform.",
+  "category": "data",
+  "logo": "database",
+  "logo_color": "#6B5CE7",
+  "form": {
+    "form_id": "hightouch-connector",
+    "title": "Connect Hightouch",
+    "subtitle": "Paste your Hightouch API token to let Anton manage syncs and models.",
+    "logo": "database",
+    "logo_color": "#6B5CE7",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste a Hightouch API token generated from Workspace Settings \u2192 API Tokens. Quickest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Hightouch API Token\n\n1. Log in to [Hightouch](https://app.hightouch.com).\n2. Click your workspace name in the top-left corner to open workspace settings.\n3. In the left sidebar, go to **Settings \u2192 API tokens**.\n4. Click **Create API token**.\n5. Give the token a descriptive name like `Anton` so you can identify it later.\n6. Choose the appropriate permission level:\n   - **Read-only** \u2014 if Anton only needs to read sync statuses and model definitions.\n   - **Full access** \u2014 if Anton needs to trigger syncs or manage models.\n7. Click **Create** and copy the token immediately \u2014 it is shown only once.\n8. Paste the token into the **API Token** field below.\n\n## Notes\n\n- Tokens are workspace-scoped. If you have multiple Hightouch workspaces, generate a token in each one you want Anton to access.\n- If you lose the token, delete it in **Settings \u2192 API tokens** and create a new one \u2014 then update it in Anton.\n- The token grants access to all resources in that workspace, so treat it like a password.",
+        "help_url": "https://hightouch.com/docs/api-reference/authentication",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ht_\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Found in Hightouch \u2192 Settings \u2192 API tokens. Shown only once at creation."
+          },
+          {
+            "name": "workspace_slug",
+            "label": "Workspace Slug",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-company",
+            "description": "Optional. Your Hightouch workspace slug (visible in the URL: app.hightouch.com/<slug>). Used to scope API calls if you manage multiple workspaces."
+          }
+        ]
+      }
+    ]
+  }
+}

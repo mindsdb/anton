@@ -1,0 +1,125 @@
+{
+  "id": "elastic_apm",
+  "label": "Elastic APM",
+  "aliases": [
+    "elastic application performance monitoring",
+    "elastic tracing",
+    "apm server",
+    "elastic observability"
+  ],
+  "keywords": [
+    "apm",
+    "tracing",
+    "observability",
+    "elastic",
+    "kibana",
+    "spans",
+    "transactions",
+    "errors",
+    "metrics",
+    "performance",
+    "monitoring"
+  ],
+  "description": "Connect to Elastic APM to ingest traces, spans, transactions, and error data from your applications via the APM Server.",
+  "category": "observability",
+  "logo": "search",
+  "logo_color": "#00BFB3",
+  "form": {
+    "form_id": "elastic_apm-connector",
+    "title": "Connect Elastic APM",
+    "subtitle": "Point Anton at your APM Server and supply a secret token or API key to start ingesting traces and performance data.",
+    "logo": "search",
+    "logo_color": "#00BFB3",
+    "methods": [
+      {
+        "id": "secret-token",
+        "label": "Secret Token",
+        "description": "Paste your APM Server URL and the secret token configured in Kibana. The simplest and most common auth method for self-managed and Elastic Cloud APM deployments.",
+        "recommended": true,
+        "how_to": "## Connect with APM Server Secret Token\n\nThis is the default authentication method for Elastic APM Server. You'll find both values in Kibana.\n\n### Steps\n\n1. Open **Kibana** and navigate to **Stack Management \u2192 Fleet \u2192 Agent Policies** (or directly to **Observability \u2192 APM**).\n2. Click your APM integration or agent policy to view its settings.\n3. Under **APM Server**, copy the **Server URL** (e.g. `https://your-cluster.apm.us-east-1.aws.elastic-cloud.com:443`).\n4. In the same section, locate the **Secret Token** field. If it is masked, click the eye icon or **Reveal** to copy it.\n   - On self-managed clusters the token is also visible in `apm-server.yml` under `apm-server.auth.secret_token`.\n5. Paste both values into the fields below and click **Submit**.\n\n### Notes\n\n- Secret tokens are shared secrets \u2014 treat them like passwords. Rotate them in Fleet whenever you suspect exposure.\n- If your APM Server is behind a custom TLS certificate you may need to supply the CA certificate.\n- On Elastic Cloud the URL always includes the port; don't strip it.\n",
+        "help_url": "https://www.elastic.co/guide/en/apm/guide/current/secret-token.html",
+        "fields": [
+          {
+            "name": "apm_server_url",
+            "label": "APM Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-cluster.apm.us-east-1.aws.elastic-cloud.com:443",
+            "description": "Full URL of your APM Server, including the port. Found in Kibana \u2192 Stack Management \u2192 Fleet \u2192 APM Integration."
+          },
+          {
+            "name": "secret_token",
+            "label": "Secret Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The shared secret token configured on the APM Server. Found in Kibana \u2192 Stack Management \u2192 Fleet \u2192 APM Integration \u2192 APM Server settings."
+          },
+          {
+            "name": "ca_cert",
+            "label": "CA Certificate (optional)",
+            "type": "textarea",
+            "required": false,
+            "secret": false,
+            "placeholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+            "description": "PEM-encoded CA certificate. Only needed if your APM Server uses a self-signed or private TLS certificate."
+          }
+        ]
+      },
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Use an Elastic API key instead of a secret token. Supports fine-grained permissions and is the recommended method when multiple services connect to the same APM Server.",
+        "recommended": false,
+        "how_to": "## Connect with an Elastic API Key\n\nAPI keys let you grant scoped, revocable credentials without sharing the cluster's master secret token.\n\n### Steps\n\n1. Open **Kibana** and navigate to **Stack Management \u2192 Fleet \u2192 Agent Policies** and locate your APM integration to copy the **Server URL**.\n2. To create an API key, go to **Stack Management \u2192 Security \u2192 API Keys**.\n3. Click **Create API key**. Give it a descriptive name like `Anton APM`.\n4. Under **Privileges**, grant at minimum `apm` ingest permissions. For read access you may also need `monitor` on the APM indices.\n5. Click **Create API key**. Copy the generated key \u2014 it is shown **only once**.\n6. Paste the APM Server URL and API key into the fields below and click **Submit**.\n\n### Notes\n\n- The API key format is `id:api_key` (base64-encoded). Paste it exactly as shown after creation.\n- API keys can be individually revoked from **Stack Management \u2192 Security \u2192 API Keys** without affecting other integrations.\n- Elastic Cloud users can also generate API keys from the Elastic Cloud console under the deployment's **Security** tab.\n",
+        "help_url": "https://www.elastic.co/guide/en/apm/guide/current/api-key.html",
+        "fields": [
+          {
+            "name": "apm_server_url",
+            "label": "APM Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://your-cluster.apm.us-east-1.aws.elastic-cloud.com:443",
+            "description": "Full URL of your APM Server, including the port. Found in Kibana \u2192 Stack Management \u2192 Fleet \u2192 APM Integration."
+          },
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "id:api_key_value",
+            "description": "Elastic API key in `id:key` format. Generated in Kibana \u2192 Stack Management \u2192 Security \u2192 API Keys. Shown only once at creation."
+          },
+          {
+            "name": "ca_cert",
+            "label": "CA Certificate (optional)",
+            "type": "textarea",
+            "required": false,
+            "secret": false,
+            "placeholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+            "description": "PEM-encoded CA certificate. Only needed if your APM Server uses a self-signed or private TLS certificate."
+          }
+        ]
+      },
+      {
+        "id": "no-auth",
+        "label": "No Authentication (Anonymous)",
+        "description": "Connect to an APM Server that has authentication disabled. Only suitable for local development or tightly network-controlled environments.",
+        "recommended": false,
+        "how_to": "## Connect to an Unauthenticated APM Server\n\nSome local development or internal APM Server deployments disable authentication entirely. Use this method only in trusted, non-production environments.\n\n### Steps\n\n1. Confirm your APM Server has authentication disabled. In `apm-server.yml` this looks like `apm-server.auth.anonymous.enabled: true` or no auth block at all.\n2. Copy the APM Server URL (e.g. `http://localhost:8200`).\n3. Paste it into the field below and click **Submit**.\n\n### Notes\n\n- Do not use this method for production deployments. Without auth, any process that can reach the APM Server can send data.\n- Elastic Cloud always enforces authentication \u2014 this method is not compatible with Elastic Cloud deployments.\n",
+        "help_url": "https://www.elastic.co/guide/en/apm/guide/current/anonymous-auth.html",
+        "fields": [
+          {
+            "name": "apm_server_url",
+            "label": "APM Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "http://localhost:8200",
+            "description": "Full URL of your APM Server. For local development this is typically http://localhost:8200."
+          }
+        ]
+      }
+    ]
+  }
+}

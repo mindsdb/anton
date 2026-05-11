@@ -1,0 +1,60 @@
+{
+  "id": "smartlead",
+  "label": "Smartlead",
+  "aliases": [
+    "smart lead",
+    "smartlead.ai",
+    "smartleads"
+  ],
+  "keywords": [
+    "cold email",
+    "email outreach",
+    "sales engagement",
+    "deliverability",
+    "sequences",
+    "campaigns",
+    "inbox rotation",
+    "warmup"
+  ],
+  "description": "Connect to Smartlead to manage cold email campaigns, mailboxes, and deliverability from Anton.",
+  "category": "sales-engagement",
+  "logo": "send",
+  "logo_color": "#6C47FF",
+  "form": {
+    "form_id": "smartlead-connector",
+    "title": "Connect Smartlead",
+    "subtitle": "Paste your Smartlead API key to give Anton access to your campaigns and mailboxes.",
+    "logo": "send",
+    "logo_color": "#6C47FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Smartlead API key from Settings \u2192 API. Quickest path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with an API Key\n\nSmartlead exposes all of its platform features via a REST API authenticated with a single API key tied to your account.\n\n### Steps\n\n1. Log in to [Smartlead](https://app.smartlead.ai).\n2. Click your avatar or workspace name in the bottom-left corner, then go to **Settings**.\n3. Select the **API** tab (sometimes listed as **API Key** or **Integrations**).\n4. Your API key is displayed on that page. Click **Copy** (or reveal and copy manually).\n5. Paste the key into the **API Key** field below and click **Submit**.\n\n### Notes\n\n- The API key grants full account access \u2014 treat it like a password and do not share it publicly.\n- If you regenerate the key in Smartlead's Settings, come back here and update the stored value; the old key will stop working immediately.\n- API keys are scoped to the workspace you are logged in to. If you manage multiple workspaces, repeat this process for each one.\n",
+        "help_url": "https://help.smartlead.ai/en/articles/8514825-api-key-authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "sl_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Smartlead \u2192 Settings \u2192 API. Treat this like a password \u2014 it grants full account access."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://server.smartlead.ai",
+            "default": "https://server.smartlead.ai",
+            "description": "Leave as default unless Smartlead has assigned you a custom API endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

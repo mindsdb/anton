@@ -1,0 +1,94 @@
+{
+  "id": "vercel",
+  "label": "Vercel",
+  "aliases": [
+    "vercel cloud",
+    "vercel hosting",
+    "vercel deployments",
+    "zeit"
+  ],
+  "keywords": [
+    "hosting",
+    "deployments",
+    "frontend",
+    "serverless",
+    "edge",
+    "cdn",
+    "nextjs",
+    "jamstack",
+    "preview",
+    "builds"
+  ],
+  "description": "Connect to Vercel to manage and monitor frontend deployments, projects, and environments.",
+  "category": "engineering",
+  "logo": "globe",
+  "logo_color": "#000000",
+  "form": {
+    "form_id": "vercel-connector",
+    "title": "Connect Vercel",
+    "subtitle": "Paste your Vercel personal access token to give Anton access to your deployments and projects.",
+    "logo": "globe",
+    "logo_color": "#000000",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Generate a token from Vercel's account settings and paste it here. No OAuth app setup required \u2014 works instantly for personal accounts and teams.",
+        "recommended": true,
+        "how_to": "## Generate a Vercel Personal Access Token\n\nVercel personal access tokens grant API access scoped to your account and any teams you belong to.\n\n### Steps\n\n1. Log in to [vercel.com](https://vercel.com) and click your avatar in the top-right corner.\n2. Go to **Settings** (account-level, not a project's settings).\n3. In the left sidebar, click **Tokens**.\n4. Click **Create** (top-right of the token list).\n5. Give the token a name like `Anton` and choose an expiration (or **No expiration** for a long-lived token).\n6. Select the **Scope** \u2014 choose **Full Account** or restrict to a specific team as needed.\n7. Click **Create Token**. Copy the token shown \u2014 it is only displayed once.\n8. Paste the token into the **API Token** field below.\n\n### Notes\n\n- The token is shown only once at creation. If you lose it, delete it and create a new one.\n- Team-scoped tokens only grant access to that team's projects; use a full-account token if you need cross-team access.\n- You can revoke the token at any time from **Settings \u2192 Tokens**.",
+        "help_url": "https://vercel.com/docs/rest-api#creating-an-access-token",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Personal access token from Vercel \u2192 Settings \u2192 Tokens. Shown only once at creation."
+          },
+          {
+            "name": "team_id",
+            "label": "Team ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "team_xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "If your projects live under a team, enter the team ID (found in the team's Settings \u2192 General). Leave blank to use your personal account."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (BYOK)",
+        "description": "Use your own Vercel OAuth application to authenticate via browser-based authorization. Requires creating an OAuth app in Vercel's integrations settings.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://vercel.com/oauth/authorize",
+          "token_url": "https://api.vercel.com/v2/oauth/access_token",
+          "scopes": []
+        },
+        "how_to": "## OAuth 2.0 with a Vercel OAuth App\n\nThis method uses a browser-based authorization flow. You must first create an OAuth app in your Vercel account.\n\n### Steps\n\n1. Log in to [vercel.com](https://vercel.com) and open **Settings \u2192 Integrations** or visit [vercel.com/account/oauth-apps](https://vercel.com/account/oauth-apps).\n2. Click **Create OAuth App**.\n3. Fill in the app name (e.g. `Anton`), homepage URL, and set the **Callback URL** to `http://127.0.0.1` (Anton's local redirect).\n4. Click **Create**. Copy the **Client ID** and **Client Secret** shown.\n5. Paste both values into the fields below and click **Submit**.\n6. A browser window will open for you to authorize the app on your Vercel account.\n\n### Notes\n\n- OAuth apps are recommended when you need delegated access on behalf of multiple users.\n- For personal or single-team use, the **Personal Access Token** method is simpler.",
+        "help_url": "https://vercel.com/docs/integrations/create-integration/submit-integration#set-up-oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "oac_xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Client ID from your Vercel OAuth app settings."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Client secret from your Vercel OAuth app settings. Shown only once at creation."
+          }
+        ]
+      }
+    ]
+  }
+}

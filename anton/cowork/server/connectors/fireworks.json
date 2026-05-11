@@ -1,0 +1,70 @@
+{
+  "id": "fireworks",
+  "label": "Fireworks AI",
+  "aliases": [
+    "fireworks.ai",
+    "fireworks",
+    "fireworks llm",
+    "fireworks models"
+  ],
+  "keywords": [
+    "llm",
+    "ai",
+    "inference",
+    "open-source",
+    "models",
+    "hosted",
+    "api",
+    "language model",
+    "generative"
+  ],
+  "description": "Run hosted open-source LLMs and image models via Fireworks AI's fast inference API.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#7C3AED",
+  "form": {
+    "form_id": "fireworks-connector",
+    "title": "Connect Fireworks AI",
+    "subtitle": "Paste your Fireworks AI API key to start running hosted open-source models.",
+    "logo": "brain",
+    "logo_color": "#7C3AED",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from your Fireworks AI account. Takes 30 seconds \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Fireworks AI API Key\n\n1. Log in to [fireworks.ai](https://fireworks.ai).\n2. Click your avatar or account name in the top-right corner.\n3. Select **Account** from the dropdown menu.\n4. Navigate to the **API Keys** tab.\n5. Click **Create API Key**, give it a name (e.g. `Anton`), and confirm.\n6. Copy the key \u2014 it is shown only once. Store it somewhere safe.\n7. Paste the key into the **API Key** field below.\n\n## Notes\n\n- If you lose the key, generate a new one and revoke the old one from the same **API Keys** panel.\n- Keys inherit your account's rate limits and billing; create separate keys per application to track usage independently.\n- You can restrict or delete a key at any time from **Account \u2192 API Keys**.",
+        "help_url": "https://docs.fireworks.ai/getting-started/quickstart#authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "fw_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at fireworks.ai \u2192 Account \u2192 API Keys. Shown only once at creation."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.fireworks.ai/inference/v1",
+            "default": "https://api.fireworks.ai/inference/v1",
+            "description": "Override only if you are using a custom or self-hosted Fireworks endpoint."
+          },
+          {
+            "name": "default_model",
+            "label": "Default Model",
+            "type": "text",
+            "required": false,
+            "placeholder": "accounts/fireworks/models/llama-v3p1-8b-instruct",
+            "description": "Model ID to use by default. Leave blank to specify the model per request."
+          }
+        ]
+      }
+    ]
+  }
+}

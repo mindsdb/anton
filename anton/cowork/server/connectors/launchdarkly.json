@@ -1,0 +1,93 @@
+{
+  "id": "launchdarkly",
+  "label": "LaunchDarkly",
+  "aliases": [
+    "launch darkly",
+    "ld",
+    "feature flags",
+    "feature toggles"
+  ],
+  "keywords": [
+    "feature flags",
+    "experimentation",
+    "toggles",
+    "rollout",
+    "a/b testing",
+    "canary",
+    "release management",
+    "flags"
+  ],
+  "description": "Manage feature flags and run experiments via LaunchDarkly's API.",
+  "category": "engineering",
+  "logo": "slider",
+  "logo_color": "#405BFF",
+  "form": {
+    "form_id": "launchdarkly-connector",
+    "title": "Connect LaunchDarkly",
+    "subtitle": "Paste your LaunchDarkly access token to let Anton read and manage feature flags.",
+    "logo": "slider",
+    "logo_color": "#405BFF",
+    "methods": [
+      {
+        "id": "api-access-token",
+        "label": "API Access Token",
+        "description": "Paste a personal or service access token from LaunchDarkly's Account Settings. Quickest way to connect \u2014 no OAuth client setup required.",
+        "recommended": true,
+        "how_to": "## Generate a LaunchDarkly API Access Token\n\nLaunchDarkly uses bearer tokens (prefixed `api-`) for API authentication. You can create personal tokens or service tokens depending on your plan.\n\n### Steps\n\n1. Log in to [LaunchDarkly](https://app.launchdarkly.com).\n2. Click your **profile avatar** in the bottom-left corner \u2192 **Account settings**.\n3. Open the **Authorization** tab.\n4. Under **Access tokens**, click **Create token**.\n5. Give it a name like `Anton`.\n6. Choose a **Role**: `Reader` for read-only access, `Writer` for full flag management, or a custom role if your plan supports it.\n7. Select **Personal token** (tied to your user) or **Service token** (not tied to a user \u2014 preferred for integrations).\n8. Click **Save token**. Copy the value immediately \u2014 it is shown only once.\n9. Paste the token (it starts with `api-`) into the **Access Token** field below.\n\n### Notes\n\n- Service tokens are available on Pro and Enterprise plans. Use a personal token if you are on a Starter or free plan.\n- The token is shown only once at creation. If you lose it, delete the old token and create a new one.\n- To restrict access further, create a custom role under **Account settings \u2192 Roles** before generating the token.\n- Revoke compromised tokens immediately from the same **Authorization** tab.",
+        "help_url": "https://docs.launchdarkly.com/home/account/api",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "api-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Personal or service access token from Account settings \u2192 Authorization \u2192 Access tokens. Starts with api-."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://app.launchdarkly.com",
+            "default": "https://app.launchdarkly.com",
+            "description": "Leave as default unless you are on a dedicated LaunchDarkly instance."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own Client)",
+        "description": "Authorize via LaunchDarkly's OAuth 2.0 flow using your own OAuth application credentials from the LaunchDarkly app registration page.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.launchdarkly.com/trust/oauth/authorize",
+          "token_url": "https://app.launchdarkly.com/trust/oauth/token",
+          "scopes": []
+        },
+        "how_to": "## OAuth 2.0 with a LaunchDarkly OAuth Application\n\nThis method uses LaunchDarkly's OAuth 2.0 flow. You must register an OAuth application in LaunchDarkly first and supply the credentials here.\n\n### Steps\n\n1. Log in to [LaunchDarkly](https://app.launchdarkly.com) as an account Owner or Admin.\n2. Go to **Account settings \u2192 Authorization \u2192 OAuth applications**.\n3. Click **Register an application**.\n4. Set the **Redirect URI** to `http://127.0.0.1` (Anton uses a local redirect for the OAuth handshake).\n5. Give the app a name like `Anton` and save.\n6. Copy the **Client ID** and **Client secret** shown on the confirmation screen.\n7. Paste both values into the fields below and click **Submit**.\n8. A browser window will open to LaunchDarkly's consent screen \u2014 approve access.\n\n### Notes\n\n- OAuth application registration is available on Pro and Enterprise plans. Use **API Access Token** if you are on a free or Starter plan.\n- LaunchDarkly may not issue refresh tokens in all configurations \u2014 if your token expires, you may need to re-authorize.\n- Revoke access anytime under **Account settings \u2192 Authorization \u2192 OAuth applications**.",
+        "help_url": "https://docs.launchdarkly.com/home/account/oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-oauth-client-id",
+            "description": "From Account settings \u2192 Authorization \u2192 OAuth applications after registering your app."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID; shown once when you register the OAuth application."
+          }
+        ]
+      }
+    ]
+  }
+}

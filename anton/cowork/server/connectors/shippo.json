@@ -1,0 +1,70 @@
+{
+  "id": "shippo",
+  "label": "Shippo",
+  "aliases": [
+    "goshippo",
+    "shippo api",
+    "shippo shipping"
+  ],
+  "keywords": [
+    "shipping",
+    "logistics",
+    "carrier",
+    "tracking",
+    "labels",
+    "fulfillment",
+    "postage",
+    "multi-carrier",
+    "parcel"
+  ],
+  "description": "Connect to Shippo's multi-carrier shipping API to create labels, track shipments, and manage carriers.",
+  "category": "logistics",
+  "logo": "upload",
+  "logo_color": "#6B2FE2",
+  "form": {
+    "form_id": "shippo-connector",
+    "title": "Connect Shippo",
+    "subtitle": "Paste your Shippo API token to start creating labels and tracking shipments.",
+    "logo": "upload",
+    "logo_color": "#6B2FE2",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your Shippo live or test API token (starts with `live_` or `test_`). Found in goshippo.com \u2192 Settings \u2192 API. Simplest and fastest setup path.",
+        "recommended": true,
+        "how_to": "## Find your Shippo API Token\n\n1. Log in to [goshippo.com](https://app.goshippo.com).\n2. Click your account name or avatar in the top-right corner, then go to **Settings**.\n3. Select the **API** tab in the left sidebar.\n4. You'll see two token types:\n   - **Test token** (starts with `test_`) \u2014 safe for development; no real shipments.\n   - **Live token** (starts with `live_`) \u2014 use for production shipments.\n5. Copy the token you want to use and paste it into the **API Token** field below.\n\n## Notes\n\n- Tokens are long-lived but can be regenerated in the same Settings \u2192 API panel at any time. If you regenerate, update the token here.\n- Use the **test_** token while setting up Anton to avoid accidental live charges.\n- Shippo rate-limits requests per API key; see [Shippo API docs](https://docs.goshippo.com/docs/api_concepts/apicalls/) for limits.",
+        "help_url": "https://docs.goshippo.com/docs/api_concepts/apiauthentication/",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Shippo API token from goshippo.com \u2192 Settings \u2192 API. Starts with `live_` for production or `test_` for sandbox."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "live",
+            "description": "Choose Live for real shipments or Test to use sandbox mode. Should match the prefix of your API token.",
+            "options": [
+              {
+                "value": "live",
+                "label": "Live (production)"
+              },
+              {
+                "value": "test",
+                "label": "Test (sandbox)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

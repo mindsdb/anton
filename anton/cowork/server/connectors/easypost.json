@@ -1,0 +1,74 @@
+{
+  "id": "easypost",
+  "label": "EasyPost",
+  "aliases": [
+    "easy post",
+    "easypost shipping",
+    "easypost api"
+  ],
+  "keywords": [
+    "shipping",
+    "tracking",
+    "insurance",
+    "carrier",
+    "postage",
+    "label",
+    "logistics",
+    "parcel",
+    "delivery",
+    "usps",
+    "fedex",
+    "ups",
+    "dhl"
+  ],
+  "description": "Multi-carrier shipping, tracking, and insurance via the EasyPost API.",
+  "category": "logistics",
+  "logo": "upload",
+  "logo_color": "#4A90D9",
+  "form": {
+    "form_id": "easypost-connector",
+    "title": "Connect EasyPost",
+    "subtitle": "Paste your EasyPost API key to start creating shipments, buying postage, and tracking packages.",
+    "logo": "upload",
+    "logo_color": "#4A90D9",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Test or Production API key from your EasyPost Account Settings. Production keys start with `EZak`, test keys start with `EZtk`. Simplest setup \u2014 no OAuth required.",
+        "recommended": true,
+        "how_to": "## Get your EasyPost API Key\n\n1. Log in at [easypost.com](https://www.easypost.com) and click your account avatar in the top-right corner.\n2. Go to **Account Settings \u2192 API Keys**.\n3. You'll see two sections: **Test API Keys** and **Production API Keys**.\n   - Test keys begin with `EZtk` \u2014 safe for development, no real charges.\n   - Production keys begin with `EZak` \u2014 creates real shipments and charges your account.\n4. Click the **copy** icon next to the key you want to use.\n5. Paste it into the **API Key** field below and select the matching **Environment**.\n\n## Notes\n\n- Keep your Production key secret \u2014 it can create labels and charge your payment method.\n- If you suspect a key has been compromised, roll it immediately from Account Settings \u2192 API Keys \u2192 **Regenerate**.\n- Regenerating a key invalidates the old one; update Anton right away to restore connectivity.\n- You can safely use the Test environment key during development \u2014 EasyPost won't bill you for test-mode shipments.",
+        "help_url": "https://www.easypost.com/docs/api#authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "EZak... or EZtk...",
+            "description": "Found in easypost.com \u2192 Account Settings \u2192 API Keys. Production keys start with EZak, test keys start with EZtk."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Match this to the key type you pasted above. Test mode is free and safe for development.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production"
+              },
+              {
+                "value": "test",
+                "label": "Test"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

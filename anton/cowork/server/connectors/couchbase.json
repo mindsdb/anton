@@ -1,0 +1,102 @@
+{
+  "id": "couchbase",
+  "label": "Couchbase",
+  "aliases": [
+    "couchbase server",
+    "couchbase cloud",
+    "capella",
+    "couchbase capella"
+  ],
+  "keywords": [
+    "nosql",
+    "document",
+    "database",
+    "distributed",
+    "json",
+    "bucket",
+    "cluster",
+    "n1ql",
+    "sql++"
+  ],
+  "description": "Connect to a Couchbase cluster or Capella cloud database using a connection string, username, password, and bucket name.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#EA2328",
+  "form": {
+    "form_id": "couchbase-connector",
+    "title": "Connect Couchbase",
+    "subtitle": "Provide your cluster connection string, credentials, and bucket to start querying your Couchbase data.",
+    "logo": "database",
+    "logo_color": "#EA2328",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste your Couchbase connection string (couchbase:// or couchbases://) along with your username, password, and target bucket. Works for both self-managed clusters and Couchbase Capella.",
+        "recommended": true,
+        "how_to": "## Connect with a Couchbase Connection String\n\nThis is the fastest path for both self-managed Couchbase Server and Couchbase Capella (cloud).\n\n### Self-managed Couchbase Server\n\n1. Open the Couchbase Web Console (typically `http://<your-node>:8091`).\n2. Your connection string is `couchbase://<hostname-or-ip>` (unencrypted) or `couchbases://<hostname-or-ip>` (TLS, recommended for production).\n3. Use the username and password of a Couchbase user that has at minimum **Data Reader** or **Data Writer** roles on the target bucket. Create users under **Security \u2192 Users \u2192 Add User**.\n4. Enter the bucket name you want Anton to query (visible under **Buckets** in the console).\n\n### Couchbase Capella (cloud)\n\n1. Log in to [Capella](https://cloud.couchbase.com) and open your **Cluster**.\n2. Go to **Connect** \u2192 copy the **Connection String**. It looks like `couchbases://cb.<id>.cloud.couchbase.com`.\n3. Under **Database Access**, create or use an existing database credential (username + password) with appropriate bucket permissions.\n4. Make sure your IP address is listed under **Allowed IP Addresses** in the cluster's **Connect** tab.\n5. Enter the target bucket name from the **Buckets** tab.\n\n### Notes\n\n- Use `couchbases://` (with an **s**) for TLS-encrypted connections \u2014 required for Capella and recommended for production clusters.\n- The password is stored encrypted locally and never sent to Anton's servers.\n- If the connection times out, verify that the Couchbase port (11210 for unencrypted, 11207 for TLS) is open in your firewall/security group.\n",
+        "help_url": "https://docs.couchbase.com/server/current/manage/manage-security/manage-users-and-roles.html",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "url",
+            "required": true,
+            "placeholder": "couchbases://cb.xxxxxxxx.cloud.couchbase.com",
+            "description": "Use couchbase:// for unencrypted or couchbases:// for TLS. For Capella, copy this from the Connect tab of your cluster."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton-user",
+            "description": "Couchbase database user with access to the target bucket."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the Couchbase database user above."
+          },
+          {
+            "name": "bucket",
+            "label": "Bucket Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-bucket",
+            "description": "The name of the Couchbase bucket Anton should connect to."
+          },
+          {
+            "name": "scope",
+            "label": "Scope (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "_default",
+            "default": "_default",
+            "description": "The scope within the bucket. Leave as _default unless you use custom scopes."
+          },
+          {
+            "name": "collection",
+            "label": "Collection (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "_default",
+            "default": "_default",
+            "description": "The collection within the scope. Leave as _default unless you use named collections."
+          },
+          {
+            "name": "tls_verify",
+            "label": "Verify TLS Certificate",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Disable only if using a self-signed certificate on a self-managed cluster. Always leave enabled for Capella."
+          }
+        ]
+      }
+    ]
+  }
+}

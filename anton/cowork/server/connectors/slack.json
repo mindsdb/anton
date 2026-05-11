@@ -1,0 +1,110 @@
+{
+  "id": "slack",
+  "label": "Slack",
+  "aliases": [
+    "slack hq",
+    "slack messaging",
+    "slack app",
+    "slack workspace"
+  ],
+  "keywords": [
+    "messaging",
+    "chat",
+    "workspace",
+    "team",
+    "channels",
+    "notifications",
+    "bot",
+    "integration",
+    "communication"
+  ],
+  "description": "Read and send messages in Slack channels and DMs using a bot installed in your workspace.",
+  "category": "communication",
+  "logo": "chats",
+  "logo_color": "#4A154B",
+  "form": {
+    "form_id": "slack-connector",
+    "title": "Connect Slack",
+    "subtitle": "Authorize Anton to read and post messages in your Slack workspace.",
+    "logo": "chats",
+    "logo_color": "#4A154B",
+    "methods": [
+      {
+        "id": "bot-token",
+        "label": "Bot User OAuth Token",
+        "description": "Paste an xoxb- token from a Slack app installed in your workspace. Simplest path \u2014 no OAuth dance required, just create an app, add scopes, install it, and copy the token.",
+        "recommended": true,
+        "how_to": "## Create a Slack App and get a Bot Token\n\nThis is the fastest way to connect Anton to Slack. You create a Slack app, grant it the permissions Anton needs, install it to your workspace, and paste the token.\n\n### Steps\n\n1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App \u2192 From scratch**.\n2. Give it a name (e.g. `Anton`) and pick the workspace you want to connect.\n3. In the left sidebar, click **OAuth & Permissions**.\n4. Scroll to **Scopes \u2192 Bot Token Scopes** and add the scopes Anton needs, for example:\n   - `channels:history` \u2014 read messages in public channels\n   - `channels:read` \u2014 list public channels\n   - `chat:write` \u2014 post messages\n   - `im:history` / `im:read` \u2014 read direct messages\n   - `groups:history` / `groups:read` \u2014 read private channels the bot is invited to\n5. Scroll back up and click **Install to Workspace**, then click **Allow**.\n6. After installation, the page shows a **Bot User OAuth Token** starting with `xoxb-`. Copy it.\n7. Paste the token into the **Bot Token** field below.\n\n### Notes\n\n- The token is only shown once per install. If you lose it, reinstall the app from the same page to generate a new one.\n- The bot must be invited to any private channel it should read (type `/invite @YourAppName` in the channel).\n- Tokens are workspace-scoped \u2014 repeat this process for each additional workspace.\n",
+        "help_url": "https://api.slack.com/authentication/token-types#bot",
+        "fields": [
+          {
+            "name": "bot_token",
+            "label": "Bot Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xoxb-1234567890-...",
+            "description": "Bot User OAuth Token from api.slack.com/apps \u2192 your app \u2192 OAuth & Permissions. Starts with xoxb-."
+          },
+          {
+            "name": "default_channel",
+            "label": "Default Channel",
+            "type": "text",
+            "required": false,
+            "placeholder": "#general",
+            "description": "Optional. The channel Anton posts to when no channel is specified (e.g. #general or a channel ID)."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "Sign in with Slack (OAuth 2.0)",
+        "description": "Use your own Slack app's client credentials to run a full OAuth 2.0 flow. More setup required \u2014 best for multi-workspace or automated scenarios.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://slack.com/oauth/v2/authorize",
+          "token_url": "https://slack.com/api/oauth.v2.access",
+          "scopes": [
+            "channels:history",
+            "channels:read",
+            "chat:write",
+            "im:history",
+            "im:read",
+            "groups:history",
+            "groups:read",
+            "users:read"
+          ]
+        },
+        "how_to": "## OAuth 2.0 with your own Slack App\n\nThis flow opens a browser window so you can authorize Anton via Slack's consent screen. You must first create a Slack app and supply its client credentials.\n\n### Steps\n\n1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App \u2192 From scratch**.\n2. Name it (e.g. `Anton`) and pick your workspace.\n3. In the left sidebar, click **OAuth & Permissions**.\n4. Under **Redirect URLs**, add `http://127.0.0.1` (Anton uses a local redirect to capture the code).\n5. Scroll to **Scopes \u2192 Bot Token Scopes** and add the scopes you need (e.g. `channels:history`, `chat:write`, `channels:read`).\n6. In the left sidebar, click **Basic Information**. Copy the **Client ID** and **Client Secret** from the **App Credentials** section.\n7. Paste both into the fields below and click **Submit**. A browser window will open Slack's authorization screen.\n8. Click **Allow**. Anton captures the token automatically.\n\n### Notes\n\n- If you see a redirect mismatch error, double-check that `http://127.0.0.1` is listed under Redirect URLs exactly.\n- Slack's OAuth 2.0 v2 returns a bot token (`xoxb-`) alongside the access response \u2014 Anton stores this for API calls.\n",
+        "help_url": "https://api.slack.com/authentication/oauth-v2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "1234567890.9876543210",
+            "description": "From api.slack.com/apps \u2192 your app \u2192 Basic Information \u2192 App Credentials."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID. Found in the same App Credentials section."
+          },
+          {
+            "name": "default_channel",
+            "label": "Default Channel",
+            "type": "text",
+            "required": false,
+            "placeholder": "#general",
+            "description": "Optional. The channel Anton posts to when no channel is specified."
+          }
+        ]
+      }
+    ]
+  }
+}

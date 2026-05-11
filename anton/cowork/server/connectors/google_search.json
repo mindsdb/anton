@@ -1,0 +1,107 @@
+{
+  "id": "google_search",
+  "label": "Google Search",
+  "aliases": [
+    "google custom search",
+    "programmable search engine",
+    "google cse",
+    "custom search api"
+  ],
+  "keywords": [
+    "search",
+    "google",
+    "web search",
+    "custom search",
+    "programmable search",
+    "cse",
+    "serp"
+  ],
+  "description": "Run web searches via Google's Programmable Search Engine (Custom Search JSON API) using an API key and Search Engine ID.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "google_search-connector",
+    "title": "Connect Google Search",
+    "subtitle": "Authorize Anton to query the web via Google's Custom Search JSON API.",
+    "logo": "search",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key + Search Engine ID",
+        "description": "Paste your Google Cloud API key (with Custom Search API enabled) and your Programmable Search Engine ID (cx). Quickest setup \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Connect with an API Key and Search Engine ID\n\nYou need two things: a **Google Cloud API key** and a **Search Engine ID (cx)**.\n\n### Part 1 \u2014 Get a Google Cloud API Key\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select or create a project.\n2. Go to **APIs & Services \u2192 Library**, search for **Custom Search API**, and click **Enable**.\n3. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 API key**.\n4. Copy the generated key. Optionally click **Edit API key** to restrict it to the Custom Search API for security.\n5. Paste the key into the **API Key** field below.\n\n### Part 2 \u2014 Get your Search Engine ID (cx)\n\n1. Open [Programmable Search Engine](https://programmablesearchengine.google.com/controlpanel/all).\n2. Click **Add** (or open an existing engine).\n3. Enter the sites to search or check **Search the entire web** for general web search.\n4. After creation, click **Customize** on your engine, then go to the **Overview** tab.\n5. Copy the **Search engine ID** value (labelled `cx`) and paste it into the **Search Engine ID** field below.\n\n### Notes\n\n- The free tier allows 100 queries per day. Additional queries cost $5 per 1,000 (up to 10,000/day).\n- Billing must be enabled on your Google Cloud project to use the API beyond the free quota.\n- If you restrict the key to specific IPs or referrers, make sure Anton's environment is whitelisted.\n",
+        "help_url": "https://developers.google.com/custom-search/v1/introduction",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "AIzaSy...",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Must have the Custom Search API enabled on the same project."
+          },
+          {
+            "name": "search_engine_id",
+            "label": "Search Engine ID (cx)",
+            "type": "text",
+            "required": true,
+            "placeholder": "017576662512468239146:omuauf_lfve",
+            "description": "From programmablesearchengine.google.com \u2192 your engine \u2192 Overview. Also called the cx parameter."
+          },
+          {
+            "name": "num_results",
+            "label": "Default Results per Query",
+            "type": "select",
+            "required": false,
+            "default": "10",
+            "description": "Number of search results Anton fetches per query (max 10 per Google's API limit).",
+            "options": [
+              {
+                "value": "1",
+                "label": "1"
+              },
+              {
+                "value": "3",
+                "label": "3"
+              },
+              {
+                "value": "5",
+                "label": "5"
+              },
+              {
+                "value": "10",
+                "label": "10"
+              }
+            ]
+          },
+          {
+            "name": "safe_search",
+            "label": "Safe Search",
+            "type": "select",
+            "required": false,
+            "default": "off",
+            "description": "Controls Google's SafeSearch filtering for explicit content.",
+            "options": [
+              {
+                "value": "off",
+                "label": "Off"
+              },
+              {
+                "value": "medium",
+                "label": "Medium"
+              },
+              {
+                "value": "high",
+                "label": "High"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

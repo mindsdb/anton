@@ -1,0 +1,115 @@
+{
+  "id": "jira",
+  "label": "Jira",
+  "aliases": [
+    "jira software",
+    "atlassian jira",
+    "jira cloud",
+    "jira server",
+    "atlassian"
+  ],
+  "keywords": [
+    "issue",
+    "tracking",
+    "project",
+    "ticket",
+    "bug",
+    "sprint",
+    "agile",
+    "kanban",
+    "scrum",
+    "atlassian",
+    "board",
+    "backlog",
+    "epic",
+    "story"
+  ],
+  "description": "Connect to Jira to read, create, and update issues and projects in your Atlassian workspace.",
+  "category": "productivity",
+  "logo": "list",
+  "logo_color": "#0052CC",
+  "form": {
+    "form_id": "jira-connector",
+    "title": "Connect Jira",
+    "subtitle": "Authenticate with your Atlassian account to access Jira issues and projects.",
+    "logo": "list",
+    "logo_color": "#0052CC",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your Atlassian API token along with your login email and Jira subdomain. Quickest path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with an Atlassian API Token\n\nAtlassian API tokens are tied to your user account and used in place of your password for HTTP Basic Auth (`email:token`).\n\n### Steps\n\n1. Log in to your Atlassian account and open [API tokens](https://id.atlassian.com/manage-profile/security/api-tokens).\n2. Click **Create API token**.\n3. Give it a descriptive label like `Anton` and click **Create**.\n4. Copy the token from the dialog \u2014 it is only shown once.\n5. Paste it into **API Token** below.\n6. Enter your **Atlassian account email** (the one you log into Jira with).\n7. Enter your **Jira subdomain** \u2014 the part before `.atlassian.net`, e.g. `yourorg` from `yourorg.atlassian.net`.\n\n### Notes\n\n- The token is used as the password in HTTP Basic Auth; your email is the username.\n- Tokens do not expire by default, but a Workspace admin can revoke them at any time.\n- If you lose the token, delete it in the API tokens page and create a new one.\n- This method works with Jira Cloud. For Jira Server/Data Center on-premise, use username + password or a Personal Access Token instead.\n",
+        "help_url": "https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/",
+        "fields": [
+          {
+            "name": "subdomain",
+            "label": "Jira Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourorg",
+            "description": "The subdomain part of your Jira URL \u2014 e.g. 'yourorg' from 'yourorg.atlassian.net'."
+          },
+          {
+            "name": "email",
+            "label": "Atlassian Account Email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@yourcompany.com",
+            "description": "The email address you use to log in to Jira. Used as the username in Basic Auth."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The API token generated at id.atlassian.com \u2192 Security \u2192 API tokens. Shown only once at creation."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (3-LO)",
+        "description": "Authorize Anton via Atlassian's OAuth 2.0 flow using your own Atlassian app credentials. More involved to set up but does not require copying an API token.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://auth.atlassian.com/authorize",
+          "token_url": "https://auth.atlassian.com/oauth/token",
+          "scopes": [
+            "read:jira-work",
+            "write:jira-work",
+            "read:jira-user",
+            "offline_access"
+          ],
+          "extra_auth_params": {
+            "audience": "api.atlassian.com",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Connect via Atlassian OAuth 2.0 (3-LO)\n\nYou must create an Atlassian OAuth app in the Atlassian Developer Console to get a Client ID and Secret.\n\n### Steps\n\n1. Go to the [Atlassian Developer Console](https://developer.atlassian.com/console/myapps/) and click **Create** \u2192 **OAuth 2.0 integration**.\n2. Give it a name like `Anton` and agree to the terms.\n3. On the app page, go to **Permissions** \u2192 add **Jira API** \u2192 select `read:jira-work`, `write:jira-work`, and `read:jira-user`.\n4. Go to **Authorization** \u2192 **OAuth 2.0 (3LO)** \u2192 set the **Callback URL** to `http://localhost` (Anton handles the local redirect).\n5. Go to **Settings** \u2192 copy the **Client ID** and **Secret**.\n6. Paste them into the fields below and click **Submit**.\n7. A browser window will open for you to authorize Anton against your Atlassian account.\n\n### Notes\n\n- The `offline_access` scope is required so Anton can refresh tokens without re-prompting you.\n- After authorization, Anton uses the Atlassian REST API at `api.atlassian.com/ex/jira/{cloudId}`.\n- You can revoke access at any time from [Atlassian Connected Apps](https://id.atlassian.com/manage-profile/apps).\n",
+        "help_url": "https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "From your Atlassian Developer Console app \u2192 Settings \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID. Found in the same Settings page in the Atlassian Developer Console."
+          }
+        ]
+      }
+    ]
+  }
+}

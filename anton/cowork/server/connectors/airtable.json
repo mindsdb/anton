@@ -1,0 +1,95 @@
+{
+  "id": "airtable",
+  "label": "Airtable",
+  "aliases": [
+    "air table",
+    "airtable db",
+    "airtable base"
+  ],
+  "keywords": [
+    "spreadsheet",
+    "database",
+    "no-code",
+    "base",
+    "table",
+    "records",
+    "grid",
+    "low-code"
+  ],
+  "description": "Read and write records in Airtable bases using the Airtable REST API.",
+  "category": "productivity",
+  "logo": "grid",
+  "logo_color": "#18BFFF",
+  "form": {
+    "form_id": "airtable-connector",
+    "title": "Connect Airtable",
+    "subtitle": "Paste your Personal Access Token to give Anton scoped access to your Airtable bases.",
+    "logo": "grid",
+    "logo_color": "#18BFFF",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Paste a PAT from Airtable's Developer Hub. Quickest path \u2014 no OAuth app setup required. Scopes are chosen when you create the token.",
+        "recommended": true,
+        "how_to": "## Generate an Airtable Personal Access Token\n\nAirtable's older per-base API keys are deprecated. Personal Access Tokens (PATs) are the current supported auth method.\n\n### Steps\n\n1. Log in to [airtable.com](https://airtable.com) and click your avatar in the top-right corner.\n2. Go to **Developer hub** (or visit [airtable.com/create/tokens](https://airtable.com/create/tokens) directly).\n3. Click **Create token**.\n4. Give the token a descriptive name like `Anton`.\n5. Under **Scopes**, add at minimum:\n   - `data.records:read` \u2014 to read records\n   - `data.records:write` \u2014 to create/update/delete records\n   - `schema.bases:read` \u2014 to list tables and fields\n6. Under **Access**, choose which bases or workspaces the token can reach. Pick **All current and future bases** for full access, or restrict to specific bases.\n7. Click **Create token**. The token is shown **once** \u2014 copy it immediately.\n8. Paste it into the **Personal Access Token** field below.\n\n### Notes\n\n- Tokens start with `pat`. If yours doesn't, you may have copied an old API key instead.\n- If you lose the token, delete it in Developer Hub and create a new one \u2014 Anton can accept a replacement without any other changes.\n- Scopes can't be edited after creation; delete and recreate if you need to add scopes later.",
+        "help_url": "https://airtable.com/developers/web/guides/personal-access-tokens",
+        "fields": [
+          {
+            "name": "personal_access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "patXXXXXXXXXXXXXX",
+            "description": "Starts with 'pat'. Found in airtable.com \u2192 avatar \u2192 Developer hub \u2192 Personal access tokens."
+          },
+          {
+            "name": "base_id",
+            "label": "Base ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "appXXXXXXXXXXXXXX",
+            "description": "Restrict Anton to a specific base. Leave blank to access all bases the token can reach. Found in the base URL: airtable.com/appXXXX/..."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (bring your own client)",
+        "description": "Authorize via Airtable's OAuth flow using your own OAuth client credentials. More setup required but tokens are user-scoped and revocable from Airtable's connected apps page.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://airtable.com/oauth2/v1/authorize",
+          "token_url": "https://airtable.com/oauth2/v1/token",
+          "scopes": [
+            "data.records:read",
+            "data.records:write",
+            "schema.bases:read"
+          ]
+        },
+        "how_to": "## Connect via OAuth 2.0\n\nUse this method if you want a browser-based consent flow rather than managing a token manually. You must register your own OAuth client in Airtable's Developer Hub.\n\n### Steps\n\n1. Go to [airtable.com/create/oauth](https://airtable.com/create/oauth) and click **Register new OAuth integration**.\n2. Fill in a name (e.g. `Anton`) and set the redirect URI to `http://localhost` (Anton uses a local server to capture the code).\n3. Under **Scopes**, enable at minimum: `data.records:read`, `data.records:write`, `schema.bases:read`.\n4. Save the integration and copy the **Client ID** and **Client secret**.\n5. Paste both into the fields below and click **Submit**.\n6. A browser window will open to Airtable's consent screen \u2014 approve the requested permissions.\n7. Anton exchanges the authorization code for a refresh token and stores it locally.\n\n### Notes\n\n- Airtable requires PKCE for OAuth clients. Anton handles this automatically.\n- To revoke access, visit **airtable.com \u2192 avatar \u2192 Connected apps** and remove the entry.\n- If the consent screen shows a warning that the app is unverified, that's expected for self-registered integrations.",
+        "help_url": "https://airtable.com/developers/web/guides/oauth-integrations",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "description": "From Airtable Developer Hub \u2192 your OAuth integration \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID. Shown once when you create the integration \u2014 store it safely."
+          }
+        ]
+      }
+    ]
+  }
+}

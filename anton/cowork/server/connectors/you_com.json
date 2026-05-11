@@ -1,0 +1,61 @@
+{
+  "id": "you_com",
+  "label": "You.com",
+  "aliases": [
+    "you",
+    "you search",
+    "youchat",
+    "you.com search"
+  ],
+  "keywords": [
+    "search",
+    "web search",
+    "image search",
+    "news search",
+    "ai search",
+    "rag",
+    "you.com",
+    "api"
+  ],
+  "description": "Search the web, images, and news using You.com's search API with a single API key.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#0066FF",
+  "form": {
+    "form_id": "you_com-connector",
+    "title": "Connect You.com",
+    "subtitle": "Paste your You.com API key to enable web, image, and news search.",
+    "logo": "search",
+    "logo_color": "#0066FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your You.com API key from the api.you.com Dashboard. The simplest and only required step \u2014 no OAuth, no setup.",
+        "recommended": true,
+        "how_to": "## Get your You.com API Key\n\n1. Go to [api.you.com](https://api.you.com) and sign in or create an account.\n2. Once logged in, navigate to the **Dashboard** (top navigation or sidebar).\n3. Locate the **API Keys** section on the Dashboard page.\n4. Click **Create API Key** (or copy an existing key if you already have one).\n5. Give the key a name like `Anton` for easy identification.\n6. Copy the generated API key \u2014 it may only be shown once, so store it somewhere safe.\n7. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Your key grants access to web, image, and news search endpoints depending on your plan tier.\n- If you suspect a key has been compromised, revoke it from the Dashboard and generate a new one.\n- Rate limits and available endpoints depend on your You.com subscription plan.",
+        "help_url": "https://documentation.you.com/api-reference/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "yk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in your You.com API Dashboard at api.you.com. Paste the full key including any prefix."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.ydc-index.io",
+            "default": "https://api.ydc-index.io",
+            "description": "The You.com API base URL. Leave as default unless you have been given a custom endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "id": "statuspage",
+  "label": "Statuspage",
+  "aliases": [
+    "atlassian statuspage",
+    "status page",
+    "status.io",
+    "incident status",
+    "atlassian status"
+  ],
+  "keywords": [
+    "statuspage",
+    "atlassian",
+    "incident",
+    "uptime",
+    "status",
+    "outage",
+    "maintenance",
+    "observability",
+    "monitoring"
+  ],
+  "description": "Manage Atlassian Statuspage pages, incidents, and components to communicate service health to your users.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#0052CC",
+  "form": {
+    "form_id": "statuspage-connector",
+    "title": "Connect Statuspage",
+    "subtitle": "Paste your Statuspage API key to let Anton read and update your status pages and incidents.",
+    "logo": "sparkle",
+    "logo_color": "#0052CC",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your personal Statuspage API key. Generated in seconds from your User Profile \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Statuspage API Key\n\nStatuspage uses a personal API key tied to your user account. Any pages your account can access will be available to Anton.\n\n### Steps\n\n1. Log in to [Statuspage](https://manage.statuspage.io).\n2. Click your avatar or name in the top-right corner and choose **Profile**.\n3. Scroll to the **API Info** section.\n4. Copy the value shown under **API key** (it looks like a long alphanumeric string, e.g. `a1b2c3d4e5f6...`).\n5. Paste it into the **API Key** field below.\n6. Optionally enter a specific **Page ID** to scope Anton to one page, or leave it blank to work across all pages your account can see.\n\n### Notes\n\n- The API key is scoped to your Statuspage user account. If your account is removed or the key is regenerated, you will need to re-enter it here.\n- To find a **Page ID**, go to **Manage \u2192 Pages**, select a page, and look at the URL: `manage.statuspage.io/pages/<page_id>`.\n- Organization admins can see all pages; restricted users see only pages they have been granted access to.\n- Treat this key like a password \u2014 anyone with it can create and resolve incidents on your behalf.\n",
+        "help_url": "https://developer.statuspage.io/#section/Authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "a1b2c3d4e5f6...",
+            "description": "Found in Statuspage \u2192 User Profile \u2192 API Info. Treat it like a password."
+          },
+          {
+            "name": "page_id",
+            "label": "Page ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "abc123xyz",
+            "description": "Scope Anton to a single Statuspage page. Find it in the URL when viewing a page in the dashboard: manage.statuspage.io/pages/<page_id>. Leave blank to access all pages."
+          }
+        ]
+      }
+    ]
+  }
+}

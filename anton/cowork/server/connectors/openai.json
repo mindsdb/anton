@@ -1,0 +1,83 @@
+{
+  "id": "openai",
+  "label": "OpenAI",
+  "aliases": [
+    "gpt",
+    "chatgpt",
+    "gpt-4",
+    "gpt-3",
+    "dall-e",
+    "whisper",
+    "openai api"
+  ],
+  "keywords": [
+    "ai",
+    "llm",
+    "gpt",
+    "embeddings",
+    "completions",
+    "dall-e",
+    "whisper",
+    "language model",
+    "openai",
+    "machine learning",
+    "neural network"
+  ],
+  "description": "Connect to OpenAI's API to use GPT models, embeddings, DALL-E image generation, and Whisper speech-to-text.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#10A37F",
+  "form": {
+    "form_id": "openai-connector",
+    "title": "Connect OpenAI",
+    "subtitle": "Paste your OpenAI API key to enable GPT, embeddings, DALL-E, and Whisper.",
+    "logo": "brain",
+    "logo_color": "#10A37F",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a secret API key from platform.openai.com. Takes 30 seconds \u2014 no OAuth setup required. Optionally scope the key to a specific organization or project.",
+        "recommended": true,
+        "how_to": "## Generate an OpenAI API Key\n\n1. Open [platform.openai.com](https://platform.openai.com) and sign in.\n2. Click your profile icon in the top-right corner \u2192 **Your profile**.\n3. Go to **API Keys** in the left sidebar (or navigate directly to [platform.openai.com/api-keys](https://platform.openai.com/api-keys)).\n4. Click **+ Create new secret key**.\n5. Give the key a name like `Anton` so you can identify it later.\n6. (Optional) Restrict the key to a specific **Project** using the project dropdown.\n7. Click **Create secret key** \u2014 the key is shown **once**. Copy it immediately.\n8. Paste the key (it starts with `sk-`) into the **API Key** field below.\n\n## Organization & Project IDs (optional)\n\n- If your account belongs to multiple organizations, find your **Organization ID** under **Settings \u2192 Organization \u2192 General** (looks like `org-...`). Leave blank to use your default org.\n- If you use OpenAI Projects, find the **Project ID** under **Settings \u2192 Projects \u2192 [your project] \u2192 General** (looks like `proj_...`). Leave blank to use the default project.\n\n## Notes\n\n- The key is shown once. If you lose it, delete the old key and generate a new one \u2014 Anton makes this easy to update.\n- Usage and rate limits are tied to your account tier. Check [platform.openai.com/usage](https://platform.openai.com/usage) to monitor consumption.\n- Keys can be revoked at any time from the API Keys page without affecting other integrations.\n",
+        "help_url": "https://platform.openai.com/docs/api-reference/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "sk-...",
+            "description": "Your OpenAI secret API key. Found at platform.openai.com/api-keys \u2014 shown only once at creation."
+          },
+          {
+            "name": "organization_id",
+            "label": "Organization ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "org-...",
+            "description": "Optional. Required only if you belong to multiple organizations. Find it under Settings \u2192 Organization \u2192 General."
+          },
+          {
+            "name": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "proj_...",
+            "description": "Optional. Scopes API calls to a specific OpenAI Project. Find it under Settings \u2192 Projects \u2192 [your project] \u2192 General."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.openai.com/v1",
+            "default": "https://api.openai.com/v1",
+            "description": "Optional. Override only if using a custom proxy or Azure OpenAI-compatible endpoint. Leave blank to use the default OpenAI API."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "id": "gcp_cloud_monitoring",
+  "label": "GCP Cloud Monitoring",
+  "aliases": [
+    "google cloud monitoring",
+    "stackdriver",
+    "stackdriver monitoring",
+    "gcp monitoring",
+    "google stackdriver",
+    "cloud monitoring"
+  ],
+  "keywords": [
+    "google",
+    "gcp",
+    "cloud",
+    "monitoring",
+    "metrics",
+    "logs",
+    "observability",
+    "stackdriver",
+    "alerting",
+    "dashboards",
+    "time series"
+  ],
+  "description": "Query metrics, logs, and alerts from Google Cloud Monitoring (formerly Stackdriver) using a service account.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "gcp_cloud_monitoring-connector",
+    "title": "Connect GCP Cloud Monitoring",
+    "subtitle": "Authenticate with a GCP service account to read metrics and logs from your project.",
+    "logo": "sparkle",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "service-account-json",
+        "label": "Service Account JSON",
+        "description": "Paste a GCP service account key file to grant Anton access to Cloud Monitoring metrics and logs. No browser pop-up required \u2014 just download the JSON key and paste it.",
+        "recommended": true,
+        "how_to": "## Authenticate with a GCP Service Account\n\nThis is the simplest path: create a service account in Google Cloud Console, grant it the Monitoring Viewer role, download a JSON key, and paste it below.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select the project you want to monitor.\n2. Navigate to **IAM & Admin \u2192 Service Accounts \u2192 Create service account**.\n3. Give it a name like `anton-monitoring` and click **Create and continue**.\n4. Under **Grant this service account access to project**, assign the following roles:\n   - `Monitoring Viewer` \u2014 read metrics and uptime checks\n   - `Logs Viewer` \u2014 read log entries (optional, needed for log queries)\n5. Click **Done**.\n6. Click the service account you just created, go to the **Keys** tab, then **Add key \u2192 Create new key \u2192 JSON**.\n7. The key file downloads automatically. Open it and copy the entire contents.\n8. Paste the JSON into the **Service Account JSON** field below.\n9. Enter your **GCP Project ID** (e.g. `my-project-123`) \u2014 found in the Cloud Console header or on the project dashboard.\n\n### Notes\n\n- The JSON key is shown only once at download time. If you lose it, delete the key and create a new one from the **Keys** tab.\n- You can scope access further by using `Monitoring Metric Writer` or custom roles instead.\n- To revoke access, delete the key from **IAM & Admin \u2192 Service Accounts \u2192 Keys**.\n",
+        "help_url": "https://cloud.google.com/monitoring/docs/reference/libraries#setting_up_authentication",
+        "fields": [
+          {
+            "name": "service_account_json",
+            "label": "Service Account JSON",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "{ \"type\": \"service_account\", \"project_id\": \"...\", ... }",
+            "description": "Paste the full contents of the downloaded JSON key file for your GCP service account."
+          },
+          {
+            "name": "project_id",
+            "label": "GCP Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-project-123",
+            "description": "The Google Cloud project ID to query. Found in the Cloud Console header or on the project dashboard."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (User Account)",
+        "description": "Sign in with your Google account via OAuth to access Cloud Monitoring. Requires you to supply your own Google Cloud OAuth client ID and secret.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/monitoring.read",
+            "https://www.googleapis.com/auth/logging.read",
+            "https://www.googleapis.com/auth/cloudplatformprojects.readonly"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## OAuth 2.0 \u2014 Sign in with Google\n\nThis method uses your personal or Workspace Google account. You'll need to create an OAuth client in Google Cloud Console first.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **APIs & Services \u2192 Library** and enable the **Cloud Monitoring API** and **Cloud Logging API**.\n3. Go to **APIs & Services \u2192 OAuth consent screen** \u2014 configure an internal or external app and add your email as a test user if external.\n4. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID** \u2014 choose **Desktop app** as the application type.\n5. Copy the generated **Client ID** and **Client secret** into the fields below.\n6. Enter the **GCP Project ID** you want to query.\n7. Click **Submit** \u2014 your browser will open Google's consent screen.\n8. Approve the requested scopes. Anton stores the resulting refresh token locally.\n\n### Notes\n\n- Refresh tokens can expire if not used for 6 months or if the OAuth consent screen is in testing mode. Re-authorize if you see auth errors.\n- To revoke: visit [Third-party apps with account access](https://myaccount.google.com/permissions) and remove Anton's entry.\n",
+        "help_url": "https://cloud.google.com/monitoring/docs/reference/libraries#setting_up_authentication",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Use a Desktop app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID. Copied from the same row in Google Cloud Console Credentials."
+          },
+          {
+            "name": "project_id",
+            "label": "GCP Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-project-123",
+            "description": "The Google Cloud project ID to query. Found in the Cloud Console header or on the project dashboard."
+          }
+        ]
+      }
+    ]
+  }
+}

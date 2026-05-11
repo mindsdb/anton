@@ -1,0 +1,114 @@
+{
+  "id": "aws_rds_sqlserver",
+  "label": "AWS RDS SQL Server",
+  "aliases": [
+    "rds sql server",
+    "amazon rds sql server",
+    "aws sql server",
+    "rds mssql",
+    "amazon sql server",
+    "aws rds mssql"
+  ],
+  "keywords": [
+    "sql server",
+    "mssql",
+    "rds",
+    "aws",
+    "amazon",
+    "database",
+    "relational",
+    "microsoft",
+    "t-sql"
+  ],
+  "description": "Connect to a Microsoft SQL Server instance managed by Amazon RDS using an endpoint, port, and credentials.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#C7232D",
+  "form": {
+    "form_id": "aws_rds_sqlserver-connector",
+    "title": "Connect AWS RDS SQL Server",
+    "subtitle": "Enter your RDS endpoint, port, database name, and credentials to establish a connection.",
+    "logo": "database",
+    "logo_color": "#C7232D",
+    "methods": [
+      {
+        "id": "host-password",
+        "label": "RDS Endpoint + Credentials",
+        "description": "Connect directly using your RDS endpoint, port, database name, username, and password. Works with SQL Server Authentication or any master user credentials created at instance launch.",
+        "recommended": true,
+        "how_to": "## Connect via RDS Endpoint + Credentials\n\nFind your RDS endpoint in the AWS Console and paste it along with your database credentials below.\n\n### Steps\n\n1. Open the [AWS RDS Console](https://console.aws.amazon.com/rds/) and navigate to **Databases**.\n2. Click your SQL Server instance to open its detail page.\n3. Under **Connectivity & security**, copy the **Endpoint** (e.g. `myinstance.abc123.us-east-1.rds.amazonaws.com`).\n4. Note the **Port** \u2014 SQL Server defaults to `1433`.\n5. Paste the endpoint into **Host** and the port into **Port** below.\n6. Enter the **Database** name you want Anton to connect to (the master database is `master` by default).\n7. Enter the **Username** and **Password** for a SQL Server login. The master user is created when you launch the instance.\n8. Enable **Use SSL/TLS** if your parameter group or instance configuration enforces encrypted connections (recommended for production).\n\n### Gotchas\n\n- The RDS instance's **Security Group** must allow inbound TCP on port 1433 from the machine running Anton. Add an inbound rule if needed: **EC2 \u2192 Security Groups \u2192 Inbound rules \u2192 Add rule \u2192 MSSQL / TCP / 1433**.\n- **Publicly accessible** must be set to `Yes` on the instance if Anton runs outside your VPC. Check under **Connectivity & security \u2192 Public accessibility**.\n- IAM database authentication for SQL Server on RDS is not supported \u2014 use a native SQL Server login.\n- SSL certificates for RDS are issued by Amazon. If certificate verification fails, download the [RDS CA bundle](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) and configure your client accordingly.\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToMicrosoftSQLServerInstance.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host (RDS Endpoint)",
+            "type": "text",
+            "required": true,
+            "placeholder": "myinstance.abc123.us-east-1.rds.amazonaws.com",
+            "description": "Found in the AWS RDS Console under Connectivity & security \u2192 Endpoint."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "1433",
+            "placeholder": "1433",
+            "description": "SQL Server default is 1433. Change only if your instance uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "master",
+            "description": "Name of the SQL Server database Anton should connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "admin",
+            "description": "SQL Server login username. Typically the master user created at instance launch."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the SQL Server login above."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Use SSL/TLS",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Encrypt the connection using SSL/TLS. Strongly recommended for production RDS instances."
+          }
+        ]
+      },
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste a full ADO.NET or JDBC-style SQL Server connection string. Useful if you already have one from another tool or want to set advanced options like application name or timeout.",
+        "recommended": false,
+        "how_to": "## Connect via Connection String\n\nPaste a full SQL Server connection string if you prefer to configure options directly.\n\n### ADO.NET format example\n\n`Server=myinstance.abc123.us-east-1.rds.amazonaws.com,1433;Database=mydb;User Id=admin;Password=secret;Encrypt=True;`\n\n### Steps\n\n1. Open the [AWS RDS Console](https://console.aws.amazon.com/rds/) \u2192 **Databases** \u2192 your instance \u2192 **Connectivity & security**.\n2. Copy the **Endpoint** and **Port**.\n3. Construct your connection string using the endpoint, port, database, username, and password.\n4. Add `Encrypt=True;TrustServerCertificate=False;` for encrypted connections.\n5. Paste the full string into the **Connection String** field below.\n\n### Common parameters\n\n- `Server=<host>,<port>` \u2014 host and port together\n- `Database=<name>` \u2014 target database\n- `User Id=<user>;Password=<pass>` \u2014 SQL Server credentials\n- `Encrypt=True` \u2014 enable TLS\n- `Connection Timeout=30` \u2014 seconds before connection attempt fails\n\n### Gotchas\n\n- Do not include credentials in a connection string that may be logged or version-controlled. Anton stores it encrypted at rest, but exercise caution.\n- RDS SQL Server does not support Windows/Kerberos authentication from outside a domain-joined environment.\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToMicrosoftSQLServerInstance.html",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "Server=myinstance.abc123.us-east-1.rds.amazonaws.com,1433;Database=mydb;User Id=admin;Password=secret;Encrypt=True;",
+            "description": "Full ADO.NET-style SQL Server connection string including host, port, database, and credentials."
+          }
+        ]
+      }
+    ]
+  }
+}

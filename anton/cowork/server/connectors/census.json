@@ -1,0 +1,59 @@
+{
+  "id": "census",
+  "label": "Census",
+  "aliases": [
+    "census reverse etl",
+    "census data activation"
+  ],
+  "keywords": [
+    "reverse etl",
+    "data activation",
+    "sync",
+    "warehouse",
+    "snowflake",
+    "bigquery",
+    "redshift",
+    "dbt",
+    "segmentation"
+  ],
+  "description": "Sync data from your warehouse to CRMs, ad platforms, and other tools using Census's Reverse ETL platform.",
+  "category": "data",
+  "logo": "database",
+  "logo_color": "#7C3AED",
+  "form": {
+    "form_id": "census-connector",
+    "title": "Connect Census",
+    "subtitle": "Paste your Census API key to let Anton read syncs, segments, and destination statuses.",
+    "logo": "database",
+    "logo_color": "#7C3AED",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Census API key generated from Settings \u2192 API. Fastest setup \u2014 no OAuth client required.",
+        "recommended": true,
+        "how_to": "## Generate a Census API Key\n\n1. Log in to [Census](https://app.getcensus.com).\n2. Click your workspace name in the top-left, then go to **Settings**.\n3. In the left sidebar, select **API**.\n4. Click **Create API Key**, give it a descriptive name like `Anton`, and confirm.\n5. Copy the key shown \u2014 it is only displayed once.\n6. Paste it into the **API Key** field below.\n\n## Notes\n\n- API keys are scoped to your Census workspace. If you belong to multiple workspaces, generate a separate key per workspace.\n- Keys do not expire by default, but you can revoke them at any time from the same **Settings \u2192 API** page.\n- Store the key securely \u2014 anyone with it has API-level access to your Census workspace.",
+        "help_url": "https://docs.getcensus.com/basics/api",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "secret_live_xxxxxxxxxxxxxxxx",
+            "description": "Found in Census \u2192 Settings \u2192 API. Shown only once at creation time."
+          },
+          {
+            "name": "workspace_id",
+            "label": "Workspace ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "12345",
+            "description": "Optional. If you belong to multiple Census workspaces, enter the numeric workspace ID to target a specific one."
+          }
+        ]
+      }
+    ]
+  }
+}

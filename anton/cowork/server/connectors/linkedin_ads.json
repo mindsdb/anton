@@ -1,0 +1,79 @@
+{
+  "id": "linkedin_ads",
+  "label": "LinkedIn Ads",
+  "aliases": [
+    "linkedin campaign manager",
+    "linkedin advertising",
+    "linkedin marketing",
+    "li ads"
+  ],
+  "keywords": [
+    "linkedin",
+    "ads",
+    "b2b",
+    "campaign manager",
+    "marketing",
+    "advertising",
+    "sponsored",
+    "lead gen",
+    "social"
+  ],
+  "description": "Connect to LinkedIn Campaign Manager to pull ad performance, spend, and audience reporting data.",
+  "category": "ads",
+  "logo": "sparkle",
+  "logo_color": "#0A66C2",
+  "form": {
+    "form_id": "linkedin_ads-connector",
+    "title": "Connect LinkedIn Ads",
+    "subtitle": "Authorize Anton to read your LinkedIn Campaign Manager ads and reporting data.",
+    "logo": "sparkle",
+    "logo_color": "#0A66C2",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth 2.0 (Bring Your Own App)",
+        "description": "Connect via LinkedIn OAuth 2.0 using your own LinkedIn Developer app. Requires Marketing Developer Platform (MDP) approval from LinkedIn \u2014 a one-time application process. Once approved, paste your Client ID and Secret below and Anton handles the rest.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://www.linkedin.com/oauth/v2/authorization",
+          "token_url": "https://www.linkedin.com/oauth/v2/accessToken",
+          "scopes": [
+            "r_ads",
+            "r_ads_reporting",
+            "rw_ads"
+          ]
+        },
+        "how_to": "## LinkedIn Ads OAuth 2.0 Setup\n\nLinkedIn Ads uses OAuth 2.0 via a Developer app you own. Access to the required marketing scopes also requires **Marketing Developer Platform (MDP) approval** from LinkedIn \u2014 apply early as it can take several days.\n\n### Step 1 \u2014 Apply for Marketing Developer Platform access\n\n1. Go to the [LinkedIn Marketing Developer Platform](https://business.linkedin.com/marketing-solutions/marketing-api) and click **Request access**.\n2. Fill in your use case (internal analytics, reporting, etc.) and submit.\n3. Wait for LinkedIn to approve your request (typically 3\u20137 business days). You'll receive an email confirmation.\n\n### Step 2 \u2014 Create a LinkedIn Developer App\n\n1. Visit [LinkedIn Developer Portal](https://www.linkedin.com/developers/apps) and click **Create app**.\n2. Fill in app name, LinkedIn Page, and logo. Click **Create app**.\n3. Under the **Auth** tab, add a redirect URL: `http://127.0.0.1` (or the port Anton instructs, e.g. `http://127.0.0.1:3000/callback`).\n4. Note your **Client ID** and **Client Secret** from the **Auth** tab.\n\n### Step 3 \u2014 Add required product scopes\n\n1. On your app page, go to the **Products** tab.\n2. Request access to **Marketing APIs** \u2014 this links your MDP approval to the app and unlocks `r_ads`, `r_ads_reporting`, and `rw_ads` scopes.\n3. Confirm the scopes appear under **Auth \u2192 OAuth 2.0 scopes**.\n\n### Step 4 \u2014 Connect in Anton\n\n1. Paste your **Client ID** and **Client Secret** into the fields below.\n2. Click **Submit**. Anton opens a LinkedIn consent screen in your browser.\n3. Authorize the requested permissions. Anton stores the resulting tokens locally.\n\n### Notes\n\n- LinkedIn access tokens expire after 60 days; refresh tokens last up to 1 year. Anton will attempt silent refresh.\n- If you see a scope error during authorization, confirm MDP approval is linked to the app in the Products tab.\n- Tokens can be revoked at [LinkedIn App Settings](https://www.linkedin.com/developers/apps) at any time.",
+        "help_url": "https://learn.microsoft.com/en-us/linkedin/marketing/getting-started",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "78abc123def456",
+            "description": "Found under your app's Auth tab in the LinkedIn Developer Portal."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Paired with the Client ID. Keep this private \u2014 anyone with it can authorize as your app."
+          },
+          {
+            "name": "ad_account_id",
+            "label": "Ad Account ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "123456789",
+            "description": "Your LinkedIn Campaign Manager account URN ID (numbers only). Leave blank to fetch all accounts accessible to the authorized user."
+          }
+        ]
+      }
+    ]
+  }
+}

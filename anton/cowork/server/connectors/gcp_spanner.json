@@ -1,0 +1,140 @@
+{
+  "id": "gcp_spanner",
+  "label": "Google Spanner",
+  "aliases": [
+    "cloud spanner",
+    "google cloud spanner",
+    "spanner",
+    "gcp spanner"
+  ],
+  "keywords": [
+    "google",
+    "gcp",
+    "spanner",
+    "sql",
+    "database",
+    "distributed",
+    "cloud",
+    "relational",
+    "newSQL"
+  ],
+  "description": "Connect to Google Cloud Spanner, a globally-distributed, strongly consistent SQL database.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "gcp_spanner-connector",
+    "title": "Connect Google Spanner",
+    "subtitle": "Authenticate with a service account to query and manage your Spanner databases.",
+    "logo": "database",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "service-account",
+        "label": "Service Account JSON",
+        "description": "Paste a Google Cloud service account key JSON to authenticate. The simplest and most reliable path \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Authenticate with a Service Account\n\nThis is the recommended approach for programmatic access to Cloud Spanner.\n\n### 1. Create or select a service account\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **IAM & Admin \u2192 Service Accounts**.\n3. Click **Create service account** (or use an existing one).\n4. Give it a name like `anton-spanner` and click **Create and continue**.\n\n### 2. Grant the required role\n\n5. Assign the role **Cloud Spanner Database User** (`roles/spanner.databaseUser`) \u2014 or **Cloud Spanner Viewer** if read-only access is sufficient.\n6. Click **Done**.\n\n### 3. Generate a JSON key\n\n7. Click the service account you just created.\n8. Go to the **Keys** tab \u2192 **Add key \u2192 Create new key \u2192 JSON**.\n9. Download the `.json` file. Paste its entire contents into the **Service Account JSON** field below.\n\n### 4. Find your instance and database IDs\n\n10. In Cloud Console, go to **Spanner**.\n11. Copy the **Instance ID** from the instance list (e.g. `my-instance`).\n12. Click into the instance and copy the **Database ID** (e.g. `my-database`).\n\n### Notes\n\n- The JSON key is shown once. If you lose it, generate a new one and re-paste it here.\n- Keep the project ID handy \u2014 it appears in the top-left project picker in Cloud Console.\n- Rotate the key in Cloud Console under **Service Accounts \u2192 Keys** if you suspect exposure.\n",
+        "help_url": "https://cloud.google.com/spanner/docs/getting-started/set-up#create_a_service_account",
+        "fields": [
+          {
+            "name": "service_account_json",
+            "label": "Service Account JSON",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "{ \"type\": \"service_account\", \"project_id\": \"...\", ... }",
+            "description": "Paste the full contents of the downloaded service account JSON key file."
+          },
+          {
+            "name": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-gcp-project",
+            "description": "Your Google Cloud project ID \u2014 visible in the Cloud Console project picker."
+          },
+          {
+            "name": "instance_id",
+            "label": "Instance ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-spanner-instance",
+            "description": "The Spanner instance ID found in Cloud Console \u2192 Spanner \u2192 instance list."
+          },
+          {
+            "name": "database_id",
+            "label": "Database ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-database",
+            "description": "The database name within the Spanner instance."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (User Credentials)",
+        "description": "Authenticate via a Google OAuth consent flow using your own Google Cloud OAuth client credentials. Suitable when you prefer user-level access instead of a service account.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/spanner.data",
+            "https://www.googleapis.com/auth/userinfo.email"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## OAuth 2.0 \u2014 Bring Your Own Client\n\nThis method uses Google's OAuth consent screen. You must supply your own OAuth client ID and secret from Google Cloud Console.\n\n### 1. Enable the Spanner API\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **APIs & Services \u2192 Library** and enable **Cloud Spanner API**.\n\n### 2. Create an OAuth client\n\n3. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID**.\n4. Set the application type to **Desktop app** and give it a name.\n5. Copy the generated **Client ID** and **Client secret**.\n\n### 3. Configure the consent screen\n\n6. Go to **APIs & Services \u2192 OAuth consent screen** and complete the setup.\n7. Add your Google account as a test user if the app is in testing mode.\n\n### 4. Authorize in Anton\n\n8. Paste the Client ID and Client secret below.\n9. Fill in your Project ID, Instance ID, and Database ID.\n10. Click **Submit**. Anton will open a browser window for you to grant access.\n\n### Notes\n\n- Refresh tokens are issued because `access_type=offline` is set.\n- If you lose access, revoke at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) and reconnect.\n",
+        "help_url": "https://cloud.google.com/spanner/docs/authentication",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Use a Desktop app client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID from the same Credentials page."
+          },
+          {
+            "name": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-gcp-project",
+            "description": "Your Google Cloud project ID \u2014 visible in the Cloud Console project picker."
+          },
+          {
+            "name": "instance_id",
+            "label": "Instance ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-spanner-instance",
+            "description": "The Spanner instance ID found in Cloud Console \u2192 Spanner \u2192 instance list."
+          },
+          {
+            "name": "database_id",
+            "label": "Database ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-database",
+            "description": "The database name within the Spanner instance."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "id": "loki",
+  "label": "Grafana Loki",
+  "aliases": [
+    "loki",
+    "grafana loki",
+    "loki logs",
+    "grafana logs"
+  ],
+  "keywords": [
+    "logs",
+    "log aggregation",
+    "observability",
+    "grafana",
+    "loki",
+    "logql",
+    "monitoring",
+    "tracing"
+  ],
+  "description": "Query and stream logs from a Grafana Loki instance using LogQL.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#F46800",
+  "form": {
+    "form_id": "loki-connector",
+    "title": "Connect Grafana Loki",
+    "subtitle": "Point Anton at your Loki endpoint to query and tail log streams.",
+    "logo": "sparkle",
+    "logo_color": "#F46800",
+    "methods": [
+      {
+        "id": "url-no-auth",
+        "label": "Loki URL (no auth)",
+        "description": "Paste your Loki base URL. Use this for local or open instances that require no authentication.",
+        "recommended": true,
+        "how_to": "## Connect to Loki without authentication\n\nThe simplest path \u2014 just paste the base URL of your Loki instance.\n\n### Steps\n\n1. Identify the base URL of your Loki instance, e.g. `http://localhost:3100` or `https://loki.internal.example.com`.\n2. If you are running Loki via Grafana Cloud or behind a reverse proxy, confirm the path prefix (usually none at the root).\n3. Paste the URL into the **Loki URL** field below and click **Submit**.\n4. Anton will verify connectivity by hitting the `/ready` endpoint.\n\n### Notes\n\n- Do not include a trailing slash.\n- If your instance is behind a firewall, ensure the host running Anton can reach it on the correct port.\n- For instances that require authentication, use one of the other methods instead.",
+        "help_url": "https://grafana.com/docs/loki/latest/api/",
+        "fields": [
+          {
+            "name": "loki_url",
+            "label": "Loki URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "http://localhost:3100",
+            "description": "Base URL of your Loki instance. No trailing slash."
+          }
+        ]
+      },
+      {
+        "id": "basic-auth",
+        "label": "Basic Auth (username + password)",
+        "description": "Authenticate with a username and password or API key. Works with Grafana Cloud Loki and any Loki instance protected by HTTP basic auth.",
+        "recommended": false,
+        "how_to": "## Connect to Loki with Basic Auth\n\nUsed for Grafana Cloud Loki or self-hosted Loki instances behind an HTTP basic-auth proxy.\n\n### Grafana Cloud steps\n\n1. Open [grafana.com](https://grafana.com) \u2192 **My Account** \u2192 your stack \u2192 **Loki** section.\n2. Note the **URL** shown (e.g. `https://logs-prod-us-central1.grafana.net`).\n3. Under **Password / API Key**, click **Generate now** or use an existing API key.\n4. Your **User** is the numeric ID shown next to the URL (e.g. `123456`).\n5. Paste the URL, user ID, and API key/password into the fields below.\n\n### Self-hosted steps\n\n1. Find the Loki base URL from your deployment config or reverse-proxy config.\n2. Enter the username and password configured in your proxy (e.g. nginx `htpasswd` or Loki's own auth middleware).\n\n### Notes\n\n- For Grafana Cloud, the password field accepts an API token, not your grafana.com account password.\n- Credentials are stored locally and never sent to Anton's servers.",
+        "help_url": "https://grafana.com/docs/grafana-cloud/data-configuration/logs/",
+        "fields": [
+          {
+            "name": "loki_url",
+            "label": "Loki URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://logs-prod-us-central1.grafana.net",
+            "description": "Base URL of your Loki instance or Grafana Cloud Loki endpoint."
+          },
+          {
+            "name": "username",
+            "label": "Username / User ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456",
+            "description": "For Grafana Cloud this is the numeric User ID shown on your stack's Loki details page."
+          },
+          {
+            "name": "password",
+            "label": "Password / API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "glc_...",
+            "description": "Your HTTP basic auth password or a Grafana Cloud API key/token."
+          }
+        ]
+      },
+      {
+        "id": "multi-tenant",
+        "label": "Multi-tenant (X-Scope-OrgID)",
+        "description": "For multi-tenant Loki deployments. Sends an X-Scope-OrgID header on every request to target a specific tenant. Optionally combine with basic auth.",
+        "recommended": false,
+        "how_to": "## Connect to a multi-tenant Loki deployment\n\nLoki's multi-tenancy mode requires every request to carry an `X-Scope-OrgID` header identifying the tenant. This method lets you set that header, optionally alongside basic auth credentials.\n\n### Steps\n\n1. Confirm your Loki deployment runs with `auth_enabled: true` in `loki-config.yaml`.\n2. Obtain the tenant (org) ID for the namespace you want to query \u2014 this is typically set by your Loki operator or platform team.\n3. Enter the Loki base URL and the **Org / Tenant ID** below.\n4. If the endpoint also requires HTTP basic auth, fill in the **Username** and **Password** fields too; otherwise leave them blank.\n5. Click **Submit**. Anton will inject the `X-Scope-OrgID` header on every API call.\n\n### Notes\n\n- The tenant ID is case-sensitive.\n- To query multiple tenants, create a separate Anton connector for each.\n- If `auth_enabled: false`, Loki ignores the header \u2014 use the **Loki URL (no auth)** method instead.\n- See the [Loki multi-tenancy docs](https://grafana.com/docs/loki/latest/operations/authentication/) for full details.",
+        "help_url": "https://grafana.com/docs/loki/latest/operations/authentication/",
+        "fields": [
+          {
+            "name": "loki_url",
+            "label": "Loki URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://loki.example.com",
+            "description": "Base URL of your multi-tenant Loki instance."
+          },
+          {
+            "name": "org_id",
+            "label": "Org / Tenant ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-tenant",
+            "description": "Value sent as the X-Scope-OrgID header. Must match a tenant configured in your Loki deployment."
+          },
+          {
+            "name": "username",
+            "label": "Username (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "admin",
+            "description": "Only required if your Loki endpoint is also protected by HTTP basic auth."
+          },
+          {
+            "name": "password",
+            "label": "Password (optional)",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Only required if your Loki endpoint is also protected by HTTP basic auth."
+          }
+        ]
+      }
+    ]
+  }
+}

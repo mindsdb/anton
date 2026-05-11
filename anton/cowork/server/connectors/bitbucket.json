@@ -1,0 +1,105 @@
+{
+  "id": "bitbucket",
+  "label": "Bitbucket",
+  "aliases": [
+    "bitbucket cloud",
+    "atlassian bitbucket",
+    "bb"
+  ],
+  "keywords": [
+    "git",
+    "source control",
+    "version control",
+    "repositories",
+    "pull requests",
+    "code review",
+    "atlassian",
+    "devops",
+    "ci",
+    "pipelines"
+  ],
+  "description": "Read repositories, pull requests, and pipelines from your Bitbucket Cloud workspace.",
+  "category": "engineering",
+  "logo": "code",
+  "logo_color": "#0052CC",
+  "form": {
+    "form_id": "bitbucket-connector",
+    "title": "Connect Bitbucket",
+    "subtitle": "Authorize Anton to access your Bitbucket repositories and pull requests.",
+    "logo": "code",
+    "logo_color": "#0052CC",
+    "methods": [
+      {
+        "id": "app-password",
+        "label": "App Password",
+        "description": "Paste your Bitbucket username and an app password \u2014 a scoped credential you generate in account settings. No OAuth client setup required; takes under a minute.",
+        "recommended": true,
+        "how_to": "## Connect with a Bitbucket App Password\n\nApp passwords are scoped credentials tied to your Bitbucket account. They are separate from your login password and can be revoked at any time.\n\n### Steps\n\n1. Log in to [bitbucket.org](https://bitbucket.org) and click your **avatar** in the bottom-left corner.\n2. Go to **Personal settings** (or **Account settings**).\n3. In the left sidebar, click **App passwords** under the **Access management** section.\n4. Click **Create app password**.\n5. Give it a descriptive label, e.g. `Anton`.\n6. Select the scopes Anton needs. For read access to repositories and PRs, check at minimum:\n   - **Account: Read**\n   - **Repositories: Read**\n   - **Pull requests: Read**\n   - Add **Write** scopes if you want Anton to comment or merge.\n7. Click **Create**. Bitbucket displays the app password **once** \u2014 copy it immediately.\n8. Paste your **Bitbucket username** (not your email) and the app password into the fields below.\n\n### Notes\n\n- Your username is visible at [bitbucket.org/account/settings](https://bitbucket.org/account/settings) under **Bitbucket profile settings \u2192 Username**.\n- The app password is shown only once. If you lose it, delete it and create a new one.\n- App passwords are per-user, not per-workspace \u2014 one credential can span multiple workspaces your account belongs to.",
+        "help_url": "https://support.atlassian.com/bitbucket-cloud/docs/create-an-app-password/",
+        "fields": [
+          {
+            "name": "username",
+            "label": "Bitbucket Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-bitbucket-username",
+            "description": "Your Bitbucket username (not your email address). Find it at Account settings \u2192 Username."
+          },
+          {
+            "name": "app_password",
+            "label": "App Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ATBBxxxxxxxxxxxxxxxxxx",
+            "description": "Generated in Bitbucket \u2192 Personal settings \u2192 App passwords. Shown only once \u2014 copy it before closing the dialog."
+          },
+          {
+            "name": "workspace",
+            "label": "Workspace Slug (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-workspace",
+            "description": "Limit Anton to a specific workspace slug. Leave blank to access all workspaces your account belongs to."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own Client)",
+        "description": "Authorize via Bitbucket's OAuth 2.0 flow using your own Atlassian OAuth consumer. A browser window opens for consent; no password is stored.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://bitbucket.org/site/oauth2/authorize",
+          "token_url": "https://bitbucket.org/site/oauth2/access_token",
+          "scopes": [
+            "account",
+            "repository",
+            "pullrequest"
+          ]
+        },
+        "how_to": "## Connect with OAuth 2.0\n\nThis method requires you to register an OAuth consumer in your Bitbucket workspace settings.\n\n### Steps\n\n1. Log in to [bitbucket.org](https://bitbucket.org) and navigate to your **Workspace settings** (the workspace you want Anton to access).\n2. In the sidebar, go to **Apps and features \u2192 OAuth consumers**.\n3. Click **Add consumer**.\n4. Set a **Name** (e.g. `Anton`) and a **Callback URL** of `http://localhost` (Anton uses a local redirect).\n5. Under **Permissions**, enable at minimum:\n   - **Account: Read**\n   - **Repositories: Read**\n   - **Pull requests: Read**\n6. Click **Save**. Bitbucket shows your **Key** (Client ID) and **Secret** (Client Secret).\n7. Paste both into the fields below and click **Submit**.\n8. A browser window opens to Bitbucket's consent screen \u2014 approve the access.\n\n### Notes\n\n- OAuth consumers live at the workspace level; they only grant access to that workspace's repositories.\n- Bitbucket issues short-lived access tokens with a refresh token \u2014 Anton stores the refresh token locally to re-authenticate silently.",
+        "help_url": "https://support.atlassian.com/bitbucket-cloud/docs/use-oauth-on-bitbucket-cloud/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Consumer Key (Client ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "The Key shown on your OAuth consumer in Workspace settings \u2192 Apps and features \u2192 OAuth consumers."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Consumer Secret (Client Secret)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The Secret paired with your OAuth consumer key. Treat it like a password."
+          }
+        ]
+      }
+    ]
+  }
+}

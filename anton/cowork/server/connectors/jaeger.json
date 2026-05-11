@@ -1,0 +1,96 @@
+{
+  "id": "jaeger",
+  "label": "Jaeger",
+  "aliases": [
+    "jaeger tracing",
+    "jaegertracing",
+    "cncf jaeger",
+    "jaeger ui",
+    "opentracing"
+  ],
+  "keywords": [
+    "tracing",
+    "distributed tracing",
+    "observability",
+    "spans",
+    "traces",
+    "cncf",
+    "opentelemetry",
+    "monitoring",
+    "apm",
+    "microservices"
+  ],
+  "description": "Query and explore distributed traces from a Jaeger backend for observability and performance analysis.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#60D0F0",
+  "form": {
+    "form_id": "jaeger-connector",
+    "title": "Connect Jaeger",
+    "subtitle": "Point Anton at your Jaeger Query endpoint to search and visualize distributed traces.",
+    "logo": "sparkle",
+    "logo_color": "#60D0F0",
+    "methods": [
+      {
+        "id": "query-url",
+        "label": "Jaeger Query URL",
+        "description": "Paste the base URL of your Jaeger Query service. Works for open instances; add optional basic-auth credentials for password-protected deployments.",
+        "recommended": true,
+        "how_to": "## Connect via Jaeger Query URL\n\nJaeger exposes a query API (and UI) from a single endpoint. Anton talks directly to that API.\n\n### Steps\n\n1. Find the URL where your Jaeger Query service is running \u2014 typically the same host you open in a browser to see the Jaeger UI (e.g. `http://jaeger.internal:16686`).\n2. If your instance is open (no auth), paste that URL into **Jaeger Query URL** and leave the credential fields empty.\n3. If your instance is protected by HTTP basic authentication:\n   - Obtain the username and password from whoever deployed the instance (Kubernetes ingress, nginx, etc.).\n   - Fill in **Username** and **Password** below.\n4. Click **Submit**. Anton will call `<query_url>/api/services` to verify connectivity.\n\n### Notes\n\n- The default Jaeger Query HTTP port is **16686**. gRPC is on 16685 \u2014 Anton uses the HTTP API, so use the HTTP port.\n- If your deployment sits behind a TLS-terminating proxy, use `https://` in the URL.\n- If Jaeger is behind an OAuth/OIDC proxy (e.g. oauth2-proxy), use the **Bearer Token** method instead.\n- Anton does not store or forward your credentials beyond the local vault.",
+        "help_url": "https://www.jaegertracing.io/docs/latest/apis/",
+        "fields": [
+          {
+            "name": "query_url",
+            "label": "Jaeger Query URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "http://jaeger.internal:16686",
+            "description": "Base URL of the Jaeger Query service \u2014 no trailing slash. Anton appends /api/... paths."
+          },
+          {
+            "name": "username",
+            "label": "Basic Auth Username",
+            "type": "text",
+            "required": false,
+            "placeholder": "admin",
+            "description": "Leave blank if your Jaeger instance does not require authentication."
+          },
+          {
+            "name": "password",
+            "label": "Basic Auth Password",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "description": "HTTP basic-auth password. Only needed for instances protected by an authenticating proxy."
+          }
+        ]
+      },
+      {
+        "id": "bearer-token",
+        "label": "Bearer Token (OAuth / OIDC Proxy)",
+        "description": "For Jaeger instances behind an OAuth2 or OIDC reverse proxy that expects an Authorization header. Paste your query URL and a long-lived bearer token.",
+        "recommended": false,
+        "how_to": "## Connect with a Bearer Token\n\nSome Kubernetes-hosted Jaeger deployments sit behind an oauth2-proxy, Istio RBAC policy, or similar middleware that validates a bearer token on every request.\n\n### Steps\n\n1. Obtain a token with read access to the Jaeger Query API:\n   - **OIDC / Keycloak**: generate a service-account token from your identity provider.\n   - **Kubernetes**: create a ServiceAccount, bind it to the appropriate role, and retrieve its token via `kubectl create token <sa>`.\n   - **oauth2-proxy**: follow your org's IdP flow to get a long-lived access token.\n2. Copy the token string (without the `Bearer ` prefix \u2014 Anton adds that automatically).\n3. Paste your Jaeger Query base URL into **Jaeger Query URL**.\n4. Paste the token into **Bearer Token**.\n5. Click **Submit**. Anton sends `Authorization: Bearer <token>` on every request.\n\n### Notes\n\n- Short-lived tokens (e.g. Kubernetes default 1-hour tokens) will stop working after expiry. Re-paste a fresh token when that happens.\n- If your proxy uses a different header name (e.g. `X-Auth-Token`), this method may not work \u2014 contact your platform team for an alternative credential type.",
+        "help_url": "https://www.jaegertracing.io/docs/latest/operator/#securing-jaeger-installation",
+        "fields": [
+          {
+            "name": "query_url",
+            "label": "Jaeger Query URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://jaeger.yourcompany.com",
+            "description": "Base URL of the Jaeger Query service \u2014 no trailing slash."
+          },
+          {
+            "name": "bearer_token",
+            "label": "Bearer Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Access token passed in the Authorization: Bearer header. Do not include the 'Bearer ' prefix."
+          }
+        ]
+      }
+    ]
+  }
+}

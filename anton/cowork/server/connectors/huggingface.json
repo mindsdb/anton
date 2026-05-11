@@ -1,0 +1,82 @@
+{
+  "id": "huggingface",
+  "label": "Hugging Face",
+  "aliases": [
+    "hf",
+    "huggingface.co",
+    "hugging face hub",
+    "hf hub"
+  ],
+  "keywords": [
+    "ai",
+    "ml",
+    "machine learning",
+    "inference",
+    "models",
+    "llm",
+    "embeddings",
+    "transformers",
+    "hub",
+    "datasets",
+    "spaces"
+  ],
+  "description": "Run inference against hosted models and access the Hugging Face model hub using a personal access token.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#FF9D00",
+  "form": {
+    "form_id": "huggingface-connector",
+    "title": "Connect Hugging Face",
+    "subtitle": "Paste your Hugging Face user access token to enable Inference API and model hub access.",
+    "logo": "brain",
+    "logo_color": "#FF9D00",
+    "methods": [
+      {
+        "id": "access-token",
+        "label": "User Access Token",
+        "description": "Paste an `hf_\u2026` token from your Hugging Face account settings. Takes 30 seconds \u2014 no OAuth client or extra setup needed.",
+        "recommended": true,
+        "how_to": "## Generate a Hugging Face User Access Token\n\nHugging Face issues personal access tokens scoped to read or write. Most Inference API use cases only need **read**.\n\n### Steps\n\n1. Log in at [huggingface.co](https://huggingface.co).\n2. Click your profile avatar (top right) \u2192 **Settings**.\n3. In the left sidebar, click **Access Tokens**.\n4. Click **New token**.\n5. Give the token a name (e.g. `Anton`) and choose a role:\n   - **Read** \u2014 query public and private models, datasets, spaces you have access to. Sufficient for inference.\n   - **Write** \u2014 also lets Anton push models, datasets, or files to the hub.\n6. Click **Generate a token**. The token (starting with `hf_`) is shown once \u2014 copy it now.\n7. Paste the token into the **Access Token** field below.\n\n### Notes\n\n- Tokens are shown only once at creation. If you lose it, revoke it and generate a new one from the same page.\n- For Inference API calls against gated models (e.g. Llama 3), you must first accept the model's license on its model card page \u2014 the token alone is not enough.\n- Tokens can be revoked at any time from **Settings \u2192 Access Tokens** without affecting other integrations.\n- If your org uses SSO, make sure the token is associated with the correct org namespace.\n",
+        "help_url": "https://huggingface.co/docs/hub/security-tokens",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "hf_\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Your personal access token from huggingface.co \u2192 Settings \u2192 Access Tokens. Starts with hf_."
+          },
+          {
+            "name": "token_scope",
+            "label": "Token Scope",
+            "type": "select",
+            "required": true,
+            "default": "read",
+            "description": "Match this to the role you chose when creating the token. Anton uses this to warn you if a requested action exceeds the token's permissions.",
+            "options": [
+              {
+                "value": "read",
+                "label": "Read \u2014 inference and hub reads only"
+              },
+              {
+                "value": "write",
+                "label": "Write \u2014 inference, hub reads, and hub writes"
+              }
+            ]
+          },
+          {
+            "name": "inference_endpoint",
+            "label": "Inference API Base URL",
+            "type": "url",
+            "required": false,
+            "default": "https://api-inference.huggingface.co",
+            "placeholder": "https://api-inference.huggingface.co",
+            "description": "Override only if you are using a Hugging Face Dedicated Inference Endpoint. Leave blank to use the default shared Inference API."
+          }
+        ]
+      }
+    ]
+  }
+}

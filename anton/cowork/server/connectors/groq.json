@@ -1,0 +1,105 @@
+{
+  "id": "groq",
+  "label": "Groq",
+  "aliases": [
+    "groq cloud",
+    "groqcloud",
+    "groq ai",
+    "groq inference"
+  ],
+  "keywords": [
+    "llm",
+    "inference",
+    "ai",
+    "language model",
+    "fast",
+    "low latency",
+    "mixtral",
+    "llama",
+    "gemma",
+    "whisper"
+  ],
+  "description": "Connect to Groq's ultra-low-latency inference API to run open-source LLMs at speed.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#F55036",
+  "form": {
+    "form_id": "groq-connector",
+    "title": "Connect Groq",
+    "subtitle": "Paste your Groq API key to start running ultra-fast inference.",
+    "logo": "brain",
+    "logo_color": "#F55036",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Groq API key (starts with gsk_) from console.groq.com. Takes 30 seconds and requires no OAuth setup.",
+        "recommended": true,
+        "how_to": "## Get your Groq API Key\n\n1. Open [console.groq.com](https://console.groq.com) and sign in (or create a free account).\n2. In the left sidebar, click **API Keys**.\n3. Click **Create API Key**, give it a name like `Anton`, and click **Submit**.\n4. Copy the key \u2014 it starts with `gsk_` and is shown only once. Store it somewhere safe.\n5. Paste the key into the **API Key** field below.\n\n## Notes\n\n- If you lose the key, generate a new one from the same panel \u2014 old keys can be revoked there too.\n- Free tier keys have rate limits per minute and per day; check your plan on the console dashboard.\n- Optionally pin a specific default model below, or leave it blank to set the model per-request.\n",
+        "help_url": "https://console.groq.com/docs/openai",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "gsk_...",
+            "description": "Your Groq API key from console.groq.com \u2192 API Keys. Shown only once at creation."
+          },
+          {
+            "name": "default_model",
+            "label": "Default Model",
+            "type": "select",
+            "required": false,
+            "description": "Model to use when no model is specified in a request. Leave blank to set per-request.",
+            "default": "llama3-8b-8192",
+            "options": [
+              {
+                "value": "llama3-8b-8192",
+                "label": "LLaMA 3 8B (8k context)"
+              },
+              {
+                "value": "llama3-70b-8192",
+                "label": "LLaMA 3 70B (8k context)"
+              },
+              {
+                "value": "llama-3.1-8b-instant",
+                "label": "LLaMA 3.1 8B Instant"
+              },
+              {
+                "value": "llama-3.1-70b-versatile",
+                "label": "LLaMA 3.1 70B Versatile"
+              },
+              {
+                "value": "llama-3.3-70b-versatile",
+                "label": "LLaMA 3.3 70B Versatile"
+              },
+              {
+                "value": "mixtral-8x7b-32768",
+                "label": "Mixtral 8x7B (32k context)"
+              },
+              {
+                "value": "gemma2-9b-it",
+                "label": "Gemma 2 9B IT"
+              },
+              {
+                "value": "whisper-large-v3",
+                "label": "Whisper Large v3 (audio)"
+              }
+            ]
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.groq.com/openai/v1",
+            "default": "https://api.groq.com/openai/v1",
+            "description": "Override only if you're using a custom proxy or a different Groq endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

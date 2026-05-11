@@ -1,0 +1,219 @@
+{
+  "id": "bigquery",
+  "label": "BigQuery",
+  "aliases": [
+    "google bigquery",
+    "bq",
+    "google cloud bigquery",
+    "gcp bigquery"
+  ],
+  "keywords": [
+    "data warehouse",
+    "sql",
+    "analytics",
+    "google cloud",
+    "gcp",
+    "queries",
+    "tables",
+    "datasets",
+    "olap"
+  ],
+  "description": "Query and analyze data in Google BigQuery using a service account or OAuth credentials.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "bigquery-connector",
+    "title": "Connect BigQuery",
+    "subtitle": "Grant Anton access to run queries and read data from your BigQuery project.",
+    "logo": "database",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "service-account",
+        "label": "Service account JSON key",
+        "description": "Paste a Google Cloud service account JSON key. The simplest, most portable path \u2014 no browser flow required, works in any environment.",
+        "recommended": true,
+        "how_to": "## Service account JSON key\n\nThe fastest way to connect. You create a service account in Google Cloud, download its JSON key, and paste it below.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select the project that owns your BigQuery datasets.\n2. Go to **IAM & Admin \u2192 Service Accounts \u2192 Create service account**. Give it a descriptive name like `anton-bigquery`.\n3. On the **Grant this service account access to project** step, assign one of these roles:\n   - **BigQuery Data Viewer** + **BigQuery Job User** \u2014 read-only queries (recommended minimum).\n   - **BigQuery User** \u2014 allows creating jobs and reading data.\n   - **BigQuery Admin** \u2014 full control (use only if Anton needs to create/delete tables).\n4. Click **Done**. Open the new service account, go to the **Keys** tab.\n5. Click **Add key \u2192 Create new key \u2192 JSON**. A `.json` file downloads automatically.\n6. Paste the entire contents of that file into **Service account JSON** below.\n7. Enter the **Project ID** of the GCP project (visible in the Cloud Console header, e.g. `my-project-123`).\n\n### Notes\n\n- The JSON key contains a private key \u2014 treat it like a password. Rotate it in Cloud Console if you suspect exposure.\n- If your datasets live in multiple projects, use the project that billing is attached to as the **Project ID**, and grant the service account cross-project dataset access via IAM in each data project.\n- BigQuery queries incur costs on your GCP account \u2014 scope the role to the minimum needed.",
+        "help_url": "https://cloud.google.com/bigquery/docs/authentication/service-account-file",
+        "fields": [
+          {
+            "name": "service_account_json",
+            "label": "Service account JSON",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "{ \"type\": \"service_account\", \"project_id\": \"...\", ... }",
+            "description": "Paste the full contents of the JSON key file downloaded from Google Cloud Console \u2192 IAM & Admin \u2192 Service Accounts \u2192 Keys."
+          },
+          {
+            "name": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-gcp-project-123",
+            "description": "The GCP project ID that BigQuery jobs will be billed to. Visible in the Cloud Console header or on the project's dashboard."
+          },
+          {
+            "name": "location",
+            "label": "Default dataset location",
+            "type": "select",
+            "required": false,
+            "default": "US",
+            "description": "The default geographic location for BigQuery jobs. Must match the location of the datasets you query.",
+            "options": [
+              {
+                "value": "US",
+                "label": "US (multi-region)"
+              },
+              {
+                "value": "EU",
+                "label": "EU (multi-region)"
+              },
+              {
+                "value": "us-east1",
+                "label": "us-east1 (South Carolina)"
+              },
+              {
+                "value": "us-east4",
+                "label": "us-east4 (Northern Virginia)"
+              },
+              {
+                "value": "us-central1",
+                "label": "us-central1 (Iowa)"
+              },
+              {
+                "value": "us-west1",
+                "label": "us-west1 (Oregon)"
+              },
+              {
+                "value": "us-west2",
+                "label": "us-west2 (Los Angeles)"
+              },
+              {
+                "value": "us-west4",
+                "label": "us-west4 (Las Vegas)"
+              },
+              {
+                "value": "northamerica-northeast1",
+                "label": "northamerica-northeast1 (Montr\u00e9al)"
+              },
+              {
+                "value": "southamerica-east1",
+                "label": "southamerica-east1 (S\u00e3o Paulo)"
+              },
+              {
+                "value": "europe-west1",
+                "label": "europe-west1 (Belgium)"
+              },
+              {
+                "value": "europe-west2",
+                "label": "europe-west2 (London)"
+              },
+              {
+                "value": "europe-west3",
+                "label": "europe-west3 (Frankfurt)"
+              },
+              {
+                "value": "europe-west4",
+                "label": "europe-west4 (Netherlands)"
+              },
+              {
+                "value": "europe-west6",
+                "label": "europe-west6 (Z\u00fcrich)"
+              },
+              {
+                "value": "europe-north1",
+                "label": "europe-north1 (Finland)"
+              },
+              {
+                "value": "asia-east1",
+                "label": "asia-east1 (Taiwan)"
+              },
+              {
+                "value": "asia-east2",
+                "label": "asia-east2 (Hong Kong)"
+              },
+              {
+                "value": "asia-northeast1",
+                "label": "asia-northeast1 (Tokyo)"
+              },
+              {
+                "value": "asia-northeast2",
+                "label": "asia-northeast2 (Osaka)"
+              },
+              {
+                "value": "asia-northeast3",
+                "label": "asia-northeast3 (Seoul)"
+              },
+              {
+                "value": "asia-south1",
+                "label": "asia-south1 (Mumbai)"
+              },
+              {
+                "value": "asia-southeast1",
+                "label": "asia-southeast1 (Singapore)"
+              },
+              {
+                "value": "asia-southeast2",
+                "label": "asia-southeast2 (Jakarta)"
+              },
+              {
+                "value": "australia-southeast1",
+                "label": "australia-southeast1 (Sydney)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "Sign in with Google (OAuth 2.0)",
+        "description": "Authorize via a browser popup using your own Google Cloud OAuth client. Best when you want access tied to a specific user identity rather than a shared service account.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/cloud-platform"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## OAuth 2.0 (bring your own OAuth client)\n\nAnton doesn't ship a hosted Google OAuth client yet, so you'll create one in Google Cloud Console and paste the credentials below.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select your project.\n2. Go to **APIs & Services \u2192 Library** and enable **BigQuery API** and **Cloud Resource Manager API**.\n3. Go to **APIs & Services \u2192 OAuth consent screen**:\n   - Choose **Internal** (Workspace) or **External**.\n   - Add the scopes: `bigquery`, `cloud-platform`, `userinfo.email`.\n   - If external, add your Google account as a test user.\n4. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 OAuth client ID**.\n   - Application type: **Desktop app**.\n   - Name it `Anton`.\n5. Copy the **Client ID** and **Client secret** shown and paste them below.\n6. Click **Submit** \u2014 Anton opens a browser window for you to sign in and consent.\n\n### Notes\n\n- The OAuth token is tied to your personal Google identity; it respects your IAM permissions on the project.\n- If the consent screen shows a warning about unverified apps, click **Advanced \u2192 Go to Anton (unsafe)** \u2014 this is expected for internal Desktop app clients.\n- Refresh tokens are stored locally and can be revoked at [myaccount.google.com/permissions](https://myaccount.google.com/permissions).",
+        "help_url": "https://cloud.google.com/bigquery/docs/authentication/end-user-installed",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console \u2192 APIs & Services \u2192 Credentials. Use a Desktop app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID above; copied from the same credential in Cloud Console."
+          },
+          {
+            "name": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-gcp-project-123",
+            "description": "The GCP project ID that BigQuery jobs will be billed to."
+          }
+        ]
+      }
+    ]
+  }
+}

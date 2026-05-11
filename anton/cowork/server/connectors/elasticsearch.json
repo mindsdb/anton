@@ -1,0 +1,98 @@
+{
+  "id": "elasticsearch",
+  "label": "Elasticsearch",
+  "aliases": [
+    "elastic",
+    "elastic search",
+    "opensearch",
+    "elk",
+    "elastic stack"
+  ],
+  "keywords": [
+    "search",
+    "logs",
+    "index",
+    "database",
+    "observability",
+    "analytics",
+    "kibana",
+    "logstash",
+    "full-text",
+    "vector"
+  ],
+  "description": "Connect to an Elasticsearch cluster to query indices, ingest documents, and run full-text or vector searches.",
+  "category": "database",
+  "logo": "search",
+  "logo_color": "#00BFB3",
+  "form": {
+    "form_id": "elasticsearch-connector",
+    "title": "Connect Elasticsearch",
+    "subtitle": "Enter your cluster URL and credentials to let Anton query and ingest data.",
+    "logo": "search",
+    "logo_color": "#00BFB3",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a cluster URL and an Elasticsearch API key. No role configuration needed \u2014 the key carries its own privileges. Recommended for most setups.",
+        "recommended": true,
+        "how_to": "## Connect with an Elasticsearch API Key\n\nAPI keys are scoped credentials tied to a specific cluster. They are simpler to rotate and audit than username/password pairs.\n\n### Steps\n\n1. Open **Kibana** \u2192 **Stack Management** \u2192 **Security** \u2192 **API Keys**.\n2. Click **Create API key**.\n3. Give it a name like `anton-key`.\n4. Optionally restrict it to specific indices or privilege levels under **Restrict privileges** (recommended in production).\n5. Click **Create API key**. Copy the key shown \u2014 it is displayed **only once**.\n6. Paste your cluster URL (e.g. `https://my-cluster.es.io:9200`) into **Cluster URL** below.\n7. Paste the key into **API Key** below.\n\n### Notes\n\n- For **Elastic Cloud**, the cluster URL is on the deployment overview page: **Cloud Console \u2192 Deployments \u2192 your deployment \u2192 Elasticsearch endpoint**.\n- For self-hosted clusters, use the Elasticsearch HTTP endpoint (default port 9200). Include `https://` if TLS is enabled.\n- If your cluster uses a self-signed certificate, ensure it is trusted by the system running Anton or disable certificate verification with caution.\n- Rotate the key any time in Kibana without changing your username or password.\n",
+        "help_url": "https://www.elastic.co/guide/en/elasticsearch/reference/current/security-api-create-api-key.html",
+        "fields": [
+          {
+            "name": "cluster_url",
+            "label": "Cluster URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://my-cluster.es.io:9200",
+            "description": "The full HTTP(S) endpoint of your Elasticsearch cluster, including port."
+          },
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Base64-encoded API key from Kibana",
+            "description": "The encoded API key value from Kibana \u2192 Stack Management \u2192 API Keys. Shown only once at creation."
+          }
+        ]
+      },
+      {
+        "id": "username-password",
+        "label": "Username & Password",
+        "description": "Authenticate with an Elasticsearch username and password. Suitable for clusters with built-in users or native realm users configured via Kibana or the Elasticsearch security API.",
+        "recommended": false,
+        "how_to": "## Connect with Username & Password\n\nUse an Elasticsearch native-realm user with appropriate privileges. Avoid using the `elastic` superuser in production \u2014 create a dedicated user instead.\n\n### Create a dedicated user (recommended)\n\n1. Open **Kibana** \u2192 **Stack Management** \u2192 **Security** \u2192 **Users**.\n2. Click **Create user**.\n3. Set a username (e.g. `anton-user`) and a strong password.\n4. Under **Roles**, assign at least `read` and `monitor` on the indices Anton will access. Or use the built-in `viewer` role for read-only access.\n5. Click **Create user**.\n\n### Connect in Anton\n\n1. Enter your cluster URL (e.g. `https://my-cluster.es.io:9200`) in **Cluster URL**.\n2. Enter the username and password you created above.\n\n### Notes\n\n- For **Elastic Cloud**, the cluster URL is on the deployment overview: **Cloud Console \u2192 Deployments \u2192 your deployment \u2192 Elasticsearch endpoint**.\n- The built-in `elastic` superuser password is set at cluster creation time. If you forgot it, reset it via the `elasticsearch-reset-password` CLI tool.\n- For large teams or automated workflows, prefer the **API Key** method \u2014 keys are easier to rotate and scope without modifying user roles.\n",
+        "help_url": "https://www.elastic.co/guide/en/elasticsearch/reference/current/setting-up-authentication.html",
+        "fields": [
+          {
+            "name": "cluster_url",
+            "label": "Cluster URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://my-cluster.es.io:9200",
+            "description": "The full HTTP(S) endpoint of your Elasticsearch cluster, including port."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton-user",
+            "description": "Elasticsearch native-realm username. Avoid using the root `elastic` superuser in production."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Password for the Elasticsearch user above."
+          }
+        ]
+      }
+    ]
+  }
+}

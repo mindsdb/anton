@@ -1,0 +1,86 @@
+{
+  "id": "runway",
+  "label": "Runway",
+  "aliases": [
+    "runwayml",
+    "runway ml",
+    "gen-2",
+    "gen-3",
+    "runway ai"
+  ],
+  "keywords": [
+    "ai",
+    "video",
+    "generation",
+    "generative",
+    "image-to-video",
+    "text-to-video",
+    "gen2",
+    "gen3",
+    "diffusion",
+    "creative"
+  ],
+  "description": "Generate and transform video with Runway's Gen-2 and Gen-3 AI models via the RunwayML API.",
+  "category": "ai",
+  "logo": "image",
+  "logo_color": "#000000",
+  "form": {
+    "form_id": "runway-connector",
+    "title": "Connect Runway",
+    "subtitle": "Paste your Runway API key to start generating video with Gen-2 and Gen-3 models.",
+    "logo": "image",
+    "logo_color": "#000000",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Runway API key from dev.runwayml.com. Quickest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Get your Runway API key\n\n1. Go to [dev.runwayml.com](https://dev.runwayml.com) and sign in with your Runway account.\n2. In the left sidebar, click **API Keys**.\n3. Click **Create new API key**, give it a name like `Anton`, and confirm.\n4. Copy the key immediately \u2014 it is shown only once.\n5. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Your Runway account must have API access enabled. If you don't see the API Keys section, apply for API access from the developer portal.\n- API usage is billed against your Runway credits. Monitor usage at **dev.runwayml.com \u2192 Usage**.\n- If you lose the key, delete it and create a new one \u2014 Anton will prompt you to re-enter it.\n- Keep the key secret; anyone with it can generate video and consume your credits.",
+        "help_url": "https://dev.runwayml.com/docs/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "rw-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at dev.runwayml.com \u2192 API Keys. Shown once at creation \u2014 copy it before closing the dialog."
+          },
+          {
+            "name": "default_model",
+            "label": "Default Model",
+            "type": "select",
+            "required": false,
+            "default": "gen3a_turbo",
+            "description": "The Runway model Anton will use by default when generating video.",
+            "options": [
+              {
+                "value": "gen3a_turbo",
+                "label": "Gen-3 Alpha Turbo (fast, recommended)"
+              },
+              {
+                "value": "gen3a",
+                "label": "Gen-3 Alpha (highest quality)"
+              },
+              {
+                "value": "gen2",
+                "label": "Gen-2 (legacy)"
+              }
+            ]
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "default": "https://api.dev.runwayml.com/v1",
+            "placeholder": "https://api.dev.runwayml.com/v1",
+            "description": "Leave as default unless Runway has assigned you a custom endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

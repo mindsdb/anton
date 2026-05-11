@@ -1,0 +1,64 @@
+{
+  "id": "deepgram",
+  "label": "Deepgram",
+  "aliases": [
+    "deepgram ai",
+    "deepgram speech",
+    "dg speech",
+    "deepgram stt"
+  ],
+  "keywords": [
+    "speech",
+    "transcription",
+    "voice",
+    "audio",
+    "stt",
+    "speech-to-text",
+    "ai",
+    "nlp",
+    "intelligence",
+    "whisper",
+    "asr"
+  ],
+  "description": "Transcribe audio and extract voice intelligence using Deepgram's speech-to-text API.",
+  "category": "ai",
+  "logo": "mic",
+  "logo_color": "#101010",
+  "form": {
+    "form_id": "deepgram-connector",
+    "title": "Connect Deepgram",
+    "subtitle": "Paste your Deepgram API key to enable speech-to-text and voice intelligence.",
+    "logo": "mic",
+    "logo_color": "#101010",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from the Deepgram Console. Fastest setup \u2014 no OAuth client required, takes under a minute.",
+        "recommended": true,
+        "how_to": "## Get a Deepgram API Key\n\n1. Log in at [console.deepgram.com](https://console.deepgram.com).\n2. Select or create a **Project** from the top navigation.\n3. In the left sidebar click **API Keys**.\n4. Click **Create a New API Key**.\n5. Give it a name (e.g. `Anton`) and choose a permission level:\n   - **Member** \u2014 full transcription and voice intelligence access (recommended).\n   - **Usage Only** \u2014 read usage stats only (too restrictive for most tasks).\n6. Click **Create Key**. The secret is shown **once** \u2014 copy it immediately.\n7. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Keys are project-scoped. If you need access to multiple Deepgram projects, create a separate connector per project.\n- To revoke access, return to **API Keys** in the Console and delete the key.",
+        "help_url": "https://developers.deepgram.com/docs/create-additional-api-keys",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-deepgram-api-key",
+            "description": "Found in Deepgram Console \u2192 your Project \u2192 API Keys. Shown only once at creation."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.deepgram.com",
+            "default": "https://api.deepgram.com",
+            "description": "Override only if you are on a Deepgram self-hosted or on-premises deployment. Leave blank to use the default cloud endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "id": "kagi",
+  "label": "Kagi",
+  "aliases": [
+    "kagi search",
+    "kagi.com",
+    "kagi ai"
+  ],
+  "keywords": [
+    "search",
+    "web search",
+    "ad-free",
+    "privacy",
+    "premium",
+    "api",
+    "results"
+  ],
+  "description": "Query Kagi's premium ad-free search engine via its paid API.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#FF6C37",
+  "form": {
+    "form_id": "kagi-connector",
+    "title": "Connect Kagi",
+    "subtitle": "Paste your Kagi API key to enable ad-free web search from Anton.",
+    "logo": "search",
+    "logo_color": "#FF6C37",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Kagi API key. Get one from kagi.com \u2192 Settings \u2192 API \u2014 takes about 30 seconds.",
+        "recommended": true,
+        "how_to": "## Connect with a Kagi API key\n\nKagi's API requires a paid Kagi account (Ultimate or API plan) with billing enabled.\n\n### Steps\n\n1. Log in at [kagi.com](https://kagi.com).\n2. Click your avatar or initials in the top-right corner \u2192 **Settings**.\n3. In the left sidebar, click **API**.\n4. If you haven't enabled API access yet, click **Generate API Key** (you may need to add a billing method first).\n5. Copy the key shown on the page.\n6. Paste it into the **API Key** field below and click **Submit**.\n\n### Notes\n\n- The API key is tied to your Kagi account's credit balance. Monitor usage in the same **Settings \u2192 API** page.\n- If you regenerate the key, you'll need to update it here \u2014 the old key stops working immediately.\n- Kagi charges per search query; check current pricing at [kagi.com/pricing](https://kagi.com/pricing).\n",
+        "help_url": "https://help.kagi.com/kagi/api/overview.html",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "k-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "From kagi.com \u2192 Settings \u2192 API. Treated as a secret and never logged."
+          }
+        ]
+      }
+    ]
+  }
+}

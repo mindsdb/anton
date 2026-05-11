@@ -1,0 +1,71 @@
+{
+  "id": "honeycomb",
+  "label": "Honeycomb",
+  "aliases": [
+    "honeycomb.io",
+    "honeycomb observability",
+    "hny"
+  ],
+  "keywords": [
+    "tracing",
+    "observability",
+    "high-cardinality",
+    "distributed tracing",
+    "telemetry",
+    "opentelemetry",
+    "otel",
+    "spans",
+    "events",
+    "datasets",
+    "apm"
+  ],
+  "description": "Connect to Honeycomb to query traces, events, and high-cardinality observability data from your datasets.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#F5A623",
+  "form": {
+    "form_id": "honeycomb-connector",
+    "title": "Connect Honeycomb",
+    "subtitle": "Paste your Honeycomb API key to start querying traces and observability data.",
+    "logo": "sparkle",
+    "logo_color": "#F5A623",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Honeycomb API key generated from Account \u2192 Team Settings \u2192 API Keys. Quickest path \u2014 no OAuth client setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Honeycomb API Key\n\n1. Log in to [Honeycomb](https://ui.honeycomb.io) and click your team name in the top-left corner.\n2. Go to **Account \u2192 Team Settings \u2192 API Keys**.\n3. Click **Create API Key**.\n4. Give it a name like `Anton` so you can identify it later.\n5. Select the permissions your use case needs \u2014 for read-only querying, enable **Query** access. Enable **Send Events** only if you want Anton to ingest data too.\n6. Choose whether this key should be scoped to specific environments or all environments.\n7. Click **Create** and copy the key immediately \u2014 it is shown only once.\n8. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Keys are environment-scoped by default in Honeycomb's newer UI. If you need access across multiple environments, create one key per environment or use a Configuration key.\n- If you lose the key, generate a new one from the same page \u2014 Anton can swap it without further steps.\n- See [Honeycomb API key docs](https://docs.honeycomb.io/get-started/configure/environments-and-api-keys/) for full details on key types and scopes.",
+        "help_url": "https://docs.honeycomb.io/get-started/configure/environments-and-api-keys/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "hcaik_...",
+            "description": "Found under Account \u2192 Team Settings \u2192 API Keys. The key is shown only once at creation time."
+          },
+          {
+            "name": "environment",
+            "label": "Environment Name",
+            "type": "text",
+            "required": false,
+            "placeholder": "production",
+            "description": "Optional. Specify the Honeycomb environment this key is scoped to (e.g. production, staging). Leave blank if your key has access to all environments."
+          },
+          {
+            "name": "api_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.honeycomb.io",
+            "default": "https://api.honeycomb.io",
+            "description": "Override only if you are using Honeycomb EU (https://api.eu1.honeycomb.io) or a self-hosted instance."
+          }
+        ]
+      }
+    ]
+  }
+}

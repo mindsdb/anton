@@ -1,0 +1,86 @@
+{
+  "id": "rollbar",
+  "label": "Rollbar",
+  "aliases": [
+    "rollbar error tracking",
+    "rollbar monitoring"
+  ],
+  "keywords": [
+    "error",
+    "monitoring",
+    "observability",
+    "exception",
+    "crash",
+    "tracking",
+    "logging",
+    "alerting",
+    "debugging"
+  ],
+  "description": "Monitor, track, and triage errors and exceptions from your applications in real time.",
+  "category": "observability",
+  "logo": "brain",
+  "logo_color": "#3CB358",
+  "form": {
+    "form_id": "rollbar-connector",
+    "title": "Connect Rollbar",
+    "subtitle": "Paste your Rollbar project access token to give Anton access to your error data.",
+    "logo": "brain",
+    "logo_color": "#3CB358",
+    "methods": [
+      {
+        "id": "project-access-token",
+        "label": "Project Access Token",
+        "description": "Paste a read-scoped project access token from Rollbar's Project Settings. Quickest setup \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Find your Rollbar Project Access Token\n\n1. Log in to [Rollbar](https://rollbar.com) and select the project you want to connect.\n2. In the left sidebar, go to **Settings \u2192 Project Access Tokens**.\n3. Find an existing token with the `read` scope, or click **Create a new access token** and select `read` as the scope.\n4. Copy the token string.\n5. Paste it into the **Project Access Token** field below.\n6. Optionally enter your **Account Slug** and **Project Slug** (visible in your Rollbar URL: `rollbar.com/<account>/<project>`) to scope requests precisely.\n\n## Notes\n\n- Use a `read`-scoped token for safety; Anton does not need write access.\n- Tokens are shown in full on the Project Access Tokens page \u2014 you can return any time to copy them again.\n- If you need to revoke access, return to **Settings \u2192 Project Access Tokens** and delete or regenerate the token.",
+        "help_url": "https://docs.rollbar.com/docs/access-tokens",
+        "fields": [
+          {
+            "name": "project_access_token",
+            "label": "Project Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_rollbar_project_access_token",
+            "description": "Found under Project \u2192 Settings \u2192 Project Access Tokens. Use a read-scoped token."
+          },
+          {
+            "name": "account_slug",
+            "label": "Account Slug",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-company",
+            "description": "Your Rollbar account name, visible in the URL: rollbar.com/<account>/<project>."
+          },
+          {
+            "name": "project_slug",
+            "label": "Project Slug",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-project",
+            "description": "The project name portion of your Rollbar URL. Helps Anton scope API requests to the correct project."
+          }
+        ]
+      },
+      {
+        "id": "account-access-token",
+        "label": "Account Access Token",
+        "description": "Use an account-level access token for cross-project access. Suitable for teams managing multiple Rollbar projects from one connection.",
+        "recommended": false,
+        "how_to": "## Find your Rollbar Account Access Token\n\n1. Log in to [Rollbar](https://rollbar.com) and click your account name in the top-right corner.\n2. Go to **Account Settings \u2192 Account Access Tokens**.\n3. Copy an existing token or click **Create a new access token**.\n4. Paste the token into the **Account Access Token** field below.\n\n## Notes\n\n- Account access tokens grant access across all projects in the account \u2014 use with care.\n- Prefer a project-scoped token (the **Project Access Token** method) if you only need one project.\n- Revoke tokens at any time from **Account Settings \u2192 Account Access Tokens**.",
+        "help_url": "https://docs.rollbar.com/docs/access-tokens#section-account-access-tokens",
+        "fields": [
+          {
+            "name": "account_access_token",
+            "label": "Account Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your_rollbar_account_access_token",
+            "description": "Found under Account Settings \u2192 Account Access Tokens. Grants cross-project access."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "id": "lattice",
+  "label": "Lattice",
+  "aliases": [
+    "lattice hr",
+    "lattice performance",
+    "lattice engagement"
+  ],
+  "keywords": [
+    "performance",
+    "engagement",
+    "1on1",
+    "one on ones",
+    "reviews",
+    "goals",
+    "okr",
+    "hr",
+    "people",
+    "feedback",
+    "employee"
+  ],
+  "description": "Connect Lattice to access performance reviews, engagement surveys, 1:1s, and goals data.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#6C4FE0",
+  "form": {
+    "form_id": "lattice-connector",
+    "title": "Connect Lattice",
+    "subtitle": "Paste your Lattice API key to give Anton access to performance, engagement, and 1:1 data.",
+    "logo": "check",
+    "logo_color": "#6C4FE0",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from Lattice Admin \u2192 Integrations \u2192 API. The fastest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Lattice API Key\n\n1. Log in to Lattice as an **admin**.\n2. Click your avatar in the top-right corner and go to **Admin**.\n3. In the left sidebar, navigate to **Integrations \u2192 API**.\n4. Click **Create API Key** (or **Generate new token** if one already exists).\n5. Give the key a descriptive name like `Anton`.\n6. Copy the key immediately \u2014 Lattice may only show it once.\n7. Paste the key into the **API Key** field below.\n\n## Notes\n\n- Only Lattice admins can access the Integrations \u2192 API section.\n- The key grants access to all data your admin account can see, including performance reviews, engagement surveys, and 1:1s.\n- If you lose the key, revoke it from the same page and generate a new one.",
+        "help_url": "https://developers.lattice.com/docs/authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "lat_live_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Lattice Admin \u2192 Integrations \u2192 API. Copy and paste the full key."
+          },
+          {
+            "name": "subdomain",
+            "label": "Lattice Subdomain",
+            "type": "text",
+            "required": false,
+            "placeholder": "yourcompany",
+            "description": "The subdomain of your Lattice account (e.g. 'yourcompany' from yourcompany.latticehq.com). Leave blank if unsure."
+          }
+        ]
+      }
+    ]
+  }
+}

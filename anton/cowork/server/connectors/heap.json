@@ -1,0 +1,59 @@
+{
+  "id": "heap",
+  "label": "Heap",
+  "aliases": [
+    "heap analytics",
+    "heap.io",
+    "heap data"
+  ],
+  "keywords": [
+    "product analytics",
+    "autocapture",
+    "user behavior",
+    "events",
+    "sessions",
+    "funnels",
+    "retention",
+    "analytics"
+  ],
+  "description": "Connect to Heap to query product analytics data, track events, and analyze user behavior captured automatically.",
+  "category": "analytics",
+  "logo": "sparkle",
+  "logo_color": "#6B4FBB",
+  "form": {
+    "form_id": "heap-connector",
+    "title": "Connect Heap",
+    "subtitle": "Paste your Heap App ID and server-side API key to start querying product analytics data.",
+    "logo": "sparkle",
+    "logo_color": "#6B4FBB",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "App ID + API Key",
+        "description": "Paste your Heap App ID and server-side API key. No OAuth flow required \u2014 copy both values from your Heap account settings and you're done.",
+        "recommended": true,
+        "how_to": "## Find your Heap App ID and API Key\n\n### App ID\n\n1. Log in to [Heap](https://heapanalytics.com) and open your project.\n2. Go to **Account \u2192 Manage \u2192 Projects** (or click your project name in the top nav).\n3. Your **App ID** is shown on the project settings page \u2014 it's a numeric string (e.g. `1234567890`).\n\n### Server-Side API Key\n\n1. In the same project, navigate to **Account \u2192 Manage \u2192 API Keys** (or **Settings \u2192 API Keys** depending on your Heap version).\n2. Click **Generate API Key** if one doesn't exist yet.\n3. Copy the key \u2014 it is shown in full here and can be viewed again later from this panel.\n\n### Notes\n\n- The App ID identifies your Heap project; the API key authenticates server-side requests.\n- If you have multiple Heap environments (e.g. development vs production), make sure you copy the App ID and key from the correct project.\n- You can revoke and regenerate keys at any time from the API Keys panel without affecting your tracked data.\n",
+        "help_url": "https://developers.heap.io/reference/server-side-api-overview",
+        "fields": [
+          {
+            "name": "app_id",
+            "label": "App ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "1234567890",
+            "description": "Found in Account \u2192 Manage \u2192 Projects. Numeric string that identifies your Heap project."
+          },
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-heap-api-key",
+            "description": "Server-side API key from Account \u2192 Manage \u2192 API Keys. Used to authenticate all requests."
+          }
+        ]
+      }
+    ]
+  }
+}

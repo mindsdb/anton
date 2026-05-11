@@ -1,0 +1,67 @@
+{
+  "id": "plausible",
+  "label": "Plausible",
+  "aliases": [
+    "plausible analytics",
+    "plausible.io"
+  ],
+  "keywords": [
+    "analytics",
+    "web analytics",
+    "privacy",
+    "pageviews",
+    "traffic",
+    "stats",
+    "dashboard",
+    "gdpr"
+  ],
+  "description": "Pull privacy-friendly web analytics data from Plausible using your site's stats API.",
+  "category": "analytics",
+  "logo": "sparkle",
+  "logo_color": "#5850EC",
+  "form": {
+    "form_id": "plausible-connector",
+    "title": "Connect Plausible",
+    "subtitle": "Paste your Plausible API key and site ID to start pulling web analytics data.",
+    "logo": "sparkle",
+    "logo_color": "#5850EC",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from your Plausible account settings along with the site domain. No OAuth setup required \u2014 the simplest and fastest path.",
+        "recommended": true,
+        "how_to": "## Connect with a Plausible API Key\n\n### Steps\n\n1. Log in to your Plausible account at [plausible.io](https://plausible.io).\n2. Click your avatar or initials in the top-right corner and open **Settings**.\n3. In the left sidebar, select **API Keys**.\n4. Click **+ New API Key**, give it a name like `Anton`, and click **Create API Key**.\n5. Copy the key shown \u2014 it is only displayed once. Paste it into the **API Key** field below.\n6. Find your **Site ID**: it is the domain you registered in Plausible (e.g. `yoursite.com`). You can see it on the main dashboard or under **Sites** in your account. Paste it into the **Site ID** field below.\n\n### Notes\n\n- The API key is shown only once at creation. If you lose it, delete it and generate a new one from the same **API Keys** page.\n- If you are on a self-hosted Plausible instance, enter your custom base URL in the **Base URL** field instead of the default.\n- Plausible's Stats API is read-only, so this key can only retrieve data \u2014 it cannot modify your site settings.\n",
+        "help_url": "https://plausible.io/docs/stats-api",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-plausible-api-key",
+            "description": "Generated in Plausible \u2192 Settings \u2192 API Keys. Shown only once at creation."
+          },
+          {
+            "name": "site_id",
+            "label": "Site ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "yoursite.com",
+            "description": "The domain you registered in Plausible (e.g. yoursite.com). Visible on your Plausible dashboard."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://plausible.io",
+            "default": "https://plausible.io",
+            "description": "Only change this if you are running a self-hosted Plausible instance. Leave blank to use the default cloud endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

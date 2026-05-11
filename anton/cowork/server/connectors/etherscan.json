@@ -1,0 +1,83 @@
+{
+  "id": "etherscan",
+  "label": "Etherscan",
+  "aliases": [
+    "ether scan",
+    "ethereum explorer",
+    "eth explorer",
+    "ethereum blockchain explorer"
+  ],
+  "keywords": [
+    "ethereum",
+    "blockchain",
+    "smart contract",
+    "eth",
+    "crypto",
+    "on-chain",
+    "defi",
+    "transactions",
+    "wallet",
+    "token",
+    "erc20",
+    "nft",
+    "web3"
+  ],
+  "description": "Query Ethereum blockchain data, smart contracts, transactions, and token balances via the Etherscan API.",
+  "category": "public-data",
+  "logo": "cube",
+  "logo_color": "#21325B",
+  "form": {
+    "form_id": "etherscan-connector",
+    "title": "Connect Etherscan",
+    "subtitle": "Paste your Etherscan API key to start querying Ethereum blockchain data.",
+    "logo": "cube",
+    "logo_color": "#21325B",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a free or paid Etherscan API key. Takes 30 seconds \u2014 sign up, generate a key, and paste it here. No OAuth or complex setup required.",
+        "recommended": true,
+        "how_to": "## Get an Etherscan API Key\n\nEtherscan offers a free tier with up to 5 calls/second and 100k calls/day \u2014 more than enough for most use cases.\n\n### Steps\n\n1. Go to [etherscan.io](https://etherscan.io) and click **Sign In** (top right). Create a free account if you don't have one.\n2. Once logged in, open the dropdown under your username and click **My API Keys**, or navigate directly to [etherscan.io/myapikey](https://etherscan.io/myapikey).\n3. Click **+ Add** (top right of the API key table).\n4. Give the key a name like `Anton` and click **Create New API Key**.\n5. Copy the generated key from the table (it remains visible \u2014 you can return at any time).\n6. Paste the key into the **API Key** field below.\n7. Select the **Network** you want to query (default: Ethereum Mainnet).\n\n### Notes\n\n- Free accounts support 5 calls/second. If you hit rate limits, consider upgrading your Etherscan plan.\n- Keys are tied to your Etherscan account and can be deleted from the same **My API Keys** page at any time.\n- For Goerli, Sepolia, or other testnets, keys are shared across networks but you must select the correct network below so Anton hits the right endpoint.",
+        "help_url": "https://docs.etherscan.io/getting-started/viewing-api-usage-statistics",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "YourApiKeyToken",
+            "description": "From etherscan.io \u2192 My API Keys. Visible any time you log in."
+          },
+          {
+            "name": "network",
+            "label": "Network",
+            "type": "select",
+            "required": true,
+            "default": "mainnet",
+            "description": "Select the Ethereum network you want to query.",
+            "options": [
+              {
+                "value": "mainnet",
+                "label": "Ethereum Mainnet"
+              },
+              {
+                "value": "goerli",
+                "label": "Goerli Testnet"
+              },
+              {
+                "value": "sepolia",
+                "label": "Sepolia Testnet"
+              },
+              {
+                "value": "holesky",
+                "label": "Holesky Testnet"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

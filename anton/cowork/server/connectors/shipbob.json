@@ -1,0 +1,59 @@
+{
+  "id": "shipbob",
+  "label": "ShipBob",
+  "aliases": [
+    "ship bob",
+    "shipbob 3pl",
+    "shipbob fulfillment"
+  ],
+  "keywords": [
+    "fulfillment",
+    "warehouse",
+    "shipping",
+    "logistics",
+    "3pl",
+    "orders",
+    "inventory",
+    "ecommerce"
+  ],
+  "description": "Connect to ShipBob to sync orders, inventory, and shipments from your 3PL fulfillment warehouse.",
+  "category": "logistics",
+  "logo": "upload",
+  "logo_color": "#00A3E0",
+  "form": {
+    "form_id": "shipbob-connector",
+    "title": "Connect ShipBob",
+    "subtitle": "Paste your ShipBob personal access token to sync fulfillment, inventory, and shipping data.",
+    "logo": "upload",
+    "logo_color": "#00A3E0",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Generate a token from the ShipBob merchant dashboard under Integrations \u2192 API and paste it here. No OAuth setup required \u2014 the simplest path.",
+        "recommended": true,
+        "how_to": "## Generate a ShipBob Personal Access Token\n\n1. Log in to [web.shipbob.com](https://web.shipbob.com).\n2. Click your account name or avatar in the top-right corner, then go to **Integrations**.\n3. Select **API** from the left sidebar (or navigate directly to **Integrations \u2192 API**).\n4. Click **Generate Token**. Give it a descriptive name like `Anton`.\n5. Copy the token shown \u2014 it is displayed **only once**. If you lose it, generate a new one.\n6. Paste the token into the **Personal Access Token** field below.\n\n## Notes\n\n- Tokens are tied to your ShipBob merchant account. If you have multiple channels or stores, make sure you're logged into the right account before generating.\n- To revoke access, return to **Integrations \u2192 API** and delete the token.\n- See [ShipBob's API documentation](https://developer.shipbob.com) for details on available endpoints and rate limits.",
+        "help_url": "https://developer.shipbob.com/api-docs/#section/Authentication",
+        "fields": [
+          {
+            "name": "personal_access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your ShipBob PAT here",
+            "description": "Found at web.shipbob.com \u2192 Integrations \u2192 API. The token is shown only once at creation time."
+          },
+          {
+            "name": "channel_id",
+            "label": "Channel ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "e.g. 12345",
+            "description": "If your ShipBob account has multiple sales channels, enter the numeric channel ID to scope requests. Leave blank to use the default channel."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "id": "pandadoc",
+  "label": "PandaDoc",
+  "aliases": [
+    "panda doc",
+    "panda-doc",
+    "pandadocs"
+  ],
+  "keywords": [
+    "documents",
+    "esignature",
+    "e-signature",
+    "contracts",
+    "proposals",
+    "quotes",
+    "workflow",
+    "signing",
+    "pdf"
+  ],
+  "description": "Create, send, and track documents and collect e-signatures through PandaDoc's document workflow platform.",
+  "category": "documents",
+  "logo": "doc",
+  "logo_color": "#27B171",
+  "form": {
+    "form_id": "pandadoc-connector",
+    "title": "Connect PandaDoc",
+    "subtitle": "Paste your PandaDoc API key to start creating and tracking documents.",
+    "logo": "doc",
+    "logo_color": "#27B171",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a PandaDoc API key \u2014 generated in Settings \u2192 API and integrations. No OAuth setup required, works instantly.",
+        "recommended": true,
+        "how_to": "## Connect via API Key\n\nPandaDoc provides a personal API key you can copy from your account settings in under a minute.\n\n### Steps\n\n1. Log in to your PandaDoc account at [app.pandadoc.com](https://app.pandadoc.com).\n2. Click your profile avatar in the top-right corner and choose **Settings**.\n3. In the left sidebar, navigate to **Integrations \u2192 API & webhooks** (or **API and integrations**).\n4. Click **Generate API Key** if you don't already have one, or copy the existing key shown.\n5. Paste the key into the **API Key** field below.\n\n### Notes\n\n- The key is scoped to your account \u2014 documents and templates accessible to your user will be available to Anton.\n- If you regenerate the key in PandaDoc, paste the new value here to refresh the connection.\n- Sandbox keys (from the Developer Dashboard) have a different prefix; use a production key for real documents.\n",
+        "help_url": "https://developers.pandadoc.com/reference/authentication-process#api-key-authorization",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-pandadoc-api-key",
+            "description": "Found in PandaDoc Settings \u2192 Integrations \u2192 API & webhooks. Treat this like a password."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0",
+        "description": "Authorize Anton via OAuth 2.0 using your own PandaDoc OAuth application. Suitable for multi-user or production integrations where per-user token scoping is required.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.pandadoc.com/oauth2/authorize",
+          "token_url": "https://api.pandadoc.com/oauth2/access_token",
+          "scopes": [
+            "read+write"
+          ]
+        },
+        "how_to": "## Connect via OAuth 2.0\n\nOAuth 2.0 requires you to create a PandaDoc OAuth application to get a client ID and secret.\n\n### Steps\n\n1. Go to the [PandaDoc Developer Dashboard](https://developers.pandadoc.com/) and log in.\n2. Navigate to **My Applications \u2192 Create Application**.\n3. Fill in the app name (e.g. `Anton`) and set the **Redirect URI** to `http://127.0.0.1` (or the URI Anton instructs you to use).\n4. After saving, copy the **Client ID** and **Client Secret** from the application detail page.\n5. Paste both values into the fields below and click **Submit**.\n6. A browser window will open for you to approve access. Log in with the PandaDoc account you want Anton to use.\n\n### Notes\n\n- The client secret is shown once at creation time in some plans \u2014 store it safely before leaving the page.\n- Scopes `read+write` grant access to documents, templates, contacts, and webhooks.\n- To revoke access later, delete the application or remove it under your account's authorized apps.\n",
+        "help_url": "https://developers.pandadoc.com/reference/authentication-process#oauth-20-authorization",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-pandadoc-client-id",
+            "description": "From the PandaDoc Developer Dashboard \u2192 My Applications \u2192 your app's detail page."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-pandadoc-client-secret",
+            "description": "Paired with the client ID. Shown at app creation time \u2014 copy it before leaving the page."
+          }
+        ]
+      }
+    ]
+  }
+}

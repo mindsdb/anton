@@ -1,0 +1,51 @@
+{
+  "id": "coda",
+  "label": "Coda",
+  "aliases": [
+    "coda.io",
+    "coda docs",
+    "coda tables"
+  ],
+  "keywords": [
+    "docs",
+    "tables",
+    "automations",
+    "notes",
+    "database",
+    "wiki",
+    "spreadsheet",
+    "collaboration"
+  ],
+  "description": "Connect to Coda to read and write docs, tables, rows, and automations.",
+  "category": "productivity",
+  "logo": "doc",
+  "logo_color": "#E5422B",
+  "form": {
+    "form_id": "coda-connector",
+    "title": "Connect Coda",
+    "subtitle": "Paste your Coda API token to give Anton access to your docs and tables.",
+    "logo": "doc",
+    "logo_color": "#E5422B",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste a personal API token from your Coda account settings. No OAuth client setup required \u2014 fastest path to connect.",
+        "recommended": true,
+        "how_to": "## Generate a Coda API Token\n\n1. Open [Coda](https://coda.io) and sign in.\n2. Click your avatar in the top-right corner and select **Account settings**.\n3. Scroll down to the **API tokens** section.\n4. Click **Generate API token**, give it a name like `Anton`, and click **Generate**.\n5. Copy the token shown \u2014 it will not be displayed again.\n6. Paste it into the **API Token** field below.\n\n## Notes\n\n- The token grants access to all docs the account can see. Use a dedicated Coda account if you want to limit scope.\n- If you lose the token, revoke it in the same **API tokens** panel and generate a new one.\n- See [Coda API docs](https://coda.io/developers/apis/v1) for full details on what the API can access.",
+        "help_url": "https://coda.io/developers/apis/v1",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "8d7e6f5a-...",
+            "description": "Found in Coda \u2192 Account settings \u2192 API tokens. Shown only once at generation time."
+          }
+        ]
+      }
+    ]
+  }
+}

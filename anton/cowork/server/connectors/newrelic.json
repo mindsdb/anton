@@ -1,0 +1,80 @@
+{
+  "id": "newrelic",
+  "label": "New Relic",
+  "aliases": [
+    "new relic",
+    "newrelic one",
+    "nr1",
+    "new-relic"
+  ],
+  "keywords": [
+    "observability",
+    "apm",
+    "monitoring",
+    "metrics",
+    "traces",
+    "logs",
+    "alerts",
+    "performance",
+    "infrastructure",
+    "dashboards"
+  ],
+  "description": "Query metrics, traces, logs, and alerts from your New Relic observability platform.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#00AC69",
+  "form": {
+    "form_id": "newrelic-connector",
+    "title": "Connect New Relic",
+    "subtitle": "Paste your User API key to give Anton access to your New Relic account.",
+    "logo": "sparkle",
+    "logo_color": "#00AC69",
+    "methods": [
+      {
+        "id": "user-api-key",
+        "label": "User API Key",
+        "description": "Paste a personal User API key (NRAK-\u2026) from your New Relic profile. Quickest path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Get your New Relic User API key\n\n1. Log in to [one.newrelic.com](https://one.newrelic.com).\n2. Click your **avatar / name** in the bottom-left corner \u2192 **API keys**.\n3. Click **Create a key** (or find an existing User key).\n4. Make sure the **Key type** is **User** (starts with `NRAK-`). Ingest keys won't work here.\n5. Copy the key \u2014 it is shown only once at creation time. If you missed it, create a new one.\n6. Paste the key into **User API Key** below.\n7. Select your **Region** \u2014 choose **EU** if your account is on `one.eu.newrelic.com`, otherwise leave it as **US**.\n\n## Notes\n\n- User API keys inherit your personal permissions. If your role lacks access to certain accounts or data, Anton will see the same restrictions.\n- Rotate by deleting the key in the API keys panel and pasting a fresh one into Anton.\n- See [New Relic API keys docs](https://docs.newrelic.com/docs/apis/intro-apis/new-relic-api-keys/) for full background.",
+        "help_url": "https://docs.newrelic.com/docs/apis/intro-apis/new-relic-api-keys/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "User API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "NRAK-XXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "description": "Found in one.newrelic.com \u2192 your avatar \u2192 API keys. Must be a User key (NRAK-\u2026), not an Ingest/License key."
+          },
+          {
+            "name": "region",
+            "label": "Region",
+            "type": "select",
+            "required": true,
+            "default": "us",
+            "description": "US accounts use one.newrelic.com; EU accounts use one.eu.newrelic.com.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (one.newrelic.com)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (one.eu.newrelic.com)"
+              }
+            ]
+          },
+          {
+            "name": "account_id",
+            "label": "Account ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "1234567",
+            "description": "Optional. Your numeric New Relic Account ID \u2014 visible in the URL after you log in (e.g. one.newrelic.com/accounts/1234567). Required for some NRQL queries."
+          }
+        ]
+      }
+    ]
+  }
+}

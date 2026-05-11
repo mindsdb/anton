@@ -1,0 +1,112 @@
+{
+  "id": "marketo",
+  "label": "Marketo",
+  "aliases": [
+    "adobe marketo",
+    "marketo engage",
+    "adobe marketo engage",
+    "marketo automation"
+  ],
+  "keywords": [
+    "marketing",
+    "automation",
+    "email",
+    "adobe",
+    "lead",
+    "campaign",
+    "nurture",
+    "launchpoint",
+    "crm",
+    "b2b"
+  ],
+  "description": "Connect to Adobe Marketo Engage via a LaunchPoint Custom Service to read and manage leads, campaigns, and marketing activities.",
+  "category": "marketing",
+  "logo": "mail",
+  "logo_color": "#5C4DE5",
+  "form": {
+    "form_id": "marketo-connector",
+    "title": "Connect Marketo",
+    "subtitle": "Paste your LaunchPoint Custom Service credentials to authorize Anton.",
+    "logo": "mail",
+    "logo_color": "#5C4DE5",
+    "methods": [
+      {
+        "id": "custom-service",
+        "label": "LaunchPoint Custom Service",
+        "description": "Paste your Marketo REST API endpoint URL, Client ID, and Client Secret from a LaunchPoint Custom Service. The simplest and recommended path \u2014 no OAuth browser flow required.",
+        "recommended": true,
+        "how_to": "## Connect via LaunchPoint Custom Service\n\nMarketo's REST API uses a dedicated service credential pair (Client ID + Client Secret) that you create inside Marketo's admin area. No browser OAuth flow is needed.\n\n### 1. Create an API-only user\n\n1. In Marketo, go to **Admin \u2192 Users & Roles \u2192 Roles**.\n2. Create a role (e.g. `Anton API Role`) with the API permissions you need (at minimum: **Access API \u2192 Read-Only Lead**, **Read-Only Activity**, etc.).\n3. Go to **Admin \u2192 Users & Roles \u2192 Users \u2192 Invite New User**.\n4. Create a user (e.g. `anton-api@yourcompany.com`), assign the role from step 2, and tick **API Only**.\n\n### 2. Create the LaunchPoint Custom Service\n\n1. Go to **Admin \u2192 Integration \u2192 LaunchPoint**.\n2. Click **New \u2192 New Service**.\n3. Fill in a **Display Name** (e.g. `Anton`), set **Service** to **Custom**, and pick the API-only user you just created.\n4. Click **Create**.\n5. Back in the LaunchPoint list, click **View Details** next to your new service.\n6. Copy the **Client ID** and **Client Secret** shown in the dialog.\n\n### 3. Find your REST Endpoint URL\n\n1. Go to **Admin \u2192 Integration \u2192 Web Services**.\n2. Under **REST API**, copy the **Endpoint** URL \u2014 it looks like `https://123-ABC-456.mktorest.com/rest`.\n\n### 4. Paste into Anton\n\nEnter the REST Endpoint URL, Client ID, and Client Secret below, then click **Submit**.\n\n### Notes\n- Credentials are stored locally and never sent to Anton's servers.\n- If you rotate the Client Secret in LaunchPoint, re-paste it here.\n- Each Marketo instance has a unique subdomain in the endpoint URL \u2014 make sure you copy from the correct Marketo subscription if you have more than one.\n",
+        "help_url": "https://experienceleague.adobe.com/docs/marketo-developer/marketo/rest/authentication.html",
+        "fields": [
+          {
+            "name": "rest_endpoint_url",
+            "label": "REST Endpoint URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://123-ABC-456.mktorest.com/rest",
+            "description": "Found in Admin \u2192 Integration \u2192 Web Services \u2192 REST API \u2192 Endpoint."
+          },
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "From the LaunchPoint Custom Service detail dialog (View Details)."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID; shown in the same LaunchPoint View Details dialog."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Custom Client)",
+        "description": "Use your own OAuth 2.0 client credentials to retrieve a bearer token via Marketo's identity endpoint. Suitable for advanced setups where you need full OAuth token lifecycle management.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://YOUR_MUNCHKIN_ID.mktorest.com/identity/oauth/token",
+          "token_url": "https://YOUR_MUNCHKIN_ID.mktorest.com/identity/oauth/token",
+          "scopes": [],
+          "extra_auth_params": {
+            "grant_type": "client_credentials"
+          }
+        },
+        "how_to": "## OAuth 2.0 with Marketo Identity Endpoint\n\nMarketo uses a client-credentials OAuth 2.0 flow \u2014 there is no user-facing browser consent screen. This method collects your Client ID and Client Secret and exchanges them for a bearer token via the identity endpoint.\n\n### Steps\n\n1. Follow steps 1\u20133 from the **LaunchPoint Custom Service** method to obtain your Client ID and Client Secret.\n2. Find your **Munchkin Account ID** under **Admin \u2192 Account Settings \u2192 Munchkin** \u2014 it looks like `123-ABC-456`.\n3. Your identity token URL will be: `https://123-ABC-456.mktorest.com/identity/oauth/token`\n4. Enter your Client ID, Client Secret, and the full identity URL below.\n5. Click **Submit** \u2014 Anton will exchange the credentials for an access token automatically.\n\n### Notes\n- Marketo access tokens expire after 3,600 seconds (1 hour). Anton will re-request a token automatically before expiry.\n- Marketo does not use user-delegated OAuth scopes; all permissions are governed by the API-only user's assigned role.\n- If the LaunchPoint Custom Service method is available, prefer it \u2014 it is simpler and equivalent.\n",
+        "help_url": "https://experienceleague.adobe.com/docs/marketo-developer/marketo/rest/authentication.html",
+        "fields": [
+          {
+            "name": "identity_url",
+            "label": "Identity Endpoint URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://123-ABC-456.mktorest.com/identity/oauth/token",
+            "description": "Constructed from your Munchkin ID: https://<MUNCHKIN_ID>.mktorest.com/identity/oauth/token"
+          },
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "From the LaunchPoint Custom Service detail dialog (View Details)."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID; shown in the same LaunchPoint View Details dialog."
+          }
+        ]
+      }
+    ]
+  }
+}

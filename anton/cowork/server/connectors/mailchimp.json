@@ -1,0 +1,84 @@
+{
+  "id": "mailchimp",
+  "label": "Mailchimp",
+  "aliases": [
+    "mail chimp",
+    "mailchimp marketing",
+    "intuit mailchimp"
+  ],
+  "keywords": [
+    "email",
+    "marketing",
+    "newsletter",
+    "audience",
+    "campaign",
+    "list",
+    "subscriber",
+    "automation",
+    "intuit"
+  ],
+  "description": "Connect to Mailchimp to manage audiences, campaigns, and subscriber data for email marketing.",
+  "category": "marketing",
+  "logo": "mail",
+  "logo_color": "#FFE01B",
+  "form": {
+    "form_id": "mailchimp-connector",
+    "title": "Connect Mailchimp",
+    "subtitle": "Paste your Mailchimp API key to give Anton access to your audiences and campaigns.",
+    "logo": "mail",
+    "logo_color": "#FFE01B",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Mailchimp API key \u2014 it ends with a datacenter suffix like `-us21`. No OAuth setup required; takes about 30 seconds.",
+        "recommended": true,
+        "how_to": "## Generate a Mailchimp API Key\n\nMailchimp API keys are scoped to your account and include your datacenter in the suffix (e.g. `abc123def456-us21`). Anton uses that suffix to route requests to the right regional endpoint automatically.\n\n### Steps\n\n1. Log in to [Mailchimp](https://login.mailchimp.com/).\n2. Click your profile icon in the bottom-left corner and select **Profile**.\n3. Go to **Extras \u2192 API keys**.\n4. Click **Create A Key**.\n5. Optionally give it a name like `Anton` so you can identify it later.\n6. Copy the full key \u2014 it ends with a `-usXX` datacenter suffix. This suffix is important; do not trim it.\n7. Paste the key into the **API Key** field below.\n\n### Notes\n\n- Mailchimp API keys grant full account access \u2014 store them carefully.\n- If you need to revoke access, return to **Extras \u2192 API keys**, find the key, and click **Invalidate**.\n- The datacenter suffix (e.g. `-us21`) tells Anton which regional API server to use. Anton extracts it automatically from the key you paste.\n- Read [Mailchimp's API key guide](https://mailchimp.com/help/about-api-keys/) for full background.\n",
+        "help_url": "https://mailchimp.com/help/about-api-keys/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "abc123def456abc789def012-us21",
+            "description": "Your full Mailchimp API key including the `-usXX` datacenter suffix. Found under Profile \u2192 Extras \u2192 API keys."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0",
+        "description": "Authorize via Mailchimp's OAuth flow using your own connected app. Requires creating an app in Mailchimp's developer portal to obtain a client ID and secret.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://login.mailchimp.com/oauth2/authorize",
+          "token_url": "https://login.mailchimp.com/oauth2/token",
+          "scopes": []
+        },
+        "how_to": "## Connect via OAuth 2.0\n\nUse this method if you prefer token-based authorization without exposing a long-lived API key. You'll need to register an app in Mailchimp's developer portal first.\n\n### Steps\n\n1. Go to the [Mailchimp Developer Portal](https://mailchimp.com/developer/) and log in.\n2. Navigate to **Registered Apps \u2192 Register An App**.\n3. Fill in the app name (e.g. `Anton`), description, and set the **Redirect URI** to `http://127.0.0.1` (or the local redirect Anton provides).\n4. After saving, copy the **Client ID** and **Client Secret** from the app detail page.\n5. Paste them into the fields below and click **Submit**.\n6. A browser window will open to Mailchimp's consent screen \u2014 log in and click **Allow**.\n7. Anton exchanges the authorization code for an access token and stores it locally.\n\n### Notes\n\n- Mailchimp OAuth tokens do not expire but can be revoked from your registered app settings.\n- After authorization, Anton will call the Mailchimp metadata endpoint to determine your datacenter automatically.\n- To revoke access, go to **Registered Apps** in the developer portal and delete or disconnect the app.\n",
+        "help_url": "https://mailchimp.com/developer/marketing/guides/access-user-data-oauth-2/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012",
+            "description": "From Mailchimp Developer Portal \u2192 Registered Apps \u2192 your app's Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID; found on the same registered app detail page."
+          }
+        ]
+      }
+    ]
+  }
+}

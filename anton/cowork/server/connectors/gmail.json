@@ -1,0 +1,117 @@
+{
+  "id": "gmail",
+  "label": "Gmail",
+  "aliases": ["google mail", "googlemail", "g-mail", "google email"],
+  "keywords": ["email", "messaging", "google", "inbox", "mail", "smtp", "imap", "workspace"],
+  "description": "Read, search, and send messages from a Gmail or Google Workspace account.",
+  "category": "communication",
+  "logo": "mail",
+  "logo_color": "#EA4335",
+  "form": {
+    "form_id": "gmail-connector",
+    "engine": "gmail",
+    "title": "Connect Gmail",
+    "subtitle": "Authorize Anton to read and send mail on your behalf.",
+    "logo": "mail",
+    "logo_color": "#EA4335",
+    "methods": [
+      {
+        "id": "browser_oauth_builtin",
+        "label": "In-Browser Connect",
+        "description": "Opens Google sign-in in your browser. No credentials required — just click Connect.",
+        "recommended": true,
+        "fields": []
+      },
+      {
+        "id": "oauth",
+        "label": "Sign in with Google",
+        "description": "OAuth 2.0 — a browser pops open for you to grant Anton scoped access. No passwords stored, revocable from your Google Account at any time. Currently requires you to bring your own Google Cloud OAuth client (steps below); we'll switch to a hosted client in a future release.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+          "token_url": "https://oauth2.googleapis.com/token",
+          "scopes": [
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/userinfo.email"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Sign in with Google (OAuth 2.0)\n\nThe modern, recommended path. Anton spawns a tiny local server, opens Google's consent screen in your browser, and exchanges the resulting authorization code for a refresh token — never sent to Anton's servers.\n\n### Pattern A — using Anton's hosted OAuth client\n\nWhen the connector spec ships with a `client_id`, you don't see any fields here. Click **Submit** and:\n\n1. Your default browser opens to Google's consent screen.\n2. Pick the Gmail account you want Anton to use.\n3. Review the requested permissions:\n   - **Read, compose, send, and permanently delete email** (`gmail.modify`)\n   - **See your email address** (`userinfo.email`)\n4. Click **Continue**. The browser hands a one-time authorization code back to Anton through a `127.0.0.1` redirect.\n5. Anton exchanges the code (using PKCE — no client secret needed) for a refresh token and stores it locally.\n\n### Pattern B — bring your own OAuth client\n\nIf this method shows two fields below (**Client ID** and **Client secret**), Anton doesn't ship a hosted OAuth client for Gmail yet — you supply your own from Google Cloud Console:\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) → pick or create a project.\n2. **APIs & Services → Library** → enable **Gmail API**.\n3. **APIs & Services → OAuth consent screen** → set up an internal or external app, add your email as a test user.\n4. **APIs & Services → Credentials → Create credentials → OAuth client ID** → pick **Desktop app** as the type.\n5. Copy the generated **Client ID** and **Client secret** into the fields below.\n6. Click **Submit**. Anton runs the same browser flow with your client.\n\n### Revoking later\n\nVisit [Third-party apps with account access](https://myaccount.google.com/permissions), find the entry, and click **Remove access**. The next task that hits Gmail will fail with an auth error and prompt you to re-authorize.\n",
+        "help_url": "https://developers.google.com/gmail/api/auth/about-auth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456789012-abcdef.apps.googleusercontent.com",
+            "description": "From Google Cloud Console → APIs & Services → Credentials. Pick the Desktop-app OAuth client."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the client ID; copied from the same row in Cloud Console."
+          }
+        ]
+      },
+      {
+        "id": "app-password",
+        "label": "App password",
+        "description": "A Google-issued 16-character password. Works without setting up a Google Cloud OAuth client — just enable 2-Step Verification, generate the code, and paste it. Simplest path for personal Gmail accounts.",
+        "recommended": false,
+        "how_to": "## Generate a Gmail app password\n\nApp passwords are 16-character codes Google issues for apps that don't run a full OAuth flow. They only work when **2-Step Verification is enabled** on the account.\n\n### Steps\n\n1. Open your [Google Account → Security page](https://myaccount.google.com/security).\n2. Confirm **2-Step Verification** is on. If it isn't, enable it first.\n3. Open the [App passwords](https://myaccount.google.com/apppasswords) panel.\n4. Type a name like `Anton` and click **Create**.\n5. Google shows a 16-character code in a yellow box. Copy it (spaces are optional — Anton strips them).\n6. Paste the code into the **App password** field below and use your full Gmail address as the **Email**.\n\n### Notes\n\n- App passwords work even with Advanced Protection on, but a Workspace admin can disable them per-org. If the panel is missing or greyed out, your account doesn't allow them — try **Sign in with Google** or **Service account** instead.\n- The code is shown once. If you lose it, just generate a new one — Anton can swap it without any other steps.\n- Read [Google's official guide](https://support.google.com/accounts/answer/185833) for the full background.\n",
+        "help_url": "https://support.google.com/accounts/answer/185833",
+        "fields": [
+          {
+            "name": "email",
+            "label": "Gmail address",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@gmail.com",
+            "description": "Full address, including the @ part."
+          },
+          {
+            "name": "app_password",
+            "label": "App password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "16 characters. Spaces are optional — Anton strips them."
+          }
+        ]
+      },
+      {
+        "id": "service-account",
+        "label": "Service account",
+        "description": "Google Workspace admins only. Uses a service-account JSON key with domain-wide delegation to act on behalf of any user in your domain.",
+        "how_to": "## Service account with domain-wide delegation\n\nFor Google Workspace admins who want Anton to operate on Gmail across the org without each user authorizing individually. Skip this method for personal Gmail accounts — use **Sign in with Google** instead.\n\n### Steps\n\n1. In [Google Cloud Console](https://console.cloud.google.com/), create or pick a project.\n2. Enable the **Gmail API** under **APIs & Services → Library**.\n3. Go to **IAM & Admin → Service Accounts → Create service account**. Give it a name like `anton-gmail`.\n4. Open the service account, switch to the **Keys** tab, and **Add key → Create new key → JSON**. Download the file.\n5. Note the service account's **Unique ID** (a 21-digit number on the Details tab).\n6. In [Google Workspace Admin Console](https://admin.google.com), open **Security → Access and data control → API controls → Domain-wide delegation**.\n7. Click **Add new** and use the Unique ID from step 5. Add these scopes:\n   - `https://www.googleapis.com/auth/gmail.modify`\n   - `https://www.googleapis.com/auth/userinfo.email`\n8. Paste the JSON key file's full contents into **Service account JSON** below.\n9. Set **Impersonate email** to the user account Anton should act as.\n\n### Notes\n\n- The JSON key is the security boundary — anyone with it can impersonate every user in the delegation list. Rotate keys in Cloud Console if you suspect exposure.\n- Rotating invalidates the key Anton has stored. Re-paste the new JSON to refresh.\n- Read [Google's domain-wide delegation guide](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority).\n",
+        "help_url": "https://developers.google.com/identity/protocols/oauth2/service-account",
+        "fields": [
+          {
+            "name": "service_account_json",
+            "label": "Service account JSON",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "description": "Paste the entire contents of the JSON key file."
+          },
+          {
+            "name": "impersonate_email",
+            "label": "Impersonate email",
+            "type": "text",
+            "required": true,
+            "placeholder": "user@yourcompany.com",
+            "description": "The user account Anton acts as — must belong to your Workspace domain."
+          }
+        ]
+      }
+    ]
+  }
+}

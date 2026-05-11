@@ -1,0 +1,69 @@
+{
+  "id": "churnzero",
+  "label": "ChurnZero",
+  "aliases": [
+    "churn zero",
+    "churn-zero",
+    "cz",
+    "churnzero crm"
+  ],
+  "keywords": [
+    "customer success",
+    "churn",
+    "retention",
+    "engagement",
+    "scoring",
+    "health score",
+    "saas",
+    "customer engagement"
+  ],
+  "description": "Connect ChurnZero to track customer engagement scores, churn risk, and account health data.",
+  "category": "customer-success",
+  "logo": "check",
+  "logo_color": "#00B388",
+  "form": {
+    "form_id": "churnzero-connector",
+    "title": "Connect ChurnZero",
+    "subtitle": "Paste your API Key and App Key to give Anton access to your ChurnZero customer engagement data.",
+    "logo": "check",
+    "logo_color": "#00B388",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key + App Key",
+        "description": "Paste two paired credentials from your ChurnZero admin panel \u2014 an API Key and an App Key. No OAuth setup required; works immediately once both keys are in place.",
+        "recommended": true,
+        "how_to": "## Locate your ChurnZero API Key and App Key\n\nChurnZero uses two separate credentials that work together \u2014 an **API Key** and an **App Key**. Both live in different sections of the Admin panel.\n\n### Retrieve your API Key\n\n1. Log in to ChurnZero as an administrator.\n2. Click your avatar / account menu in the top-right corner and select **Admin**.\n3. Navigate to **Admin \u2192 Integrations \u2192 API**.\n4. Copy the **API Key** displayed on that page.\n\n### Retrieve your App Key\n\n1. Still in the **Admin** area, navigate to **Admin \u2192 Settings \u2192 App Settings** (sometimes listed as **Setup \u2192 App Settings**).\n2. Copy the **App Key** (also called the App ID or Account Key depending on your ChurnZero version).\n\n### Paste into Anton\n\n1. Paste the **API Key** into the field below.\n2. Paste the **App Key** into the second field below.\n3. Click **Submit** \u2014 Anton will validate both keys against your ChurnZero instance.\n\n### Notes\n\n- Both keys are required; neither works without the other.\n- If you do not see the API page, confirm your user role has **Admin** or **API Access** permissions.\n- Keys do not expire automatically, but regenerating them in ChurnZero will invalidate the old pair \u2014 update Anton if you rotate them.\n- Your ChurnZero instance URL (subdomain) is also required so Anton can route requests to the correct environment.",
+        "help_url": "https://support.churnzero.com/hc/en-us/articles/360004683552-ChurnZero-API",
+        "fields": [
+          {
+            "name": "instance_url",
+            "label": "ChurnZero Instance URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://yourcompany.churnzero.net",
+            "description": "The base URL of your ChurnZero environment, e.g. https://yourcompany.churnzero.net"
+          },
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "czapi_xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found under Admin \u2192 Integrations \u2192 API in your ChurnZero admin panel."
+          },
+          {
+            "name": "app_key",
+            "label": "App Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "czapp_xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found under Admin \u2192 Settings \u2192 App Settings in your ChurnZero admin panel."
+          }
+        ]
+      }
+    ]
+  }
+}

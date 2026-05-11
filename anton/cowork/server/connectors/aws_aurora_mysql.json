@@ -1,0 +1,205 @@
+{
+  "id": "aws_aurora_mysql",
+  "label": "AWS Aurora MySQL",
+  "aliases": [
+    "aurora mysql",
+    "amazon aurora mysql",
+    "aws aurora",
+    "rds aurora mysql",
+    "aurora rds"
+  ],
+  "keywords": [
+    "aws",
+    "aurora",
+    "mysql",
+    "rds",
+    "amazon",
+    "database",
+    "cluster",
+    "sql",
+    "relational"
+  ],
+  "description": "Connect to an Amazon Aurora MySQL-compatible cluster using its writer or reader endpoint.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#FF9900",
+  "form": {
+    "form_id": "aws_aurora_mysql-connector",
+    "title": "Connect AWS Aurora MySQL",
+    "subtitle": "Enter your Aurora cluster endpoint, credentials, and connection options.",
+    "logo": "database",
+    "logo_color": "#FF9900",
+    "methods": [
+      {
+        "id": "direct-connection",
+        "label": "Cluster Endpoint (Direct Connection)",
+        "description": "Paste your Aurora cluster writer or reader endpoint, port, database name, and credentials. The simplest and most common path for connecting Aurora MySQL to Anton.",
+        "recommended": true,
+        "how_to": "## Connect via Aurora Cluster Endpoint\n\nAurora exposes separate endpoints for writes (writer) and reads (reader). Grab the right one from the RDS Console.\n\n### Steps\n\n1. Open the [AWS RDS Console](https://console.aws.amazon.com/rds/) and navigate to **Databases**.\n2. Click your Aurora MySQL cluster (not a specific instance \u2014 the cluster row).\n3. Under the **Connectivity & security** tab, find:\n   - **Writer endpoint** \u2014 use this for read/write access (e.g. `mycluster.cluster-xxxx.us-east-1.rds.amazonaws.com`).\n   - **Reader endpoint** \u2014 use this for read-only, load-balanced replicas (e.g. `mycluster.cluster-ro-xxxx.us-east-1.rds.amazonaws.com`).\n4. Note the **Port** (default: `3306`).\n5. Enter the **Database name** you want Anton to connect to.\n6. Provide the **Username** and **Password** for a database user with appropriate privileges.\n7. If your cluster enforces TLS (recommended), toggle **Require SSL** on.\n\n### Gotchas\n\n- Make sure the security group attached to the cluster allows inbound TCP on the chosen port from the machine running Anton.\n- If connecting across VPCs or from outside AWS, you may need a public endpoint or a bastion/VPN tunnel.\n- Aurora Serverless v1 clusters don't expose persistent TCP endpoints \u2014 use the Data API method instead.\n- The writer endpoint always routes to the current primary; failovers are transparent within ~30 seconds.\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.Endpoints.html",
+        "fields": [
+          {
+            "name": "endpoint_type",
+            "label": "Endpoint Type",
+            "type": "select",
+            "required": true,
+            "default": "writer",
+            "description": "Writer endpoint supports reads and writes; reader endpoint is load-balanced and read-only.",
+            "options": [
+              {
+                "value": "writer",
+                "label": "Writer (read/write)"
+              },
+              {
+                "value": "reader",
+                "label": "Reader (read-only, load-balanced)"
+              }
+            ]
+          },
+          {
+            "name": "host",
+            "label": "Cluster Endpoint Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "mycluster.cluster-xxxx.us-east-1.rds.amazonaws.com",
+            "description": "Copy the writer or reader endpoint hostname from RDS Console \u2192 your cluster \u2192 Connectivity & security."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "3306",
+            "placeholder": "3306",
+            "description": "Default Aurora MySQL port is 3306. Change only if your cluster uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "The name of the specific database (schema) inside the cluster that Anton should connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "admin",
+            "description": "Database user with the necessary privileges. Avoid using the master user in production."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user above. Stored encrypted and never transmitted to Anton's servers."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Strongly recommended. Aurora supports TLS by default; enable this unless your cluster explicitly disables it."
+          },
+          {
+            "name": "ssl_ca",
+            "label": "SSL CA Certificate (optional)",
+            "type": "textarea",
+            "required": false,
+            "secret": false,
+            "description": "Paste the PEM-encoded AWS RDS CA certificate if you need to verify the server identity. Download the bundle from https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem."
+          }
+        ]
+      },
+      {
+        "id": "iam-auth",
+        "label": "IAM Database Authentication",
+        "description": "Use AWS IAM credentials instead of a static password. Aurora generates a short-lived authentication token via the AWS SDK \u2014 no long-lived DB password required.",
+        "recommended": false,
+        "how_to": "## IAM Database Authentication\n\nAurora MySQL supports password-free login using short-lived tokens generated by AWS IAM. This requires IAM auth to be enabled on the cluster and an IAM policy granting `rds-db:connect`.\n\n### Prerequisites\n\n- Aurora MySQL 5.7 or 8.0 cluster with **IAM database authentication** enabled (RDS Console \u2192 your cluster \u2192 Modify \u2192 check **IAM database authentication**).\n- An IAM user or role with a policy allowing `rds-db:connect` on the cluster's DB resource ARN.\n\n### Steps\n\n1. In the RDS Console, enable **IAM database authentication** on your cluster (Modify \u2192 Additional configuration).\n2. In IAM, attach a policy to your user/role:\n   ```\n   { \"Effect\": \"Allow\", \"Action\": \"rds-db:connect\",\n     \"Resource\": \"arn:aws:rds-db:REGION:ACCOUNT:dbuser:CLUSTER_RESOURCE_ID/DB_USER\" }\n   ```\n3. Create a database user mapped to IAM: `CREATE USER 'myiamuser' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS';`\n4. Enter your cluster endpoint, port, and database below.\n5. Provide your **AWS Access Key ID** and **Secret Access Key** (or leave blank to use the instance/container's role credentials if Anton runs inside AWS).\n6. Anton will generate a 15-minute authentication token automatically before each connection.\n\n### Gotchas\n\n- The IAM token is valid for only 15 minutes. Anton refreshes it on each reconnect automatically.\n- SSL is mandatory for IAM auth \u2014 the SSL toggle is forced on.\n- If Anton runs on an EC2/ECS/Lambda with an instance role, you can leave the key fields empty.\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html",
+        "fields": [
+          {
+            "name": "endpoint_type",
+            "label": "Endpoint Type",
+            "type": "select",
+            "required": true,
+            "default": "writer",
+            "description": "Writer endpoint supports reads and writes; reader endpoint is load-balanced and read-only.",
+            "options": [
+              {
+                "value": "writer",
+                "label": "Writer (read/write)"
+              },
+              {
+                "value": "reader",
+                "label": "Reader (read-only, load-balanced)"
+              }
+            ]
+          },
+          {
+            "name": "host",
+            "label": "Cluster Endpoint Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "mycluster.cluster-xxxx.us-east-1.rds.amazonaws.com",
+            "description": "Writer or reader endpoint hostname from RDS Console \u2192 your cluster \u2192 Connectivity & security."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "3306",
+            "placeholder": "3306",
+            "description": "Default Aurora MySQL port is 3306."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "The target database (schema) inside the cluster."
+          },
+          {
+            "name": "db_username",
+            "label": "Database Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "myiamuser",
+            "description": "The MySQL user created with AWSAuthenticationPlugin. Must match the IAM policy resource ARN."
+          },
+          {
+            "name": "aws_region",
+            "label": "AWS Region",
+            "type": "text",
+            "required": true,
+            "placeholder": "us-east-1",
+            "description": "The AWS region where your Aurora cluster lives (e.g. us-east-1, eu-west-2)."
+          },
+          {
+            "name": "aws_access_key_id",
+            "label": "AWS Access Key ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "AKIAIOSFODNN7EXAMPLE",
+            "description": "Leave blank if Anton runs on an AWS resource with an attached IAM role. Otherwise, provide the key ID."
+          },
+          {
+            "name": "aws_secret_access_key",
+            "label": "AWS Secret Access Key (optional)",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "description": "Paired with the Access Key ID. Leave blank when using instance/container role credentials."
+          }
+        ]
+      }
+    ]
+  }
+}

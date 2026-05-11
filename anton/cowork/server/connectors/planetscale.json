@@ -1,0 +1,111 @@
+{
+  "id": "planetscale",
+  "label": "PlanetScale",
+  "aliases": [
+    "planet scale",
+    "planetscaledb",
+    "ps db",
+    "vitess mysql"
+  ],
+  "keywords": [
+    "mysql",
+    "serverless",
+    "database",
+    "sql",
+    "vitess",
+    "branching",
+    "cloud",
+    "relational"
+  ],
+  "description": "Connect to a PlanetScale MySQL-compatible serverless database using branch credentials from the PlanetScale Console.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#000000",
+  "form": {
+    "form_id": "planetscale-connector",
+    "title": "Connect PlanetScale",
+    "subtitle": "Paste your branch connection credentials from the PlanetScale Console to connect Anton to your database.",
+    "logo": "database",
+    "logo_color": "#000000",
+    "methods": [
+      {
+        "id": "connection-credentials",
+        "label": "Branch credentials (username & password)",
+        "description": "Paste the host, port, database name, username, and password generated in PlanetScale Console \u2192 Branch \u2192 Connect \u2192 New password. SSL is enforced automatically.",
+        "recommended": true,
+        "how_to": "## Connect with PlanetScale branch credentials\n\nPlanetScale generates per-branch credentials you can paste directly into Anton. SSL is required and enabled by default.\n\n### Steps\n\n1. Open [app.planetscale.com](https://app.planetscale.com) and sign in.\n2. Select your **organization** and then your **database**.\n3. In the left sidebar, click **Branches** and choose the branch you want Anton to connect to (e.g. `main`).\n4. Click the **Connect** button in the top-right area of the branch page.\n5. Click **New password** to generate a fresh set of credentials. Give it a name like `anton`.\n6. In the **Connect with** dropdown, select **General** (or any MySQL-compatible option) to reveal the raw connection details.\n7. Copy each of the following values into the fields below:\n   - **Host** \u2014 e.g. `aws.connect.psdb.cloud`\n   - **Port** \u2014 typically `3306`\n   - **Database** \u2014 the name of your PlanetScale database\n   - **Username** \u2014 the generated username\n   - **Password** \u2014 the generated password (shown once \u2014 copy it now)\n\n### Notes\n\n- The password is shown **only once**. If you navigate away before copying, generate a new password.\n- PlanetScale requires TLS/SSL \u2014 Anton always connects with SSL enabled for this connector.\n- You can revoke credentials at any time from the **Passwords** tab on the branch page without affecting other credentials.\n- Production branches may require a **safe migrations** workflow; ensure the branch allows the queries Anton will run.\n",
+        "help_url": "https://planetscale.com/docs/concepts/connection-strings",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "aws.connect.psdb.cloud",
+            "description": "The hostname from PlanetScale Console \u2192 Branch \u2192 Connect. Usually ends in .psdb.cloud."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "3306",
+            "placeholder": "3306",
+            "description": "MySQL port \u2014 PlanetScale defaults to 3306."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-database",
+            "description": "The name of your PlanetScale database (matches the database name in the Console)."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "abc123xyz",
+            "description": "The generated username from PlanetScale Console \u2192 Branch \u2192 Connect \u2192 New password."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The generated password \u2014 shown only once in the Console. Generate a new one if lost."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "PlanetScale requires SSL. Leave this enabled unless you have a specific reason to disable it."
+          }
+        ]
+      },
+      {
+        "id": "connection-url",
+        "label": "Connection URL",
+        "description": "Paste the full MySQL connection URL from PlanetScale Console directly. Anton will parse the host, port, database, credentials, and SSL settings from the URL string.",
+        "recommended": false,
+        "how_to": "## Connect with a PlanetScale connection URL\n\nIf you prefer a single connection string over individual fields, PlanetScale provides a ready-made URL.\n\n### Steps\n\n1. Open [app.planetscale.com](https://app.planetscale.com) and sign in.\n2. Navigate to your **database \u2192 Branches \u2192 Connect \u2192 New password**.\n3. In the **Connect with** dropdown, select **MySQL CLI** or **General** to reveal the connection URL.\n4. Copy the full URL \u2014 it looks like:\n   `mysql://username:password@aws.connect.psdb.cloud/my-database?ssl-mode=REQUIRED`\n5. Paste it into the **Connection URL** field below.\n\n### Notes\n\n- The URL contains your password in plain text \u2014 treat it as a secret.\n- The password is shown only once. If you missed it, generate a new credential set.\n- SSL mode is embedded in the URL (`?ssl-mode=REQUIRED`). Do not remove that parameter.\n- You can revoke the credential at any time from the **Passwords** tab on the branch page.\n",
+        "help_url": "https://planetscale.com/docs/concepts/connection-strings",
+        "fields": [
+          {
+            "name": "connection_url",
+            "label": "Connection URL",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "mysql://username:password@aws.connect.psdb.cloud/my-database?ssl-mode=REQUIRED",
+            "description": "Full MySQL connection URL from PlanetScale Console \u2192 Branch \u2192 Connect. Keep the ?ssl-mode=REQUIRED parameter."
+          }
+        ]
+      }
+    ]
+  }
+}

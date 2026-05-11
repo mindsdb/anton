@@ -1,0 +1,109 @@
+{
+  "id": "zoho_books",
+  "label": "Zoho Books",
+  "aliases": [
+    "zohobooks",
+    "zoho accounting",
+    "zoho finance",
+    "zoho invoice"
+  ],
+  "keywords": [
+    "accounting",
+    "invoicing",
+    "finance",
+    "books",
+    "zoho",
+    "billing",
+    "expenses",
+    "payments"
+  ],
+  "description": "Connect Zoho Books to read and write accounting data including invoices, expenses, and contacts.",
+  "category": "accounting",
+  "logo": "key",
+  "logo_color": "#E42527",
+  "form": {
+    "form_id": "zoho_books-connector",
+    "title": "Connect Zoho Books",
+    "subtitle": "Authorize Anton to access your Zoho Books organization via OAuth 2.0.",
+    "logo": "key",
+    "logo_color": "#E42527",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth 2.0 (Bring Your Own Client)",
+        "description": "Create a self-client app in the Zoho API Console, paste your Client ID and Client Secret, and Anton handles the OAuth browser flow. This is the only supported auth path for Zoho Books.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.zoho.com/oauth/v2/auth",
+          "token_url": "https://accounts.zoho.com/oauth/v2/token",
+          "scopes": [
+            "ZohoBooks.fullaccess.all"
+          ],
+          "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent"
+          }
+        },
+        "how_to": "## Create a Zoho API Client\n\nZoho Books uses OAuth 2.0. You need to register your own app in the Zoho API Console to get a Client ID and Client Secret.\n\n### Steps\n\n1. Go to [Zoho API Console](https://api-console.zoho.com/) and sign in with the Zoho account linked to your Books organization.\n2. Click **Add Client** and choose **Self Client** (recommended for desktop/server use).\n3. Fill in any name (e.g. `Anton`) and click **Create**.\n4. On the client's **Client Secret** tab, copy the **Client ID** and **Client Secret** \u2014 paste them into the fields below.\n5. Select the **Data Center / Region** that matches where your Zoho account is hosted (e.g. `.com` for US, `.eu` for Europe).\n6. Click **Submit**. Anton will open a browser window to Zoho's consent screen.\n7. Grant the requested permissions and you'll be redirected back to Anton automatically.\n\n### Notes\n\n- The region you pick here **must match** the Zoho data center where your account lives. If you sign in at `accounts.zoho.eu`, pick **EU**.\n- Zoho refresh tokens are long-lived but can be revoked from **API Console \u2192 Your App \u2192 Revoke Token**.\n- The scope `ZohoBooks.fullaccess.all` grants full read/write access to your Books organization. Use `ZohoBooks.contacts.READ` etc. if you need narrower access.\n",
+        "help_url": "https://www.zoho.com/books/api/v3/oauth/#overview",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "1000.XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            "description": "From Zoho API Console \u2192 your Self Client \u2192 Client Secret tab."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID; found on the same tab in the API Console."
+          },
+          {
+            "name": "region",
+            "label": "Data Center / Region",
+            "type": "select",
+            "required": true,
+            "default": "com",
+            "description": "Must match the Zoho data center where your account is hosted. Check the domain you use to log in to Zoho (e.g. accounts.zoho.eu \u2192 EU).",
+            "options": [
+              {
+                "value": "com",
+                "label": "United States (zoho.com)"
+              },
+              {
+                "value": "eu",
+                "label": "Europe (zoho.eu)"
+              },
+              {
+                "value": "in",
+                "label": "India (zoho.in)"
+              },
+              {
+                "value": "com.au",
+                "label": "Australia (zoho.com.au)"
+              },
+              {
+                "value": "jp",
+                "label": "Japan (zoho.jp)"
+              }
+            ]
+          },
+          {
+            "name": "organization_id",
+            "label": "Organization ID",
+            "type": "text",
+            "required": false,
+            "placeholder": "123456789",
+            "description": "Optional. Your Zoho Books Organization ID (found in Settings \u2192 Organization Profile). Required if your account manages multiple organizations."
+          }
+        ]
+      }
+    ]
+  }
+}

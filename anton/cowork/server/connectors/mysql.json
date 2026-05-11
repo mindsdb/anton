@@ -1,0 +1,131 @@
+{
+  "id": "mysql",
+  "label": "MySQL",
+  "aliases": [
+    "my sql",
+    "mysql database",
+    "mysql server",
+    "mariadb",
+    "percona"
+  ],
+  "keywords": [
+    "database",
+    "sql",
+    "relational",
+    "rdbms",
+    "open-source",
+    "tables",
+    "queries",
+    "mysql",
+    "mariadb"
+  ],
+  "description": "Connect to a MySQL (or MariaDB/Percona) database to read and write data using SQL.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#4479A1",
+  "form": {
+    "form_id": "mysql-connector",
+    "title": "Connect MySQL",
+    "subtitle": "Provide your MySQL host, credentials, and optional SSL settings to connect.",
+    "logo": "database",
+    "logo_color": "#4479A1",
+    "methods": [
+      {
+        "id": "host-password",
+        "label": "Host & Password",
+        "description": "Enter your MySQL host, port, database name, username, and password. Supports SSL for encrypted connections. Works with any MySQL-compatible server.",
+        "recommended": true,
+        "how_to": "## Connect with Host & Password\n\nThis is the standard way to connect Anton to any MySQL-compatible database (MySQL, MariaDB, Percona, PlanetScale, etc.).\n\n### Steps\n\n1. Locate your database connection details \u2014 these are typically found in your hosting dashboard, cloud provider console, or from your database administrator.\n2. Enter the **Host** \u2014 this is the hostname or IP address of your MySQL server (e.g. `db.example.com` or `127.0.0.1`).\n3. Enter the **Port** \u2014 MySQL defaults to `3306`. Change this only if your server uses a non-standard port.\n4. Enter the **Database** name \u2014 the specific database (schema) Anton should connect to.\n5. Enter the **Username** and **Password** for a MySQL user that has the permissions you need.\n6. Toggle **Use SSL** on if your server requires or supports encrypted connections (recommended for remote servers).\n7. If using SSL with a custom CA certificate (common with managed cloud databases like AWS RDS or Google Cloud SQL), paste the CA certificate contents into **SSL CA Certificate**.\n\n### Notes\n\n- Make sure the MySQL user has been granted access from the host Anton runs on. If connecting remotely, run: `GRANT ALL ON yourdb.* TO 'user'@'%' IDENTIFIED BY 'password';` and ensure the firewall/security group allows inbound TCP on port 3306.\n- For cloud-managed databases (AWS RDS, Google Cloud SQL, Azure Database for MySQL), SSL is usually required \u2014 enable the toggle and paste the provider's CA cert.\n- Anton stores your password encrypted locally and never transmits it to Anton's servers.\n",
+        "help_url": "https://dev.mysql.com/doc/refman/8.0/en/connecting.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "db.example.com or 127.0.0.1",
+            "description": "Hostname or IP address of your MySQL server."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "3306",
+            "placeholder": "3306",
+            "description": "MySQL port. Default is 3306."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "The name of the specific database (schema) to connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "mysql_user",
+            "description": "MySQL user with the appropriate permissions for this database."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the MySQL user. Stored encrypted locally."
+          },
+          {
+            "name": "use_ssl",
+            "label": "Use SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Enable SSL/TLS encryption for the connection. Recommended for remote or cloud-hosted databases."
+          },
+          {
+            "name": "ssl_ca_cert",
+            "label": "SSL CA Certificate",
+            "type": "textarea",
+            "required": false,
+            "secret": false,
+            "placeholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+            "description": "Optional. Paste the PEM-encoded CA certificate to verify the server's identity. Required by some managed cloud databases (e.g. AWS RDS, Google Cloud SQL)."
+          }
+        ]
+      },
+      {
+        "id": "connection-string",
+        "label": "Connection String (DSN)",
+        "description": "Paste a full MySQL connection string (DSN). Useful if your tooling or hosting provider already gives you one.",
+        "recommended": false,
+        "how_to": "## Connect with a MySQL Connection String (DSN)\n\nIf your hosting provider or framework already provides a full MySQL DSN, paste it here instead of filling in individual fields.\n\n### MySQL DSN format\n\n```\nmysql://username:password@host:port/database\n```\n\n### Steps\n\n1. Obtain your DSN from your hosting dashboard, cloud console (e.g. PlanetScale, Railway, Heroku, Render), or application config file.\n2. Paste the full DSN into the **Connection String** field below.\n3. If SSL is required, append `?ssl=true` or `?sslmode=require` to the DSN, or add your CA cert in the **SSL CA Certificate** field.\n\n### Notes\n\n- The DSN contains your password in plain text \u2014 treat it as a secret and avoid sharing it.\n- If your password contains special characters (e.g. `@`, `/`, `#`), ensure they are URL-encoded in the DSN.\n- PlanetScale and similar serverless MySQL providers may supply DSNs directly from their dashboards under **Connect \u2192 Connect with \u2192 Generic**.\n",
+        "help_url": "https://dev.mysql.com/doc/refman/8.0/en/connecting-using-uri-or-key-value-pairs.html",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "mysql://username:password@host:3306/database",
+            "description": "Full MySQL DSN. Includes host, port, credentials, and database name. Treated as a secret."
+          },
+          {
+            "name": "ssl_ca_cert",
+            "label": "SSL CA Certificate",
+            "type": "textarea",
+            "required": false,
+            "secret": false,
+            "placeholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+            "description": "Optional. Paste the PEM-encoded CA certificate if your server requires SSL certificate verification."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "id": "sage_intacct",
+  "label": "Sage Intacct",
+  "aliases": [
+    "intacct",
+    "sage intacct erp",
+    "sage financial",
+    "intacct accounting"
+  ],
+  "keywords": [
+    "accounting",
+    "finance",
+    "erp",
+    "general ledger",
+    "accounts payable",
+    "accounts receivable",
+    "sage",
+    "intacct",
+    "mid-market",
+    "financial management"
+  ],
+  "description": "Connect to Sage Intacct's XML Web Services API using multi-credential authentication to access financial data, GL entries, invoices, and more.",
+  "category": "accounting",
+  "logo": "key",
+  "logo_color": "#00B140",
+  "form": {
+    "form_id": "sage_intacct-connector",
+    "title": "Connect Sage Intacct",
+    "subtitle": "Provide your Sage Intacct sender credentials and company login to authenticate via the XML Web Services API.",
+    "logo": "key",
+    "logo_color": "#00B140",
+    "methods": [
+      {
+        "id": "xml-web-services-credentials",
+        "label": "XML Web Services Credentials",
+        "description": "Paste your Sage Intacct sender ID, sender password, company ID, user ID, and user password. This is the standard multi-credential authentication Sage Intacct requires for all API integrations.",
+        "recommended": true,
+        "how_to": "## Connect via Sage Intacct XML Web Services\n\nSage Intacct uses a two-layer credential system: **sender credentials** (identify your integration application) and **company/user credentials** (identify who you are within Intacct). Both layers are required for every API call.\n\n### Step 1 \u2014 Obtain Sender Credentials\n\n1. Log in to the [Sage Intacct Marketplace / Developer Portal](https://developer.intacct.com/) or contact Sage Intacct support to request a **Sender ID** and **Sender Password** for your integration.\n2. If you are an existing Sage Intacct partner or have a licensed Web Services subscription, your Sender ID and password will have been issued when you enrolled. Check your original onboarding email or ask your Sage account manager.\n3. Keep the Sender Password secure \u2014 it is tied to your integration application, not your personal account.\n\n### Step 2 \u2014 Enable Web Services for Your Company\n\n1. Log in to your Sage Intacct company as an administrator.\n2. Go to **Company \u2192 Admin \u2192 Subscriptions** and confirm that **Web Services** is enabled.\n3. Go to **Company \u2192 Setup \u2192 Company** \u2192 click the **Security** tab.\n4. Under **Web Services authorizations**, click **Add** and enter your **Sender ID** to whitelist it for your company.\n\n### Step 3 \u2014 Identify Your Company and User Credentials\n\n1. Your **Company ID** is shown on the **Company \u2192 Setup \u2192 Company** page (or in the URL after login).\n2. The **User ID** and **User Password** are the credentials of a Sage Intacct user account that has the API permissions you need. It is best practice to create a dedicated Web Services user:\n   - Go to **Company \u2192 Admin \u2192 Users \u2192 Add**.\n   - Set the user type to **Business** or **Web Services only**.\n   - Assign the appropriate roles/permissions for the data Anton needs to access.\n\n### Notes\n\n- All five credentials are required \u2014 the API will reject requests missing any of them.\n- The sender credentials are shared across companies; the company/user credentials are company-specific.\n- If you manage multiple Sage Intacct entities, you may need to specify a **Location ID** or use entity-level credentials depending on your setup.\n- Rotate the Web Services user password in Intacct and update it here if you ever suspect exposure.\n",
+        "help_url": "https://developer.intacct.com/web-services/",
+        "fields": [
+          {
+            "name": "sender_id",
+            "label": "Sender ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "MyIntegrationSenderID",
+            "description": "The Sender ID issued by Sage Intacct for your integration application. Found in your developer enrollment or onboarding email."
+          },
+          {
+            "name": "sender_password",
+            "label": "Sender Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The password paired with your Sender ID. Issued alongside the Sender ID by Sage Intacct."
+          },
+          {
+            "name": "company_id",
+            "label": "Company ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "MyCompanyID",
+            "description": "Your Sage Intacct company identifier. Found under Company \u2192 Setup \u2192 Company, or visible in your login URL."
+          },
+          {
+            "name": "user_id",
+            "label": "User ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "api_user",
+            "description": "The Sage Intacct user account Anton will authenticate as. A dedicated Web Services user is recommended."
+          },
+          {
+            "name": "user_password",
+            "label": "User Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the Sage Intacct user account specified above."
+          },
+          {
+            "name": "entity_id",
+            "label": "Entity / Location ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "LOC-001",
+            "description": "For multi-entity companies, specify the entity or location ID Anton should operate against. Leave blank to use the top-level company context."
+          },
+          {
+            "name": "endpoint_url",
+            "label": "API Endpoint URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.intacct.com/ia/xml/xmlgw.phtml",
+            "default": "https://api.intacct.com/ia/xml/xmlgw.phtml",
+            "description": "Sage Intacct XML gateway URL. Leave as default unless your Sage account uses a custom endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

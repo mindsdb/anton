@@ -1,0 +1,98 @@
+{
+  "id": "google_maps",
+  "label": "Google Maps Platform",
+  "aliases": [
+    "google maps",
+    "gmaps",
+    "google places",
+    "google geocoding",
+    "google routes",
+    "google distance matrix",
+    "maps api"
+  ],
+  "keywords": [
+    "maps",
+    "geocoding",
+    "places",
+    "routes",
+    "directions",
+    "distance",
+    "matrix",
+    "latitude",
+    "longitude",
+    "location",
+    "address",
+    "google",
+    "navigation"
+  ],
+  "description": "Query Google Maps Platform APIs for geocoding, places search, routes, and distance matrix calculations.",
+  "category": "maps",
+  "logo": "globe",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "google_maps-connector",
+    "title": "Connect Google Maps Platform",
+    "subtitle": "Paste your API key to enable Places, Geocoding, Routes, and Distance Matrix access.",
+    "logo": "globe",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste an API key from Google Cloud Console. The simplest path \u2014 no OAuth flow, no browser pop-up. Restrict the key to specific Maps APIs for security.",
+        "recommended": true,
+        "how_to": "## Get a Google Maps Platform API Key\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and select or create a project.\n2. Go to **APIs & Services \u2192 Library** and enable the APIs you need:\n   - **Maps JavaScript API** (optional, for embed use)\n   - **Places API**\n   - **Geocoding API**\n   - **Directions API** / **Routes API**\n   - **Distance Matrix API**\n3. Go to **APIs & Services \u2192 Credentials \u2192 Create credentials \u2192 API key**.\n4. Click **Edit API key** on the newly created key.\n5. Under **API restrictions**, select **Restrict key** and tick only the Maps APIs you enabled \u2014 this limits blast radius if the key leaks.\n6. Optionally under **Application restrictions**, restrict to specific IP addresses or referrer URLs.\n7. Copy the key (format: `AIza...`) and paste it below.\n\n## Notes\n\n- The key is shown at any time in Credentials \u2014 you don't need to capture it immediately.\n- Google Maps Platform requires a billing account. Usage within the free monthly credit ($200) is common, but check [pricing](https://mapsplatform.google.com/pricing/) for your expected call volume.\n- Rotate the key in Cloud Console if you suspect exposure; paste the new key here to update Anton.",
+        "help_url": "https://developers.google.com/maps/documentation/javascript/get-api-key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "AIzaSy...",
+            "description": "Your Google Maps Platform API key from Cloud Console \u2192 APIs & Services \u2192 Credentials."
+          },
+          {
+            "name": "enabled_apis",
+            "label": "Enabled APIs",
+            "type": "select",
+            "required": false,
+            "default": "all",
+            "description": "Which Maps Platform APIs this key is authorized for. Used to validate calls and surface helpful errors.",
+            "options": [
+              {
+                "value": "all",
+                "label": "All (Places, Geocoding, Routes, Distance Matrix)"
+              },
+              {
+                "value": "places",
+                "label": "Places API only"
+              },
+              {
+                "value": "geocoding",
+                "label": "Geocoding API only"
+              },
+              {
+                "value": "routes",
+                "label": "Routes / Directions API only"
+              },
+              {
+                "value": "distance_matrix",
+                "label": "Distance Matrix API only"
+              }
+            ]
+          },
+          {
+            "name": "base_url_override",
+            "label": "Base URL override (optional)",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://maps.googleapis.com",
+            "description": "Leave blank to use the standard Google Maps endpoint. Set only if routing through a proxy or a Maps for Work enterprise endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

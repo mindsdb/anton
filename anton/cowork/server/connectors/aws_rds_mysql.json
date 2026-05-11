@@ -1,0 +1,161 @@
+{
+  "id": "aws_rds_mysql",
+  "label": "AWS RDS MySQL",
+  "aliases": [
+    "amazon rds mysql",
+    "rds mysql",
+    "aws mysql",
+    "amazon mysql",
+    "rds database",
+    "amazon relational database service mysql"
+  ],
+  "keywords": [
+    "aws",
+    "amazon",
+    "rds",
+    "mysql",
+    "database",
+    "relational",
+    "cloud",
+    "sql"
+  ],
+  "description": "Connect to an AWS-managed MySQL database instance via its RDS endpoint.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#FF9900",
+  "form": {
+    "form_id": "aws_rds_mysql-connector",
+    "title": "Connect AWS RDS MySQL",
+    "subtitle": "Enter your RDS endpoint and credentials to connect Anton to your MySQL instance.",
+    "logo": "database",
+    "logo_color": "#FF9900",
+    "methods": [
+      {
+        "id": "direct-connection",
+        "label": "Direct Connection",
+        "description": "Paste your RDS endpoint, port, database name, and MySQL credentials. The simplest path \u2014 no extra tooling required.",
+        "recommended": true,
+        "how_to": "## Connect via RDS Endpoint Credentials\n\nFind your RDS endpoint and connect with your MySQL username and password.\n\n### Steps\n\n1. Open the [AWS Console](https://console.aws.amazon.com/) and navigate to **RDS \u2192 Databases**.\n2. Click the DB instance you want to connect to.\n3. Under the **Connectivity & security** tab, locate the **Endpoint** (e.g. `mydb.abc123xyz.us-east-1.rds.amazonaws.com`) and **Port** (default: `3306`).\n4. Copy the endpoint and paste it into the **Host** field below.\n5. Enter the **Port** (leave as `3306` unless you changed it).\n6. Enter the **Database** name you want Anton to connect to.\n7. Enter the **Username** and **Password** for a MySQL user that has the required privileges.\n8. Toggle **Use SSL** on (recommended) \u2014 AWS RDS enforces SSL by default on most instance types.\n\n### Notes\n\n- Make sure your RDS security group allows inbound traffic on port 3306 from the machine running Anton. Go to **RDS \u2192 Databases \u2192 your instance \u2192 Connectivity & security \u2192 VPC security groups** and add an inbound rule if needed.\n- If your instance is in a private VPC, you may need a bastion host or VPN to reach it from your local machine.\n- The MySQL user should have at minimum `SELECT` privileges on the target database, or broader privileges if Anton needs to write data.\n- SSL certificates for RDS are available at the [AWS SSL/TLS documentation](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ConnectToInstance.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host (RDS Endpoint)",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb.abc123xyz.us-east-1.rds.amazonaws.com",
+            "description": "Found in AWS Console \u2192 RDS \u2192 Databases \u2192 your instance \u2192 Connectivity & security tab."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "placeholder": "3306",
+            "default": "3306",
+            "description": "MySQL default is 3306. Change only if your instance uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "The name of the specific MySQL database (schema) Anton should connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "admin",
+            "description": "MySQL user with access to the target database."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the MySQL user above. Stored encrypted locally."
+          },
+          {
+            "name": "use_ssl",
+            "label": "Use SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Encrypt the connection with SSL/TLS. Strongly recommended \u2014 AWS RDS enforces SSL by default on most instance types."
+          }
+        ]
+      },
+      {
+        "id": "iam-auth",
+        "label": "IAM Database Authentication",
+        "description": "Use AWS IAM credentials to generate short-lived authentication tokens instead of a static password. Requires IAM DB auth enabled on the RDS instance.",
+        "recommended": false,
+        "how_to": "## IAM Database Authentication\n\nAWS RDS supports passwordless login using short-lived IAM tokens. This avoids storing a static MySQL password.\n\n### Prerequisites\n\n- IAM DB authentication must be enabled on your RDS instance.\n- Your IAM user or role must have the `rds-db:connect` permission.\n\n### Steps\n\n1. Open **AWS Console \u2192 RDS \u2192 Databases** and click your instance.\n2. Under **Configuration**, confirm **IAM database authentication** is set to **Enabled**. If not, click **Modify** to enable it.\n3. In **IAM \u2192 Policies**, create or attach a policy granting `rds-db:connect` on the target DB resource ARN (e.g. `arn:aws:rds-db:us-east-1:123456789012:dbuser:db-ABCDEFG/myuser`).\n4. In **IAM \u2192 Users (or Roles) \u2192 Security credentials**, generate an **Access key ID** and **Secret access key** for the IAM identity Anton will use.\n5. In your RDS MySQL instance, create a database user with the `AWSAuthenticationPlugin`:\n   - `CREATE USER 'myuser'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS';`\n   - Grant appropriate privileges to this user.\n6. Paste the IAM **Access Key ID**, **Secret Access Key**, **AWS Region**, and the remaining connection details below.\n\n### Notes\n\n- IAM tokens expire after 15 minutes; Anton will automatically generate a new token for each connection attempt.\n- SSL is required for IAM auth \u2014 the toggle is forced on.\n- The IAM user needs network-level access to the RDS endpoint just like standard auth.\n",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host (RDS Endpoint)",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb.abc123xyz.us-east-1.rds.amazonaws.com",
+            "description": "Found in AWS Console \u2192 RDS \u2192 Databases \u2192 your instance \u2192 Connectivity & security tab."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "placeholder": "3306",
+            "default": "3306",
+            "description": "MySQL default is 3306."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "The name of the specific MySQL database (schema) Anton should connect to."
+          },
+          {
+            "name": "db_username",
+            "label": "Database Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "myuser",
+            "description": "The MySQL user created with AWSAuthenticationPlugin. Must match the IAM policy resource ARN."
+          },
+          {
+            "name": "aws_access_key_id",
+            "label": "AWS Access Key ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "AKIAIOSFODNN7EXAMPLE",
+            "description": "IAM user access key ID with rds-db:connect permission on this instance."
+          },
+          {
+            "name": "aws_secret_access_key",
+            "label": "AWS Secret Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Secret access key paired with the Access Key ID above."
+          },
+          {
+            "name": "aws_region",
+            "label": "AWS Region",
+            "type": "text",
+            "required": true,
+            "placeholder": "us-east-1",
+            "description": "The AWS region your RDS instance is deployed in (e.g. us-east-1, eu-west-2)."
+          }
+        ]
+      }
+    ]
+  }
+}

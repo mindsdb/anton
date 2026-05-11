@@ -1,0 +1,52 @@
+{
+  "id": "serper",
+  "label": "Serper",
+  "aliases": [
+    "serper.dev",
+    "serper api",
+    "google search api",
+    "serper search"
+  ],
+  "keywords": [
+    "search",
+    "google",
+    "web search",
+    "serp",
+    "real-time",
+    "results",
+    "api",
+    "internet"
+  ],
+  "description": "Fetch real-time Google Search results via the Serper API.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "serper-connector",
+    "title": "Connect Serper",
+    "subtitle": "Paste your Serper API key to enable real-time Google Search results in Anton.",
+    "logo": "search",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste the API key from your Serper dashboard. Takes about 30 seconds \u2014 no OAuth, no setup.",
+        "recommended": true,
+        "how_to": "## Get your Serper API key\n\n1. Go to [serper.dev](https://serper.dev) and sign in (or create a free account).\n2. After logging in, click **API Key** in the left sidebar.\n3. Copy the key shown on that page.\n4. Paste it into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Free accounts include 2,500 queries per month. Paid plans unlock higher limits.\n- The API key grants full access to your Serper account's quota \u2014 keep it secret.\n- If you suspect the key is compromised, return to the Serper dashboard and regenerate it.\n",
+        "help_url": "https://serper.dev/api-key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at serper.dev \u2192 API Key in the left sidebar."
+          }
+        ]
+      }
+    ]
+  }
+}

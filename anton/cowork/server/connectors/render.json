@@ -1,0 +1,62 @@
+{
+  "id": "render",
+  "label": "Render",
+  "aliases": [
+    "render.com",
+    "render cloud",
+    "render paas"
+  ],
+  "keywords": [
+    "paas",
+    "cloud",
+    "hosting",
+    "deploy",
+    "web services",
+    "containers",
+    "static sites",
+    "databases",
+    "devops",
+    "infrastructure"
+  ],
+  "description": "Deploy and manage web services, static sites, databases, and cron jobs on Render's modern PaaS platform.",
+  "category": "cloud",
+  "logo": "cube",
+  "logo_color": "#46E3B7",
+  "form": {
+    "form_id": "render-connector",
+    "title": "Connect Render",
+    "subtitle": "Paste your Render API key to let Anton manage your deployments and services.",
+    "logo": "cube",
+    "logo_color": "#46E3B7",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a Render API key generated from your Account Settings. Quickest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Render API Key\n\n1. Log in to [Render Dashboard](https://dashboard.render.com/).\n2. Click your profile avatar in the top-right corner and select **Account Settings**.\n3. Scroll down to the **API Keys** section.\n4. Click **Create API Key**, give it a name like `Anton`, and confirm.\n5. Copy the key shown \u2014 it is only displayed once. Store it somewhere safe if needed.\n6. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- API keys are scoped to your personal account. For team usage, generate a key from the Render team's account settings.\n- If you lose the key, delete it from Account Settings and create a new one \u2014 there is no way to view an existing key again.\n- Deleting a key immediately revokes Anton's access; generate and paste a new one to restore it.\n",
+        "help_url": "https://render.com/docs/api",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "rnd_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Render Dashboard \u2192 Account Settings \u2192 API Keys. Shown only once at creation."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.render.com/v1",
+            "default": "https://api.render.com/v1",
+            "description": "Override only if using a custom Render endpoint. Leave as default for standard accounts."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "id": "better_stack",
+  "label": "Better Stack",
+  "aliases": [
+    "betterstack",
+    "logtail",
+    "better uptime",
+    "betteruptime",
+    "better-stack"
+  ],
+  "keywords": [
+    "logs",
+    "logging",
+    "uptime",
+    "monitoring",
+    "on-call",
+    "alerts",
+    "incidents",
+    "observability",
+    "logtail",
+    "status page"
+  ],
+  "description": "Connect to Better Stack to query logs, monitor uptime, and manage on-call incidents from a single platform.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#FF4F4F",
+  "form": {
+    "form_id": "better_stack-connector",
+    "title": "Connect Better Stack",
+    "subtitle": "Paste your Better Stack team API token to enable log, uptime, and on-call access.",
+    "logo": "sparkle",
+    "logo_color": "#FF4F4F",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your team API token from Better Stack Account settings. The fastest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Better Stack API Token\n\nBetter Stack issues per-team API tokens that grant access to Logs, Uptime, and On-Call APIs.\n\n### Steps\n\n1. Log in to [Better Stack](https://betterstack.com) and open your team workspace.\n2. Click your avatar or team name in the top-right corner \u2192 **Account settings**.\n3. Navigate to the **API tokens** section in the left sidebar.\n4. Click **Create new token**, give it a descriptive name like `Anton`, and click **Create**.\n5. Copy the token shown \u2014 it is only displayed once.\n6. Paste it into the **API Token** field below.\n\n### Notes\n\n- The token grants access to all Better Stack products (Logs, Uptime, On-Call) for the team it belongs to.\n- If you manage multiple teams, generate a token from each team's settings separately.\n- To revoke access, return to **Account settings \u2192 API tokens** and delete the token.\n- If the token is lost before copying, delete it and create a fresh one.",
+        "help_url": "https://betterstack.com/docs/uptime/api/getting-started-with-uptime-api/",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your Better Stack API token",
+            "description": "Found in Better Stack \u2192 Account settings \u2192 API tokens. Shown once at creation time."
+          },
+          {
+            "name": "team_name",
+            "label": "Team Name (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "my-team",
+            "description": "Optional label to identify which Better Stack team this token belongs to."
+          }
+        ]
+      }
+    ]
+  }
+}

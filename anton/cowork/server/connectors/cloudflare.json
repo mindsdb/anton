@@ -1,0 +1,103 @@
+{
+  "id": "cloudflare",
+  "label": "Cloudflare",
+  "aliases": [
+    "cf",
+    "cloudflare dns",
+    "cloudflare workers",
+    "cloudflare r2",
+    "cloudflare kv"
+  ],
+  "keywords": [
+    "dns",
+    "cdn",
+    "workers",
+    "r2",
+    "kv",
+    "pages",
+    "firewall",
+    "waf",
+    "proxy",
+    "edge",
+    "serverless",
+    "storage",
+    "cache",
+    "zone",
+    "domain"
+  ],
+  "description": "Manage Cloudflare DNS, Workers, R2, KV, Pages, and more via the Cloudflare API.",
+  "category": "cloud",
+  "logo": "cube",
+  "logo_color": "#F48120",
+  "form": {
+    "form_id": "cloudflare-connector",
+    "title": "Connect Cloudflare",
+    "subtitle": "Authorize Anton to manage your Cloudflare zones, Workers, R2 buckets, and other resources.",
+    "logo": "cube",
+    "logo_color": "#F48120",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste a scoped API token from My Profile \u2192 API Tokens. Recommended \u2014 tokens are revocable, minimally scoped, and far safer than a Global API Key.",
+        "recommended": true,
+        "how_to": "## Create a scoped Cloudflare API Token\n\nAPI Tokens are the modern, preferred way to authenticate with Cloudflare. You control exactly which resources and permissions are granted.\n\n### Steps\n\n1. Log in to the [Cloudflare dashboard](https://dash.cloudflare.com).\n2. Click your profile icon (top-right) \u2192 **My Profile**.\n3. Select the **API Tokens** tab \u2192 **Create Token**.\n4. Choose **Create Custom Token** (or start from a template like *Edit zone DNS*).\n5. Under **Permissions**, add the resource types you need Anton to access \u2014 for example:\n   - Zone / DNS / Edit\n   - Account / Workers Scripts / Edit\n   - Account / R2 Storage / Edit\n6. Under **Account Resources**, pick **All accounts** or scope to a specific account.\n7. Optionally restrict by **IP filtering** or set a **TTL**.\n8. Click **Continue to summary \u2192 Create Token**.\n9. Copy the token \u2014 it is shown **only once**. Paste it into the **API Token** field below.\n10. Find your **Account ID** on the right-hand sidebar of the Cloudflare dashboard home page (or any zone overview page) and paste it below.\n\n### Notes\n\n- If the token is lost, generate a new one \u2014 they cannot be retrieved after creation.\n- Revoke tokens any time from **My Profile \u2192 API Tokens \u2192 Revoke**.\n- Most Account-level resources (Workers, R2, KV) require the Account ID; Zone-level resources (DNS) require a Zone ID, which you can add as an optional field per-request.\n",
+        "help_url": "https://developers.cloudflare.com/fundamentals/api/get-started/create-token/",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Scoped API token from My Profile \u2192 API Tokens. Shown only once at creation."
+          },
+          {
+            "name": "account_id",
+            "label": "Account ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "e.g. 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+            "description": "Found on the right-hand sidebar of your Cloudflare dashboard home or any zone page."
+          }
+        ]
+      },
+      {
+        "id": "global-api-key",
+        "label": "Global API Key",
+        "description": "Use your account-wide Global API Key and email. Not recommended \u2014 the Global API Key has full account access and cannot be scoped. Prefer an API Token where possible.",
+        "recommended": false,
+        "how_to": "## Use the Global API Key\n\nThe Global API Key grants unrestricted access to your entire Cloudflare account. Use it only if a scoped API Token is not available for your use-case.\n\n### Steps\n\n1. Log in to the [Cloudflare dashboard](https://dash.cloudflare.com).\n2. Click your profile icon (top-right) \u2192 **My Profile**.\n3. Select the **API Tokens** tab.\n4. Scroll down to the **Global API Key** section and click **View**.\n5. Complete any 2FA prompt, then copy the key.\n6. Paste the key into the **Global API Key** field below, and enter the **Email** associated with your Cloudflare account.\n7. Find your **Account ID** on the dashboard sidebar and paste it below.\n\n### Notes\n\n- The Global API Key never expires and cannot be scoped \u2014 treat it like a root password.\n- If you suspect exposure, rotate it immediately from the same page.\n- Prefer a scoped **API Token** for all new integrations.\n",
+        "help_url": "https://developers.cloudflare.com/fundamentals/api/get-started/keys/",
+        "fields": [
+          {
+            "name": "email",
+            "label": "Cloudflare Email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@example.com",
+            "description": "The email address associated with your Cloudflare account."
+          },
+          {
+            "name": "global_api_key",
+            "label": "Global API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "From My Profile \u2192 API Tokens \u2192 Global API Key \u2192 View. Full account access \u2014 use with caution."
+          },
+          {
+            "name": "account_id",
+            "label": "Account ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "e.g. 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+            "description": "Found on the right-hand sidebar of your Cloudflare dashboard home or any zone page."
+          }
+        ]
+      }
+    ]
+  }
+}

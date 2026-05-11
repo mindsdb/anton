@@ -1,0 +1,65 @@
+{
+  "id": "basecamp",
+  "label": "Basecamp",
+  "aliases": [
+    "37signals",
+    "basecamp 4",
+    "bc4",
+    "basecamp3",
+    "bc3"
+  ],
+  "keywords": [
+    "project management",
+    "team communication",
+    "tasks",
+    "to-dos",
+    "messaging",
+    "collaboration",
+    "37signals"
+  ],
+  "description": "Connect to Basecamp to manage projects, to-dos, messages, and team communication.",
+  "category": "productivity",
+  "logo": "folder",
+  "logo_color": "#1D2D35",
+  "form": {
+    "form_id": "basecamp-connector",
+    "title": "Connect Basecamp",
+    "subtitle": "Authorize Anton to access your Basecamp projects and team data.",
+    "logo": "folder",
+    "logo_color": "#1D2D35",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Basecamp (OAuth 2.0)",
+        "description": "OAuth 2.0 via your own Basecamp integration \u2014 register a free app on launchpad.37signals.com, paste your client credentials, and Anton opens the Basecamp consent screen in your browser. No passwords stored, revocable from your Basecamp account at any time.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://launchpad.37signals.com/authorization/new",
+          "token_url": "https://launchpad.37signals.com/authorization/token",
+          "scopes": []
+        },
+        "how_to": "## Sign in with Basecamp (OAuth 2.0 \u2014 Bring Your Own Client)\n\nBasecamp's OAuth flow requires you to register a free integration app at 37signals' developer portal. This takes about two minutes.\n\n### 1. Register an integration\n\n1. Go to [launchpad.37signals.com/integrations](https://launchpad.37signals.com/integrations) and sign in with your Basecamp account.\n2. Click **Register another application**.\n3. Fill in the form:\n   - **Name**: anything recognizable, e.g. `Anton`\n   - **Website**: any URL, e.g. `https://example.com`\n   - **Redirect URI**: `http://127.0.0.1` (Anton uses a local redirect)\n4. Click **Register this app**.\n\n### 2. Copy your credentials\n\n5. On the app detail page you'll see a **Client ID** and **Client Secret**. Copy both.\n\n### 3. Paste into Anton\n\n6. Enter your **Client ID** and **Client Secret** in the fields below.\n7. Click **Submit**. Anton will open the Basecamp authorization screen in your browser.\n8. Sign in and click **Allow** to grant Anton access.\n\n### Notes\n\n- The Client Secret is shown immediately after registration. Store it somewhere safe \u2014 you can reveal it again on the app page if needed.\n- To revoke access later, go to your Basecamp account \u2192 **Profile \u2192 Authorized apps** and remove the entry for Anton.\n- Basecamp does not use named scopes; the token grants access to all Basecamps your account belongs to.",
+        "help_url": "https://github.com/basecamp/api/blob/master/sections/authentication.md",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-basecamp-client-id",
+            "description": "Found on your app's detail page at launchpad.37signals.com/integrations."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID \u2014 copy it from the same integration page."
+          }
+        ]
+      }
+    ]
+  }
+}

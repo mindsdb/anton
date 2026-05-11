@@ -1,0 +1,60 @@
+{
+  "id": "gainsight",
+  "label": "Gainsight",
+  "aliases": [
+    "gainsight cs",
+    "gainsight customer success",
+    "gainsight nxt"
+  ],
+  "keywords": [
+    "customer success",
+    "health scoring",
+    "churn",
+    "csm",
+    "account health",
+    "lifecycle",
+    "retention",
+    "nps",
+    "playbooks"
+  ],
+  "description": "Connect to Gainsight to sync customer health scores, accounts, and success data into Anton.",
+  "category": "customer-success",
+  "logo": "check",
+  "logo_color": "#FF6600",
+  "form": {
+    "form_id": "gainsight-connector",
+    "title": "Connect Gainsight",
+    "subtitle": "Paste your Access Key and tenant URL to give Anton access to your Gainsight data.",
+    "logo": "check",
+    "logo_color": "#FF6600",
+    "methods": [
+      {
+        "id": "access-key",
+        "label": "Access Key",
+        "description": "Paste an Access Key from Gainsight Administration \u2192 Connectors 2.0 \u2192 Auth \u2192 Access Keys along with your tenant URL. The simplest and recommended path.",
+        "recommended": true,
+        "how_to": "## Generate a Gainsight Access Key\n\n### Steps\n\n1. Log in to Gainsight as an admin.\n2. Navigate to **Administration** (gear icon in the top-right).\n3. Go to **Connectors 2.0** in the left sidebar.\n4. Click the **Auth** tab, then select **Access Keys**.\n5. Click **Generate Key** (or **Add Key**). Give it a descriptive name like `Anton`.\n6. Copy the generated Access Key \u2014 it may only be shown once. Store it somewhere safe.\n7. Find your tenant URL \u2014 it is the base URL you use to log in to Gainsight, e.g. `https://yourcompany.gainsight.com`.\n8. Paste both the Access Key and your tenant URL into the fields below.\n\n### Notes\n\n- The Access Key grants API-level access scoped to the permissions of the admin user who created it. Use a dedicated admin account where possible.\n- If the key is ever compromised, return to **Administration \u2192 Connectors 2.0 \u2192 Auth \u2192 Access Keys** and revoke it, then generate a new one.\n- Different Gainsight editions (NXT, Salesforce Edition) may have slightly different navigation; consult the [Gainsight API docs](https://support.gainsight.com/SFDC_Edition/API_and_Developer_Docs/Gainsight_API) if your UI differs.\n",
+        "help_url": "https://support.gainsight.com/SFDC_Edition/API_and_Developer_Docs/Gainsight_API",
+        "fields": [
+          {
+            "name": "tenant_url",
+            "label": "Tenant URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://yourcompany.gainsight.com",
+            "description": "The base URL of your Gainsight instance \u2014 the same URL you use to log in."
+          },
+          {
+            "name": "access_key",
+            "label": "Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your Access Key here",
+            "description": "Found in Administration \u2192 Connectors 2.0 \u2192 Auth \u2192 Access Keys. Copy and paste the full key."
+          }
+        ]
+      }
+    ]
+  }
+}

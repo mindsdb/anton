@@ -1,0 +1,60 @@
+{
+  "id": "vitally",
+  "label": "Vitally",
+  "aliases": [
+    "vitally.io",
+    "vitally cs",
+    "vitally customer success"
+  ],
+  "keywords": [
+    "customer success",
+    "playbooks",
+    "health score",
+    "churn",
+    "accounts",
+    "nps",
+    "crm",
+    "onboarding",
+    "retention"
+  ],
+  "description": "Connect Anton to Vitally to read account health, trigger playbooks, and sync customer success data.",
+  "category": "customer-success",
+  "logo": "check",
+  "logo_color": "#5457FF",
+  "form": {
+    "form_id": "vitally-connector",
+    "title": "Connect Vitally",
+    "subtitle": "Paste your Vitally API key and subdomain to give Anton access to your customer success workspace.",
+    "logo": "check",
+    "logo_color": "#5457FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Vitally API secret key and workspace subdomain. Takes about 60 seconds \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Generate a Vitally API Key\n\n1. Log in to your Vitally workspace at `https://<yoursubdomain>.vitally.io`.\n2. Click your avatar or workspace name in the bottom-left corner, then go to **Settings**.\n3. In the left sidebar, navigate to **Integrations \u2192 API**.\n4. Click **Create API Key**, give it a descriptive name like `Anton`, then click **Save**.\n5. Copy the generated secret key \u2014 it is shown only once. If you lose it, you must revoke and create a new one.\n6. Paste the key into the **API Key** field below.\n7. Enter your Vitally **subdomain** (the part before `.vitally.io` in your workspace URL).\n\n## Notes\n\n- API keys inherit the permissions of the workspace they belong to; use a dedicated key for Anton so it can be revoked independently.\n- If you do not see the **API** section under Integrations, confirm you have Admin rights in Vitally.\n- The base API URL Anton will use is `https://rest.vitally.io`.\n",
+        "help_url": "https://docs.vitally.io/pushing-data-to-vitally/rest-apis",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "sk_live_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Vitally API secret key. Found under Settings \u2192 Integrations \u2192 API."
+          },
+          {
+            "name": "subdomain",
+            "label": "Workspace Subdomain",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourcompany",
+            "description": "The subdomain of your Vitally workspace (e.g. 'yourcompany' from yourcompany.vitally.io)."
+          }
+        ]
+      }
+    ]
+  }
+}

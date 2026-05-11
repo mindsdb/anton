@@ -1,0 +1,59 @@
+{
+  "id": "fathom",
+  "label": "Fathom",
+  "aliases": [
+    "fathom analytics",
+    "fathom analytics app",
+    "usefathom"
+  ],
+  "keywords": [
+    "analytics",
+    "web analytics",
+    "privacy",
+    "pageviews",
+    "traffic",
+    "stats",
+    "tracking",
+    "cookieless"
+  ],
+  "description": "Pull privacy-friendly web analytics data from Fathom using your API key and site ID.",
+  "category": "analytics",
+  "logo": "sparkle",
+  "logo_color": "#9187FF",
+  "form": {
+    "form_id": "fathom-connector",
+    "title": "Connect Fathom",
+    "subtitle": "Paste your Fathom API key and 8-character site ID to start pulling analytics data.",
+    "logo": "sparkle",
+    "logo_color": "#9187FF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Generate a Fathom API token from your account settings and supply the 8-character site ID from your dashboard URL. Quickest way to connect.",
+        "recommended": true,
+        "how_to": "## Connect with a Fathom API Key\n\n### Generate an API token\n\n1. Log in to [Fathom](https://app.usefathom.com/) and click your account avatar in the top-right corner.\n2. Go to **Account settings \u2192 API tokens**.\n3. Click **Create token**, give it a memorable name like `Anton`, and click **Save**.\n4. Copy the token immediately \u2014 Fathom only shows it once.\n5. Paste it into the **API Key** field below.\n\n### Find your Site ID\n\n1. In the Fathom dashboard, click on the site you want Anton to access.\n2. Look at the URL in your browser \u2014 it will contain an 8-character alphanumeric ID, e.g. `app.usefathom.com/sites/ABCD1234/...`\n3. Copy that 8-character string and paste it into the **Site ID** field below.\n\n### Notes\n\n- The API token is shown only once at creation. If you lose it, delete the old token and create a new one.\n- Each API token can access all sites in your account; the Site ID scopes Anton to a specific property.\n- Fathom's API is rate-limited \u2014 avoid polling more frequently than once per minute.",
+        "help_url": "https://usefathom.com/docs/api",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "fathom_tok_...",
+            "description": "Found under Account settings \u2192 API tokens. Shown only once at creation."
+          },
+          {
+            "name": "site_id",
+            "label": "Site ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "ABCD1234",
+            "description": "The 8-character ID from your Fathom dashboard URL (e.g. app.usefathom.com/sites/ABCD1234/...)."
+          }
+        ]
+      }
+    ]
+  }
+}

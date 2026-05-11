@@ -1,0 +1,106 @@
+{
+  "id": "rudderstack",
+  "label": "RudderStack",
+  "aliases": [
+    "rudder stack",
+    "rudder",
+    "rudder cdp",
+    "rudderstack cdp"
+  ],
+  "keywords": [
+    "cdp",
+    "customer data platform",
+    "event tracking",
+    "analytics",
+    "data pipeline",
+    "open source",
+    "event ingestion",
+    "write key",
+    "data plane"
+  ],
+  "description": "Send and manage customer event data through RudderStack's open-source Customer Data Platform.",
+  "category": "data",
+  "logo": "database",
+  "logo_color": "#2D6AF6",
+  "form": {
+    "form_id": "rudderstack-connector",
+    "title": "Connect RudderStack",
+    "subtitle": "Paste your source Write Key and Data Plane URL to start ingesting events.",
+    "logo": "database",
+    "logo_color": "#2D6AF6",
+    "methods": [
+      {
+        "id": "write-key",
+        "label": "Write Key + Data Plane URL",
+        "description": "Paste the Write Key from your RudderStack source and your Data Plane URL. The fastest path \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect via Write Key\n\nEach RudderStack source has a unique Write Key that grants event ingestion access. You also need your Data Plane URL, which is where events are sent.\n\n### Steps\n\n1. Log in to [app.rudderstack.com](https://app.rudderstack.com).\n2. In the left sidebar, go to **Sources** and click the source you want Anton to write to (or click **+ Add Source** to create a new one).\n3. On the source detail page, find the **Write Key** field \u2014 it looks like a long alphanumeric string. Click **Copy**.\n4. Paste the Write Key into the **Write Key** field below.\n5. Now find your **Data Plane URL**:\n   - For RudderStack Cloud, it appears on the same source page or under **Settings \u2192 Data Plane URL**. It typically looks like `https://<your-subdomain>.dataplane.rudderstack.com`.\n   - For self-hosted deployments, use the URL of your own data plane server (e.g. `https://dp.yourcompany.com`).\n6. Paste the Data Plane URL into the **Data Plane URL** field below.\n7. Click **Submit**.\n\n### Notes\n\n- The Write Key is scoped to a single source \u2014 create a dedicated source (type: **HTTP API**) for Anton to keep traffic isolated.\n- If you regenerate the Write Key in RudderStack, come back here and update it.\n- Self-hosted data planes must be reachable from the machine running Anton.\n",
+        "help_url": "https://www.rudderstack.com/docs/dashboard-guides/sources/",
+        "fields": [
+          {
+            "name": "write_key",
+            "label": "Write Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "1abc2DEFghIJklMNopQRstUVwxYZ34",
+            "description": "Found on your source's detail page in the RudderStack dashboard. Treat it like a password."
+          },
+          {
+            "name": "data_plane_url",
+            "label": "Data Plane URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://yoursubdomain.dataplane.rudderstack.com",
+            "description": "The endpoint where events are sent. For RudderStack Cloud, copy it from the source page. For self-hosted, use your own data plane URL."
+          }
+        ]
+      },
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token (Management API)",
+        "description": "Use a RudderStack Personal Access Token to call the management API \u2014 for reading source/destination configs, not just ingesting events.",
+        "recommended": false,
+        "how_to": "## Connect via Personal Access Token\n\nRudderStack's management API lets you read and configure sources, destinations, and transformations. It uses Personal Access Tokens for authentication.\n\n### Steps\n\n1. Log in to [app.rudderstack.com](https://app.rudderstack.com).\n2. Click your **profile icon** in the bottom-left corner and select **Profile**.\n3. Scroll down to the **Personal Access Tokens** section.\n4. Click **Generate new token**, give it a name like `Anton`, and select a role (**Read-Only** is sufficient for reading configs; **Read-Write** is needed for mutations).\n5. Copy the token \u2014 it is shown only once.\n6. Paste it into the **Personal Access Token** field below.\n7. Optionally provide your **Data Plane URL** if you also want to send events.\n\n### Notes\n\n- Tokens are shown only once at creation. If you lose it, delete it and generate a new one.\n- Use **Read-Only** role for lowest-privilege access when Anton only needs to inspect config.\n- The management API base URL is `https://api.rudderstack.com` for RudderStack Cloud.\n",
+        "help_url": "https://www.rudderstack.com/docs/dashboard-guides/personal-access-token/",
+        "fields": [
+          {
+            "name": "personal_access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "ruk_...",
+            "description": "Generated from your RudderStack profile page. Shown only once \u2014 store it safely."
+          },
+          {
+            "name": "data_plane_url",
+            "label": "Data Plane URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://yoursubdomain.dataplane.rudderstack.com",
+            "description": "Optional. Provide if Anton should also send events in addition to managing configs."
+          },
+          {
+            "name": "region",
+            "label": "Region",
+            "type": "select",
+            "required": false,
+            "default": "us",
+            "description": "RudderStack Cloud region your workspace is hosted in.",
+            "options": [
+              {
+                "value": "us",
+                "label": "US (api.rudderstack.com)"
+              },
+              {
+                "value": "eu",
+                "label": "EU (api.eu.rudderstack.com)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

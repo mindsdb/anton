@@ -1,0 +1,96 @@
+{
+  "id": "uber",
+  "label": "Uber",
+  "aliases": [
+    "uber rides",
+    "uber eats",
+    "uber business",
+    "ubereats"
+  ],
+  "keywords": [
+    "rides",
+    "eats",
+    "delivery",
+    "mobility",
+    "transportation",
+    "rideshare",
+    "business travel"
+  ],
+  "description": "Connect Uber to access ride history, Eats deliveries, and Business account data via the Uber API.",
+  "category": "mobility",
+  "logo": "send",
+  "logo_color": "#000000",
+  "form": {
+    "form_id": "uber-connector",
+    "title": "Connect Uber",
+    "subtitle": "Authorize Anton to read your Uber rides, Eats, and Business data via OAuth 2.0.",
+    "logo": "send",
+    "logo_color": "#000000",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Uber (OAuth 2.0)",
+        "description": "OAuth 2.0 \u2014 opens Uber's consent screen in your browser. Requires creating a free Uber developer app at developer.uber.com to get a Client ID and Client Secret.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://login.uber.com/oauth/v2/authorize",
+          "token_url": "https://login.uber.com/oauth/v2/token",
+          "scopes": [
+            "profile",
+            "history",
+            "rides.request",
+            "rides.read",
+            "eats.deliveries"
+          ]
+        },
+        "how_to": "## Sign in with Uber (OAuth 2.0)\n\nYou'll need a free Uber developer app to get OAuth credentials. This takes about 5 minutes.\n\n### Create an Uber developer app\n\n1. Go to [developer.uber.com](https://developer.uber.com) and sign in with your Uber account.\n2. Click **My Apps \u2192 Create App**.\n3. Give the app a name like `Anton` and fill in any required description fields.\n4. Under **Redirect URIs**, add `http://127.0.0.1` (Anton uses a local redirect for the OAuth callback).\n5. Under **Scopes**, enable the ones you need:\n   - `profile` \u2014 your name and email\n   - `history` \u2014 past trip history\n   - `rides.request` / `rides.read` \u2014 request and read ride data\n   - `eats.deliveries` \u2014 Uber Eats delivery data\n6. Save the app. Copy the **Client ID** and **Client Secret** from the app dashboard.\n\n### Connect in Anton\n\n7. Paste the **Client ID** and **Client Secret** into the fields below.\n8. Choose which **scopes** you want Anton to request (leave the default for full access).\n9. Click **Submit**. A browser window opens to Uber's consent screen.\n10. Sign in and click **Allow**. Anton stores the resulting tokens locally.\n\n### Notes\n\n- `rides.request` lets Anton request rides on your behalf \u2014 remove it if you only need read access.\n- Uber tokens expire; Anton will refresh them automatically using the refresh token.\n- To revoke access, visit [privacy.uber.com](https://privacy.uber.com) \u2192 **Account \u2192 Apps with Access** and remove Anton.\n",
+        "help_url": "https://developer.uber.com/docs/riders/guides/authentication/introduction",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "aBcDeFgHiJkLmNoPqRsTuVwX",
+            "description": "Found on your app's dashboard at developer.uber.com under App Credentials."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID. Keep this private \u2014 anyone with it can impersonate your app."
+          },
+          {
+            "name": "scopes",
+            "label": "Scopes",
+            "type": "select",
+            "required": true,
+            "default": "profile history rides.read eats.deliveries",
+            "description": "Choose the permission set Anton should request. Match these to the scopes enabled in your Uber app.",
+            "options": [
+              {
+                "value": "profile history rides.read eats.deliveries",
+                "label": "Read-only (profile, history, rides, Eats)"
+              },
+              {
+                "value": "profile history rides.request rides.read eats.deliveries",
+                "label": "Full access including ride requests"
+              },
+              {
+                "value": "profile history rides.read",
+                "label": "Rides only (profile, history, rides)"
+              },
+              {
+                "value": "profile eats.deliveries",
+                "label": "Eats only (profile, Eats deliveries)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

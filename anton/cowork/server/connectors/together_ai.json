@@ -1,0 +1,63 @@
+{
+  "id": "together_ai",
+  "label": "Together.ai",
+  "aliases": [
+    "together ai",
+    "togetherai",
+    "together",
+    "together inference"
+  ],
+  "keywords": [
+    "llm",
+    "inference",
+    "fine-tuning",
+    "open-source",
+    "models",
+    "ai",
+    "machine learning",
+    "gpu",
+    "api",
+    "language model"
+  ],
+  "description": "Run inference and fine-tune open-source models via Together.ai's cloud API.",
+  "category": "ai",
+  "logo": "brain",
+  "logo_color": "#0F6FFF",
+  "form": {
+    "form_id": "together_ai-connector",
+    "title": "Connect Together.ai",
+    "subtitle": "Paste your Together.ai API key to enable inference and fine-tuning for open-source models.",
+    "logo": "brain",
+    "logo_color": "#0F6FFF",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Together.ai API key \u2014 found in your account dashboard under Settings \u2192 API Keys. Simplest and fastest way to connect.",
+        "recommended": true,
+        "how_to": "## Get your Together.ai API Key\n\n1. Go to [api.together.xyz](https://api.together.xyz) and sign in (or create a free account).\n2. Click your avatar or account name in the top-right corner.\n3. Navigate to **Settings \u2192 API Keys**.\n4. Click **Create API Key** (or copy an existing one).\n5. Give the key a name like `Anton` and click **Create**.\n6. Copy the key \u2014 it is shown in full here; you can view it again later from the same page.\n7. Paste the key into the **API Key** field below and click **Submit**.\n\n## Notes\n\n- Keep your API key private. Anyone with the key can charge inference costs to your account.\n- If you suspect exposure, return to **Settings \u2192 API Keys**, revoke the old key, and generate a new one.\n- Together.ai charges per token; review your usage on the **Usage** tab in the dashboard.",
+        "help_url": "https://docs.together.ai/docs/get-started",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found at api.together.xyz \u2192 Settings \u2192 API Keys. Treated as a secret and never logged."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.together.xyz/v1",
+            "default": "https://api.together.xyz/v1",
+            "description": "Override only if you use a custom or self-hosted Together.ai endpoint. Leave blank to use the default."
+          }
+        ]
+      }
+    ]
+  }
+}

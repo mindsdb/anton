@@ -1,0 +1,121 @@
+{
+  "id": "bing_search",
+  "label": "Bing Search",
+  "aliases": [
+    "microsoft bing",
+    "bing web search",
+    "azure bing",
+    "bing api"
+  ],
+  "keywords": [
+    "search",
+    "web search",
+    "bing",
+    "microsoft",
+    "azure",
+    "serp",
+    "internet search"
+  ],
+  "description": "Search the web using Microsoft Bing Web Search API v7 hosted on Azure.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#008373",
+  "form": {
+    "form_id": "bing_search-connector",
+    "title": "Connect Bing Search",
+    "subtitle": "Paste your Azure Bing Search subscription key to start querying the web.",
+    "logo": "search",
+    "logo_color": "#008373",
+    "methods": [
+      {
+        "id": "subscription-key",
+        "label": "Subscription Key",
+        "description": "Paste the subscription key from your Azure Bing Search resource. The fastest path \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Get your Bing Search subscription key\n\n1. Sign in to the [Azure Portal](https://portal.azure.com).\n2. In the search bar at the top, type **Bing Search** and select **Bing Search** under Marketplace, or navigate to an existing Bing Search resource.\n3. If you don't have a resource yet, click **Create** \u2192 choose a subscription, resource group, region, and pricing tier, then click **Review + create**.\n4. Once the resource is deployed, open it and go to **Resource Management \u2192 Keys and Endpoint** in the left sidebar.\n5. Copy either **Key 1** or **Key 2** (both are valid; Key 2 lets you rotate without downtime).\n6. Paste the key into the **Subscription Key** field below.\n7. Optionally note the **Endpoint** region shown on that same page and enter it in the **Azure Region** field (defaults to `global`).\n\n## Notes\n\n- Keys are 32-character hex strings. Do not share them \u2014 anyone with the key can use your quota.\n- To rotate: generate a new key in the Azure Portal, update Anton, then delete the old key.\n- Free-tier resources have a limited number of transactions per month. Upgrade the pricing tier in the Azure Portal if you hit quota limits.\n- The Bing Search v7 API endpoint is `https://api.bing.microsoft.com/v7.0/search`.\n",
+        "help_url": "https://learn.microsoft.com/en-us/bing/search-apis/bing-web-search/create-bing-search-service-resource",
+        "fields": [
+          {
+            "name": "subscription_key",
+            "label": "Subscription Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "a1b2c3d4e5f6...",
+            "description": "Found in Azure Portal \u2192 your Bing Search resource \u2192 Keys and Endpoint. Either Key 1 or Key 2 works."
+          },
+          {
+            "name": "azure_region",
+            "label": "Azure Region",
+            "type": "select",
+            "required": false,
+            "default": "global",
+            "description": "The market/region to bias results toward. Corresponds to the 'mkt' parameter. Leave as Global for worldwide results.",
+            "options": [
+              {
+                "value": "global",
+                "label": "Global"
+              },
+              {
+                "value": "en-US",
+                "label": "United States (en-US)"
+              },
+              {
+                "value": "en-GB",
+                "label": "United Kingdom (en-GB)"
+              },
+              {
+                "value": "en-AU",
+                "label": "Australia (en-AU)"
+              },
+              {
+                "value": "en-CA",
+                "label": "Canada (en-CA)"
+              },
+              {
+                "value": "en-IN",
+                "label": "India (en-IN)"
+              },
+              {
+                "value": "de-DE",
+                "label": "Germany (de-DE)"
+              },
+              {
+                "value": "fr-FR",
+                "label": "France (fr-FR)"
+              },
+              {
+                "value": "es-ES",
+                "label": "Spain (es-ES)"
+              },
+              {
+                "value": "it-IT",
+                "label": "Italy (it-IT)"
+              },
+              {
+                "value": "ja-JP",
+                "label": "Japan (ja-JP)"
+              },
+              {
+                "value": "zh-CN",
+                "label": "China (zh-CN)"
+              },
+              {
+                "value": "pt-BR",
+                "label": "Brazil (pt-BR)"
+              }
+            ]
+          },
+          {
+            "name": "custom_endpoint",
+            "label": "Custom Endpoint URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.bing.microsoft.com/v7.0/search",
+            "description": "Override the default Bing Search v7 endpoint. Leave blank unless your Azure resource uses a custom subdomain or private endpoint."
+          }
+        ]
+      }
+    ]
+  }
+}

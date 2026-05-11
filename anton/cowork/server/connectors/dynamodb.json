@@ -1,0 +1,275 @@
+{
+  "id": "dynamodb",
+  "label": "DynamoDB",
+  "aliases": [
+    "amazon dynamodb",
+    "aws dynamodb",
+    "dynamo db",
+    "amazon dynamo"
+  ],
+  "keywords": [
+    "nosql",
+    "database",
+    "aws",
+    "amazon",
+    "key-value",
+    "document",
+    "table",
+    "cloud",
+    "storage"
+  ],
+  "description": "Query and write to Amazon DynamoDB tables using AWS credentials scoped to your account and region.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#4A90D9",
+  "form": {
+    "form_id": "dynamodb-connector",
+    "title": "Connect DynamoDB",
+    "subtitle": "Provide AWS credentials so Anton can read and write DynamoDB tables on your behalf.",
+    "logo": "database",
+    "logo_color": "#4A90D9",
+    "methods": [
+      {
+        "id": "access-key",
+        "label": "AWS Access Key",
+        "description": "Paste an IAM Access Key ID and Secret Access Key with DynamoDB permissions. The simplest and most common path \u2014 no SDK or CLI setup required.",
+        "recommended": true,
+        "how_to": "## AWS Access Key (IAM credentials)\n\nCreate an IAM user (or use an existing one) scoped to DynamoDB, generate an access key, and paste the credentials below.\n\n### Steps\n\n1. Open the [AWS IAM Console](https://console.aws.amazon.com/iam/) and go to **Users**.\n2. Click **Create user** (or pick an existing service user). Give it a name like `anton-dynamodb`.\n3. On the **Permissions** step, attach the policy **AmazonDynamoDBFullAccess** \u2014 or create an inline policy with only the actions you need (`dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:Query`, `dynamodb:Scan`, etc.).\n4. Finish creating the user, then open the user \u2192 **Security credentials** tab \u2192 **Create access key**.\n5. Choose **Application running outside AWS** as the use case.\n6. Copy the **Access key ID** and **Secret access key** \u2014 the secret is shown only once.\n7. Paste both values into the fields below, and set the **Region** to the AWS region where your DynamoDB tables live (e.g. `us-east-1`).\n\n### Notes\n\n- Prefer a dedicated IAM user with least-privilege permissions rather than using your root account credentials.\n- If you lose the secret key, deactivate the old key in IAM and generate a new one \u2014 there is no way to retrieve it again.\n- The region must match where your tables are provisioned; DynamoDB is a regional service.\n- See [AWS docs on managing access keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html) for full details.\n",
+        "help_url": "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/SettingUp.DynamoWebService.html",
+        "fields": [
+          {
+            "name": "access_key_id",
+            "label": "Access Key ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "AKIAIOSFODNN7EXAMPLE",
+            "description": "The AWS Access Key ID from IAM \u2192 Users \u2192 Security credentials."
+          },
+          {
+            "name": "secret_access_key",
+            "label": "Secret Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "description": "The secret shown once when you created the access key. Keep this safe."
+          },
+          {
+            "name": "region",
+            "label": "AWS Region",
+            "type": "select",
+            "required": true,
+            "default": "us-east-1",
+            "description": "The AWS region where your DynamoDB tables are provisioned.",
+            "options": [
+              {
+                "value": "us-east-1",
+                "label": "US East (N. Virginia) \u2014 us-east-1"
+              },
+              {
+                "value": "us-east-2",
+                "label": "US East (Ohio) \u2014 us-east-2"
+              },
+              {
+                "value": "us-west-1",
+                "label": "US West (N. California) \u2014 us-west-1"
+              },
+              {
+                "value": "us-west-2",
+                "label": "US West (Oregon) \u2014 us-west-2"
+              },
+              {
+                "value": "ca-central-1",
+                "label": "Canada (Central) \u2014 ca-central-1"
+              },
+              {
+                "value": "eu-west-1",
+                "label": "Europe (Ireland) \u2014 eu-west-1"
+              },
+              {
+                "value": "eu-west-2",
+                "label": "Europe (London) \u2014 eu-west-2"
+              },
+              {
+                "value": "eu-west-3",
+                "label": "Europe (Paris) \u2014 eu-west-3"
+              },
+              {
+                "value": "eu-central-1",
+                "label": "Europe (Frankfurt) \u2014 eu-central-1"
+              },
+              {
+                "value": "eu-north-1",
+                "label": "Europe (Stockholm) \u2014 eu-north-1"
+              },
+              {
+                "value": "ap-east-1",
+                "label": "Asia Pacific (Hong Kong) \u2014 ap-east-1"
+              },
+              {
+                "value": "ap-southeast-1",
+                "label": "Asia Pacific (Singapore) \u2014 ap-southeast-1"
+              },
+              {
+                "value": "ap-southeast-2",
+                "label": "Asia Pacific (Sydney) \u2014 ap-southeast-2"
+              },
+              {
+                "value": "ap-northeast-1",
+                "label": "Asia Pacific (Tokyo) \u2014 ap-northeast-1"
+              },
+              {
+                "value": "ap-northeast-2",
+                "label": "Asia Pacific (Seoul) \u2014 ap-northeast-2"
+              },
+              {
+                "value": "ap-south-1",
+                "label": "Asia Pacific (Mumbai) \u2014 ap-south-1"
+              },
+              {
+                "value": "sa-east-1",
+                "label": "South America (S\u00e3o Paulo) \u2014 sa-east-1"
+              },
+              {
+                "value": "me-south-1",
+                "label": "Middle East (Bahrain) \u2014 me-south-1"
+              },
+              {
+                "value": "af-south-1",
+                "label": "Africa (Cape Town) \u2014 af-south-1"
+              }
+            ]
+          },
+          {
+            "name": "endpoint_url",
+            "label": "Custom Endpoint URL (optional)",
+            "type": "url",
+            "required": false,
+            "placeholder": "http://localhost:8000",
+            "description": "Override the default DynamoDB endpoint \u2014 useful for DynamoDB Local or LocalStack during development. Leave blank for AWS."
+          }
+        ]
+      },
+      {
+        "id": "iam-role-keys",
+        "label": "IAM Role via Assumed Role Keys",
+        "description": "Use temporary STS credentials from an assumed IAM Role \u2014 Access Key ID, Secret Access Key, and a Session Token. Suitable for environments using role-based access or short-lived credentials.",
+        "recommended": false,
+        "how_to": "## Assumed IAM Role (temporary STS credentials)\n\nIf your organization uses IAM Roles rather than long-lived IAM user keys, you can generate temporary credentials via AWS STS and paste them here.\n\n### Steps\n\n1. Identify the IAM Role ARN you want to assume (e.g. `arn:aws:iam::123456789012:role/DynamoDBAccessRole`).\n2. Run the following with the AWS CLI or SDK to obtain temporary credentials:\n   - `aws sts assume-role --role-arn <ARN> --role-session-name anton-session`\n3. The response includes `AccessKeyId`, `SecretAccessKey`, and `SessionToken`. Copy all three.\n4. Paste each into the corresponding fields below.\n5. Set the **Region** to match your DynamoDB tables.\n\n### Notes\n\n- Temporary STS credentials expire (default 1 hour, max 12 hours). You will need to repeat this process and update Anton when they expire.\n- For a longer-lived setup without credential rotation headaches, use the **AWS Access Key** method with a dedicated IAM user instead.\n- See [AWS STS AssumeRole docs](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html) for full details.\n",
+        "help_url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-api.html",
+        "fields": [
+          {
+            "name": "access_key_id",
+            "label": "Access Key ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "ASIAIOSFODNN7EXAMPLE",
+            "description": "The temporary Access Key ID returned by STS AssumeRole. Starts with ASIA."
+          },
+          {
+            "name": "secret_access_key",
+            "label": "Secret Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "The temporary Secret Access Key paired with the Access Key ID above."
+          },
+          {
+            "name": "session_token",
+            "label": "Session Token",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "description": "The STS session token required alongside temporary credentials. This is a long string returned by AssumeRole."
+          },
+          {
+            "name": "region",
+            "label": "AWS Region",
+            "type": "select",
+            "required": true,
+            "default": "us-east-1",
+            "description": "The AWS region where your DynamoDB tables are provisioned.",
+            "options": [
+              {
+                "value": "us-east-1",
+                "label": "US East (N. Virginia) \u2014 us-east-1"
+              },
+              {
+                "value": "us-east-2",
+                "label": "US East (Ohio) \u2014 us-east-2"
+              },
+              {
+                "value": "us-west-1",
+                "label": "US West (N. California) \u2014 us-west-1"
+              },
+              {
+                "value": "us-west-2",
+                "label": "US West (Oregon) \u2014 us-west-2"
+              },
+              {
+                "value": "ca-central-1",
+                "label": "Canada (Central) \u2014 ca-central-1"
+              },
+              {
+                "value": "eu-west-1",
+                "label": "Europe (Ireland) \u2014 eu-west-1"
+              },
+              {
+                "value": "eu-west-2",
+                "label": "Europe (London) \u2014 eu-west-2"
+              },
+              {
+                "value": "eu-west-3",
+                "label": "Europe (Paris) \u2014 eu-west-3"
+              },
+              {
+                "value": "eu-central-1",
+                "label": "Europe (Frankfurt) \u2014 eu-central-1"
+              },
+              {
+                "value": "eu-north-1",
+                "label": "Europe (Stockholm) \u2014 eu-north-1"
+              },
+              {
+                "value": "ap-east-1",
+                "label": "Asia Pacific (Hong Kong) \u2014 ap-east-1"
+              },
+              {
+                "value": "ap-southeast-1",
+                "label": "Asia Pacific (Singapore) \u2014 ap-southeast-1"
+              },
+              {
+                "value": "ap-southeast-2",
+                "label": "Asia Pacific (Sydney) \u2014 ap-southeast-2"
+              },
+              {
+                "value": "ap-northeast-1",
+                "label": "Asia Pacific (Tokyo) \u2014 ap-northeast-1"
+              },
+              {
+                "value": "ap-northeast-2",
+                "label": "Asia Pacific (Seoul) \u2014 ap-northeast-2"
+              },
+              {
+                "value": "ap-south-1",
+                "label": "Asia Pacific (Mumbai) \u2014 ap-south-1"
+              },
+              {
+                "value": "sa-east-1",
+                "label": "South America (S\u00e3o Paulo) \u2014 sa-east-1"
+              },
+              {
+                "value": "me-south-1",
+                "label": "Middle East (Bahrain) \u2014 me-south-1"
+              },
+              {
+                "value": "af-south-1",
+                "label": "Africa (Cape Town) \u2014 af-south-1"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

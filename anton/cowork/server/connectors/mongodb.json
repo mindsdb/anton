@@ -1,0 +1,137 @@
+{
+  "id": "mongodb",
+  "label": "MongoDB",
+  "aliases": [
+    "mongo",
+    "mongo db",
+    "mongodb atlas",
+    "atlas"
+  ],
+  "keywords": [
+    "database",
+    "document",
+    "nosql",
+    "atlas",
+    "collection",
+    "query",
+    "aggregation",
+    "replica set"
+  ],
+  "description": "Connect to a MongoDB database or Atlas cluster to query and manage documents.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#00ED64",
+  "form": {
+    "form_id": "mongodb-connector",
+    "title": "Connect MongoDB",
+    "subtitle": "Link Anton to a MongoDB database or Atlas cluster.",
+    "logo": "database",
+    "logo_color": "#00ED64",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste a full mongodb:// or mongodb+srv:// URI \u2014 the fastest way to connect. Includes credentials, host, and database in a single field.",
+        "recommended": true,
+        "how_to": "## Connect with a Connection String\n\nA MongoDB connection string encodes everything Anton needs in one value. This is the simplest path for both Atlas and self-hosted instances.\n\n### MongoDB Atlas\n\n1. Log in to [MongoDB Atlas](https://cloud.mongodb.com/).\n2. Open your project and click **Database** in the left sidebar.\n3. Click **Connect** next to the cluster you want.\n4. Choose **Drivers** and select any driver \u2014 you just need the URI format.\n5. Copy the string shown (it looks like `mongodb+srv://<user>:<password>@cluster0.abc.mongodb.net/`).\n6. Replace `<password>` with your database user's password.\n7. Append the database name after the host if not already present (e.g. `\u2026mongodb.net/myDatabase`).\n8. Paste the full string into the **Connection String** field below.\n\n### Self-Hosted / On-Premises\n\n1. Your string will typically look like `mongodb://username:password@host:27017/myDatabase`.\n2. For replica sets, include the `?replicaSet=<name>` query parameter.\n3. For TLS, append `?tls=true&tlsCAFile=/path/to/ca.pem` or equivalent.\n\n### Notes\n\n- Keep this string secret \u2014 it contains your credentials.\n- Atlas IPs: add Anton's IP (or `0.0.0.0/0` for testing) under **Network Access \u2192 IP Access List**.\n- If your password contains special characters, percent-encode them (e.g. `@` \u2192 `%40`).\n",
+        "help_url": "https://www.mongodb.com/docs/manual/reference/connection-string/",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "mongodb+srv://user:password@cluster0.abc.mongodb.net/myDatabase",
+            "description": "Full mongodb:// or mongodb+srv:// URI including credentials and database name."
+          },
+          {
+            "name": "database",
+            "label": "Default Database",
+            "type": "text",
+            "required": false,
+            "placeholder": "myDatabase",
+            "description": "Optional override for the default database. If your URI already contains a database name, leave this blank."
+          }
+        ]
+      },
+      {
+        "id": "host-credentials",
+        "label": "Host + Credentials",
+        "description": "Specify the host, port, database, username, and password as separate fields. Useful when you don't have a pre-built connection string.",
+        "recommended": false,
+        "how_to": "## Connect with Host and Credentials\n\nFill in each connection parameter individually. Anton assembles the connection string internally.\n\n### Finding your connection details\n\n**Atlas:**\n1. Go to [MongoDB Atlas](https://cloud.mongodb.com/) \u2192 **Database \u2192 Connect \u2192 Drivers**.\n2. Break apart the URI shown to extract host, username, and password.\n3. The host looks like `cluster0.abc.mongodb.net` (no `mongodb+srv://` prefix needed here).\n\n**Self-hosted:**\n1. Your host is the server IP or hostname, and the port is typically `27017`.\n2. Use the username/password for a database user with the appropriate roles.\n\n### Notes\n\n- Ensure the database user has at least `readWrite` on the target database.\n- For Atlas, whitelist Anton's egress IP under **Network Access \u2192 IP Access List**.\n- Enable **TLS** if your server requires encrypted connections (Atlas requires it by default).\n",
+        "help_url": "https://www.mongodb.com/docs/manual/reference/connection-string/",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "cluster0.abc.mongodb.net or 192.168.1.10",
+            "description": "Hostname or IP address of your MongoDB server or Atlas cluster (without protocol prefix)."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": false,
+            "placeholder": "27017",
+            "default": "27017",
+            "description": "MongoDB port. Defaults to 27017. Leave blank for Atlas SRV connections."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "myDatabase",
+            "description": "The database name Anton will connect to by default."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "dbuser",
+            "description": "MongoDB database user with appropriate read/write permissions."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Password for the database user. Stored securely."
+          },
+          {
+            "name": "auth_source",
+            "label": "Auth Source Database",
+            "type": "text",
+            "required": false,
+            "placeholder": "admin",
+            "default": "admin",
+            "description": "The database where the user's credentials are stored. Typically 'admin' for self-hosted; may differ on Atlas."
+          },
+          {
+            "name": "use_srv",
+            "label": "Use SRV (mongodb+srv://)",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Enable for Atlas or any cluster using DNS SRV records. Resolves port automatically."
+          },
+          {
+            "name": "tls",
+            "label": "Enable TLS",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Encrypt the connection. Required for Atlas; optional for self-hosted servers with TLS configured."
+          }
+        ]
+      }
+    ]
+  }
+}

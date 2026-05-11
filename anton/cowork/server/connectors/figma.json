@@ -1,0 +1,89 @@
+{
+  "id": "figma",
+  "label": "Figma",
+  "aliases": [
+    "figma design",
+    "figma files",
+    "figma prototypes"
+  ],
+  "keywords": [
+    "design",
+    "prototype",
+    "ui",
+    "ux",
+    "vector",
+    "mockup",
+    "wireframe",
+    "collaboration",
+    "files",
+    "components"
+  ],
+  "description": "Access Figma design files, prototypes, and components via the Figma REST API.",
+  "category": "engineering",
+  "logo": "image",
+  "logo_color": "#F24E1E",
+  "form": {
+    "form_id": "figma-connector",
+    "title": "Connect Figma",
+    "subtitle": "Paste your Figma personal access token to give Anton access to your design files and prototypes.",
+    "logo": "image",
+    "logo_color": "#F24E1E",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Generate a token in Figma Settings \u2192 Personal access tokens and paste it here. No OAuth setup required \u2014 the fastest way to connect.",
+        "recommended": true,
+        "how_to": "## Generate a Figma Personal Access Token\n\nFigma personal access tokens are scoped credentials you can create directly from your account settings. No admin access or OAuth app required.\n\n### Steps\n\n1. Open [Figma](https://www.figma.com) and log in.\n2. Click your **avatar** in the top-left corner \u2192 **Settings**.\n3. Scroll down to the **Personal access tokens** section.\n4. Click **Generate new token**.\n5. Give the token a descriptive name like `Anton`.\n6. Choose an expiration (or set to **No expiration** for a long-lived token).\n7. Click **Generate token**. Figma shows the token **once** \u2014 copy it immediately.\n8. Paste the token into the **Personal Access Token** field below.\n\n### Notes\n\n- The token inherits your account's access level \u2014 it can read any file or project you can access.\n- If you lose the token before pasting it, just delete it in Settings and generate a new one.\n- To revoke access later, return to **Settings \u2192 Personal access tokens** and delete the `Anton` entry.\n- Tokens are scoped to your personal account; for team-wide access consider using an org service account.\n",
+        "help_url": "https://www.figma.com/developers/api#access-tokens",
+        "fields": [
+          {
+            "name": "personal_access_token",
+            "label": "Personal Access Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "figd_xxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Figma \u2192 Settings \u2192 Personal access tokens. The token is shown only once after generation."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0",
+        "description": "Use a Figma OAuth app (client ID + secret) to authorize via browser. Suitable for team deployments or when you prefer not to use a personal token.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://www.figma.com/oauth",
+          "token_url": "https://www.figma.com/api/oauth/token",
+          "scopes": [
+            "file_read"
+          ],
+          "extra_auth_params": {}
+        },
+        "how_to": "## OAuth 2.0 via a Figma App\n\nThis method requires you to register an OAuth application in the Figma developer portal and supply the credentials below.\n\n### Steps\n\n1. Go to [Figma Developer Console](https://www.figma.com/developers/apps) and log in.\n2. Click **New app** and fill in the app name (e.g. `Anton`) and a description.\n3. Under **Redirect URLs**, add `http://localhost` (Anton uses a local redirect during the OAuth flow).\n4. Select the **File content** scope (`file_read`) \u2014 this is the minimum needed.\n5. Click **Save**. Figma shows your **Client ID** and **Client secret**.\n6. Copy both values and paste them into the fields below.\n7. Click **Submit** \u2014 your browser will open Figma's consent screen.\n8. Approve the permissions and Anton will store the resulting tokens.\n\n### Notes\n\n- Figma OAuth tokens do not issue refresh tokens by default; you may need to re-authorize periodically.\n- The personal access token method above is simpler for individual use.\n",
+        "help_url": "https://www.figma.com/developers/api#oauth2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-figma-client-id",
+            "description": "From Figma Developer Console \u2192 your app \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-figma-client-secret",
+            "description": "From Figma Developer Console \u2192 your app \u2192 Client secret. Keep this private."
+          }
+        ]
+      }
+    ]
+  }
+}

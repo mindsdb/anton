@@ -1,0 +1,66 @@
+{
+  "id": "gong",
+  "label": "Gong",
+  "aliases": [
+    "gong.io",
+    "gong ai",
+    "gong revenue intelligence"
+  ],
+  "keywords": [
+    "call recording",
+    "revenue intelligence",
+    "sales calls",
+    "conversation intelligence",
+    "deals",
+    "coaching",
+    "pipeline"
+  ],
+  "description": "Connect Gong to access call recordings, transcripts, and revenue intelligence data from your sales conversations.",
+  "category": "revenue-intel",
+  "logo": "mic",
+  "logo_color": "#3B1EAD",
+  "form": {
+    "form_id": "gong-connector",
+    "title": "Connect Gong",
+    "subtitle": "Paste your Gong API credentials to give Anton access to calls, transcripts, and deal intelligence.",
+    "logo": "mic",
+    "logo_color": "#3B1EAD",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "Access Key + Secret",
+        "description": "Paste your Gong API Access Key and Access Key Secret from Company Settings. Fastest setup \u2014 no OAuth flow needed.",
+        "recommended": true,
+        "how_to": "## Generate a Gong API Access Key\n\nGong uses an Access Key / Access Key Secret pair for API authentication. Only a Gong Technical Administrator can create these.\n\n### Steps\n\n1. Log in to Gong as a Technical Administrator.\n2. Go to **Company Settings** (top-right avatar \u2192 Settings).\n3. In the left sidebar, navigate to **Ecosystem \u2192 API**.\n4. Click **Create** (or **Generate API Key** if you have none yet).\n5. Give the key a name like `Anton` so you can identify it later.\n6. Gong displays the **Access Key** and **Access Key Secret** \u2014 copy both now. **The secret is shown only once and cannot be retrieved again.**\n7. Paste the values into the fields below and click **Submit**.\n\n### Notes\n\n- If you lose the secret, you must revoke the key and create a new one.\n- The key inherits the permissions of the Technical Administrator account that created it \u2014 keep it stored securely.\n- To revoke access later, return to **Company Settings \u2192 Ecosystem \u2192 API** and delete the key.\n",
+        "help_url": "https://help.gong.io/hc/en-us/articles/360043290292-Gong-API-Authentication",
+        "fields": [
+          {
+            "name": "access_key",
+            "label": "Access Key",
+            "type": "text",
+            "required": true,
+            "placeholder": "e.g. a1b2c3d4e5f6...",
+            "description": "Found in Company Settings \u2192 Ecosystem \u2192 API after generating a key pair."
+          },
+          {
+            "name": "access_key_secret",
+            "label": "Access Key Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Shown only once when the key is created. If lost, revoke the key and generate a new pair."
+          },
+          {
+            "name": "base_url",
+            "label": "API Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.gong.io",
+            "default": "https://api.gong.io",
+            "description": "Override only if your Gong account uses a regional or custom endpoint. Leave as default for most accounts."
+          }
+        ]
+      }
+    ]
+  }
+}

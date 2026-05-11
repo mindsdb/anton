@@ -1,0 +1,92 @@
+{
+  "id": "helpscout",
+  "label": "Help Scout",
+  "aliases": [
+    "help scout",
+    "helpscout app",
+    "help-scout",
+    "helpscout helpdesk"
+  ],
+  "keywords": [
+    "helpdesk",
+    "shared inbox",
+    "support",
+    "tickets",
+    "customer service",
+    "email",
+    "conversations",
+    "beacon",
+    "docs"
+  ],
+  "description": "Connect to Help Scout to read and manage conversations, mailboxes, customers, and tags from your shared inbox.",
+  "category": "support",
+  "logo": "chats",
+  "logo_color": "#1292EE",
+  "form": {
+    "form_id": "helpscout-connector",
+    "title": "Connect Help Scout",
+    "subtitle": "Paste your Help Scout App ID and App Secret to start pulling conversations and customer data.",
+    "logo": "chats",
+    "logo_color": "#1292EE",
+    "methods": [
+      {
+        "id": "client-credentials",
+        "label": "App ID + App Secret (OAuth 2.0 client credentials)",
+        "description": "Paste your Help Scout OAuth app credentials. Help Scout issues a bearer token automatically using the client_credentials grant \u2014 no browser pop-up required.",
+        "recommended": true,
+        "how_to": "## Connect via App ID and App Secret\n\nHelp Scout's API uses OAuth 2.0 with the `client_credentials` grant. You paste an App ID and App Secret; Anton exchanges them for a bearer token silently \u2014 no browser flow.\n\n### Steps\n\n1. Log in to Help Scout and open **Your Profile** (avatar, top-right).\n2. Go to **My Apps \u2192 Create My App**.\n3. Give the app a name like `Anton` and click **Create**.\n4. Help Scout shows an **App ID** and **App Secret** on the app detail page.\n5. Copy both values and paste them into the fields below.\n\n### Notes\n\n- The App Secret is shown immediately after creation. If you navigate away and lose it, click **Regenerate App Secret** on the same page \u2014 this invalidates the old one.\n- Tokens issued via client_credentials are scoped to your Help Scout account. All mailboxes and conversations the account can access will be available to Anton.\n- If your account belongs to multiple Help Scout companies, the token will reflect the company tied to the credentials you use.\n- See [Help Scout API authentication docs](https://developer.helpscout.com/mailbox-api/overview/authentication/) for full details.\n",
+        "help_url": "https://developer.helpscout.com/mailbox-api/overview/authentication/",
+        "fields": [
+          {
+            "name": "app_id",
+            "label": "App ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "abcd1234-ef56-7890-ab12-cdef34567890",
+            "description": "Found on Your Profile \u2192 My Apps \u2192 (your app). Also called the OAuth client ID."
+          },
+          {
+            "name": "app_secret",
+            "label": "App Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Shown once after app creation. Regenerate it in Help Scout if you've lost it."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (authorization code \u2014 bring your own client)",
+        "description": "Opens a browser to let a Help Scout user grant Anton access interactively. Useful when you want per-user tokens rather than account-level credentials. Requires supplying your own OAuth app's client ID and secret.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://secure.helpscout.net/authentication/authorizeClientApplication",
+          "token_url": "https://api.helpscout.net/v2/tokens",
+          "scopes": []
+        },
+        "how_to": "## Connect via OAuth 2.0 authorization code flow\n\nThis method opens Help Scout's consent screen in your browser. Use it when you want the token tied to a specific user's session rather than account-level credentials.\n\n### Steps\n\n1. Log in to Help Scout and go to **Your Profile \u2192 My Apps \u2192 Create My App**.\n2. Set a **Redirect URL** \u2014 Anton will supply `http://127.0.0.1` (local loopback). Enter that or the URL Anton provides during setup.\n3. After saving, copy the **App ID** (client ID) and **App Secret** (client secret) shown on the app page.\n4. Paste both into the fields below and click **Submit**.\n5. A browser window opens to Help Scout's authorization screen. Log in and click **Authorize**.\n6. Anton captures the authorization code and exchanges it for an access token.\n\n### Notes\n\n- Help Scout does not issue refresh tokens for the authorization code flow, so the session will expire after the access token lifetime. You may need to re-authorize periodically.\n- Help Scout OAuth does not use explicit scopes in the authorization URL \u2014 access level is determined by the authenticated user's account permissions.\n- The App Secret is shown once \u2014 save it before leaving the app creation page.\n",
+        "help_url": "https://developer.helpscout.com/mailbox-api/overview/authentication/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "App ID (Client ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "abcd1234-ef56-7890-ab12-cdef34567890",
+            "description": "From Your Profile \u2192 My Apps \u2192 (your app). Used as the OAuth client_id."
+          },
+          {
+            "name": "client_secret",
+            "label": "App Secret (Client Secret)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the App ID. Shown once on app creation in Help Scout."
+          }
+        ]
+      }
+    ]
+  }
+}

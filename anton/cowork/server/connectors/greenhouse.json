@@ -1,0 +1,87 @@
+{
+  "id": "greenhouse",
+  "label": "Greenhouse",
+  "aliases": [
+    "greenhouse.io",
+    "greenhouse ats",
+    "greenhouse recruiting"
+  ],
+  "keywords": [
+    "ats",
+    "applicant tracking",
+    "recruiting",
+    "hiring",
+    "candidates",
+    "jobs",
+    "hr",
+    "talent acquisition",
+    "harvest"
+  ],
+  "description": "Connect to Greenhouse to read candidates, jobs, applications, and recruiting pipeline data via the Harvest API.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#24A47F",
+  "form": {
+    "form_id": "greenhouse-connector",
+    "title": "Connect Greenhouse",
+    "subtitle": "Paste your Harvest API key to give Anton read access to your recruiting data.",
+    "logo": "check",
+    "logo_color": "#24A47F",
+    "methods": [
+      {
+        "id": "harvest-api-key",
+        "label": "Harvest API Key",
+        "description": "Paste a Harvest API key from your Greenhouse Dev Center. The simplest and most common way to integrate \u2014 no OAuth flow required.",
+        "recommended": true,
+        "how_to": "## Generate a Harvest API Key\n\nThe Harvest API is Greenhouse's primary data API. API keys are scoped per user and created in the Dev Center.\n\n### Steps\n\n1. Log in to Greenhouse as a Site Admin.\n2. Navigate to **Configure** (gear icon, top-right) \u2192 **Dev Center** \u2192 **API Credential Management**.\n3. Click **Create New API Key**.\n4. Set **API Type** to **Harvest**.\n5. Give it a descriptive name like `Anton Integration`.\n6. Click **Create**. Greenhouse displays the key **once** \u2014 copy it immediately.\n7. Paste the key into the **Harvest API Key** field below.\n8. Optionally set the **Subdomain** field to your Greenhouse subdomain (e.g. `yourcompany` from `yourcompany.greenhouse.io`).\n\n### Notes\n\n- The key is shown only once at creation. If you lose it, delete it and create a new one.\n- You can restrict which endpoints the key can access under **Permissions** before saving \u2014 grant at least read access to the resources Anton needs.\n- Only Site Admins can access API Credential Management. If you don't see it, ask your Greenhouse admin.",
+        "help_url": "https://developers.greenhouse.io/harvest.html#authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "Harvest API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-harvest-api-key",
+            "description": "Found in Greenhouse \u2192 Configure \u2192 Dev Center \u2192 API Credential Management. Shown only once at creation."
+          },
+          {
+            "name": "subdomain",
+            "label": "Greenhouse Subdomain",
+            "type": "text",
+            "required": false,
+            "placeholder": "yourcompany",
+            "description": "The subdomain of your Greenhouse account (e.g. 'yourcompany' from yourcompany.greenhouse.io). Leave blank to use the default."
+          }
+        ]
+      },
+      {
+        "id": "job-board-api-key",
+        "label": "Job Board API Key",
+        "description": "Use a Job Board API key for read-only access to public job listings and basic board data. More limited in scope than the Harvest API.",
+        "recommended": false,
+        "how_to": "## Generate a Job Board API Key\n\nThe Job Board API provides access to public-facing job postings and board information. It is more limited than the Harvest API.\n\n### Steps\n\n1. Log in to Greenhouse as a Site Admin.\n2. Navigate to **Configure** \u2192 **Dev Center** \u2192 **API Credential Management**.\n3. Click **Create New API Key**.\n4. Set **API Type** to **Job Board**.\n5. Name it (e.g. `Anton Job Board`) and click **Create**.\n6. Copy the key immediately \u2014 it is shown only once.\n7. Paste it into the **Job Board API Key** field below along with your board token.\n\n### Notes\n\n- The Job Board API only covers job postings and departments \u2014 use the Harvest API method for full recruiting pipeline access.\n- Your board token appears in **Job Board** settings in Greenhouse.",
+        "help_url": "https://developers.greenhouse.io/job-board.html",
+        "fields": [
+          {
+            "name": "job_board_api_key",
+            "label": "Job Board API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-job-board-api-key",
+            "description": "Found in Greenhouse \u2192 Configure \u2192 Dev Center \u2192 API Credential Management. Select 'Job Board' as the API type."
+          },
+          {
+            "name": "board_token",
+            "label": "Job Board Token",
+            "type": "text",
+            "required": true,
+            "placeholder": "yourcompany",
+            "description": "Your Greenhouse job board token, visible in Job Board settings. Used to identify which board to query."
+          }
+        ]
+      }
+    ]
+  }
+}

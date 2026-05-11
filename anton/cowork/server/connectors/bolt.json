@@ -1,0 +1,101 @@
+{
+  "id": "bolt",
+  "label": "Bolt",
+  "aliases": [
+    "bolt rides",
+    "bolt food",
+    "bolt scooters",
+    "taxify"
+  ],
+  "keywords": [
+    "rides",
+    "ridesharing",
+    "food delivery",
+    "scooters",
+    "mobility",
+    "eu",
+    "africa",
+    "taxi",
+    "transport"
+  ],
+  "description": "Connect to Bolt's partner platform to manage rides, food orders, and scooter data across EU and Africa.",
+  "category": "mobility",
+  "logo": "send",
+  "logo_color": "#34D186",
+  "form": {
+    "form_id": "bolt-connector",
+    "title": "Connect Bolt",
+    "subtitle": "Paste your Bolt partner API credentials to access rides, food, and scooter data.",
+    "logo": "send",
+    "logo_color": "#34D186",
+    "methods": [
+      {
+        "id": "api-key-secret",
+        "label": "API Key & Secret",
+        "description": "Paste your Bolt partner API key and secret from the Bolt Partners developer portal. The fastest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Get your Bolt Partner API Key & Secret\n\n### Steps\n\n1. Log in to the [Bolt Partners Portal](https://partners.bolt.eu).\n2. Navigate to **Developers** in the left sidebar.\n3. Click **API Keys** (or **Create new API key** if you haven't generated one yet).\n4. Give the key a name such as `Anton` and select the appropriate scopes for the data you need (rides, food, scooters).\n5. Click **Generate** (or **Create**).\n6. Copy the **API Key** and the **API Secret** \u2014 the secret is typically shown only once. Store it securely before closing the dialog.\n7. Paste both values into the fields below.\n\n### Notes\n\n- If the API Secret is shown only once at creation time, store it in a password manager immediately.\n- If you lose the secret, revoke the key and generate a new one from the same **Developers** page.\n- API keys are scoped per environment (production vs. sandbox). Make sure you're using the correct environment key.\n- Bolt's partner API is region-specific; ensure your account is associated with the correct country/city fleet.",
+        "help_url": "https://partners.bolt.eu/developers",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "text",
+            "required": true,
+            "placeholder": "bolt_api_xxxxxxxxxxxxxxxx",
+            "description": "Found in the Bolt Partners Portal under Developers \u2192 API Keys."
+          },
+          {
+            "name": "api_secret",
+            "label": "API Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Your Bolt API secret",
+            "description": "Shown once at key creation. If lost, revoke the key and generate a new one."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Select whether to connect to the live production environment or the sandbox for testing.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production"
+              },
+              {
+                "value": "sandbox",
+                "label": "Sandbox"
+              }
+            ]
+          },
+          {
+            "name": "region",
+            "label": "Region",
+            "type": "select",
+            "required": false,
+            "default": "eu",
+            "description": "The primary region your Bolt partner account operates in.",
+            "options": [
+              {
+                "value": "eu",
+                "label": "Europe"
+              },
+              {
+                "value": "africa",
+                "label": "Africa"
+              },
+              {
+                "value": "other",
+                "label": "Other"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

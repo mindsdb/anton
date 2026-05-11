@@ -1,0 +1,93 @@
+{
+  "id": "azure_mysql",
+  "label": "Azure MySQL",
+  "aliases": [
+    "azure database for mysql",
+    "azure mysql flexible server",
+    "microsoft azure mysql",
+    "azure db mysql"
+  ],
+  "keywords": [
+    "mysql",
+    "azure",
+    "microsoft",
+    "database",
+    "sql",
+    "relational",
+    "flexible server",
+    "cloud database",
+    "rdbms"
+  ],
+  "description": "Connect to an Azure Database for MySQL Flexible Server instance using host, port, credentials, and SSL.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#0078D4",
+  "form": {
+    "form_id": "azure_mysql-connector",
+    "title": "Connect Azure MySQL",
+    "subtitle": "Enter your Azure Database for MySQL Flexible Server connection details to get started.",
+    "logo": "database",
+    "logo_color": "#0078D4",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Host / Credentials",
+        "description": "Paste your server hostname, port, database name, and admin credentials. SSL is required by Azure and enabled automatically.",
+        "recommended": true,
+        "how_to": "## Connect with Host & Credentials\n\nAzure Database for MySQL Flexible Server requires SSL. Gather the details below from the Azure portal before filling in the form.\n\n## Steps\n\n1. Open the [Azure portal](https://portal.azure.com) and navigate to your **Azure Database for MySQL Flexible Server** resource.\n2. In the left menu, click **Overview**. Copy the **Server name** (e.g. `myserver.mysql.database.azure.com`) \u2014 paste it into **Host** below.\n3. The default port is **3306** unless you changed it during provisioning.\n4. Under **Settings \u2192 Databases**, find or create the database you want Anton to connect to.\n5. Under **Settings \u2192 Server parameters**, confirm `require_secure_transport` is `ON` (it is by default). Anton will always connect over SSL.\n6. Use the admin username you set when creating the server (format: `username` \u2014 Azure may display it as `username@servername` in older UIs, but Flexible Server accepts the short form).\n7. If you forgot the password, go to **Settings \u2192 Reset password** to set a new one.\n8. Fill in all fields below and click **Connect**.\n\n## Notes\n\n- Flexible Server blocks public access by default. Ensure your network has access via **Networking \u2192 Add current client IP** or a configured VNet rule.\n- If your firewall blocks the connection, add Anton's outbound IP in **Settings \u2192 Networking \u2192 Firewall rules**.\n- The `require_secure_transport` parameter cannot be disabled on Azure MySQL Flexible Server for security compliance.",
+        "help_url": "https://learn.microsoft.com/en-us/azure/mysql/flexible-server/connect-workbench",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "url",
+            "required": true,
+            "placeholder": "myserver.mysql.database.azure.com",
+            "description": "The fully-qualified server name from the Azure portal Overview page."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": false,
+            "placeholder": "3306",
+            "default": "3306",
+            "description": "MySQL port \u2014 default is 3306 for Azure Flexible Server."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydatabase",
+            "description": "The name of the specific database to connect to on this server."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "adminuser",
+            "description": "Your MySQL admin or app user. Azure Flexible Server accepts the short username without the @servername suffix."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the MySQL user. Reset via Azure portal \u2192 Settings \u2192 Reset password if needed."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "SSL is mandatory on Azure Database for MySQL Flexible Server and is always enforced. Leave this on."
+          }
+        ]
+      }
+    ]
+  }
+}

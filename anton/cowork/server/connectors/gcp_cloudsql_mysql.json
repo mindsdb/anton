@@ -1,0 +1,163 @@
+{
+  "id": "gcp_cloudsql_mysql",
+  "label": "GCP Cloud SQL MySQL",
+  "aliases": [
+    "google cloud sql mysql",
+    "cloud sql mysql",
+    "gcp mysql",
+    "google mysql",
+    "cloudsql mysql"
+  ],
+  "keywords": [
+    "mysql",
+    "google cloud",
+    "gcp",
+    "cloud sql",
+    "database",
+    "sql",
+    "relational",
+    "rdbms"
+  ],
+  "description": "Connect to a Google Cloud SQL MySQL instance using host, port, credentials, and optional SSL.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#4285F4",
+  "form": {
+    "form_id": "gcp_cloudsql_mysql-connector",
+    "title": "Connect GCP Cloud SQL MySQL",
+    "subtitle": "Enter your Cloud SQL instance connection details to start querying MySQL from Anton.",
+    "logo": "database",
+    "logo_color": "#4285F4",
+    "methods": [
+      {
+        "id": "direct-connection",
+        "label": "Direct Connection",
+        "description": "Connect directly to your Cloud SQL MySQL instance using its public IP address, port, database name, username, and password. Optionally enforce SSL for encrypted connections.",
+        "recommended": true,
+        "how_to": "## Connect via Public IP (Direct Connection)\n\nThis is the simplest way to connect Anton to your Cloud SQL MySQL instance.\n\n### Prerequisites\n\n- Your Cloud SQL instance must have a **public IP** enabled.\n- Your machine's IP must be added to the instance's **Authorized networks** list.\n\n### Steps\n\n1. Open [Google Cloud Console](https://console.cloud.google.com/) and navigate to **SQL** in the left menu.\n2. Click your MySQL instance to open its details page.\n3. Under **Connectivity**, note the **Public IP address**. This is your host.\n4. Go to **Connections \u2192 Networking \u2192 Authorized networks** and add your current public IP (or CIDR range) so Cloud SQL accepts inbound connections.\n5. Under **Users**, confirm or create the MySQL user Anton will use. Note the username and password.\n6. Enter the **Public IP** as the host, **3306** as the port (default), your **database name**, **username**, and **password** in the fields below.\n7. If your instance requires SSL (recommended), toggle **Require SSL** on. Download the server CA cert from **Connections \u2192 Security** and paste it into the CA Certificate field.\n\n### Notes\n\n- Never add `0.0.0.0/0` to Authorized networks in production \u2014 whitelist only the IP running Anton.\n- If you prefer not to expose a public IP, consider using the Cloud SQL Auth Proxy method instead.\n- The default MySQL port is **3306** and is rarely changed.\n",
+        "help_url": "https://cloud.google.com/sql/docs/mysql/connect-admin-ip",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Public IP Address",
+            "type": "text",
+            "required": true,
+            "placeholder": "34.123.45.67",
+            "description": "The public IP of your Cloud SQL instance. Found in Cloud Console \u2192 SQL \u2192 your instance \u2192 Connectivity."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "3306",
+            "placeholder": "3306",
+            "description": "MySQL port. Default is 3306 unless your instance is configured otherwise."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "The name of the MySQL database (schema) Anton should connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton_user",
+            "description": "MySQL user with access to the target database."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the MySQL user above."
+          },
+          {
+            "name": "use_ssl",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enforce an SSL/TLS encrypted connection. Recommended for production instances."
+          },
+          {
+            "name": "ssl_ca_cert",
+            "label": "SSL CA Certificate",
+            "type": "textarea",
+            "required": false,
+            "secret": false,
+            "placeholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+            "description": "Server CA certificate in PEM format. Download from Cloud Console \u2192 SQL \u2192 your instance \u2192 Connections \u2192 Security. Only required when Require SSL is enabled."
+          }
+        ]
+      },
+      {
+        "id": "cloud-sql-auth-proxy",
+        "label": "Cloud SQL Auth Proxy",
+        "description": "Route connections through the Cloud SQL Auth Proxy running locally. No public IP or Authorized networks needed \u2014 the proxy handles IAM-authenticated tunneling to Cloud SQL.",
+        "recommended": false,
+        "how_to": "## Connect via Cloud SQL Auth Proxy\n\nThe Auth Proxy is Google's recommended approach when you don't want to expose a public IP or manage Authorized networks manually.\n\n### Prerequisites\n\n- [Download the Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/mysql/sql-proxy#install) binary for your OS.\n- A Google Cloud service account with the **Cloud SQL Client** (`roles/cloudsql.client`) IAM role.\n- The service account's JSON key file.\n\n### Steps\n\n1. In [Cloud Console](https://console.cloud.google.com/) \u2192 **SQL**, click your instance and note the **Connection name** (format: `project:region:instance`).\n2. Go to **IAM & Admin \u2192 Service Accounts**, create a service account, and grant it the **Cloud SQL Client** role.\n3. Under the service account \u2192 **Keys** \u2192 **Add key \u2192 Create new key \u2192 JSON**. Download the JSON key.\n4. Run the proxy locally:\n   ```\n   ./cloud-sql-proxy --credentials-file=/path/to/key.json PROJECT:REGION:INSTANCE\n   ```\n   By default it listens on `127.0.0.1:3306`.\n5. In the fields below, set **Host** to `127.0.0.1`, **Port** to `3306`, and enter your database credentials.\n6. SSL is handled by the proxy itself \u2014 leave **Require SSL** off when using this method.\n\n### Notes\n\n- The proxy must be running on the same machine as Anton for the connection to succeed.\n- Keep the JSON key secret \u2014 it grants Cloud SQL access to everyone who holds it.\n- See [Google's Auth Proxy guide](https://cloud.google.com/sql/docs/mysql/sql-proxy) for advanced flags (e.g. Unix socket mode).\n",
+        "help_url": "https://cloud.google.com/sql/docs/mysql/sql-proxy",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Proxy Host",
+            "type": "text",
+            "required": true,
+            "default": "127.0.0.1",
+            "placeholder": "127.0.0.1",
+            "description": "Host where the Cloud SQL Auth Proxy is listening. Usually 127.0.0.1 when running locally."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "3306",
+            "placeholder": "3306",
+            "description": "Port the Auth Proxy is bound to. Default is 3306."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my_database",
+            "description": "The name of the MySQL database (schema) Anton should connect to."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton_user",
+            "description": "MySQL user with access to the target database."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the MySQL user above."
+          },
+          {
+            "name": "service_account_json",
+            "label": "Service Account JSON",
+            "type": "textarea",
+            "required": false,
+            "secret": true,
+            "placeholder": "{ \"type\": \"service_account\", ... }",
+            "description": "Optional. Paste the full contents of your service account JSON key if you want Anton to launch the proxy automatically. Leave blank if you're running the proxy yourself."
+          }
+        ]
+      }
+    ]
+  }
+}

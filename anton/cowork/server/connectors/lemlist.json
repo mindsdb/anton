@@ -1,0 +1,51 @@
+{
+  "id": "lemlist",
+  "label": "Lemlist",
+  "aliases": [
+    "lem list",
+    "lemlist.com",
+    "lmlist"
+  ],
+  "keywords": [
+    "cold email",
+    "outbound",
+    "sales",
+    "email sequences",
+    "prospecting",
+    "email automation",
+    "campaigns",
+    "follow-up"
+  ],
+  "description": "Automate cold email outreach and multi-channel sequences with Lemlist.",
+  "category": "sales-engagement",
+  "logo": "send",
+  "logo_color": "#FF4C64",
+  "form": {
+    "form_id": "lemlist-connector",
+    "title": "Connect Lemlist",
+    "subtitle": "Paste your Lemlist API key to give Anton access to your campaigns and leads.",
+    "logo": "send",
+    "logo_color": "#FF4C64",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Lemlist API key from Team Settings. No OAuth setup required \u2014 the fastest way to connect.",
+        "recommended": true,
+        "how_to": "## Connect with an API Key\n\nLemlist exposes a stable API key per team that grants full API access.\n\n### Steps\n\n1. Log in to [Lemlist](https://app.lemlist.com).\n2. Click your avatar or team name in the bottom-left corner.\n3. Go to **Settings \u2192 Integrations** (or navigate directly to **Team Settings \u2192 API**).\n4. Under the **API** section, click **Generate** if no key exists, or copy the existing key.\n5. Paste the key into the **API Key** field below.\n\n### Notes\n\n- The API key grants access to all campaigns and lead data for your team \u2014 keep it secret.\n- If you regenerate the key in Lemlist, update it here to restore access.\n- You can scope usage per sub-team only if your plan supports multiple teams; otherwise one key covers the whole workspace.\n",
+        "help_url": "https://help.lemlist.com/en/articles/4938388-lemlist-api",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "lem_xxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Lemlist \u2192 Settings \u2192 Integrations \u2192 API. Treat this like a password \u2014 anyone with it has full access to your team's account."
+          }
+        ]
+      }
+    ]
+  }
+}

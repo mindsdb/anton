@@ -1,0 +1,94 @@
+{
+  "id": "datadog",
+  "label": "Datadog",
+  "aliases": [
+    "datadog apm",
+    "datadog monitoring",
+    "dd",
+    "datadog metrics",
+    "datadog logs"
+  ],
+  "keywords": [
+    "observability",
+    "metrics",
+    "logs",
+    "monitoring",
+    "apm",
+    "tracing",
+    "infrastructure",
+    "alerts",
+    "dashboards",
+    "analytics"
+  ],
+  "description": "Connect to Datadog to query metrics, logs, traces, and events from your observability platform.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#632CA6",
+  "form": {
+    "form_id": "datadog-connector",
+    "title": "Connect Datadog",
+    "subtitle": "Paste your Datadog API key and Application key to give Anton access to your observability data.",
+    "logo": "sparkle",
+    "logo_color": "#632CA6",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key + Application Key",
+        "description": "Paste your Datadog API key and Application key. Quickest setup \u2014 no OAuth flow required. Scoped to the permissions of the user or service account that owns the Application key.",
+        "recommended": true,
+        "how_to": "## Connect with API Key + Application Key\n\nDatadog uses two credentials together: an **API key** (identifies your org) and an **Application key** (identifies the actor and carries permissions).\n\n### Find your API key\n\n1. Log in to Datadog and go to **Organization Settings \u2192 API Keys** (or visit `https://app.datadoghq.com/organization-settings/api-keys`).\n2. Click **New Key** or copy an existing key you want Anton to use.\n3. Give it a descriptive name like `Anton`.\n\n### Find or create your Application key\n\n1. Go to **Organization Settings \u2192 Application Keys** (or `https://app.datadoghq.com/organization-settings/application-keys`).\n2. Click **New Key**, name it `Anton`, and copy the value immediately \u2014 it is shown only once.\n3. Scope the key to the minimum permissions Anton needs (e.g. `metrics_read`, `logs_read`).\n\n### Select your region\n\nChoose the Datadog site that matches your account sign-in URL:\n- **US1** \u2192 `app.datadoghq.com` (default)\n- **US3** \u2192 `us3.datadoghq.com`\n- **US5** \u2192 `us5.datadoghq.com`\n- **EU** \u2192 `app.datadoghq.eu`\n- **US1-FED** \u2192 `app.ddog-gov.com`\n\n### Notes\n\n- Application keys are shown only once at creation. If lost, delete the old key and create a new one.\n- API keys are org-level; Application keys carry per-user permissions \u2014 use a service account for production.\n- Rotate both keys in Organization Settings if you suspect exposure.\n",
+        "help_url": "https://docs.datadoghq.com/account_management/api-app-keys/",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found under Organization Settings \u2192 API Keys. Identifies your Datadog organization."
+          },
+          {
+            "name": "application_key",
+            "label": "Application Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found under Organization Settings \u2192 Application Keys. Carries the permissions Anton will use. Shown only once at creation."
+          },
+          {
+            "name": "region",
+            "label": "Datadog Site / Region",
+            "type": "select",
+            "required": true,
+            "default": "us1",
+            "description": "Select the Datadog site that matches your login URL.",
+            "options": [
+              {
+                "value": "us1",
+                "label": "US1 \u2014 app.datadoghq.com (default)"
+              },
+              {
+                "value": "us3",
+                "label": "US3 \u2014 us3.datadoghq.com"
+              },
+              {
+                "value": "us5",
+                "label": "US5 \u2014 us5.datadoghq.com"
+              },
+              {
+                "value": "eu",
+                "label": "EU \u2014 app.datadoghq.eu"
+              },
+              {
+                "value": "us1-fed",
+                "label": "US1-FED \u2014 app.ddog-gov.com"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

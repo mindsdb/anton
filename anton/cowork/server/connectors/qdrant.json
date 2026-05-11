@@ -1,0 +1,77 @@
+{
+  "id": "qdrant",
+  "label": "Qdrant",
+  "aliases": [
+    "qdrant cloud",
+    "qdrant vector db",
+    "qdrant vector database"
+  ],
+  "keywords": [
+    "vector",
+    "database",
+    "embeddings",
+    "similarity search",
+    "semantic search",
+    "ai",
+    "machine learning",
+    "open-source",
+    "managed",
+    "collections"
+  ],
+  "description": "Connect to a Qdrant vector database cluster \u2014 self-hosted or Qdrant Cloud \u2014 to store and search high-dimensional embeddings.",
+  "category": "vector-db",
+  "logo": "cube",
+  "logo_color": "#DC244C",
+  "form": {
+    "form_id": "qdrant-connector",
+    "title": "Connect Qdrant",
+    "subtitle": "Paste your Qdrant cluster URL and API key to start querying vector collections.",
+    "logo": "cube",
+    "logo_color": "#DC244C",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "Cluster URL + API Key",
+        "description": "Paste your Qdrant cluster endpoint and API key. Works for both Qdrant Cloud managed clusters and self-hosted instances with API key auth enabled.",
+        "recommended": true,
+        "how_to": "## Connect with a Cluster URL and API Key\n\n### Qdrant Cloud (managed)\n\n1. Log in at [cloud.qdrant.io](https://cloud.qdrant.io).\n2. Open your cluster from the **Clusters** list.\n3. Under **Connection details**, copy the **Cluster URL** (e.g. `https://xyz.us-east-1-0.aws.cloud.qdrant.io:6333`).\n4. Go to **Access \u2192 API Keys \u2192 Create API Key**. Give it a name like `Anton`.\n5. Copy the key \u2014 it is shown **once** only. Store it safely before closing the dialog.\n6. Paste the URL and API key into the fields below.\n\n### Self-hosted Qdrant\n\n1. Ensure your Qdrant instance is running and reachable (default port `6333`).\n2. If you started Qdrant with `--api-key` or set `service.api_key` in `config.yaml`, use that value as your API key.\n3. If no API key is configured, leave the **API Key** field blank \u2014 Anton will connect without authentication.\n4. Enter the full URL to your instance (e.g. `http://localhost:6333` or `https://qdrant.mycompany.com`).\n\n### Notes\n\n- The API key is sent as the `api-key` header on every request.\n- For TLS-terminated clusters, always use `https://` to avoid sending the key in plaintext.\n- You can scope permissions by creating read-only API keys in Qdrant Cloud if Anton only needs search access.",
+        "help_url": "https://qdrant.tech/documentation/cloud/authentication/",
+        "fields": [
+          {
+            "name": "cluster_url",
+            "label": "Cluster URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://xyz.us-east-1-0.aws.cloud.qdrant.io:6333",
+            "description": "Full URL of your Qdrant cluster, including protocol and port. Use http://localhost:6333 for a local instance."
+          },
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "your-qdrant-api-key",
+            "description": "API key for authentication. Required for Qdrant Cloud clusters; optional for self-hosted instances without auth enabled."
+          },
+          {
+            "name": "collection_name",
+            "label": "Default Collection",
+            "type": "text",
+            "required": false,
+            "placeholder": "my_collection",
+            "description": "Optional default collection Anton will read from and write to. Can be overridden per-query."
+          },
+          {
+            "name": "tls_skip_verify",
+            "label": "Skip TLS verification",
+            "type": "boolean",
+            "required": false,
+            "default": "false",
+            "description": "Disable TLS certificate verification. Enable only for self-hosted clusters with self-signed certificates."
+          }
+        ]
+      }
+    ]
+  }
+}

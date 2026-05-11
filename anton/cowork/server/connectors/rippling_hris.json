@@ -1,0 +1,72 @@
+{
+  "id": "rippling_hris",
+  "label": "Rippling HR",
+  "aliases": [
+    "rippling",
+    "rippling hris",
+    "rippling hr",
+    "rippling human resources"
+  ],
+  "keywords": [
+    "hris",
+    "hr",
+    "human resources",
+    "employees",
+    "payroll",
+    "benefits",
+    "onboarding",
+    "rippling",
+    "workforce"
+  ],
+  "description": "Connect to Rippling's HRIS API to read employee records, payroll data, benefits, and org structure.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#FF6B35",
+  "form": {
+    "form_id": "rippling_hris-connector",
+    "title": "Connect Rippling HR",
+    "subtitle": "Authorize Anton to access your Rippling HRIS data via OAuth 2.0.",
+    "logo": "check",
+    "logo_color": "#FF6B35",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth 2.0 (Bring Your Own App)",
+        "description": "Create a custom OAuth app in Rippling, then paste your Client ID and Secret here. Anton will open a browser window for authorization \u2014 no passwords stored.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://app.rippling.com/apps/oauth/authorize",
+          "token_url": "https://app.rippling.com/api/o/token/",
+          "scopes": [
+            "employees:read",
+            "companies:read",
+            "groups:read",
+            "departments:read"
+          ]
+        },
+        "how_to": "## Connect Rippling HR via OAuth 2.0\n\nRippling requires you to register a custom OAuth app in your account before authorizing. This takes about 2 minutes.\n\n### 1. Create an OAuth app in Rippling\n\n1. Log in to [app.rippling.com](https://app.rippling.com) as an admin.\n2. Go to **Settings** (bottom-left gear icon) \u2192 **API** \u2192 **OAuth Apps**.\n3. Click **Create App**.\n4. Give it a name like `Anton Integration` and set the **Redirect URI** to `http://127.0.0.1` (Anton uses a local redirect to capture the auth code).\n5. Under **Scopes**, enable at minimum: `employees:read`, `companies:read`, `groups:read`, `departments:read`. Add others as needed.\n6. Click **Save**.\n\n### 2. Copy your credentials\n\n1. After saving, Rippling shows your **Client ID** and **Client Secret**.\n2. The client secret is shown once \u2014 copy it immediately.\n\n### 3. Paste into Anton\n\n1. Enter the **Client ID** and **Client Secret** in the fields below.\n2. Click **Submit**. Anton will open a browser window pointing to Rippling's consent screen.\n3. Approve the requested scopes. Rippling redirects back to Anton and stores your access and refresh tokens locally.\n\n### Notes\n\n- If your Rippling plan does not include API access, the **API** section may not appear in Settings. Contact Rippling support to enable it.\n- To revoke access later, go to **Settings \u2192 API \u2192 OAuth Apps** in Rippling and delete the app.",
+        "help_url": "https://developer.rippling.com/docs/rippling/RipplingAPI/Authentication/oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "rpl_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in Rippling \u2192 Settings \u2192 API \u2192 OAuth Apps after creating your app."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your Rippling OAuth client secret",
+            "description": "Shown once when you create the app in Rippling. Store it securely \u2014 Anton encrypts it locally."
+          }
+        ]
+      }
+    ]
+  }
+}

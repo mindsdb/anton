@@ -1,0 +1,107 @@
+{
+  "id": "spotify",
+  "label": "Spotify",
+  "aliases": [
+    "spotify music",
+    "spotify api",
+    "spotify developer"
+  ],
+  "keywords": [
+    "music",
+    "audio",
+    "playlists",
+    "tracks",
+    "albums",
+    "artists",
+    "library",
+    "streaming",
+    "podcasts"
+  ],
+  "description": "Access Spotify's music catalog, user library, playlists, and listening history via the Spotify Web API.",
+  "category": "public-data",
+  "logo": "image",
+  "logo_color": "#1DB954",
+  "form": {
+    "form_id": "spotify-connector",
+    "title": "Connect Spotify",
+    "subtitle": "Authorize Anton to read your Spotify library, playlists, and listening history.",
+    "logo": "image",
+    "logo_color": "#1DB954",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "Sign in with Spotify (OAuth 2.0)",
+        "description": "OAuth 2.0 via a Spotify Developer app you register. Paste your Client ID and Client Secret, then Anton opens a browser consent screen to obtain a scoped access token. No passwords stored.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://accounts.spotify.com/authorize",
+          "token_url": "https://accounts.spotify.com/api/token",
+          "scopes": [
+            "user-library-read",
+            "playlist-read-private",
+            "playlist-read-collaborative",
+            "user-read-recently-played",
+            "user-top-read",
+            "user-read-email"
+          ]
+        },
+        "how_to": "## Register a Spotify Developer App\n\nSpotify requires you to create an app on their developer dashboard to obtain OAuth credentials.\n\n1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and log in with your Spotify account.\n2. Click **Create app**.\n3. Fill in an **App name** (e.g. `Anton`) and **App description** (any text).\n4. Set **Redirect URI** to `http://127.0.0.1:9898/callback` \u2014 Anton's local redirect handler.\n5. Under **APIs used**, select **Web API**, then click **Save**.\n6. Open the app you just created and click **Settings**.\n7. Copy the **Client ID** and click **View client secret** to reveal and copy the **Client secret**.\n8. Paste both into the fields below and click **Submit**. A browser window will open to Spotify's consent screen.\n9. Log in (if not already) and click **Agree** to grant the requested permissions.\n\n### Scopes requested\n\n- `user-library-read` \u2014 saved tracks, albums, and shows\n- `playlist-read-private` + `playlist-read-collaborative` \u2014 all playlists\n- `user-read-recently-played` \u2014 listening history\n- `user-top-read` \u2014 top artists and tracks\n- `user-read-email` \u2014 your Spotify email address\n\n### Notes\n\n- Apps in **Development mode** allow up to 25 Spotify users. For broader access, apply for **Extended Quota** in the dashboard.\n- Spotify access tokens expire after 1 hour; Anton will automatically refresh them using the stored refresh token.\n- If you need to revoke access, visit [spotify.com/account/apps](https://www.spotify.com/account/apps) and click **Remove Access** next to your app.\n",
+        "help_url": "https://developer.spotify.com/documentation/web-api/tutorials/getting-started",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "a1b2c3d4e5f6...",
+            "description": "From your Spotify Developer Dashboard \u2192 your app \u2192 Settings \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "From your Spotify Developer Dashboard \u2192 your app \u2192 Settings \u2192 View client secret."
+          },
+          {
+            "name": "redirect_uri",
+            "label": "Redirect URI",
+            "type": "url",
+            "required": true,
+            "default": "http://127.0.0.1:9898/callback",
+            "placeholder": "http://127.0.0.1:9898/callback",
+            "description": "Must exactly match the Redirect URI you entered in your Spotify app settings."
+          }
+        ]
+      },
+      {
+        "id": "client-credentials",
+        "label": "Client Credentials (catalog only)",
+        "description": "App-level access to Spotify's public music catalog \u2014 no user login required. Suitable for searching tracks, albums, and artists, but cannot access any personal library or playlist data.",
+        "recommended": false,
+        "how_to": "## Client Credentials Flow\n\nUse this method when you only need access to Spotify's public catalog (search, album info, artist data) and do not need any user-specific data.\n\n1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and create an app (same steps as OAuth above, but no Redirect URI is needed).\n2. Open your app \u2192 **Settings** and copy the **Client ID** and **Client secret**.\n3. Paste both into the fields below and click **Submit**.\n\n### What you can access\n\n- Track, album, artist, and playlist metadata (public only)\n- Search across Spotify's full catalog\n- Browse featured playlists, new releases, and categories\n\n### What you cannot access\n\n- Saved library, listening history, or private playlists \u2014 use **Sign in with Spotify** for those.\n\n### Notes\n\n- Tokens expire after 1 hour; Anton refreshes automatically.\n- No user consent screen is shown \u2014 this is purely app-to-app authentication.\n",
+        "help_url": "https://developer.spotify.com/documentation/web-api/tutorials/client-credentials-flow",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "a1b2c3d4e5f6...",
+            "description": "From your Spotify Developer Dashboard \u2192 your app \u2192 Settings \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "From your Spotify Developer Dashboard \u2192 your app \u2192 Settings \u2192 View client secret."
+          }
+        ]
+      }
+    ]
+  }
+}

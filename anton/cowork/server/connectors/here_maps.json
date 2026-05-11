@@ -1,0 +1,98 @@
+{
+  "id": "here_maps",
+  "label": "HERE Maps",
+  "aliases": [
+    "here",
+    "here location services",
+    "here platform",
+    "nokia maps",
+    "here api"
+  ],
+  "keywords": [
+    "maps",
+    "geocoding",
+    "routing",
+    "geolocation",
+    "navigation",
+    "directions",
+    "places",
+    "location",
+    "spatial",
+    "enterprise",
+    "mapping"
+  ],
+  "description": "Access HERE's enterprise mapping, geocoding, and routing APIs using an API key from the HERE developer portal.",
+  "category": "maps",
+  "logo": "globe",
+  "logo_color": "#00AFAA",
+  "form": {
+    "form_id": "here_maps-connector",
+    "title": "Connect HERE Maps",
+    "subtitle": "Paste your HERE REST API key to enable geocoding, routing, and mapping services.",
+    "logo": "globe",
+    "logo_color": "#00AFAA",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste a REST API key from the HERE Developer Portal. No OAuth setup required \u2014 copy and paste in under a minute.",
+        "recommended": true,
+        "how_to": "## Generate a HERE REST API Key\n\n1. Sign in at [developer.here.com](https://developer.here.com/).\n2. Click your account avatar (top right) \u2192 **Projects**, or navigate directly to the [Projects page](https://platform.here.com/admin/apps).\n3. Select an existing project or click **New Project** to create one.\n4. Inside the project, go to the **REST** section and click **Create API key**.\n5. Give the key a name (e.g. `Anton`) and click **Create**.\n6. Copy the generated key \u2014 it is shown immediately in the key list.\n7. Paste it into the **API Key** field below.\n\n## Notes\n\n- Keys can be revoked at any time from the same Projects \u2192 REST page.\n- HERE's free tier includes a generous monthly allowance; check **Usage & Billing** in the portal to monitor consumption.\n- If you need to restrict the key by service (e.g. only Geocoding), use the **Restrictions** settings on the key detail page before saving.\n",
+        "help_url": "https://developer.here.com/documentation/identity-access-management/dev_guide/topics/dev-apikey.html",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-here-api-key",
+            "description": "Found at developer.here.com \u2192 Projects \u2192 REST \u2192 Create API key."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL Override",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://geocode.search.hereapi.com",
+            "description": "Optional. Override the default HERE API endpoint, e.g. for private deployments or a specific regional endpoint."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Client Credentials)",
+        "description": "Use a HERE OAuth app's client ID and secret for server-to-server access. More suitable for production environments where short-lived tokens are preferred over long-lived API keys.",
+        "recommended": false,
+        "how_to": "## Set up HERE OAuth 2.0 (Client Credentials)\n\n1. Sign in at [developer.here.com](https://developer.here.com/).\n2. Navigate to **Projects** \u2192 select or create a project.\n3. Go to the **OAuth 2.0** tab and click **Create app**.\n4. Give the app a name (e.g. `Anton`) and click **Register**.\n5. Copy the **Access Key ID** (this is your Client ID) and **Access Key Secret** (this is your Client Secret).\n6. Paste them into the fields below.\n\n## Notes\n\n- Tokens issued via the client credentials grant are short-lived (typically 24 hours). Anton will refresh them automatically before expiry.\n- The OAuth 2.0 token URL for HERE is `https://account.api.here.com/oauth2/token`.\n- Scopes are not user-configurable for HERE's OAuth client credentials flow; HERE grants access based on the services enabled in your project.\n",
+        "help_url": "https://developer.here.com/documentation/identity-access-management/dev_guide/topics/dev-oauth2.html",
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://account.api.here.com/oauth2/authorize",
+          "token_url": "https://account.api.here.com/oauth2/token",
+          "scopes": [],
+          "extra_auth_params": {}
+        },
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Access Key ID (Client ID)",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-here-access-key-id",
+            "description": "Found in the HERE Developer Portal under Projects \u2192 OAuth 2.0 \u2192 your app."
+          },
+          {
+            "name": "client_secret",
+            "label": "Access Key Secret (Client Secret)",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-here-access-key-secret",
+            "description": "Paired with the Access Key ID. Shown once at app creation \u2014 generate a new one if lost."
+          }
+        ]
+      }
+    ]
+  }
+}

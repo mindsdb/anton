@@ -1,0 +1,58 @@
+{
+  "id": "recurly",
+  "label": "Recurly",
+  "aliases": [
+    "recurly billing",
+    "recurly subscriptions"
+  ],
+  "keywords": [
+    "subscription",
+    "billing",
+    "recurring",
+    "payments",
+    "invoices",
+    "plans",
+    "revenue",
+    "saas"
+  ],
+  "description": "Connect to Recurly to access subscription billing data including plans, accounts, invoices, and transactions.",
+  "category": "billing",
+  "logo": "key",
+  "logo_color": "#E01F45",
+  "form": {
+    "form_id": "recurly-connector",
+    "title": "Connect Recurly",
+    "subtitle": "Paste your Recurly private API key to give Anton access to your subscription billing data.",
+    "logo": "key",
+    "logo_color": "#E01F45",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "Private API Key",
+        "description": "Paste your Recurly private API key. Found under Integrations \u2192 API Credentials in your Recurly dashboard. Quickest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Recurly Private API Key\n\nRecurly issues a private API key per site that grants full API access. Treat it like a password.\n\n### Steps\n\n1. Log in to your [Recurly dashboard](https://app.recurly.com).\n2. In the left sidebar, navigate to **Integrations \u2192 API Credentials**.\n3. Under **Private API Key**, click **Show** (or **Regenerate** if you want a fresh key).\n4. Copy the full key \u2014 it starts with a prefix like `recurly-`.\n5. Paste it into the **Private API Key** field below.\n6. Optionally enter your **Recurly Site Subdomain** (e.g. `mycompany`) if you want Anton to target a specific site. You can find this in **Admin \u2192 Site Settings** or in your dashboard URL (`mycompany.recurly.com`).\n\n### Notes\n\n- The private API key grants read and write access to your Recurly site. Store it securely and rotate it in the dashboard if it is ever exposed.\n- If your account has multiple sites, make sure you copy the key from the correct site's API Credentials page.\n- Recurly also issues a public key for client-side tokenization \u2014 that is not the key needed here.\n",
+        "help_url": "https://recurly.com/developers/api/v2021-02-25/#section/Authentication",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "Private API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "recurly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Found in your Recurly dashboard under Integrations \u2192 API Credentials. Starts with 'recurly-'."
+          },
+          {
+            "name": "subdomain",
+            "label": "Site Subdomain",
+            "type": "text",
+            "required": false,
+            "placeholder": "mycompany",
+            "description": "Your Recurly site subdomain (e.g. 'mycompany' from mycompany.recurly.com). Required if your account manages multiple sites."
+          }
+        ]
+      }
+    ]
+  }
+}

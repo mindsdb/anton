@@ -1,0 +1,87 @@
+{
+  "id": "zoominfo",
+  "label": "ZoomInfo",
+  "aliases": [
+    "zoom info",
+    "zoominfo salesos",
+    "discoverorg",
+    "zoom information"
+  ],
+  "keywords": [
+    "b2b",
+    "contact data",
+    "intent data",
+    "company data",
+    "lead enrichment",
+    "prospecting",
+    "firmographic",
+    "technographic",
+    "sales intelligence"
+  ],
+  "description": "Access ZoomInfo's B2B contact, company, and buyer intent data to enrich leads and fuel prospecting workflows.",
+  "category": "enrichment",
+  "logo": "search",
+  "logo_color": "#F5A623",
+  "form": {
+    "form_id": "zoominfo-connector",
+    "title": "Connect ZoomInfo",
+    "subtitle": "Authenticate with your ZoomInfo account credentials to access contact and intent data.",
+    "logo": "search",
+    "logo_color": "#F5A623",
+    "methods": [
+      {
+        "id": "username-password",
+        "label": "Username & Password",
+        "description": "Authenticate using the username and password associated with your ZoomInfo account. Credentials are issued by your ZoomInfo account admin \u2014 not self-serve.",
+        "recommended": true,
+        "how_to": "## Connect with Username & Password\n\nZoomInfo uses a PKI-based client credentials flow. Your account admin provisions the username and password tied to your ZoomInfo license \u2014 you cannot create them yourself from the ZoomInfo UI.\n\n### Steps\n\n1. Contact your ZoomInfo account admin or Customer Success Manager to obtain your API **username** and **password**.\n2. If your org is on a named-user plan, the credentials are typically the same as your ZoomInfo portal login (email + password). Confirm with your admin.\n3. Paste the **Username** (usually your work email) into the field below.\n4. Paste the **Password** into the password field.\n5. Click **Submit** \u2014 Anton will exchange these for a short-lived JWT token (valid ~60 minutes) and handle silent refresh automatically.\n\n### Notes\n\n- Credentials are scoped to your ZoomInfo license tier. If you receive `403 Forbidden` errors, your plan may not include the data endpoint being queried \u2014 confirm entitlements with your admin.\n- ZoomInfo tokens expire after 60 minutes; Anton re-authenticates automatically using your stored credentials.\n- If your organization enforces IP allowlisting, ensure the machine running Anton is on the approved list.\n- Do **not** share credentials across team members \u2014 each user should have their own named-user credentials.",
+        "help_url": "https://api-docs.zoominfo.com/#authentication",
+        "fields": [
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@yourcompany.com",
+            "description": "Your ZoomInfo account username, typically your work email. Provisioned by your account admin."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Your ZoomInfo account password. Anton uses this to obtain and refresh JWT tokens \u2014 it is stored encrypted locally."
+          }
+        ]
+      },
+      {
+        "id": "username-private-key",
+        "label": "Username & Private Key (PKI)",
+        "description": "Authenticate using your ZoomInfo username paired with an RSA private key. More secure than password auth \u2014 recommended for server-side or automated workflows where your admin has issued a PKI key pair.",
+        "recommended": false,
+        "how_to": "## Connect with Username & Private Key (PKI)\n\nZoomInfo supports RSA key-pair authentication as an alternative to password credentials. Your account admin generates and registers the public key with ZoomInfo; you hold the private key.\n\n### Prerequisites\n\n- Your ZoomInfo admin must have already registered a public key for your account via the ZoomInfo Admin Portal or through your Customer Success Manager.\n- You must have the corresponding **RSA private key** (PEM format, typically beginning with `-----BEGIN RSA PRIVATE KEY-----` or `-----BEGIN PRIVATE KEY-----`).\n\n### Steps\n\n1. Ask your ZoomInfo account admin to confirm that PKI authentication is enabled for your account and that your public key is registered.\n2. Locate your **private key** file (`.pem` or `.key`). If your admin generated the key pair on your behalf, they should have sent you the private key securely.\n3. Enter your ZoomInfo **Username** (work email) in the field below.\n4. Paste the **full contents of your private key** (including the `-----BEGIN...` and `-----END...` header/footer lines) into the Private Key field.\n5. Click **Submit**. Anton signs a JWT assertion using your private key and exchanges it with ZoomInfo's token endpoint.\n\n### Notes\n\n- Never share your private key. If it is compromised, notify your admin immediately to rotate the key pair.\n- The private key is stored encrypted in Anton's local credential store.\n- If authentication fails, confirm with your admin that the correct public key fingerprint is registered in ZoomInfo.",
+        "help_url": "https://api-docs.zoominfo.com/#authentication",
+        "fields": [
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@yourcompany.com",
+            "description": "Your ZoomInfo account username, typically your work email."
+          },
+          {
+            "name": "private_key",
+            "label": "RSA Private Key",
+            "type": "textarea",
+            "required": true,
+            "secret": true,
+            "placeholder": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----",
+            "description": "Paste the full contents of your PEM-formatted private key, including the header and footer lines. Your admin must have registered the corresponding public key with ZoomInfo."
+          }
+        ]
+      }
+    ]
+  }
+}

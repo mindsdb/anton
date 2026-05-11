@@ -1,0 +1,129 @@
+{
+  "id": "tempo",
+  "label": "Grafana Tempo",
+  "aliases": [
+    "tempo",
+    "grafana tempo",
+    "tempo tracing",
+    "grafana tracing"
+  ],
+  "keywords": [
+    "tracing",
+    "traces",
+    "spans",
+    "observability",
+    "grafana",
+    "opentelemetry",
+    "jaeger",
+    "zipkin",
+    "distributed tracing",
+    "apm"
+  ],
+  "description": "Connect to a Grafana Tempo backend to query and explore distributed traces.",
+  "category": "observability",
+  "logo": "sparkle",
+  "logo_color": "#F46800",
+  "form": {
+    "form_id": "tempo-connector",
+    "title": "Connect Grafana Tempo",
+    "subtitle": "Point Anton at your Tempo endpoint to query and explore distributed traces.",
+    "logo": "sparkle",
+    "logo_color": "#F46800",
+    "methods": [
+      {
+        "id": "url-no-auth",
+        "label": "Tempo URL (no auth)",
+        "description": "Paste your Tempo HTTP endpoint and connect instantly \u2014 ideal for local or unauthenticated Tempo instances.",
+        "recommended": true,
+        "how_to": "## Connect to Tempo with a URL (no auth)\n\nUse this path for local Tempo instances, Docker Compose setups, or any deployment that doesn't require authentication.\n\n### Steps\n\n1. Find the HTTP address of your Tempo instance. The default port is **3200** (e.g. `http://localhost:3200`).\n2. If Tempo is running behind a reverse proxy or Grafana Cloud, use the full base URL shown in your Grafana data-source settings under **Data sources \u2192 Tempo \u2192 URL**.\n3. Paste the URL into the **Tempo URL** field below and click **Submit**.\n\n### Notes\n\n- Anton queries the Tempo HTTP API (`/api/traces`, `/api/search`, etc.) \u2014 make sure those paths are reachable from the machine running Anton.\n- If your instance requires authentication or multi-tenancy headers, use the **Basic Auth** or **Basic Auth + Org ID** methods instead.",
+        "help_url": "https://grafana.com/docs/tempo/latest/api_docs/",
+        "fields": [
+          {
+            "name": "tempo_url",
+            "label": "Tempo URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "http://localhost:3200",
+            "description": "Base URL of your Tempo HTTP endpoint, including scheme and port."
+          }
+        ]
+      },
+      {
+        "id": "basic-auth",
+        "label": "Basic Auth",
+        "description": "Supply a username and password alongside the Tempo URL \u2014 suitable for Tempo instances protected by HTTP basic authentication or Grafana Cloud Tempo.",
+        "recommended": false,
+        "how_to": "## Connect to Tempo with Basic Auth\n\nUse this for Tempo instances (including Grafana Cloud) that require a username and password.\n\n### Steps\n\n1. Find your Tempo base URL. In Grafana Cloud, open **Connections \u2192 Data sources \u2192 Tempo** and copy the **URL** field (e.g. `https://<stack>.grafana.net/tempo`).\n2. For Grafana Cloud, your **username** is the numeric instance ID shown on the same page, and your **password** is a Grafana Cloud API token.\n   - Generate a token at: **grafana.com \u2192 your org \u2192 Security \u2192 API Keys \u2192 Add API key** with the `MetricsPublisher` or `Viewer` role.\n3. For self-hosted Tempo behind a proxy (e.g. nginx with `auth_basic`), use the credentials you configured on that proxy.\n4. Paste the URL, username, and password into the fields below and click **Submit**.\n\n### Notes\n\n- The password is stored encrypted locally \u2014 never sent to Anton's servers.\n- Grafana Cloud tokens can be scoped read-only for safety.",
+        "help_url": "https://grafana.com/docs/grafana-cloud/data-configuration/metrics/metrics-grafana-cloud/#create-a-grafana-cloud-api-key",
+        "fields": [
+          {
+            "name": "tempo_url",
+            "label": "Tempo URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://tempo-prod-01-eu-west-0.grafana.net/tempo",
+            "description": "Base URL of your Tempo HTTP endpoint, including scheme and port."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "123456",
+            "description": "For Grafana Cloud, this is the numeric instance ID shown on the data source page."
+          },
+          {
+            "name": "password",
+            "label": "Password / API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "For Grafana Cloud, use a Grafana Cloud API token. For self-hosted, use the proxy password."
+          }
+        ]
+      },
+      {
+        "id": "basic-auth-org-id",
+        "label": "Basic Auth + Org ID (multi-tenant)",
+        "description": "For multi-tenant Tempo deployments: add an X-Scope-OrgID header alongside basic auth credentials to route queries to the correct tenant.",
+        "recommended": false,
+        "how_to": "## Connect to Tempo with Basic Auth and a Tenant Org ID\n\nTempo's multi-tenant mode (used with Grafana Enterprise or cortex-style deployments) requires an `X-Scope-OrgID` header on every request in addition to any auth credentials.\n\n### Steps\n\n1. Identify your Tempo base URL and basic auth credentials (see **Basic Auth** method above for details).\n2. Determine your **Org ID** (tenant ID). This is typically configured in your Tempo or Cortex deployment manifest and shared with you by your platform team. Common values are short strings like `myteam` or `prod`.\n3. If running Tempo in single-tenant mode, the org ID is usually `anonymous` \u2014 but in that case you likely don't need this method at all.\n4. Fill in the URL, username, password, and org ID below, then click **Submit**.\n\n### Notes\n\n- Anton will send `X-Scope-OrgID: <your-value>` on every Tempo API request.\n- Mixing up the org ID is a common gotcha: traces stored under tenant A won't appear when querying as tenant B.\n- See the [Tempo multi-tenancy docs](https://grafana.com/docs/tempo/latest/operations/tempo_cli/#multi-tenancy) for more context.",
+        "help_url": "https://grafana.com/docs/tempo/latest/operations/multitenancy/",
+        "fields": [
+          {
+            "name": "tempo_url",
+            "label": "Tempo URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://tempo.internal.example.com",
+            "description": "Base URL of your Tempo HTTP endpoint, including scheme and port."
+          },
+          {
+            "name": "username",
+            "label": "Username",
+            "type": "text",
+            "required": false,
+            "placeholder": "admin",
+            "description": "Leave blank if your Tempo endpoint does not require basic authentication."
+          },
+          {
+            "name": "password",
+            "label": "Password / API Token",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "description": "Leave blank if your Tempo endpoint does not require basic authentication."
+          },
+          {
+            "name": "org_id",
+            "label": "X-Scope-OrgID",
+            "type": "text",
+            "required": true,
+            "placeholder": "myteam",
+            "description": "Tenant identifier sent as the X-Scope-OrgID header. Use 'anonymous' for single-tenant deployments that still require the header."
+          }
+        ]
+      }
+    ]
+  }
+}

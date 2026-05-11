@@ -1,0 +1,87 @@
+{
+  "id": "todoist",
+  "label": "Todoist",
+  "aliases": [
+    "todoist app",
+    "doist",
+    "to-do ist"
+  ],
+  "keywords": [
+    "tasks",
+    "todos",
+    "project management",
+    "productivity",
+    "checklist",
+    "reminders",
+    "personal",
+    "team"
+  ],
+  "description": "Manage personal and team tasks, projects, and to-do lists via the Todoist REST API.",
+  "category": "productivity",
+  "logo": "check",
+  "logo_color": "#DB4035",
+  "form": {
+    "form_id": "todoist-connector",
+    "title": "Connect Todoist",
+    "subtitle": "Paste your Todoist API token to let Anton read and manage your tasks and projects.",
+    "logo": "check",
+    "logo_color": "#DB4035",
+    "methods": [
+      {
+        "id": "api-token",
+        "label": "API Token",
+        "description": "Paste your personal Todoist API token \u2014 found in Settings \u2192 Integrations \u2192 Developer. No OAuth setup required; works for both personal and team accounts.",
+        "recommended": true,
+        "how_to": "## Get your Todoist API token\n\nTodoist exposes a permanent personal API token for each account. It gives full access to your tasks, projects, labels, and comments.\n\n### Steps\n\n1. Log in to Todoist at [todoist.com](https://todoist.com).\n2. Click your **avatar / profile picture** in the top-left corner.\n3. Select **Settings** from the dropdown menu.\n4. In the left sidebar, click **Integrations**.\n5. Click the **Developer** tab.\n6. Your **API token** is displayed under the heading \"API token\". Click **Copy to clipboard**.\n7. Paste the token into the **API Token** field below and click **Submit**.\n\n### Notes\n\n- The token is permanent and does not expire unless you manually regenerate it.\n- Regenerating the token in Todoist will immediately revoke the old one \u2014 re-paste the new token in Anton if you do.\n- The token grants full access to your account (read + write). Keep it secret.\n- Business/team plan users: the token is scoped to your own Todoist user account, not the whole team workspace.",
+        "help_url": "https://developer.todoist.com/rest/v2/#authorization",
+        "fields": [
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "0123456789abcdef0123456789abcdef01234567",
+            "description": "Found in Todoist \u2192 Settings \u2192 Integrations \u2192 Developer \u2192 API token."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (Bring Your Own App)",
+        "description": "Use your own Todoist OAuth application to authorize via browser. Suitable for multi-user or team deployments where you want scoped, revocable access tokens.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://todoist.com/oauth/authorize",
+          "token_url": "https://todoist.com/oauth/access_token",
+          "scopes": [
+            "data:read_write",
+            "data:delete",
+            "project:delete"
+          ]
+        },
+        "how_to": "## Set up a Todoist OAuth application\n\nUse this path if you want browser-based OAuth with scoped, revocable tokens instead of a static API token. You must register a Todoist app first.\n\n### Steps\n\n1. Open the [Todoist App Management Console](https://developer.todoist.com/appconsole.html) and sign in.\n2. Click **Create a new app**.\n3. Give it a name (e.g. `Anton`) and fill in any required fields.\n4. Under **OAuth Redirect URLs**, add `http://127.0.0.1` (Anton uses a local redirect).\n5. Save the app. Copy the **Client ID** and **Client Secret** shown on the app detail page.\n6. Paste both values into the fields below and click **Submit** \u2014 a browser window will open to Todoist's consent screen.\n7. Approve the requested scopes. Anton will store the resulting access token locally.\n\n### Scopes requested\n\n- `data:read_write` \u2014 read and create/update tasks, projects, labels\n- `data:delete` \u2014 delete tasks and projects\n- `project:delete` \u2014 delete projects\n\n### Notes\n\n- Access tokens issued via OAuth do not expire but can be revoked from the App Management Console.\n- If you only need read access, you can limit scopes to `data:read` in the fields below.",
+        "help_url": "https://developer.todoist.com/guides/#oauth",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "abcdef1234567890abcdef1234567890",
+            "description": "From the Todoist App Management Console \u2014 Client ID field on your app's detail page."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID; found on the same page in the Todoist App Management Console."
+          }
+        ]
+      }
+    ]
+  }
+}

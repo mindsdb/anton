@@ -1,0 +1,59 @@
+{
+  "id": "braze",
+  "label": "Braze",
+  "aliases": [
+    "braze messaging",
+    "braze crm",
+    "appboy"
+  ],
+  "keywords": [
+    "customer engagement",
+    "messaging",
+    "push notifications",
+    "email",
+    "sms",
+    "marketing automation",
+    "mobile",
+    "in-app"
+  ],
+  "description": "Connect to Braze to manage users, send messages, and trigger campaigns via the Braze REST API.",
+  "category": "marketing",
+  "logo": "mail",
+  "logo_color": "#FF3A44",
+  "form": {
+    "form_id": "braze-connector",
+    "title": "Connect Braze",
+    "subtitle": "Paste your Braze REST API key and endpoint URL to give Anton access to your Braze workspace.",
+    "logo": "mail",
+    "logo_color": "#FF3A44",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "REST API Key",
+        "description": "Paste your Braze REST API key and your instance's REST endpoint URL. The simplest and most direct way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Braze REST API Key\n\nBraze uses per-workspace API keys and per-instance REST endpoints. You'll need both.\n\n### Step 1 \u2014 Find your REST endpoint\n\n1. Log in to your Braze dashboard.\n2. Check the URL in your browser. Your instance determines your endpoint, e.g.:\n   - `https://rest.iad-01.braze.com` for US-01\n   - `https://rest.iad-02.braze.com` for US-02\n   - `https://rest.fra-01.braze.eu` for EU-01\n3. Full list: [Braze API endpoints](https://www.braze.com/docs/api/basics/#endpoints).\n\n### Step 2 \u2014 Create a REST API key\n\n1. In your Braze dashboard, go to **Settings \u2192 APIs and Identifiers \u2192 API Keys**.\n2. Click **Create New API Key**.\n3. Give it a descriptive name like `Anton`.\n4. Select the permission scopes Anton needs (e.g. `users.track`, `campaigns.list`, `messages.send`, etc.).\n5. Optionally restrict by IP allowlist for extra security.\n6. Click **Save** \u2014 the key is shown immediately. Copy it.\n\n### Step 3 \u2014 Paste into Anton\n\n1. Paste the REST endpoint URL into **REST Endpoint URL** below (include `https://`).\n2. Paste the API key into **REST API Key** below.\n3. Click **Submit**.\n\n### Notes\n\n- API keys are workspace-scoped. If you have multiple workspaces, create a key in each and add a separate connector per workspace.\n- Keys can be rotated or deleted under **Settings \u2192 APIs and Identifiers** at any time. Re-paste the new key into Anton after rotation.\n- Braze does not show the full key after creation \u2014 copy it before closing the modal.\n",
+        "help_url": "https://www.braze.com/docs/api/basics/",
+        "fields": [
+          {
+            "name": "rest_endpoint_url",
+            "label": "REST Endpoint URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://rest.iad-01.braze.com",
+            "description": "The REST API base URL for your Braze instance. Find it at braze.com/docs/api/basics/#endpoints or infer it from your dashboard URL."
+          },
+          {
+            "name": "api_key",
+            "label": "REST API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Found in Braze dashboard under Settings \u2192 APIs and Identifiers \u2192 API Keys. Copy it immediately after creation \u2014 it is not shown again in full."
+          }
+        ]
+      }
+    ]
+  }
+}

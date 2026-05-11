@@ -1,0 +1,61 @@
+{
+  "id": "chorus_ai",
+  "label": "Chorus.ai",
+  "aliases": [
+    "chorus",
+    "zoominfo chorus",
+    "chorus zoominfo",
+    "chorus ai"
+  ],
+  "keywords": [
+    "call recording",
+    "revenue intelligence",
+    "conversation intelligence",
+    "sales calls",
+    "meeting recording",
+    "zoominfo",
+    "coaching",
+    "deal intelligence"
+  ],
+  "description": "Connect to Chorus.ai (ZoomInfo Chorus) to access call recordings, transcripts, and revenue intelligence data.",
+  "category": "revenue-intel",
+  "logo": "mic",
+  "logo_color": "#FF6B35",
+  "form": {
+    "form_id": "chorus_ai-connector",
+    "title": "Connect Chorus.ai",
+    "subtitle": "Paste your Chorus.ai API key to access call recordings and revenue intelligence.",
+    "logo": "mic",
+    "logo_color": "#FF6B35",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Chorus.ai API key generated from Settings \u2192 Integrations \u2192 API. The fastest way to connect \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Connect with a Chorus.ai API Key\n\n### Steps\n\n1. Log in to your Chorus.ai account at [chorus.ai](https://chorus.ai).\n2. Click your profile avatar or name in the top-right corner.\n3. Navigate to **Settings \u2192 Integrations \u2192 API**.\n4. If no key exists, click **Generate API Key** (or **Create Token**).\n5. Copy the generated key \u2014 it may only be shown once, so save it somewhere safe.\n6. Paste the key into the **API Key** field below.\n\n### Notes\n\n- Only account admins may be able to generate API keys depending on your Chorus plan.\n- If you regenerate a key, the old one is immediately invalidated \u2014 update Anton with the new key.\n- Your Chorus.ai instance may be hosted under a ZoomInfo subdomain if your org migrated; use the same Settings path in that UI.\n",
+        "help_url": "https://support.chorus.ai/hc/en-us/articles/360041865692-API-Access",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "Paste your Chorus.ai API key",
+            "description": "Found in Chorus.ai \u2192 Settings \u2192 Integrations \u2192 API. Treat this like a password \u2014 it grants full API access to your account."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://api.chorus.ai",
+            "default": "https://api.chorus.ai",
+            "description": "Override only if your org uses a custom or regional Chorus endpoint. Leave as default for most accounts."
+          }
+        ]
+      }
+    ]
+  }
+}

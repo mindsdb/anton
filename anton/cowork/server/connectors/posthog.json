@@ -1,0 +1,67 @@
+{
+  "id": "posthog",
+  "label": "PostHog",
+  "aliases": ["post hog"],
+  "keywords": ["analytics", "product", "events", "funnels", "feature flags", "session replay", "dashboards"],
+  "description": "Query events, persons, cohorts, and feature flags from your PostHog project.",
+  "category": "analytics",
+  "logo": "sparkle",
+  "logo_color": "#F54E00",
+  "form": {
+    "form_id": "posthog-connector",
+    "title": "Connect PostHog",
+    "subtitle": "Anton uses your personal API key to query events and run insights against your PostHog project.",
+    "logo": "sparkle",
+    "logo_color": "#F54E00",
+    "methods": [
+      {
+        "id": "personal-api-key",
+        "label": "Personal API key",
+        "description": "Paste a Personal API key from your PostHog account. Stored locally — never sent anywhere except PostHog itself.",
+        "recommended": true,
+        "how_to": "## Generate a PostHog Personal API key\n\nPersonal API keys give Anton your account-level scopes — they can read across every project you have access to (you can also scope them down). Project IDs and host vary by where your PostHog instance lives.\n\n### Steps\n\n1. Sign in to PostHog at [us.posthog.com](https://us.posthog.com), [eu.posthog.com](https://eu.posthog.com), or your self-hosted URL.\n2. Click your profile icon (top right) → **Account settings**.\n3. Open the **Personal API keys** tab.\n4. Click **+ Create personal API key**. Name it `Anton`, optionally restrict the scopes to read-only or specific projects.\n5. Copy the generated key (starts with `phx_…`). Paste it into **Personal API key** below.\n6. Find your **Project ID** — it's the number in the URL when you're inside a project, e.g. `us.posthog.com/project/12345/dashboard` → project ID is `12345`.\n7. Pick the **Host** that matches where you signed in (US Cloud, EU Cloud, or paste your self-hosted URL).\n\n### Notes\n\n- The Personal API key is a credential — anyone with it can read everything you can read in PostHog. Anton stores it locally; rotate it from the same Account settings panel if you suspect exposure.\n- Project-scoped Project API keys (the `phc_…` ones used by SDK ingestion) are NOT what you want here — those can only WRITE events, not read them.\n- Read [PostHog's API authentication docs](https://posthog.com/docs/api#how-to-obtain-a-personal-api-key).\n",
+        "help_url": "https://posthog.com/docs/api#how-to-obtain-a-personal-api-key",
+        "fields": [
+          {
+            "name": "personal_api_key",
+            "label": "Personal API key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "phx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Starts with phx_ — generate from PostHog → Account settings → Personal API keys."
+          },
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "select",
+            "required": true,
+            "default": "https://us.posthog.com",
+            "options": [
+              { "value": "https://us.posthog.com", "label": "US Cloud (us.posthog.com)" },
+              { "value": "https://eu.posthog.com", "label": "EU Cloud (eu.posthog.com)" },
+              { "value": "custom", "label": "Self-hosted (enter URL)" }
+            ],
+            "description": "Match the region you signed in to."
+          },
+          {
+            "name": "custom_host",
+            "label": "Self-hosted URL",
+            "type": "url",
+            "required": false,
+            "placeholder": "https://posthog.your-company.com",
+            "description": "Only fill in if you picked Self-hosted above."
+          },
+          {
+            "name": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "12345",
+            "description": "The number in your project URL: us.posthog.com/project/<project_id>/…"
+          }
+        ]
+      }
+    ]
+  }
+}

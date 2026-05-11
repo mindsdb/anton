@@ -1,0 +1,93 @@
+{
+  "id": "redshift",
+  "label": "Redshift",
+  "aliases": [
+    "amazon redshift",
+    "aws redshift",
+    "redshift warehouse",
+    "amazon data warehouse"
+  ],
+  "keywords": [
+    "data warehouse",
+    "aws",
+    "amazon",
+    "sql",
+    "analytics",
+    "cluster",
+    "postgres",
+    "columnar",
+    "olap"
+  ],
+  "description": "Query and analyze data in your Amazon Redshift data warehouse using standard SQL.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#8C4FFF",
+  "form": {
+    "form_id": "redshift-connector",
+    "title": "Connect Redshift",
+    "subtitle": "Enter your Redshift cluster endpoint and credentials to connect Anton to your data warehouse.",
+    "logo": "database",
+    "logo_color": "#8C4FFF",
+    "methods": [
+      {
+        "id": "cluster-credentials",
+        "label": "Cluster credentials",
+        "description": "Connect directly using your Redshift cluster endpoint, port, database name, and a database user and password. The simplest and most common path.",
+        "recommended": true,
+        "how_to": "## Connect with cluster credentials\n\nYou need your cluster endpoint, the database name, and a database-level user/password.\n\n### Finding your cluster endpoint\n\n1. Open the [Amazon Redshift console](https://console.aws.amazon.com/redshiftv2/).\n2. Click **Clusters** in the left nav, then click your cluster name.\n3. On the **General information** tab, find **Endpoint**. It looks like:\n   `my-cluster.abc123xyz.us-east-1.redshift.amazonaws.com:5439/mydb`\n4. Copy the host part (everything before the colon), the port (default **5439**), and the database name (the segment after the last slash).\n\n### Finding or creating a database user\n\n1. Connect to Redshift with a superuser (e.g. via the Query Editor v2 in the console).\n2. Run `CREATE USER anton PASSWORD 'StrongPassword123';` and grant the required schema/table permissions.\n3. Use those credentials in the fields below.\n\n### Network access\n\n- Your Redshift cluster must be **publicly accessible**, or Anton must run inside the same VPC.\n- Ensure the cluster's **security group inbound rules** allow TCP on port 5439 from Anton's IP.\n- If your cluster is in a private subnet, configure a VPC endpoint or bastion tunnel before connecting.\n\n### Notes\n\n- Credentials are stored locally and never sent to Anton's servers.\n- IAM authentication is not yet supported \u2014 use a native database user.\n",
+        "help_url": "https://docs.aws.amazon.com/redshift/latest/mgmt/connecting-to-cluster.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Cluster endpoint (host)",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-cluster.abc123xyz.us-east-1.redshift.amazonaws.com",
+            "description": "The hostname portion of your cluster endpoint, found under Clusters \u2192 your cluster \u2192 General information in the Redshift console."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5439",
+            "placeholder": "5439",
+            "description": "Redshift's default port is 5439. Change only if your cluster uses a custom port."
+          },
+          {
+            "name": "database",
+            "label": "Database name",
+            "type": "text",
+            "required": true,
+            "placeholder": "dev",
+            "description": "The name of the Redshift database you want to connect to (e.g. dev, analytics, prod)."
+          },
+          {
+            "name": "username",
+            "label": "Database user",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton_user",
+            "description": "A Redshift database user with SELECT (and any other required) privileges on the target schemas and tables."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user above. Stored locally and never transmitted to Anton's servers."
+          },
+          {
+            "name": "ssl",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Enable SSL/TLS for the connection. Strongly recommended; disable only if your cluster explicitly does not support SSL."
+          }
+        ]
+      }
+    ]
+  }
+}

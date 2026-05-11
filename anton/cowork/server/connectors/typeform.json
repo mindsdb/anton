@@ -1,0 +1,96 @@
+{
+  "id": "typeform",
+  "label": "Typeform",
+  "aliases": [
+    "type form",
+    "typeforms",
+    "tf"
+  ],
+  "keywords": [
+    "forms",
+    "surveys",
+    "questionnaire",
+    "responses",
+    "leads",
+    "data collection",
+    "feedback"
+  ],
+  "description": "Connect to Typeform to read forms, fetch responses, and manage surveys.",
+  "category": "forms",
+  "logo": "doc",
+  "logo_color": "#262627",
+  "form": {
+    "form_id": "typeform-connector",
+    "title": "Connect Typeform",
+    "subtitle": "Paste your Typeform personal access token to let Anton read your forms and responses.",
+    "logo": "doc",
+    "logo_color": "#262627",
+    "methods": [
+      {
+        "id": "personal-access-token",
+        "label": "Personal Access Token",
+        "description": "Paste a personal access token (starts with tfp_\u2026) generated from your Typeform account settings. The fastest way to connect \u2014 no OAuth app setup required.",
+        "recommended": true,
+        "how_to": "## Generate a Typeform Personal Access Token\n\nTypeform personal access tokens give Anton scoped read access to your forms and responses without requiring a full OAuth app.\n\n### Steps\n\n1. Log in to [Typeform](https://www.typeform.com) and click your profile avatar in the top-right corner.\n2. Select **Settings** from the dropdown menu.\n3. In the left sidebar, click **Personal tokens**.\n4. Click **Generate a new token**.\n5. Give the token a name like `Anton` so you can identify it later.\n6. Select the scopes Anton needs \u2014 at minimum enable **Read** access for **Forms** and **Responses**.\n7. Click **Generate token**. The token is shown once \u2014 copy it immediately.\n8. Paste the token (starts with `tfp_\u2026`) into the **Personal access token** field below.\n\n### Notes\n\n- Tokens are shown only once. If you lose it, delete the old token and generate a new one.\n- To revoke access, go back to **Settings \u2192 Personal tokens** and click the trash icon next to the token.\n- Workspace tokens (for team accounts) can be created under **Workspace settings \u2192 Tokens** instead.",
+        "help_url": "https://www.typeform.com/developers/get-started/personal-access-token/",
+        "fields": [
+          {
+            "name": "access_token",
+            "label": "Personal access token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "tfp_\u2026",
+            "description": "Your Typeform personal access token. Found under Settings \u2192 Personal tokens. Shown once on creation \u2014 copy it before closing the dialog."
+          },
+          {
+            "name": "workspace_id",
+            "label": "Workspace ID (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "ABC123",
+            "description": "Optional. Scope requests to a specific Typeform workspace. Leave blank to use your default account workspace."
+          }
+        ]
+      },
+      {
+        "id": "oauth",
+        "label": "OAuth 2.0 (bring your own app)",
+        "description": "Use a Typeform OAuth app you've registered in the Typeform Developer Portal. More complex to set up but useful for multi-user or organization-wide deployments.",
+        "recommended": false,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://api.typeform.com/oauth/authorize",
+          "token_url": "https://api.typeform.com/oauth/token",
+          "scopes": [
+            "forms:read",
+            "responses:read",
+            "workspaces:read",
+            "accounts:read"
+          ]
+        },
+        "how_to": "## OAuth 2.0 with a Typeform App\n\nThis method requires registering an app in the Typeform Developer Portal and providing the client credentials below.\n\n### Steps\n\n1. Go to the [Typeform Developer Portal](https://developer.typeform.com/) and sign in.\n2. Navigate to **My Apps \u2192 Create a new app**.\n3. Fill in the app name (e.g., `Anton`) and set the **Redirect URI** to `http://127.0.0.1` (Anton uses a local redirect).\n4. Under **Scopes**, enable: `forms:read`, `responses:read`, `workspaces:read`, `accounts:read`.\n5. Save the app. Copy the **Client ID** and **Client Secret** shown on the app detail page.\n6. Paste both values into the fields below, then click **Submit** to launch the OAuth consent flow in your browser.\n\n### Notes\n\n- Client secrets are sensitive \u2014 treat them like passwords.\n- If you need to revoke access, delete or reset the app in the Developer Portal.",
+        "help_url": "https://www.typeform.com/developers/get-started/applications/",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "OAuth client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-typeform-client-id",
+            "description": "From the Typeform Developer Portal \u2192 My Apps \u2192 your app \u2192 Client ID."
+          },
+          {
+            "name": "client_secret",
+            "label": "OAuth client secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "your-typeform-client-secret",
+            "description": "Paired with the client ID. Found on the same app detail page in the Developer Portal."
+          }
+        ]
+      }
+    ]
+  }
+}

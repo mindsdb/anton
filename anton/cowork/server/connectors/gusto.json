@@ -1,0 +1,93 @@
+{
+  "id": "gusto",
+  "label": "Gusto",
+  "aliases": [
+    "gusto hr",
+    "gusto payroll",
+    "zenpayroll"
+  ],
+  "keywords": [
+    "payroll",
+    "benefits",
+    "hr",
+    "human resources",
+    "employees",
+    "compensation",
+    "onboarding",
+    "taxes",
+    "w2",
+    "paystub"
+  ],
+  "description": "Connect Gusto to read and manage payroll, benefits, and HR data for your organization.",
+  "category": "hr",
+  "logo": "check",
+  "logo_color": "#F45D48",
+  "form": {
+    "form_id": "gusto-connector",
+    "title": "Connect Gusto",
+    "subtitle": "Authorize Anton to access your Gusto payroll, benefits, and HR data.",
+    "logo": "check",
+    "logo_color": "#F45D48",
+    "methods": [
+      {
+        "id": "oauth-byok",
+        "label": "OAuth 2.0 (Bring Your Own App)",
+        "description": "Connect via Gusto's OAuth 2.0 flow using a developer app you create at dev.gusto.com. Anton opens Gusto's consent screen in your browser \u2014 no passwords stored, revocable at any time.",
+        "recommended": true,
+        "submit_action": "oauth_launch",
+        "oauth": {
+          "auth_url": "https://api.gusto.com/oauth/authorize",
+          "token_url": "https://api.gusto.com/oauth/token",
+          "scopes": [
+            "public",
+            "payrolls:read",
+            "payrolls:run",
+            "employees:read",
+            "employees:write",
+            "companies:read",
+            "benefits:read",
+            "benefits:write"
+          ]
+        },
+        "how_to": "## Connect Gusto via OAuth 2.0\n\nGusto requires you to create your own developer application to obtain OAuth credentials. This takes about 5 minutes.\n\n### 1. Create a Gusto Developer App\n\n1. Go to [dev.gusto.com](https://dev.gusto.com) and sign in or create a developer account.\n2. Click **Applications \u2192 Create Application**.\n3. Give it a name like `Anton` and fill in a description.\n4. Under **Redirect URIs**, add `http://localhost` (Anton uses a local redirect to capture the code).\n5. Click **Create**.\n\n### 2. Copy your credentials\n\n1. Open your newly created app and navigate to the **OAuth** or **Credentials** tab.\n2. Copy the **Client ID** and **Client Secret** \u2014 the secret is shown once, so copy it now.\n3. Paste both into the fields below.\n\n### 3. Authorize\n\n1. Click **Submit**. Anton opens Gusto's consent screen in your browser.\n2. Log in with the Gusto account you want to connect and click **Authorize**.\n3. Anton exchanges the authorization code for a refresh token and stores it locally.\n\n### Notes\n\n- Use the **Demo** environment at `https://api.gusto-demo.com` during testing; switch to `https://api.gusto.com` for production.\n- Scopes map to Gusto's resource permissions \u2014 if you need narrower access, remove scopes you don't need before submitting.\n- To revoke access, go to Gusto \u2192 **Account Settings \u2192 Authorized Applications** and remove the entry.",
+        "help_url": "https://docs.gusto.com/embedded-payroll/docs/oauth2",
+        "fields": [
+          {
+            "name": "client_id",
+            "label": "Client ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "your-gusto-client-id",
+            "description": "Found in your app's Credentials tab at dev.gusto.com."
+          },
+          {
+            "name": "client_secret",
+            "label": "Client Secret",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Client ID. Copy it immediately after creating the app \u2014 Gusto may only show it once."
+          },
+          {
+            "name": "environment",
+            "label": "Environment",
+            "type": "select",
+            "required": true,
+            "default": "production",
+            "description": "Use Demo for testing with sandbox data; Production for live payroll data.",
+            "options": [
+              {
+                "value": "production",
+                "label": "Production (api.gusto.com)"
+              },
+              {
+                "value": "demo",
+                "label": "Demo / Sandbox (api.gusto-demo.com)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

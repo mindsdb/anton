@@ -1,0 +1,127 @@
+{
+  "id": "cockroachdb",
+  "label": "CockroachDB",
+  "aliases": [
+    "cockroach db",
+    "cockroach",
+    "crdb",
+    "cockroach database"
+  ],
+  "keywords": [
+    "database",
+    "distributed",
+    "sql",
+    "postgres",
+    "postgresql",
+    "cockroach",
+    "crdb",
+    "cloud",
+    "relational"
+  ],
+  "description": "Connect to a CockroachDB cluster \u2014 serverless, dedicated, or self-hosted \u2014 using a Postgres-compatible SQL interface.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#6933FF",
+  "form": {
+    "form_id": "cockroachdb-connector",
+    "title": "Connect CockroachDB",
+    "subtitle": "Connect to your CockroachDB cluster using a connection string or individual credentials.",
+    "logo": "database",
+    "logo_color": "#6933FF",
+    "methods": [
+      {
+        "id": "connection-string",
+        "label": "Connection String",
+        "description": "Paste the full PostgreSQL-compatible connection string from your CockroachDB Console or cluster config. Quickest path \u2014 one field, no manual assembly.",
+        "recommended": true,
+        "how_to": "## Connect via Connection String\n\nCockroachDB clusters expose a single PostgreSQL-compatible connection string you can copy directly from the Console.\n\n### CockroachDB Serverless / Dedicated (Cloud)\n\n1. Sign in to [CockroachDB Cloud](https://cockroachlabs.cloud/).\n2. Click on your cluster name.\n3. Click **Connect** (top-right).\n4. Choose **Connection string** from the **Select option** dropdown.\n5. Select your **SQL user** and **database** from the dropdowns.\n6. Click **Copy connection string** \u2014 it looks like:\n   `postgresql://user:password@host:26257/defaultdb?sslmode=verify-full`\n7. Paste it into the **Connection String** field below.\n\n### Self-hosted CockroachDB\n\n1. Your connection string follows the pattern:\n   `postgresql://<user>:<password>@<host>:<port>/<database>?sslmode=require`\n2. Default port is **26257**.\n3. Adjust `sslmode` to match your cluster's TLS configuration (`require`, `verify-full`, or `disable` for local dev clusters).\n\n### Notes\n\n- The string contains your password \u2014 Anton stores it encrypted locally.\n- For Serverless clusters, `sslmode=verify-full` and the `options=--cluster=<routing-id>` param may be required; copy the string from the Console to get these automatically.\n",
+        "help_url": "https://www.cockroachlabs.com/docs/stable/connect-to-the-database.html",
+        "fields": [
+          {
+            "name": "connection_string",
+            "label": "Connection String",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "postgresql://user:password@host:26257/defaultdb?sslmode=verify-full",
+            "description": "Full PostgreSQL-compatible connection string. Copy it directly from CockroachDB Cloud Console \u2192 Connect \u2192 Connection string."
+          }
+        ]
+      },
+      {
+        "id": "host-port-credentials",
+        "label": "Host / Port / Credentials",
+        "description": "Enter your cluster host, port, database name, and credentials individually. Useful when you have individual connection parameters rather than a full connection string.",
+        "recommended": false,
+        "how_to": "## Connect via Host, Port, and Credentials\n\nUse this method when you have individual connection parameters (host, port, user, password) rather than a single connection string.\n\n### Finding your connection parameters\n\n**CockroachDB Cloud:**\n1. Sign in to [CockroachDB Cloud](https://cockroachlabs.cloud/) and open your cluster.\n2. Click **Connect** \u2192 choose **Parameters only** (or extract values from the connection string).\n3. Note the **Host**, **Port** (typically `26257`), **Database**, **User**, and **Password**.\n\n**Self-hosted:**\n1. The host is the address of any cluster node or your load balancer.\n2. Default port is `26257`.\n3. Use the SQL user you created with `CREATE USER` and set a password with `ALTER USER ... WITH PASSWORD`.\n\n### SSL / TLS\n\n- For production clusters, set **SSL Mode** to `verify-full` or at minimum `require`.\n- For local development clusters started without TLS, use `disable`.\n- Serverless and Dedicated Cloud clusters require `verify-full`.\n\n### Notes\n\n- Ensure the SQL user has `CONNECT` privilege on the target database.\n- CockroachDB Serverless may require the cluster routing ID appended to the username (e.g. `user.routing-id`) \u2014 check the Cloud Console for the exact username format.\n",
+        "help_url": "https://www.cockroachlabs.com/docs/stable/connection-parameters.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "free-tier.gcp-us-east1.cockroachlabs.cloud",
+            "description": "Hostname or IP address of your CockroachDB cluster or load balancer."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "26257",
+            "placeholder": "26257",
+            "description": "CockroachDB default port is 26257."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": true,
+            "placeholder": "defaultdb",
+            "description": "Name of the database to connect to. CockroachDB's default database is `defaultdb`."
+          },
+          {
+            "name": "username",
+            "label": "SQL Username",
+            "type": "text",
+            "required": true,
+            "placeholder": "myuser",
+            "description": "SQL user with CONNECT privilege on the target database. For Serverless clusters, this may include a routing suffix (e.g. user.cluster-routing-id)."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+            "description": "Password for the SQL user."
+          },
+          {
+            "name": "ssl_mode",
+            "label": "SSL Mode",
+            "type": "select",
+            "required": true,
+            "default": "verify-full",
+            "description": "TLS verification mode. Use verify-full for Cloud clusters, require for self-hosted with TLS, disable only for local development.",
+            "options": [
+              {
+                "value": "verify-full",
+                "label": "verify-full (recommended for Cloud)"
+              },
+              {
+                "value": "require",
+                "label": "require (self-hosted with TLS)"
+              },
+              {
+                "value": "disable",
+                "label": "disable (local dev only)"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "id": "perplexity",
+  "label": "Perplexity",
+  "aliases": [
+    "perplexity ai",
+    "perplexity.ai",
+    "pplx"
+  ],
+  "keywords": [
+    "search",
+    "llm",
+    "ai",
+    "web search",
+    "grounded",
+    "rag",
+    "sonar",
+    "perplexity",
+    "language model",
+    "real-time"
+  ],
+  "description": "Query Perplexity's search-grounded LLM API to get up-to-date, cited answers from the web.",
+  "category": "web-search",
+  "logo": "search",
+  "logo_color": "#20808D",
+  "form": {
+    "form_id": "perplexity-connector",
+    "title": "Connect Perplexity",
+    "subtitle": "Paste your Perplexity API key to enable search-grounded AI queries from Anton.",
+    "logo": "search",
+    "logo_color": "#20808D",
+    "methods": [
+      {
+        "id": "api-key",
+        "label": "API Key",
+        "description": "Paste your Perplexity API key (starts with pplx-) from perplexity.ai \u2192 Settings \u2192 API. Quickest way to get started \u2014 no OAuth setup required.",
+        "recommended": true,
+        "how_to": "## Get your Perplexity API Key\n\n1. Sign in at [perplexity.ai](https://www.perplexity.ai).\n2. Click your profile icon in the bottom-left corner, then go to **Settings**.\n3. Open the **API** tab.\n4. If you haven't already, click **Generate** (or **+ New Key**) to create an API key.\n5. Copy the key \u2014 it begins with `pplx-`.\n6. Paste it into the **API Key** field below.\n\n## Notes\n\n- API access requires a Perplexity Pro subscription or an active API billing plan.\n- The key is shown only once at generation time; if you lose it, generate a new one from the same page.\n- You can create multiple keys and revoke individual ones under **Settings \u2192 API** at any time.\n- Keep the key secret \u2014 anyone with it can make requests billed to your account.",
+        "help_url": "https://docs.perplexity.ai/guides/getting-started",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "pplx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "description": "Your Perplexity API key from perplexity.ai \u2192 Settings \u2192 API. Starts with pplx-."
+          },
+          {
+            "name": "model",
+            "label": "Default Model",
+            "type": "select",
+            "required": false,
+            "default": "sonar",
+            "description": "The Perplexity model Anton will use by default for requests.",
+            "options": [
+              {
+                "value": "sonar",
+                "label": "Sonar (recommended, search-grounded)"
+              },
+              {
+                "value": "sonar-pro",
+                "label": "Sonar Pro (deeper search, higher cost)"
+              },
+              {
+                "value": "sonar-reasoning",
+                "label": "Sonar Reasoning (chain-of-thought)"
+              },
+              {
+                "value": "sonar-reasoning-pro",
+                "label": "Sonar Reasoning Pro"
+              },
+              {
+                "value": "r1-1776",
+                "label": "R1-1776 (offline, no search)"
+              }
+            ]
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "url",
+            "required": false,
+            "default": "https://api.perplexity.ai",
+            "placeholder": "https://api.perplexity.ai",
+            "description": "Override only if using a proxy or a custom endpoint. Leave blank to use the default Perplexity API URL."
+          }
+        ]
+      }
+    ]
+  }
+}

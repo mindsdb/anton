@@ -1,0 +1,193 @@
+{
+  "id": "aws_aurora_postgres",
+  "label": "AWS Aurora Postgres",
+  "aliases": [
+    "aurora postgres",
+    "aurora postgresql",
+    "aws aurora",
+    "amazon aurora",
+    "rds aurora postgres",
+    "aurora rds"
+  ],
+  "keywords": [
+    "aws",
+    "amazon",
+    "aurora",
+    "postgres",
+    "postgresql",
+    "rds",
+    "database",
+    "cloud",
+    "sql",
+    "relational"
+  ],
+  "description": "Connect to an Amazon Aurora PostgreSQL-compatible cluster using the writer or reader endpoint.",
+  "category": "database",
+  "logo": "database",
+  "logo_color": "#FF9900",
+  "form": {
+    "form_id": "aws_aurora_postgres-connector",
+    "title": "Connect AWS Aurora Postgres",
+    "subtitle": "Enter your Aurora cluster endpoint, credentials, and SSL preference to connect.",
+    "logo": "database",
+    "logo_color": "#FF9900",
+    "methods": [
+      {
+        "id": "direct-connection",
+        "label": "Cluster Endpoint (Password Auth)",
+        "description": "Paste your Aurora cluster writer or reader endpoint, port, database name, and credentials. The simplest path \u2014 no additional setup required beyond having network access to the cluster.",
+        "recommended": true,
+        "how_to": "## Connect via Aurora Cluster Endpoint\n\n### Find your endpoint in the AWS Console\n\n1. Open the [AWS Console](https://console.aws.amazon.com/) and navigate to **RDS** (search for it in the top bar).\n2. In the left sidebar click **Databases**.\n3. Locate your Aurora cluster (type shows **Aurora** and engine shows **PostgreSQL-compatible**). Click the cluster identifier.\n4. On the cluster detail page, scroll to the **Connectivity & security** tab.\n5. You will see two endpoints:\n   - **Writer endpoint** \u2014 routes to the current primary instance; use this for read-write workloads.\n   - **Reader endpoint** \u2014 load-balances across read replicas; use this for read-only queries.\n6. Copy the endpoint hostname (e.g. `my-cluster.cluster-abc123.us-east-1.rds.amazonaws.com`).\n7. Note the **Port** (default `5432`) and the **DB name** you created when provisioning the cluster.\n\n### Credentials\n\n8. The master username and password were set at cluster creation. You can reset the master password from **Modify** on the cluster page if needed.\n9. For least-privilege access, consider creating a dedicated PostgreSQL user: connect as master and run `CREATE USER anton WITH PASSWORD '...' LOGIN;` then `GRANT CONNECT ON DATABASE mydb TO anton;`.\n\n### Network access\n\n10. Ensure Anton's host (your machine or the server running Anton) can reach the cluster. In **VPC security groups** attached to the cluster, confirm inbound TCP on port 5432 is allowed from your IP. For public clusters, check that **Publicly accessible** is set to **Yes** on the instance.\n\n### SSL\n\n11. Aurora Postgres supports and encourages SSL. Toggle **Require SSL** on unless your cluster explicitly disables it. Download the [AWS RDS CA bundle](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) if your client needs certificate verification.",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Connecting.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Cluster Endpoint Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-cluster.cluster-abc123.us-east-1.rds.amazonaws.com",
+            "description": "Writer endpoint for read-write access, or reader endpoint for read-only. Found in RDS \u2192 Databases \u2192 your cluster \u2192 Connectivity & security tab."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "Default Aurora Postgres port is 5432. Change only if your cluster uses a non-standard port."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "The name of the specific PostgreSQL database to connect to within the cluster."
+          },
+          {
+            "name": "username",
+            "label": "Database User",
+            "type": "text",
+            "required": true,
+            "placeholder": "postgres",
+            "description": "Master user or a dedicated least-privilege user created in your Aurora cluster."
+          },
+          {
+            "name": "password",
+            "label": "Password",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Password for the database user above. Set at cluster creation; reset via RDS \u2192 Modify if needed."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "Strongly recommended. Aurora Postgres supports SSL/TLS by default. Disable only if your cluster explicitly rejects SSL connections."
+          },
+          {
+            "name": "endpoint_type",
+            "label": "Endpoint Type",
+            "type": "select",
+            "required": false,
+            "default": "writer",
+            "description": "Indicates whether the host above is a writer or reader endpoint. Used for documentation and routing hints only \u2014 does not change the connection string.",
+            "options": [
+              {
+                "value": "writer",
+                "label": "Writer (read-write, routes to primary)"
+              },
+              {
+                "value": "reader",
+                "label": "Reader (read-only, load-balanced across replicas)"
+              },
+              {
+                "value": "instance",
+                "label": "Instance endpoint (direct to a specific node)"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "iam-auth",
+        "label": "IAM Database Authentication",
+        "description": "Generate a short-lived IAM auth token instead of a static password. Requires IAM DB auth enabled on the cluster and an IAM policy granting rds-db:connect. No long-lived passwords stored.",
+        "recommended": false,
+        "how_to": "## IAM Database Authentication\n\nAurora Postgres supports IAM-based login: AWS generates a temporary token (valid 15 minutes) that replaces the password. Your IAM role or user must have the `rds-db:connect` permission.\n\n### Enable IAM auth on the cluster\n\n1. In the AWS Console go to **RDS \u2192 Databases** and click your Aurora cluster.\n2. Click **Modify** \u2192 under **Database options** enable **IAM database authentication**.\n3. Apply immediately or during the next maintenance window.\n\n### Create an IAM policy\n\n4. In **IAM \u2192 Policies \u2192 Create policy**, use this JSON:\n   ```\n   {\n     \"Effect\": \"Allow\",\n     \"Action\": \"rds-db:connect\",\n     \"Resource\": \"arn:aws:rds-db:REGION:ACCOUNT_ID:dbuser:CLUSTER_RESOURCE_ID/DB_USER\"\n   }\n   ```\n5. Attach the policy to the IAM user or role Anton will use.\n\n### Create the DB user in Postgres\n\n6. Connect to the cluster as master and run:\n   `CREATE USER anton; GRANT rds_iam TO anton;`\n\n### Configure Anton\n\n7. Provide your AWS Access Key ID and Secret Access Key (or use an instance role if Anton runs on EC2).\n8. Anton calls `rds:GenerateAuthToken` to produce a fresh token for each connection.",
+        "help_url": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html",
+        "fields": [
+          {
+            "name": "host",
+            "label": "Cluster Endpoint Host",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-cluster.cluster-abc123.us-east-1.rds.amazonaws.com",
+            "description": "Writer or reader endpoint from RDS \u2192 Databases \u2192 Connectivity & security tab."
+          },
+          {
+            "name": "port",
+            "label": "Port",
+            "type": "text",
+            "required": true,
+            "default": "5432",
+            "placeholder": "5432",
+            "description": "Default Aurora Postgres port is 5432."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "mydb",
+            "description": "The PostgreSQL database to connect to within the cluster."
+          },
+          {
+            "name": "db_username",
+            "label": "Database User",
+            "type": "text",
+            "required": true,
+            "placeholder": "anton",
+            "description": "Must be a Postgres user granted the rds_iam role. Created with GRANT rds_iam TO <user>."
+          },
+          {
+            "name": "aws_access_key_id",
+            "label": "AWS Access Key ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "AKIAIOSFODNN7EXAMPLE",
+            "description": "Access key for the IAM user that has the rds-db:connect permission. Leave blank to use the instance/environment role if Anton runs on AWS infrastructure."
+          },
+          {
+            "name": "aws_secret_access_key",
+            "label": "AWS Secret Access Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "description": "Paired with the Access Key ID above. Stored encrypted locally by Anton."
+          },
+          {
+            "name": "aws_region",
+            "label": "AWS Region",
+            "type": "text",
+            "required": true,
+            "placeholder": "us-east-1",
+            "description": "The AWS region where your Aurora cluster is deployed (e.g. us-east-1, eu-west-1)."
+          },
+          {
+            "name": "ssl_enabled",
+            "label": "Require SSL",
+            "type": "boolean",
+            "required": false,
+            "default": "true",
+            "description": "IAM auth requires SSL \u2014 keep this enabled. Aurora will reject IAM token auth over non-SSL connections."
+          }
+        ]
+      }
+    ]
+  }
+}

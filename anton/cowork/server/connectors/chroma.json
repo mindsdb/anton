@@ -1,0 +1,122 @@
+{
+  "id": "chroma",
+  "label": "Chroma",
+  "aliases": [
+    "chromadb",
+    "chroma db",
+    "chroma vector db",
+    "chroma cloud"
+  ],
+  "keywords": [
+    "vector",
+    "database",
+    "embeddings",
+    "similarity search",
+    "ai",
+    "machine learning",
+    "open-source",
+    "retrieval"
+  ],
+  "description": "Connect to a Chroma vector database \u2014 self-hosted or Chroma Cloud \u2014 to store and query embeddings.",
+  "category": "vector-db",
+  "logo": "cube",
+  "logo_color": "#E15C2E",
+  "form": {
+    "form_id": "chroma-connector",
+    "title": "Connect Chroma",
+    "subtitle": "Point Anton at your Chroma server or Chroma Cloud tenant to read and write vector collections.",
+    "logo": "cube",
+    "logo_color": "#E15C2E",
+    "methods": [
+      {
+        "id": "self-hosted",
+        "label": "Self-hosted Chroma server",
+        "description": "Paste the URL of your locally or privately hosted Chroma instance. No API token required for unauthenticated servers; add a static token if you enabled token auth.",
+        "recommended": true,
+        "how_to": "## Connect to a self-hosted Chroma server\n\n### Prerequisites\n\n- A running Chroma server (`chroma run` or Docker). Default port is `8000`.\n- If you enabled token authentication (`CHROMA_SERVER_AUTH_PROVIDER`), have your static token ready.\n\n### Steps\n\n1. Find the address of your Chroma server, e.g. `http://localhost:8000` or `http://192.168.1.50:8000`.\n2. Paste it into **Server URL** below (include the scheme and port).\n3. If your server was started with `CHROMA_SERVER_AUTH_CREDENTIALS=<token>`, paste that value into **API Token**. Leave it blank for unauthenticated servers.\n4. Optionally set a **Tenant** and **Database** name if your deployment uses multi-tenancy (defaults are `default_tenant` / `default_database`).\n5. Click **Submit** \u2014 Anton will issue a `/api/v1/heartbeat` check to verify connectivity.\n\n### Notes\n\n- If Chroma runs inside Docker and Anton runs on the host, use `http://host.docker.internal:8000` instead of `localhost`.\n- TLS-terminated servers should use `https://`.\n- Token auth is set server-side via environment variables; see the [Chroma auth docs](https://docs.trychroma.com/usage-guide#authentication) for details.\n",
+        "help_url": "https://docs.trychroma.com/usage-guide",
+        "fields": [
+          {
+            "name": "server_url",
+            "label": "Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "http://localhost:8000",
+            "description": "Full URL of your Chroma server, including scheme and port."
+          },
+          {
+            "name": "api_token",
+            "label": "API Token",
+            "type": "password",
+            "required": false,
+            "secret": true,
+            "placeholder": "your-static-token",
+            "description": "Static bearer token if you enabled token authentication on the server. Leave blank for open servers."
+          },
+          {
+            "name": "tenant",
+            "label": "Tenant",
+            "type": "text",
+            "required": false,
+            "placeholder": "default_tenant",
+            "default": "default_tenant",
+            "description": "Chroma tenant name. Leave as default unless you use multi-tenancy."
+          },
+          {
+            "name": "database",
+            "label": "Database",
+            "type": "text",
+            "required": false,
+            "placeholder": "default_database",
+            "default": "default_database",
+            "description": "Chroma database name within the tenant."
+          }
+        ]
+      },
+      {
+        "id": "chroma-cloud",
+        "label": "Chroma Cloud",
+        "description": "Connect to a managed Chroma Cloud tenant using your Cloud API key, tenant ID, and database name from the Chroma Cloud dashboard.",
+        "recommended": false,
+        "how_to": "## Connect to Chroma Cloud\n\n### Prerequisites\n\n- A Chroma Cloud account at [trychroma.com](https://trychroma.com).\n- A database created in the Chroma Cloud dashboard.\n\n### Steps\n\n1. Log in to [Chroma Cloud](https://cloud.trychroma.com).\n2. Navigate to **Settings \u2192 API Keys** and click **Create API Key**. Copy the key \u2014 it is shown only once.\n3. From the dashboard home, copy your **Tenant ID** (shown under your account name or in the URL).\n4. Open the database you want Anton to use and copy its **Database Name**.\n5. Paste all three values into the fields below.\n6. The **Server URL** defaults to `https://api.trychroma.com` \u2014 only change it if Chroma Cloud directs you to a regional endpoint.\n7. Click **Submit** to verify the connection.\n\n### Notes\n\n- API keys are scoped to your tenant. Rotate them in **Settings \u2192 API Keys** if compromised.\n- Each database within a tenant is isolated; Anton will only access the database you specify.\n",
+        "help_url": "https://docs.trychroma.com/chroma-cloud",
+        "fields": [
+          {
+            "name": "server_url",
+            "label": "Server URL",
+            "type": "url",
+            "required": true,
+            "placeholder": "https://api.trychroma.com",
+            "default": "https://api.trychroma.com",
+            "description": "Chroma Cloud API endpoint. Use the default unless directed to a regional URL."
+          },
+          {
+            "name": "api_token",
+            "label": "API Key",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "chroma-cloud-api-key",
+            "description": "API key from Chroma Cloud \u2192 Settings \u2192 API Keys. Shown only once at creation."
+          },
+          {
+            "name": "tenant",
+            "label": "Tenant ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "description": "Your Chroma Cloud tenant ID, found in the dashboard header or URL."
+          },
+          {
+            "name": "database",
+            "label": "Database Name",
+            "type": "text",
+            "required": true,
+            "placeholder": "my-database",
+            "description": "The name of the Chroma Cloud database Anton should connect to."
+          }
+        ]
+      }
+    ]
+  }
+}
