@@ -27,9 +27,13 @@ from anton.core.llm.provider import (
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
-    SCRATCHPAD_TOOL,
+    CREATE_ARTIFACT_TOOL,
+    LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    OPEN_ARTIFACT_TOOL,
     RECALL_TOOL,
+    SCRATCHPAD_TOOL,
+    SET_ARTIFACT_PRIMARY_TOOL,
     ToolDef,
 )
 from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
@@ -547,6 +551,17 @@ class ChatSession:
 
         # Procedural memory retrieval — always available, no-op if no skills.
         self.tool_registry.register_tool(RECALL_SKILL_TOOL)
+
+        # Artifacts — only register when a workspace is bound to the
+        # session. Bare-cwd CLI sessions without `resolve_workspace`
+        # have nowhere to write artifacts to, and the tool handlers
+        # would just return error strings — better to hide the tools
+        # entirely so the LLM doesn't try to use them.
+        if self._workspace is not None:
+            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
+            self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(SET_ARTIFACT_PRIMARY_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

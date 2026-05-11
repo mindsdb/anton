@@ -95,7 +95,21 @@ class Workspace:
             self._env_file.write_text("# Anton environment variables\n")
             actions.append(f"Created {self._env_file}")
 
+        # Visible artifacts directory at the workspace root. Replaces
+        # the legacy hidden `.anton/output/` dump — one folder per
+        # artifact, each owning its own metadata.json + README.md.
+        # Idempotent: existing artifact subfolders are left alone.
+        artifacts_dir = self._base / "artifacts"
+        if not artifacts_dir.exists():
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            actions.append(f"Created {artifacts_dir}")
+
         return actions
+
+    @property
+    def artifacts_dir(self) -> Path:
+        """Where artifacts live. Created lazily by `initialize()`."""
+        return self._base / "artifacts"
 
     # ── anton.md reading ─────────────────────────────────────────
 
