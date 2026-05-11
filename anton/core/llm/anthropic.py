@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 
 import anthropic
 
+from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
     LLMProvider,
@@ -173,10 +174,20 @@ class AnthropicProvider(LLMProvider):
                         info = blocks.get(idx, {})
                         if info.get("type") == "tool_use":
                             raw_json = "".join(info["json_parts"])
-                            parsed_input = json.loads(raw_json) if raw_json else {}
+                            # safe_parse_tool_input never raises. It
+                            # returns (parsed_dict, parse_error). When
+                            # parse_error is set, the session
+                            # dispatcher short-circuits with a tool
+                            # result asking the LLM to re-emit a clean
+                            # call — that recovery happens via the
+                            # tool_use/tool_result protocol the LLM
+                            # already understands, so it doesn't need
+                            # to escalate to a session-level retry.
+                            parsed_input, parse_error = safe_parse_tool_input(raw_json)
                             tool_calls.append(
                                 ToolCall(
-                                    id=info["id"], name=info["name"], input=parsed_input
+                                    id=info["id"], name=info["name"], input=parsed_input,
+                                    parse_error=parse_error,
                                 )
                             )
                             yield StreamToolUseEnd(id=info["id"])

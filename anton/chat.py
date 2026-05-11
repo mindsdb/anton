@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.error
+from urllib.parse import quote
 import sys
 import time
 from pathlib import Path
@@ -364,10 +365,12 @@ async def _handle_remote(
             console.print()
             return
         if has_key.lower() == "n":
+            # Strip /api/v1 suffix if present.
+            base_url = settings.minds_url.rstrip("/").removesuffix("/api/v1")
             webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                f"{base_url}/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+                f"&redirect_uri={quote(base_url, safe='')}"
             )
             console.print()
 
@@ -443,19 +446,24 @@ async def _handle_publish(
     # 2. Find the HTML file to publish
     import re
 
-    output_dir = Path(settings.workspace_path) / ".anton" / "output"
+    # Search the new artifacts/<slug>/ tree (recursive — each artifact
+    # owns its own subfolder). The legacy `.anton/output/` flat
+    # directory is no longer scanned; users move old files into a
+    # proper artifact subfolder if they still want them publishable.
+    artifacts_root = Path(settings.artifacts_dir)
+    publish_index_dir = artifacts_root  # `.published.json` lives at the root
 
     if file_arg:
         target = Path(file_arg)
         if not target.is_absolute():
             target = Path(settings.workspace_path) / file_arg
     else:
-        # List HTML files sorted by modification time (most recent first)
+        # Recursively list HTML files under any artifact, sorted by mtime.
         html_files = sorted(
-            output_dir.glob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
-        ) if output_dir.is_dir() else []
+            artifacts_root.rglob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
+        ) if artifacts_root.is_dir() else []
         if not html_files:
-            console.print("  [anton.warning]No HTML files found in .anton/output/[/]")
+            console.print(f"  [anton.warning]No HTML files found under {artifacts_root}/[/]")
             console.print()
             return
 
@@ -504,7 +512,7 @@ async def _handle_publish(
         return
 
     # 3. Check if this file was previously published
-    published_json = output_dir / ".published.json"
+    published_json = publish_index_dir / ".published.json"
     published_map = {}
     try:
         if published_json.is_file():
@@ -805,16 +813,28 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
 
     # Read the script and patch for scratchpad execution.
     # 1. __file__ doesn't exist inside exec() — set it so os.path.dirname works
-    # 2. Override OUTPUT_PATH to write to .anton/output/ instead of demo_data/
+    # 2. Override OUTPUT_PATH so the dashboard lands in the right artifact
+    #    folder. The demo creates a dedicated artifact directly via the
+    #    `ArtifactStore` so the dashboard appears in the Live Artifacts view
+    #    end-to-end with proper metadata + README, just like an LLM-driven
+    #    artifact would.
+    from anton.core.artifacts import ArtifactStore as _ArtifactStore
+    _store = _ArtifactStore(Path(settings.artifacts_dir))
+    _demo_artifact = _store.create(
+        name="NVDA BTC Dashboard",
+        description="Demo dashboard comparing NVDA stock and BTC prices over time.",
+        type="html-app",
+    )
     code = script_path.read_text()
-    output_dir = str(Path(settings.workspace_path) / ".anton" / "output")
-    output_html = str(Path(output_dir) / "nvda_btc_dashboard.html")
+    output_dir = str(_store.folder_for(_demo_artifact.slug))
+    output_html = str(Path(output_dir) / "dashboard.html")
     code = (
         f"import os as _os; _os.makedirs({output_dir!r}, exist_ok=True)\n"
         f"__file__ = {str(script_path)!r}\n"
         + code
     )
-    # Replace the OUTPUT_PATH line so the dashboard goes to .anton/output/
+    # Replace the OUTPUT_PATH line so the dashboard goes into the
+    # claimed artifact folder.
     code = code.replace(
         'OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvda_btc_dashboard.html")',
         f'OUTPUT_PATH = {output_html!r}',
@@ -1114,7 +1134,7 @@ async def _chat_loop(
     # Build runtime context so the LLM knows what it's running on
     runtime_context = build_runtime_context(settings)
 
-    output_path = f"{settings.output_dir.rstrip('/')}/"
+    artifacts_path = f"{settings.artifacts_dir.rstrip('/')}/"
     from anton.chat_session import get_runtime_factory
 
     session = ChatSession(ChatSessionConfig(
@@ -1125,7 +1145,15 @@ async def _chat_loop(
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=runtime_context,
-            output_context=f"Save output to `{output_path}` (create it if needed).",
+            # See `chat_session.create_session` for the full version
+            # of this prompt fragment — both call sites use the same
+            # artifact-flow guidance.
+            output_context=(
+                f"User-facing artifacts live under `{artifacts_path}`. "
+                "Before producing one, call `create_artifact(name, description, type)`; "
+                "the tool returns the absolute folder path you should write into. "
+                "To modify an existing artifact, use `list_artifacts` then `open_artifact(slug)`."
+            ),
         ),
         workspace=workspace,
         console=console,
