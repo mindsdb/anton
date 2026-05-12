@@ -1,9 +1,11 @@
 """Passthrough alias resolution.
 
 Callers write ``_xxx_`` in the request ``model`` field; we resolve that to a
-concrete upstream provider + model + credentials at request time. Adding a new
-provider means: (1) adding a settings block, (2) adding a factory below, and
-(3) adding the alias to ``_ALIAS_PRIORITY``.
+concrete upstream provider + model + credentials at request time. Adding a
+new alias means: (1) add a model-name setting on the relevant provider block
+in :mod:`minds.common.settings.app_settings`, and (2) add an entry to
+``_ALIAS_PRIORITY`` below. No new factory functions per alias — the
+provider-level builders read the model name from settings.
 
 Routing layout for v1:
 
@@ -21,22 +23,30 @@ with no signal.
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from enum import StrEnum
 
 from fastapi import HTTPException
 
-from minds.common.settings.app_settings import get_app_settings
+from minds.common.settings.app_settings import AppSettings, get_app_settings
 
 _PASSTHROUGH_PATTERN = re.compile(r"^_([a-zA-Z0-9]+)_$")
 
 
-ApiKind = Literal["openai_responses", "anthropic_messages", "gemini_native"]
-WebSearchMode = Literal[
-    "openai_native",  # Responses API: tools=[{"type":"web_search"}]
-    "anthropic_native",  # Messages API: web_search_20250305 / web_fetch_20250910
-    "gemini_google_search",  # Gemini: Tool(google_search=GoogleSearch())
-    "drop",  # silently omit the generic web_search/fetch tools
-]
+class ApiKind(StrEnum):
+    """Which upstream transport + translation path the agent uses."""
+
+    OPENAI_RESPONSES = "openai_responses"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
+    GEMINI_NATIVE = "gemini_native"
+
+
+class WebSearchMode(StrEnum):
+    """How generic ``web_search`` / ``fetch`` tools should be translated."""
+
+    OPENAI_NATIVE = "openai_native"  # Responses API: tools=[{"type":"web_search"}]
+    ANTHROPIC_NATIVE = "anthropic_native"  # Messages API: web_search_20250305 / web_fetch_20250910
+    GEMINI_GOOGLE_SEARCH = "gemini_google_search"  # Gemini: Tool(google_search=GoogleSearch())
+    DROP = "drop"  # silently omit the generic web_search/fetch tools
 
 
 @dataclass(frozen=True)
@@ -53,7 +63,7 @@ class PassthroughModelConfig:
     model_name: str
     api_key: str
     base_url: str | None = None
-    web_search_mode: WebSearchMode = "drop"
+    web_search_mode: WebSearchMode = WebSearchMode.DROP
     label: str = ""
 
 
@@ -63,119 +73,128 @@ def is_passthrough_model(model: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Per-provider availability + config factories
+# Provider availability predicates
 # ---------------------------------------------------------------------------
-#
-# Each factory is only called *after* its availability predicate has returned
-# True, so factories can dereference settings unconditionally. Predicates are
-# closures over the settings object the resolver fetches per call so tests can
-# clear the lru_cache and re-resolve with different env vars.
 
 
-def _openai_available(settings) -> bool:  # noqa: ANN001
+def _openai_available(settings: AppSettings) -> bool:
     key = settings.openai.api_key
     return bool(key) and key != "not set"
 
 
-def _anthropic_available(settings) -> bool:  # noqa: ANN001
+def _anthropic_available(settings: AppSettings) -> bool:
     return bool(settings.anthropic.api_key)
 
 
-def _fireworks_available(settings) -> bool:  # noqa: ANN001
+def _fireworks_available(settings: AppSettings) -> bool:
     return bool(settings.fireworks.api_key)
 
 
-def _gemini_available(settings) -> bool:  # noqa: ANN001
+def _gemini_available(settings: AppSettings) -> bool:
     return bool(settings.gemini.api_key)
 
 
-def _openai_reason(settings) -> PassthroughModelConfig:  # noqa: ANN001
+# ---------------------------------------------------------------------------
+# Per-provider config builders (one per upstream, not one per alias)
+# ---------------------------------------------------------------------------
+#
+# Each builder takes the resolved model name as an argument rather than
+# hardcoding it, so adding a new alias served by an existing provider is a
+# settings entry + a one-line ``_ALIAS_PRIORITY`` change. No new code path
+# per alias.
+
+
+def _config_for_openai(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
     return PassthroughModelConfig(
-        api_kind="openai_responses",
-        model_name="gpt-5.2",
+        api_kind=ApiKind.OPENAI_RESPONSES,
+        model_name=model_name,
         api_key=settings.openai.api_key,
         base_url=settings.openai.api_url,
-        web_search_mode="openai_native",
+        web_search_mode=WebSearchMode.OPENAI_NATIVE,
         label="openai",
     )
 
 
-def _openai_code(settings) -> PassthroughModelConfig:  # noqa: ANN001
+def _config_for_anthropic(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
     return PassthroughModelConfig(
-        api_kind="openai_responses",
-        model_name="gpt-5.1-codex",
-        api_key=settings.openai.api_key,
-        base_url=settings.openai.api_url,
-        web_search_mode="openai_native",
-        label="openai",
-    )
-
-
-def _anthropic_reason(settings) -> PassthroughModelConfig:  # noqa: ANN001
-    return PassthroughModelConfig(
-        api_kind="anthropic_messages",
-        model_name="claude-sonnet-4-6",
+        api_kind=ApiKind.ANTHROPIC_MESSAGES,
+        model_name=model_name,
         api_key=settings.anthropic.api_key,
-        web_search_mode="anthropic_native",
+        web_search_mode=WebSearchMode.ANTHROPIC_NATIVE,
         label="anthropic",
     )
 
 
-def _anthropic_code(settings) -> PassthroughModelConfig:  # noqa: ANN001
-    return PassthroughModelConfig(
-        api_kind="anthropic_messages",
-        model_name="claude-haiku-4-5-20251001",
-        api_key=settings.anthropic.api_key,
-        web_search_mode="anthropic_native",
-        label="anthropic",
-    )
-
-
-def _fireworks_kimi(settings) -> PassthroughModelConfig:  # noqa: ANN001
+def _config_for_fireworks(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
     # Fireworks exposes an Anthropic-compatible Messages API at this base
     # URL; the Anthropic SDK appends /v1/messages. Web search is unavailable
     # — Fireworks doesn't host a search index — so generic web_search/fetch
     # tools are dropped before forwarding upstream.
     return PassthroughModelConfig(
-        api_kind="anthropic_messages",
-        model_name="accounts/fireworks/models/kimi-k2p6",
+        api_kind=ApiKind.ANTHROPIC_MESSAGES,
+        model_name=model_name,
         api_key=settings.fireworks.api_key,
         base_url=settings.fireworks.anthropic_base_url,
-        web_search_mode="drop",
+        web_search_mode=WebSearchMode.DROP,
         label="fireworks",
     )
 
 
-def _gemini_pro(settings) -> PassthroughModelConfig:  # noqa: ANN001
+def _config_for_gemini(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
     return PassthroughModelConfig(
-        api_kind="gemini_native",
-        model_name="gemini-3.1-pro-preview",
+        api_kind=ApiKind.GEMINI_NATIVE,
+        model_name=model_name,
         api_key=settings.gemini.api_key,
-        web_search_mode="gemini_google_search",
+        web_search_mode=WebSearchMode.GEMINI_GOOGLE_SEARCH,
         label="gemini",
     )
 
 
-# Per-alias priority list: the first ``(predicate, factory)`` pair whose
-# predicate returns True wins. Order = preference order.
+# ---------------------------------------------------------------------------
+# Alias → priority-list of (predicate, config builder) pairs
+# ---------------------------------------------------------------------------
 #
-# Single-provider aliases (``kimi``, ``gemini``) deliberately have only one
-# entry — if the matching key isn't configured we 400 rather than falling
-# back to a different model family.
-_ALIAS_PRIORITY: dict[str, list[tuple[Callable, Callable[..., PassthroughModelConfig]]]] = {
+# Each entry's builder is a ``Callable[[AppSettings], PassthroughModelConfig]``
+# that reads the model name from settings; the first predicate that returns
+# True wins. Single-provider aliases (``kimi``, ``gemini``) deliberately
+# have only one entry — missing key → 400, not silent fallback.
+
+AliasBuilder = Callable[[AppSettings], PassthroughModelConfig]
+AliasPredicate = Callable[[AppSettings], bool]
+
+
+_ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
     "reason": [
-        (_anthropic_available, _anthropic_reason),
-        (_openai_available, _openai_reason),
+        (
+            _anthropic_available,
+            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_reason_model),
+        ),
+        (
+            _openai_available,
+            lambda s: _config_for_openai(s, s.openai.passthrough_reason_model),
+        ),
     ],
     "code": [
-        (_anthropic_available, _anthropic_code),
-        (_openai_available, _openai_code),
+        (
+            _anthropic_available,
+            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_code_model),
+        ),
+        (
+            _openai_available,
+            lambda s: _config_for_openai(s, s.openai.passthrough_code_model),
+        ),
     ],
     "kimi": [
-        (_fireworks_available, _fireworks_kimi),
+        (
+            _fireworks_available,
+            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_kimi_model),
+        ),
     ],
     "gemini": [
-        (_gemini_available, _gemini_pro),
+        (
+            _gemini_available,
+            lambda s: _config_for_gemini(s, s.gemini.passthrough_model),
+        ),
     ],
 }
 
@@ -196,9 +215,9 @@ def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
     settings = get_app_settings()
 
     candidates = _ALIAS_PRIORITY.get(alias, _ALIAS_PRIORITY["reason"])
-    for predicate, factory in candidates:
+    for predicate, builder in candidates:
         if predicate(settings):
-            return factory(settings)
+            return builder(settings)
 
     raise HTTPException(
         status_code=400,
