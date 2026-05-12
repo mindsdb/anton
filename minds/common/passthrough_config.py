@@ -10,7 +10,7 @@ Routing layout for v1:
     _reason_   — Anthropic claude-sonnet-4-6, falls back to OpenAI gpt-5.2
     _code_     — Anthropic claude-haiku-4-5-20251001, falls back to OpenAI gpt-5.1-codex
     _kimi_     — Fireworks Kimi K2.6 (Anthropic-shape API at fireworks.ai)
-    _gemini_   — Google Gemini 2.5 Pro (native generateContent API)
+    _gemini_   — Google gemini-3.1-pro-preview (native generateContent API)
 
 When a single-provider alias (``_kimi_``, ``_gemini_``) is requested but its
 key isn't configured we raise HTTP 400 rather than silently falling back —
