@@ -18,12 +18,16 @@ import pytest
 from fastapi import HTTPException
 
 from minds.agents.passthrough_agent.agent import (
-    _ANTHROPIC_WEB_FETCH_BETA_HEADER,
+    AnthropicToolsTranslation,
+    ChatCompletionsFunctionTool,
+    GenericFetchTool,
+    GenericWebSearchTool,
     PassthroughAgent,
     _chat_messages_to_gemini,
     _chat_messages_to_responses_input,
     _chat_tool_choice_to_gemini,
     _chat_tool_choice_to_responses,
+    _classify_tool,
     _gemini_response_to_openai,
     _is_generic_web_tool,
     _only_web_tools,
@@ -134,24 +138,30 @@ def test_only_web_tools_empty_or_none_returns_false():
 
 
 def test_translate_anthropic_web_search_only():
-    tools, beta = _translate_tools_for_anthropic([{"type": "web_search"}])
-    assert tools == [{"type": "web_search_20250305", "name": "web_search"}]
-    assert beta is False
+    result = _translate_tools_for_anthropic([{"type": "web_search"}])
+    assert isinstance(result, AnthropicToolsTranslation)
+    assert result.tools == [
+        {"type": get_app_settings().anthropic.web_search_tool_type, "name": "web_search"},
+    ]
+    assert result.needs_web_fetch_beta is False
 
 
 def test_translate_anthropic_fetch_only_sets_beta_flag():
-    tools, beta = _translate_tools_for_anthropic([{"type": "fetch"}])
-    assert tools == [{"type": "web_fetch_20250910", "name": "web_fetch"}]
-    assert beta is True
+    result = _translate_tools_for_anthropic([{"type": "fetch"}])
+    assert result.tools == [
+        {"type": get_app_settings().anthropic.web_fetch_tool_type, "name": "web_fetch"},
+    ]
+    assert result.needs_web_fetch_beta is True
 
 
 def test_translate_anthropic_both_web_tools():
-    tools, beta = _translate_tools_for_anthropic([{"type": "web_search"}, {"type": "fetch"}])
-    assert tools == [
-        {"type": "web_search_20250305", "name": "web_search"},
-        {"type": "web_fetch_20250910", "name": "web_fetch"},
+    s = get_app_settings().anthropic
+    result = _translate_tools_for_anthropic([{"type": "web_search"}, {"type": "fetch"}])
+    assert result.tools == [
+        {"type": s.web_search_tool_type, "name": "web_search"},
+        {"type": s.web_fetch_tool_type, "name": "web_fetch"},
     ]
-    assert beta is True
+    assert result.needs_web_fetch_beta is True
 
 
 def test_translate_anthropic_mixed_with_function_tool():
@@ -163,29 +173,85 @@ def test_translate_anthropic_mixed_with_function_tool():
             "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
         },
     }
-    tools, beta = _translate_tools_for_anthropic([{"type": "web_search"}, function_tool])
+    result = _translate_tools_for_anthropic([{"type": "web_search"}, function_tool])
 
-    assert tools == [
-        {"type": "web_search_20250305", "name": "web_search"},
+    assert result.tools == [
+        {"type": get_app_settings().anthropic.web_search_tool_type, "name": "web_search"},
         {
             "name": "lookup",
             "description": "Look something up",
             "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
         },
     ]
-    assert beta is False
+    assert result.needs_web_fetch_beta is False
 
 
 def test_translate_anthropic_empty_or_none():
-    assert _translate_tools_for_anthropic(None) == ([], False)
-    assert _translate_tools_for_anthropic([]) == ([], False)
+    empty_none = _translate_tools_for_anthropic(None)
+    assert empty_none.tools == [] and empty_none.needs_web_fetch_beta is False
+    empty_list = _translate_tools_for_anthropic([])
+    assert empty_list.tools == [] and empty_list.needs_web_fetch_beta is False
 
 
 def test_translate_anthropic_unknown_type_silently_skipped():
-    # Preserves existing _openai_tools_to_anthropic behavior for unknown types.
-    tools, beta = _translate_tools_for_anthropic([{"type": "mystery"}])
-    assert tools == []
-    assert beta is False
+    # Unknown tool types don't crash; classifier logs at debug, translator drops.
+    result = _translate_tools_for_anthropic([{"type": "mystery"}])
+    assert result.tools == []
+    assert result.needs_web_fetch_beta is False
+
+
+def test_translate_anthropic_malformed_function_tool_skipped():
+    # A function tool missing the inner "function" payload fails Pydantic
+    # validation; the classifier logs a warning and the translator skips it.
+    result = _translate_tools_for_anthropic([{"type": "function"}])
+    assert result.tools == []
+
+
+# ---------------------------------------------------------------------------
+# Pydantic tool models / _classify_tool
+# ---------------------------------------------------------------------------
+
+
+def test_classify_tool_recognizes_generic_web_search():
+    parsed = _classify_tool({"type": "web_search"})
+    assert isinstance(parsed, GenericWebSearchTool)
+
+
+def test_classify_tool_recognizes_generic_fetch():
+    parsed = _classify_tool({"type": "fetch"})
+    assert isinstance(parsed, GenericFetchTool)
+
+
+def test_classify_tool_recognizes_function_tool_and_parses_fields():
+    parsed = _classify_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look it up",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    assert isinstance(parsed, ChatCompletionsFunctionTool)
+    assert parsed.function.name == "lookup"
+    assert parsed.function.description == "Look it up"
+
+
+def test_classify_tool_returns_none_for_non_dict():
+    assert _classify_tool("web_search") is None  # type: ignore[arg-type]
+    assert _classify_tool(None) is None  # type: ignore[arg-type]
+
+
+def test_classify_tool_returns_none_for_malformed_function_tool():
+    # Missing the nested "function" payload entirely.
+    assert _classify_tool({"type": "function"}) is None
+    # function payload present but missing required "name".
+    assert _classify_tool({"type": "function", "function": {}}) is None
+
+
+def test_classify_tool_returns_none_for_unknown_type():
+    assert _classify_tool({"type": "mystery"}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +590,7 @@ async def test_proxy_anthropic_sets_beta_header_for_fetch(monkeypatch):
     )
 
     kwargs = create_mock.await_args.kwargs
-    assert kwargs["extra_headers"] == {"anthropic-beta": _ANTHROPIC_WEB_FETCH_BETA_HEADER}
+    assert kwargs["extra_headers"] == {"anthropic-beta": get_app_settings().anthropic.web_fetch_beta_header}
 
 
 @pytest.mark.asyncio
@@ -669,17 +735,17 @@ async def test_proxy_openai_specific_function_tool_choice_translated(monkeypatch
 
 def test_translate_anthropic_drop_mode_strips_web_search():
     # Used for Fireworks: their Anthropic-shape API has no hosted search.
-    tools, beta = _translate_tools_for_anthropic([{"type": "web_search"}], web_search_mode="drop")
-    assert tools == []
-    assert beta is False
+    result = _translate_tools_for_anthropic([{"type": "web_search"}], web_search_mode="drop")
+    assert result.tools == []
+    assert result.needs_web_fetch_beta is False
 
 
 def test_translate_anthropic_drop_mode_strips_fetch_and_keeps_function():
     function_tool = {"type": "function", "function": {"name": "f", "parameters": {}}}
-    tools, beta = _translate_tools_for_anthropic([{"type": "fetch"}, function_tool], web_search_mode="drop")
+    result = _translate_tools_for_anthropic([{"type": "fetch"}, function_tool], web_search_mode="drop")
     # fetch dropped; function tool still translated to Anthropic shape.
-    assert tools == [{"name": "f", "description": "", "input_schema": {}}]
-    assert beta is False
+    assert result.tools == [{"name": "f", "description": "", "input_schema": {}}]
+    assert result.needs_web_fetch_beta is False
 
 
 def test_translate_openai_drop_mode_strips_web_search_and_fetch():
