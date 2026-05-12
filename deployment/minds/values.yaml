@@ -121,7 +121,21 @@ deployment:
       value: "web_fetch_20250910"
     - name: ANTHROPIC__WEB_FETCH_BETA_HEADER
       value: "web-fetch-2025-09-10"
-  
+
+    # Fireworks.ai (open-source models served via Anthropic-compatible API)
+    - name: FIREWORKS__API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: FIREWORKS_API_KEY
+
+    # Google Gemini
+    - name: GEMINI__API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: GEMINI_API_KEY
+
     - name: MINDSDB__URL
       value: "http://mindsdb:80"
 
