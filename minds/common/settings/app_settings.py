@@ -61,6 +61,19 @@ class OpenAISettings(Settings):
         default=["gpt-4.1", "gpt-5.3-codex", "gpt-5.3-instant"], description="The supported OpenAI coding models"
     )  # OPENAI__SUPPORTED_CODING_MODELS
 
+    # Passthrough-agent alias → model mappings. These pick which OpenAI model
+    # the ``_reason_`` / ``_code_`` aliases resolve to when OpenAI is the
+    # winning provider; defaults match the current production picks. Override
+    # via env to pin or upgrade independently of code releases.
+    passthrough_reason_model: str = Field(
+        default="gpt-5.2",
+        description="OpenAI model used for the passthrough `_reason_` alias.",
+    )  # OPENAI__PASSTHROUGH_REASON_MODEL
+    passthrough_code_model: str = Field(
+        default="gpt-5.1-codex",
+        description="OpenAI model used for the passthrough `_code_` alias.",
+    )  # OPENAI__PASSTHROUGH_CODE_MODEL
+
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
     def split_supported_openai_models(cls, v: list[str] | str) -> list[str]:
@@ -96,6 +109,18 @@ class AnthropicSettings(Settings):
         "web_fetch tool. Example: 'web-fetch-2025-09-10'.",
     )  # ANTHROPIC__WEB_FETCH_BETA_HEADER
 
+    # Passthrough-agent alias → model mappings. These pick which Anthropic
+    # model the ``_reason_`` / ``_code_`` aliases resolve to. Override via
+    # env to pin or upgrade independently of code releases.
+    passthrough_reason_model: str = Field(
+        default="claude-sonnet-4-6",
+        description="Anthropic model used for the passthrough `_reason_` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_REASON_MODEL
+    passthrough_code_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Anthropic model used for the passthrough `_code_` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_CODE_MODEL
+
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
     def split_supported_anthropic_models(cls, v: list[str] | str) -> list[str]:
@@ -111,9 +136,24 @@ class FireworksSettings(Settings):
         description="Anthropic-compatible base URL for Fireworks (SDK appends /v1/messages)",
     )  # FIREWORKS__ANTHROPIC_BASE_URL
 
+    # Passthrough-agent alias → Fireworks-hosted model name. Adding a new
+    # Fireworks-hosted model is a settings entry plus a one-line table
+    # change in passthrough_config — no new factory function required.
+    passthrough_kimi_model: str = Field(
+        default="accounts/fireworks/models/kimi-k2p6",
+        description="Fireworks model used for the passthrough `_kimi_` alias.",
+    )  # FIREWORKS__PASSTHROUGH_KIMI_MODEL
+
 
 class GeminiSettings(Settings):
     api_key: str = Field(default="", description="The Google Gemini API key")  # GEMINI__API_KEY
+
+    # Passthrough-agent alias → Gemini model. Override via env to pin or
+    # upgrade independently of code releases.
+    passthrough_model: str = Field(
+        default="gemini-3.1-pro-preview",
+        description="Gemini model used for the passthrough `_gemini_` alias.",
+    )  # GEMINI__PASSTHROUGH_MODEL
 
 
 class MindsDBSettings(Settings):
