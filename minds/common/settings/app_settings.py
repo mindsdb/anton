@@ -81,6 +81,21 @@ class AnthropicSettings(Settings):
         description="The supported Anthropic coding models",
     )  # ANTHROPIC__SUPPORTED_CODING_MODELS
 
+    # Native web-tool versions used by the passthrough agent. These are
+    # Anthropic-versioned API contracts (e.g. "web_search_20250305") that
+    # change in a regular cadence. No defaults — operators must set them
+    # explicitly so version bumps are a conscious config change.
+    web_search_tool_type: str = Field(
+        description="Anthropic native web_search tool type (versioned). Example: 'web_search_20250305'.",
+    )  # ANTHROPIC__WEB_SEARCH_TOOL_TYPE
+    web_fetch_tool_type: str = Field(
+        description="Anthropic native web_fetch tool type (versioned). Example: 'web_fetch_20250910'.",
+    )  # ANTHROPIC__WEB_FETCH_TOOL_TYPE
+    web_fetch_beta_header: str = Field(
+        description="Value for the 'anthropic-beta' header required by the "
+        "web_fetch tool. Example: 'web-fetch-2025-09-10'.",
+    )  # ANTHROPIC__WEB_FETCH_BETA_HEADER
+
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
     def split_supported_anthropic_models(cls, v: list[str] | str) -> list[str]:

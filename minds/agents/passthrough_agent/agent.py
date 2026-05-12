@@ -21,15 +21,27 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
+from openai.types.chat import ChatCompletionChunk
+from openai.types.chat.chat_completion_chunk import (
+    Choice as ChunkChoice,
+)
+from openai.types.chat.chat_completion_chunk import (
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
+from pydantic import BaseModel, Field, ValidationError
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
 from minds.common.passthrough_config import PassthroughModelConfig
-from minds.schemas.chat import Message, Role
+from minds.common.settings.app_settings import get_app_settings
+from minds.schemas.chat import Message
 
 logger = setup_logging()
+settings = get_app_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -238,15 +250,116 @@ WEB_SEARCH_TYPE = "web_search"
 FETCH_TYPE = "fetch"
 _GENERIC_WEB_TOOL_TYPES = {WEB_SEARCH_TYPE, FETCH_TYPE}
 
-# Provider-native equivalents.
-_ANTHROPIC_WEB_SEARCH_TYPE = "web_search_20250305"
-_ANTHROPIC_WEB_FETCH_TYPE = "web_fetch_20250910"
-_ANTHROPIC_WEB_FETCH_BETA_HEADER = "web-fetch-2025-09-10"
+# Anthropic-versioned native tool types and the web_fetch beta header value
+# are configured via env vars on ``AnthropicSettings`` (no defaults) so
+# version bumps are an explicit operator decision rather than a silent
+# code change. Reference: ``minds/common/settings/app_settings.py``.
 
 
-def _is_generic_web_tool(tool: dict) -> bool:
-    """True iff ``tool`` uses our generic web-tool shape (``web_search`` / ``fetch``)."""
-    return isinstance(tool, dict) and tool.get("type") in _GENERIC_WEB_TOOL_TYPES
+# ---------------------------------------------------------------------------
+# Typed tool models
+# ---------------------------------------------------------------------------
+#
+# Inbound ``tools`` is raw JSON from the client. We parse each entry into a
+# Pydantic model before translating so a stray key typo or wrong-shape value
+# surfaces as a ValidationError up front rather than as a runtime
+# ``KeyError`` / silently-wrong upstream request. The translation helpers
+# operate on these typed wrappers, not raw dicts.
+
+
+class GenericWebSearchTool(BaseModel):
+    """Wire-format opt-in for native web search (provider-agnostic)."""
+
+    type: Literal["web_search"]
+
+
+class GenericFetchTool(BaseModel):
+    """Wire-format opt-in for native URL fetching (provider-agnostic)."""
+
+    type: Literal["fetch"]
+
+
+class ChatCompletionsFunctionDef(BaseModel):
+    """The ``function`` payload nested inside a chat-completions function tool."""
+
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}},
+    )
+
+
+class ChatCompletionsFunctionTool(BaseModel):
+    """A chat-completions function tool: ``{"type":"function","function":{...}}``."""
+
+    type: Literal["function"]
+    function: ChatCompletionsFunctionDef
+
+
+# Discriminated union of recognized inbound tool shapes.
+ParsedTool = GenericWebSearchTool | GenericFetchTool | ChatCompletionsFunctionTool
+
+
+class AnthropicToolsTranslation(BaseModel):
+    """Result of translating a client tool list to Anthropic-native format.
+
+    Returned as a named model (rather than a tuple) so callers reference
+    fields by name and can't get tuple ordering wrong.
+    """
+
+    tools: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Tools shaped for Anthropic's ``messages.create(tools=...)``.",
+    )
+    needs_web_fetch_beta: bool = Field(
+        default=False,
+        description="True iff a generic ``fetch`` tool was translated to "
+        "Anthropic's web_fetch, which currently requires the "
+        "``anthropic-beta`` header configured at "
+        "``settings.anthropic.web_fetch_beta_header``.",
+    )
+
+
+def _classify_tool(tool: Any) -> ParsedTool | None:
+    """Return a typed wrapper for a known tool shape, or ``None`` if unrecognized.
+
+    Anything we don't recognize (already-provider-shaped tools, malformed
+    entries, etc.) returns ``None`` and is logged at debug level so call
+    sites can decide whether to pass through or drop.
+    """
+    if not isinstance(tool, dict):
+        logger.debug("Skipping non-dict tool entry", extra={"tool_type": type(tool).__name__})
+        return None
+    ttype = tool.get("type")
+    if ttype == WEB_SEARCH_TYPE:
+        try:
+            return GenericWebSearchTool.model_validate(tool)
+        except ValidationError as exc:
+            logger.warning("Malformed generic web_search tool, skipping", extra={"errors": exc.errors()})
+            return None
+    if ttype == FETCH_TYPE:
+        try:
+            return GenericFetchTool.model_validate(tool)
+        except ValidationError as exc:
+            logger.warning("Malformed generic fetch tool, skipping", extra={"errors": exc.errors()})
+            return None
+    if ttype == "function":
+        try:
+            return ChatCompletionsFunctionTool.model_validate(tool)
+        except ValidationError as exc:
+            logger.warning(
+                "Malformed function tool, skipping",
+                extra={"errors": exc.errors(), "tool_name": (tool.get("function") or {}).get("name")},
+            )
+            return None
+    logger.debug("Unrecognized tool type, will pass through to upstream", extra={"type": ttype})
+    return None
+
+
+def _is_generic_web_tool(tool: Any) -> bool:
+    """True iff ``tool`` is a recognized generic web tool (``web_search`` / ``fetch``)."""
+    parsed = _classify_tool(tool)
+    return isinstance(parsed, GenericWebSearchTool | GenericFetchTool)
 
 
 def _only_web_tools(tools: list[dict] | None) -> bool:
@@ -260,46 +373,97 @@ def _only_web_tools(tools: list[dict] | None) -> bool:
     return all(_is_generic_web_tool(t) for t in tools)
 
 
+# ---------------------------------------------------------------------------
+# Streaming chunk builder
+# ---------------------------------------------------------------------------
+
+
+def _emit_chunk(
+    *,
+    completion_id: str,
+    created: int,
+    model: str,
+    role: str | None = None,
+    content: str | None = None,
+    tool_calls: list[ChoiceDeltaToolCall] | None = None,
+    finish_reason: str | None = None,
+) -> str:
+    """Build a serialized ``chat.completion.chunk`` SSE line via OpenAI SDK types.
+
+    Constructing chunks through ``ChatCompletionChunk`` / ``ChoiceDelta`` /
+    ``ChoiceDeltaToolCall`` keeps the wire shape correct by construction: a
+    typo in a delta field name fails Pydantic validation rather than silently
+    producing a broken SSE chunk that downstream clients would have to
+    debug.
+    """
+    delta = ChoiceDelta(role=role, content=content, tool_calls=tool_calls)
+    chunk = ChatCompletionChunk(
+        id=completion_id,
+        object="chat.completion.chunk",
+        created=created,
+        model=model,
+        choices=[ChunkChoice(index=0, delta=delta, finish_reason=finish_reason)],
+    )
+    return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+
 def _translate_tools_for_anthropic(
     tools: list[dict] | None,
     web_search_mode: str = "anthropic_native",
-) -> tuple[list[dict], bool]:
+) -> AnthropicToolsTranslation:
     """Translate generic + function tools to Anthropic's native tool format.
 
-    Returns ``(anthropic_tools, needs_web_fetch_beta)``. The boolean is True
-    iff a generic ``fetch`` tool was translated, meaning the caller must add
-    the ``anthropic-beta: web-fetch-2025-09-10`` header to the request (the
-    Anthropic web_fetch tool is currently in beta).
+    Returns an :class:`AnthropicToolsTranslation`. ``needs_web_fetch_beta``
+    is True iff a generic ``fetch`` tool was translated, meaning the caller
+    must add the ``anthropic-beta`` header (value from
+    ``settings.anthropic.web_fetch_beta_header``) to the request.
 
-    Generic web tools become Anthropic's versioned native types when
+    Generic web tools become Anthropic's versioned native types (from
+    ``settings.anthropic.web_search_tool_type`` /
+    ``settings.anthropic.web_fetch_tool_type``) when
     ``web_search_mode == "anthropic_native"``; with ``"drop"`` they are
     silently omitted (used for Fireworks routes, which share the Anthropic
-    transport shape but have no hosted search index). Function tools fall
-    through to the existing :func:`_openai_tools_to_anthropic` shape;
+    transport shape but have no hosted search index). Function tools are
+    re-shaped via :func:`ChatCompletionsFunctionTool`'s typed fields;
     unrecognized types are skipped (matches today's behavior).
     """
+    result = AnthropicToolsTranslation()
     if not tools:
-        return [], False
+        return result
 
-    out: list[dict] = []
-    needs_web_fetch_beta = False
     for tool in tools:
-        ttype = tool.get("type") if isinstance(tool, dict) else None
-        if ttype == WEB_SEARCH_TYPE:
+        parsed = _classify_tool(tool)
+        if isinstance(parsed, GenericWebSearchTool):
             if web_search_mode == "drop":
+                logger.debug("Dropping generic web_search (web_search_mode='drop')")
                 continue
-            out.append({"type": _ANTHROPIC_WEB_SEARCH_TYPE, "name": "web_search"})
-        elif ttype == FETCH_TYPE:
+            result.tools.append({"type": settings.anthropic.web_search_tool_type, "name": "web_search"})
+        elif isinstance(parsed, GenericFetchTool):
             if web_search_mode == "drop":
+                logger.debug("Dropping generic fetch (web_search_mode='drop')")
                 continue
-            out.append({"type": _ANTHROPIC_WEB_FETCH_TYPE, "name": "web_fetch"})
-            needs_web_fetch_beta = True
-        elif ttype == "function":
-            # Reuse existing function-tool conversion for one-tool input.
-            out.extend(_openai_tools_to_anthropic([tool]))
-        # else: silently skip unknown tool types (preserves prior behavior).
+            result.tools.append({"type": settings.anthropic.web_fetch_tool_type, "name": "web_fetch"})
+            result.needs_web_fetch_beta = True
+        elif isinstance(parsed, ChatCompletionsFunctionTool):
+            result.tools.append(
+                {
+                    "name": parsed.function.name,
+                    "description": parsed.function.description or "",
+                    "input_schema": parsed.function.parameters,
+                }
+            )
+        # else: unrecognized, already logged at debug by _classify_tool.
 
-    return out, needs_web_fetch_beta
+    logger.debug(
+        "Translated tools for Anthropic",
+        extra={
+            "input_count": len(tools),
+            "output_count": len(result.tools),
+            "needs_web_fetch_beta": result.needs_web_fetch_beta,
+            "web_search_mode": web_search_mode,
+        },
+    )
+    return result
 
 
 def _translate_tools_for_openai(
@@ -317,7 +481,8 @@ def _translate_tools_for_openai(
       (deduped — OpenAI's web_search bundles URL fetching, no separate
       fetch tool exists). With ``web_search_mode == "drop"`` they are
       silently omitted instead.
-    - Chat-completions function tool → flattened Responses shape.
+    - Chat-completions function tool → flattened Responses shape, via
+      :class:`ChatCompletionsFunctionTool` for typed field access.
     - Anything else passes through unchanged (covers tools the caller
       already shaped for the Responses API).
     """
@@ -327,27 +492,40 @@ def _translate_tools_for_openai(
     out: list[dict] = []
     web_search_added = False
     for tool in tools:
-        ttype = tool.get("type") if isinstance(tool, dict) else None
-        if ttype in _GENERIC_WEB_TOOL_TYPES:
+        parsed = _classify_tool(tool)
+        if isinstance(parsed, GenericWebSearchTool | GenericFetchTool):
             if web_search_mode == "drop":
+                logger.debug(
+                    "Dropping generic %s (web_search_mode='drop')",
+                    parsed.type,
+                )
                 continue
             if not web_search_added:
                 out.append({"type": "web_search"})
                 web_search_added = True
             continue
-        if ttype == "function" and "function" in tool:
-            fn = tool["function"]
+        if isinstance(parsed, ChatCompletionsFunctionTool):
             flat: dict[str, Any] = {
                 "type": "function",
-                "name": fn.get("name", ""),
-                "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                "name": parsed.function.name,
+                "parameters": parsed.function.parameters,
             }
-            if "description" in fn:
-                flat["description"] = fn["description"]
+            if parsed.function.description is not None:
+                flat["description"] = parsed.function.description
             out.append(flat)
             continue
-        out.append(tool)
+        # Pass through anything we didn't recognize (might be already-Responses-shaped).
+        if isinstance(tool, dict):
+            out.append(tool)
 
+    logger.debug(
+        "Translated tools for OpenAI (Responses)",
+        extra={
+            "input_count": len(tools),
+            "output_count": len(out),
+            "web_search_mode": web_search_mode,
+        },
+    )
     return out
 
 
@@ -821,128 +999,6 @@ class PassthroughAgent:
         # openai_responses (default)
         return await self._proxy_openai(**kwargs)
 
-    async def run(
-        self,
-        messages: list[Message],
-        streamer: Any,
-        stream: bool,
-        run_context: Any = None,
-        tools: list[dict] | None = None,
-        tool_choice: str | dict | None = None,
-    ):
-        """Legacy run method for backward compat with MessageStreamer pipeline.
-
-        Note: this code path is currently unreachable for passthrough models
-        (``OpenAIRequestHandler.create`` short-circuits to ``proxy()``); the
-        ``tools`` / ``tool_choice`` parameters exist for feature parity with
-        ``proxy()`` so future callers can use generic ``web_search`` / ``fetch``
-        here too. Only the model's final-text content is pushed to ``streamer``;
-        any ``server_tool_use`` / ``web_search_tool_result`` /
-        ``web_fetch_tool_result`` blocks Anthropic emits for native tools are
-        intentionally not surfaced (they're internal to the server-side tool).
-        """
-        logger.debug(
-            "run called",
-            extra={
-                "api_kind": self.config.api_kind,
-                "provider_label": self.config.label,
-                "model": self.config.model_name,
-                "message_count": len(messages),
-                "stream": stream,
-                "request_id": None,
-            },
-        )
-        msg_dicts = _messages_to_dicts(messages)
-
-        # See _proxy_anthropic / _proxy_openai for the tool_choice rationale:
-        # native web tools cannot be forced via tool_choice, so drop it when
-        # the request's only tools are web tools.
-        effective_tool_choice = None if _only_web_tools(tools) else tool_choice
-
-        if self.config.api_kind == "gemini_native":
-            # The legacy run() path is currently unreachable for passthrough
-            # models (handler short-circuits to proxy()). Keep the dispatch
-            # symmetric so future callers don't silently fall through to the
-            # OpenAI branch with a Gemini config; surface explicitly instead.
-            raise NotImplementedError(
-                "PassthroughAgent.run() does not yet support api_kind='gemini_native'. "
-                "Use proxy() (the default request path) for Gemini routes."
-            )
-
-        if self.config.api_kind == "anthropic_messages":
-            client = self._get_anthropic_client()
-            system_prompt, anthropic_msgs = _openai_messages_to_anthropic(msg_dicts)
-
-            kwargs: dict[str, Any] = {
-                "model": self.config.model_name,
-                "messages": anthropic_msgs,
-                "max_tokens": 16384,
-            }
-            if system_prompt:
-                kwargs["system"] = system_prompt
-
-            anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools, self.config.web_search_mode)
-            if anthropic_tools:
-                kwargs["tools"] = anthropic_tools
-            if needs_web_fetch_beta:
-                kwargs["extra_headers"] = {"anthropic-beta": _ANTHROPIC_WEB_FETCH_BETA_HEADER}
-            anthropic_tc = _openai_tool_choice_to_anthropic(effective_tool_choice)
-            if anthropic_tc is not None:
-                kwargs["tool_choice"] = anthropic_tc
-
-            try:
-                response = await client.messages.create(**kwargs)
-            except Exception:
-                logger.error(
-                    "Anthropic API request failed in run",
-                    exc_info=True,
-                    extra={"model": self.config.model_name},
-                )
-                raise
-            text = ""
-            for block in response.content:
-                if block.type == "text":
-                    text += block.text
-            self._usage = (response.usage.input_tokens, response.usage.output_tokens)
-            await streamer.push(role=Role.assistant, content=text)
-        else:
-            client = self._get_openai_client()
-            instructions, responses_input = _chat_messages_to_responses_input(msg_dicts)
-
-            kwargs: dict[str, Any] = {
-                "model": self.config.model_name,
-                "input": responses_input,
-            }
-            if instructions:
-                kwargs["instructions"] = instructions
-
-            openai_tools = _translate_tools_for_openai(tools, self.config.web_search_mode)
-            if openai_tools:
-                kwargs["tools"] = openai_tools
-            if effective_tool_choice is not None:
-                kwargs["tool_choice"] = _chat_tool_choice_to_responses(effective_tool_choice)
-
-            try:
-                response = await client.responses.create(**kwargs)
-            except Exception:
-                logger.error(
-                    "OpenAI API request failed in run",
-                    exc_info=True,
-                    extra={"model": self.config.model_name},
-                )
-                raise
-            # Extract assistant text from output items; ignore function_call,
-            # web_search_call, reasoning, etc. (consistent with the Anthropic
-            # branch — the streamer only sees final text).
-            text_parts: list[str] = []
-            for item in getattr(response, "output", []) or []:
-                if getattr(item, "type", None) == "message":
-                    for part in getattr(item, "content", []) or []:
-                        if getattr(part, "type", None) == "output_text":
-                            text_parts.append(getattr(part, "text", ""))
-            self._usage = (response.usage.input_tokens, response.usage.output_tokens)
-            await streamer.push(role=Role.assistant, content="".join(text_parts))
-
     async def get_last_run_usage(self) -> tuple[int, int] | None:
         return self._usage
 
@@ -1019,12 +1075,27 @@ class PassthroughAgent:
         # the chat-completions → Responses shape conversion).
         if tool_choice is not None and not _only_web_tools(tools):
             kwargs["tool_choice"] = _chat_tool_choice_to_responses(tool_choice)
+        elif tool_choice is not None:
+            logger.debug(
+                "Dropping tool_choice — only web tools present",
+                extra={"request_id": request_id, "tool_choice": tool_choice},
+            )
         if temperature is not None:
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             # Chat completions ``max_tokens`` is ``max_output_tokens`` on Responses.
             kwargs["max_output_tokens"] = max_tokens
 
+        logger.debug(
+            "Calling OpenAI Responses",
+            extra={
+                "request_id": request_id,
+                "model": self.config.model_name,
+                "stream": stream,
+                "has_tools": bool(openai_tools),
+                "has_instructions": bool(instructions),
+            },
+        )
         try:
             response = await client.responses.create(**kwargs)
         except APIStatusError as exc:
@@ -1077,6 +1148,7 @@ class PassthroughAgent:
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
         model = self.config.model_name
+        emit_kwargs = {"completion_id": completion_id, "created": created, "model": model}
 
         # Map Responses output_index → chat-completion tool_call index/info.
         function_calls_by_output_index: dict[int, dict] = {}
@@ -1086,25 +1158,17 @@ class PassthroughAgent:
         input_tokens = 0
         output_tokens = 0
 
+        logger.debug(
+            "OpenAI Responses stream begin",
+            extra={"request_id": request_id, "model": model, "completion_id": completion_id},
+        )
+
         async for event in stream:
             event_type = event.type
 
             if event_type in ("response.created", "response.in_progress"):
                 if not sent_role_chunk:
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"role": "assistant", "content": ""},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    yield _emit_chunk(**emit_kwargs, role="assistant", content="")
                     sent_role_chunk = True
 
             elif event_type == "response.output_item.added":
@@ -1119,70 +1183,37 @@ class PassthroughAgent:
                         "id": call_id,
                         "name": name,
                     }
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {
-                                    "tool_calls": [
-                                        {
-                                            "index": tc_index,
-                                            "id": call_id,
-                                            "type": "function",
-                                            "function": {"name": name, "arguments": ""},
-                                        }
-                                    ]
-                                },
-                                "finish_reason": None,
-                            }
+                    logger.debug(
+                        "Opening tool_call delta",
+                        extra={"request_id": request_id, "tc_index": tc_index, "name": name},
+                    )
+                    yield _emit_chunk(
+                        **emit_kwargs,
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=tc_index,
+                                id=call_id,
+                                type="function",
+                                function=ChoiceDeltaToolCallFunction(name=name, arguments=""),
+                            )
                         ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    )
 
             elif event_type == "response.output_text.delta":
-                chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": event.delta},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                yield _emit_chunk(**emit_kwargs, content=event.delta)
 
             elif event_type == "response.function_call_arguments.delta":
                 tc_info = function_calls_by_output_index.get(event.output_index)
                 if tc_info is not None:
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {
-                                    "tool_calls": [
-                                        {
-                                            "index": tc_info["tc_index"],
-                                            "function": {"arguments": event.delta},
-                                        }
-                                    ]
-                                },
-                                "finish_reason": None,
-                            }
+                    yield _emit_chunk(
+                        **emit_kwargs,
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=tc_info["tc_index"],
+                                function=ChoiceDeltaToolCallFunction(arguments=event.delta),
+                            )
                         ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    )
 
             elif event_type == "response.completed":
                 full = event.response
@@ -1194,14 +1225,16 @@ class PassthroughAgent:
                     if getattr(item, "type", None) == "function_call":
                         finish_reason = "tool_calls"
                         break
-                chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                logger.debug(
+                    "OpenAI Responses stream completed",
+                    extra={
+                        "request_id": request_id,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "finish_reason": finish_reason,
+                    },
+                )
+                yield _emit_chunk(**emit_kwargs, finish_reason=finish_reason)
 
             # All other event types (web_search_call.*, reasoning, content_part.*,
             # etc.) are intentionally not forwarded.
@@ -1236,12 +1269,13 @@ class PassthroughAgent:
         if system_prompt:
             kwargs["system"] = system_prompt
 
-        anthropic_tools, needs_web_fetch_beta = _translate_tools_for_anthropic(tools, self.config.web_search_mode)
-        if anthropic_tools:
-            kwargs["tools"] = anthropic_tools
-        if needs_web_fetch_beta:
-            # Anthropic's web_fetch tool is currently behind a beta header.
-            kwargs["extra_headers"] = {"anthropic-beta": _ANTHROPIC_WEB_FETCH_BETA_HEADER}
+        anthropic = _translate_tools_for_anthropic(tools, self.config.web_search_mode)
+        if anthropic.tools:
+            kwargs["tools"] = anthropic.tools
+        if anthropic.needs_web_fetch_beta:
+            # Anthropic's web_fetch tool is currently behind a beta header
+            # (value configured via ANTHROPIC__WEB_FETCH_BETA_HEADER).
+            kwargs["extra_headers"] = {"anthropic-beta": settings.anthropic.web_fetch_beta_header}
 
         # tool_choice handling: pure pass-through, with one exception. Native
         # server-side tools (web_search_20250305 / web_fetch_20250910) cannot
@@ -1250,6 +1284,11 @@ class PassthroughAgent:
         # forwarding e.g. tool_choice="required" would be a no-op or upstream
         # error, so drop it. When function tools are also present, pass-through.
         effective_tool_choice = None if _only_web_tools(tools) else tool_choice
+        if tool_choice is not None and effective_tool_choice is None:
+            logger.debug(
+                "Dropping tool_choice — only web tools present",
+                extra={"request_id": request_id, "tool_choice": tool_choice},
+            )
         anthropic_tc = _openai_tool_choice_to_anthropic(effective_tool_choice)
         if anthropic_tc is not None:
             kwargs["tool_choice"] = anthropic_tc
@@ -1258,6 +1297,16 @@ class PassthroughAgent:
         if stream:
             kwargs["stream"] = True
 
+        logger.debug(
+            "Calling Anthropic messages",
+            extra={
+                "request_id": request_id,
+                "model": self.config.model_name,
+                "stream": stream,
+                "has_tools": bool(anthropic.tools),
+                "needs_web_fetch_beta": anthropic.needs_web_fetch_beta,
+            },
+        )
         try:
             response = await client.messages.create(**kwargs)
         except APIStatusError as exc:
@@ -1307,6 +1356,7 @@ class PassthroughAgent:
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
         model = self.config.model_name
+        emit_kwargs = {"completion_id": completion_id, "created": created, "model": model}
 
         input_tokens = 0
         output_tokens = 0
@@ -1315,93 +1365,53 @@ class PassthroughAgent:
         current_tool_calls: dict[int, dict] = {}
         tool_call_index = 0
 
+        logger.debug(
+            "Anthropic stream begin",
+            extra={"request_id": request_id, "model": model, "completion_id": completion_id},
+        )
+
         async for event in stream:
             event_type = event.type
 
             if event_type == "message_start":
                 if hasattr(event.message, "usage"):
                     input_tokens = event.message.usage.input_tokens
-                # Send initial role chunk
-                chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": ""},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                yield _emit_chunk(**emit_kwargs, role="assistant", content="")
 
             elif event_type == "content_block_start":
                 block = event.content_block
                 if block.type == "tool_use":
-                    tc = {
-                        "id": block.id,
-                        "type": "function",
-                        "function": {"name": block.name, "arguments": ""},
-                    }
-                    current_tool_calls[tool_call_index] = tc
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"tool_calls": [{"index": tool_call_index, **tc}]},
-                                "finish_reason": None,
-                            }
+                    current_tool_calls[tool_call_index] = {"id": block.id, "name": block.name}
+                    logger.debug(
+                        "Opening Anthropic tool_use",
+                        extra={"request_id": request_id, "tc_index": tool_call_index, "name": block.name},
+                    )
+                    yield _emit_chunk(
+                        **emit_kwargs,
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=tool_call_index,
+                                id=block.id,
+                                type="function",
+                                function=ChoiceDeltaToolCallFunction(name=block.name, arguments=""),
+                            )
                         ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    )
 
             elif event_type == "content_block_delta":
                 delta = event.delta
                 if delta.type == "text_delta":
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": delta.text},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    yield _emit_chunk(**emit_kwargs, content=delta.text)
                 elif delta.type == "input_json_delta":
-                    if tool_call_index in current_tool_calls:
-                        current_tool_calls[tool_call_index]["function"]["arguments"] += delta.partial_json
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {
-                                    "tool_calls": [
-                                        {
-                                            "index": tool_call_index,
-                                            "function": {"arguments": delta.partial_json},
-                                        }
-                                    ]
-                                },
-                                "finish_reason": None,
-                            }
+                    yield _emit_chunk(
+                        **emit_kwargs,
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=tool_call_index,
+                                function=ChoiceDeltaToolCallFunction(arguments=delta.partial_json),
+                            )
                         ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    )
 
             elif event_type == "content_block_stop":
                 if tool_call_index in current_tool_calls:
@@ -1413,20 +1423,16 @@ class PassthroughAgent:
                 finish_reason = "stop"
                 if hasattr(event.delta, "stop_reason") and event.delta.stop_reason == "tool_use":
                     finish_reason = "tool_calls"
-                chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": finish_reason,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                logger.debug(
+                    "Anthropic stream completed",
+                    extra={
+                        "request_id": request_id,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "finish_reason": finish_reason,
+                    },
+                )
+                yield _emit_chunk(**emit_kwargs, finish_reason=finish_reason)
 
             elif event_type == "message_stop":
                 pass
@@ -1524,6 +1530,7 @@ class PassthroughAgent:
         completion_id = f"chatcmpl-{uuid.uuid4()}"
         created = int(time.time())
         model = self.config.model_name
+        emit_kwargs = {"completion_id": completion_id, "created": created, "model": model}
 
         sent_role_chunk = False
         tool_call_index = 0
@@ -1533,31 +1540,24 @@ class PassthroughAgent:
         completion_tokens = 0
         last_finish_reason: Any = None
 
-        async def _emit_role_chunk():
+        def _role_chunk_sse() -> str | None:
             nonlocal sent_role_chunk
             if sent_role_chunk:
                 return None
             sent_role_chunk = True
-            return {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": ""},
-                        "finish_reason": None,
-                    }
-                ],
-            }
+            return _emit_chunk(**emit_kwargs, role="assistant", content="")
+
+        logger.debug(
+            "Gemini stream begin",
+            extra={"request_id": request_id, "model": model, "completion_id": completion_id},
+        )
 
         try:
             stream = await client.aio.models.generate_content_stream(**common_kwargs)
             async for chunk in stream:
-                role_chunk = await _emit_role_chunk()
+                role_chunk = _role_chunk_sse()
                 if role_chunk is not None:
-                    yield f"data: {json.dumps(role_chunk)}\n\n"
+                    yield role_chunk
 
                 candidate = (getattr(chunk, "candidates", None) or [None])[0]
                 if candidate is None:
@@ -1570,20 +1570,7 @@ class PassthroughAgent:
                     text = getattr(part, "text", None)
                     if text:
                         text_emitted = True
-                        delta_chunk = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": text},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                        yield f"data: {json.dumps(delta_chunk)}\n\n"
+                        yield _emit_chunk(**emit_kwargs, content=text)
 
                     fn_call = getattr(part, "function_call", None)
                     if fn_call is not None:
@@ -1591,32 +1578,20 @@ class PassthroughAgent:
                         args = getattr(fn_call, "args", {}) or {}
                         # Whole tool_call atomically — Gemini doesn't stream
                         # incremental argument deltas.
-                        tc_chunk = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {
-                                        "tool_calls": [
-                                            {
-                                                "index": tool_call_index,
-                                                "id": f"call_{uuid.uuid4().hex[:8]}",
-                                                "type": "function",
-                                                "function": {
-                                                    "name": getattr(fn_call, "name", "") or "",
-                                                    "arguments": json.dumps(args),
-                                                },
-                                            }
-                                        ]
-                                    },
-                                    "finish_reason": None,
-                                }
+                        yield _emit_chunk(
+                            **emit_kwargs,
+                            tool_calls=[
+                                ChoiceDeltaToolCall(
+                                    index=tool_call_index,
+                                    id=f"call_{uuid.uuid4().hex[:8]}",
+                                    type="function",
+                                    function=ChoiceDeltaToolCallFunction(
+                                        name=getattr(fn_call, "name", "") or "",
+                                        arguments=json.dumps(args),
+                                    ),
+                                )
                             ],
-                        }
-                        yield f"data: {json.dumps(tc_chunk)}\n\n"
+                        )
                         tool_call_index += 1
 
                 usage_metadata = getattr(chunk, "usage_metadata", None)
@@ -1638,18 +1613,20 @@ class PassthroughAgent:
         # If nothing came through at all, still emit a role chunk so the
         # client sees a valid (empty) completion rather than a half-stream.
         if not sent_role_chunk:
-            empty_chunk = await _emit_role_chunk()
+            empty_chunk = _role_chunk_sse()
             if empty_chunk is not None:
-                yield f"data: {json.dumps(empty_chunk)}\n\n"
+                yield empty_chunk
         _ = text_emitted  # currently unused but retained for clarity
-        final_chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-        }
-        yield f"data: {json.dumps(final_chunk)}\n\n"
+        logger.debug(
+            "Gemini stream completed",
+            extra={
+                "request_id": request_id,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "finish_reason": finish_reason,
+            },
+        )
+        yield _emit_chunk(**emit_kwargs, finish_reason=finish_reason)
 
         self._usage = (prompt_tokens, completion_tokens)
         yield "data: [DONE]\n\n"
