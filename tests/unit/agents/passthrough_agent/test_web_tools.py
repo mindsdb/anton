@@ -796,9 +796,8 @@ async def test_anthropic_client_threads_base_url_from_config(monkeypatch):
             captured.update(kwargs)
             self.messages = SimpleNamespace(create=AsyncMock(return_value=_make_anthropic_response()))
 
-    import anthropic
-
-    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+    # Imports are at module-top in agent.py now; patch the symbol where it's used.
+    monkeypatch.setattr("minds.agents.passthrough_agent.agent.AsyncAnthropic", _FakeAsyncAnthropic)
 
     agent = PassthroughAgent(config=_fireworks_config())
     client = agent._get_anthropic_client()
@@ -818,9 +817,7 @@ async def test_anthropic_client_omits_base_url_when_unset(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    import anthropic
-
-    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+    monkeypatch.setattr("minds.agents.passthrough_agent.agent.AsyncAnthropic", _FakeAsyncAnthropic)
 
     agent = PassthroughAgent(config=_anthropic_config())
     agent._get_anthropic_client()
@@ -834,16 +831,46 @@ async def test_anthropic_client_omits_base_url_when_unset(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _fake_settings(*, openai_key="", anthropic_key="", fireworks_key="", gemini_key=""):
-    """Build a stand-in for AppSettings exposing only the fields the resolver reads."""
+def _fake_settings(
+    *,
+    openai_key: str = "",
+    anthropic_key: str = "",
+    fireworks_key: str = "",
+    gemini_key: str = "",
+    openai_reason_model: str = "gpt-5.2",
+    openai_code_model: str = "gpt-5.1-codex",
+    anthropic_reason_model: str = "claude-sonnet-4-6",
+    anthropic_code_model: str = "claude-haiku-4-5-20251001",
+    fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6",
+    gemini_model: str = "gemini-3.1-pro-preview",
+) -> SimpleNamespace:
+    """Build a stand-in for AppSettings exposing only the fields the resolver reads.
+
+    Model names are explicit args (with the same defaults the real settings
+    have) so tests can override them when verifying that settings drive
+    the alias table instead of hardcoded literals.
+    """
     return SimpleNamespace(
-        openai=SimpleNamespace(api_key=openai_key, api_url="https://api.openai.com/v1"),
-        anthropic=SimpleNamespace(api_key=anthropic_key),
+        openai=SimpleNamespace(
+            api_key=openai_key,
+            api_url="https://api.openai.com/v1",
+            passthrough_reason_model=openai_reason_model,
+            passthrough_code_model=openai_code_model,
+        ),
+        anthropic=SimpleNamespace(
+            api_key=anthropic_key,
+            passthrough_reason_model=anthropic_reason_model,
+            passthrough_code_model=anthropic_code_model,
+        ),
         fireworks=SimpleNamespace(
             api_key=fireworks_key,
             anthropic_base_url="https://api.fireworks.ai/inference",
+            passthrough_kimi_model=fireworks_kimi_model,
         ),
-        gemini=SimpleNamespace(api_key=gemini_key),
+        gemini=SimpleNamespace(
+            api_key=gemini_key,
+            passthrough_model=gemini_model,
+        ),
     )
 
 
@@ -920,6 +947,25 @@ def test_resolve_reason_with_no_keys_raises_400(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         resolve_passthrough_model("_reason_")
     assert exc_info.value.status_code == 400
+
+
+def test_resolve_reads_model_names_from_settings_not_hardcoded(monkeypatch):
+    """Override a passthrough_*_model setting and confirm the resolver picks
+    it up — proves the alias table is settings-driven, not hardcoded."""
+    _patch_settings(
+        monkeypatch,
+        _fake_settings(
+            anthropic_key="an-key",
+            anthropic_reason_model="claude-future-model-1",
+            fireworks_key="fw-key",
+            fireworks_kimi_model="accounts/fireworks/models/kimi-future",
+            gemini_key="gm-key",
+            gemini_model="gemini-future-pro",
+        ),
+    )
+    assert resolve_passthrough_model("_reason_").model_name == "claude-future-model-1"
+    assert resolve_passthrough_model("_kimi_").model_name == "accounts/fireworks/models/kimi-future"
+    assert resolve_passthrough_model("_gemini_").model_name == "gemini-future-pro"
 
 
 def test_resolve_unknown_alias_falls_back_to_reason_table(monkeypatch):
@@ -1112,11 +1158,15 @@ def test_gemini_response_to_chat_function_call_becomes_tool_call():
 
 
 def test_gemini_response_to_chat_max_tokens_finish_reason_maps_to_length():
+    # Real google.genai FinishReason enum — _gemini_finish_reason_to_openai
+    # now compares against the typed enum, not a getattr fallback.
+    from google.genai import types as genai_types
+
     response = SimpleNamespace(
         candidates=[
             SimpleNamespace(
                 content=SimpleNamespace(parts=[SimpleNamespace(text="cut off", function_call=None)]),
-                finish_reason=SimpleNamespace(name="MAX_TOKENS"),
+                finish_reason=genai_types.FinishReason.MAX_TOKENS,
             )
         ],
         usage_metadata=SimpleNamespace(prompt_token_count=1, candidates_token_count=1),
