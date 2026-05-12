@@ -111,6 +111,12 @@ from .routes.schedules import router as schedules_router, start_scheduler
 from .routes.browse import router as browse_router
 from .routes.integrations import router as integrations_router, refresh_google_oauth_tokens
 from .routes.datavault import router as datavault_router
+from .routes.dispatch import (
+    router as dispatch_router,
+    close_repo as close_dispatch_repo,
+    start_dispatch,
+    stop_dispatch,
+)
 from .routes.connectors import router as connectors_router
 from . import COWORK_SERVER_PROTOCOL_VERSION, COWORK_SERVER_VERSION
 
@@ -150,6 +156,7 @@ async def _google_token_refresh_loop() -> None:
 async def lifespan(app: FastAPI):
     projects_store.ensure_general_project()
     start_scheduler()
+    await start_dispatch()
     refresh_task = asyncio.create_task(_google_token_refresh_loop())
     yield
     refresh_task.cancel()
@@ -157,6 +164,8 @@ async def lifespan(app: FastAPI):
         await refresh_task
     except asyncio.CancelledError:
         pass
+    await stop_dispatch()
+    await close_dispatch_repo()
     await conversation_manager.close_all()
     await scratchpad_runtime.close_all()
 
@@ -194,6 +203,7 @@ app.include_router(schedules_router)
 app.include_router(browse_router)
 app.include_router(integrations_router, prefix="/v1/integrations", tags=["integrations"])
 app.include_router(datavault_router, prefix="/v1/datavault", tags=["datavault"])
+app.include_router(dispatch_router, prefix="/v1/dispatch", tags=["dispatch"])
 # Predefined connector registry — server/connectors/*.json
 app.include_router(connectors_router)
 
