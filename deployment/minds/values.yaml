@@ -112,6 +112,15 @@ deployment:
         secretKeyRef:
           name: mindsdb-secrets
           key: ANTHROPIC_API_KEY
+
+    # Anthropic native web-tool versions (required by app_settings.AnthropicSettings,
+    # no defaults — version bumps are an explicit config change).
+    - name: ANTHROPIC__WEB_SEARCH_TOOL_TYPE
+      value: "web_search_20250305"
+    - name: ANTHROPIC__WEB_FETCH_TOOL_TYPE
+      value: "web_fetch_20250910"
+    - name: ANTHROPIC__WEB_FETCH_BETA_HEADER
+      value: "web-fetch-2025-09-10"
   
     - name: MINDSDB__URL
       value: "http://mindsdb:80"
