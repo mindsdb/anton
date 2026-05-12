@@ -1,0 +1,59 @@
+{
+  "id": "telegram",
+  "label": "Telegram",
+  "aliases": [
+    "telegram bot",
+    "telegram messaging",
+    "telegram channel",
+    "tg bot"
+  ],
+  "keywords": [
+    "messaging",
+    "chat",
+    "bot",
+    "notifications",
+    "integration",
+    "communication",
+    "mobile"
+  ],
+  "description": "Receive and reply to messages in Telegram chats and groups using a bot created via @BotFather.",
+  "category": "communication",
+  "logo": "chats",
+  "logo_color": "#229ED9",
+  "form": {
+    "form_id": "telegram-connector",
+    "title": "Connect Telegram",
+    "subtitle": "Authorize Anton to receive and send messages through a Telegram bot.",
+    "logo": "chats",
+    "logo_color": "#229ED9",
+    "methods": [
+      {
+        "id": "bot-token",
+        "label": "Bot Token",
+        "description": "Paste the token from @BotFather. Takes 30 seconds to set up \u2014 no OAuth dance, no redirect URLs.",
+        "recommended": true,
+        "how_to": "## Create a Telegram Bot and get a Token\n\n### Steps\n\n1. Open Telegram and search for **@BotFather**.\n2. Send `/newbot` and follow the prompts to choose a name and username for your bot.\n3. BotFather will reply with a **token** that looks like `123456789:ABC-defGhIJKlmNoPQRsTUVwxyZ`.\n4. Copy the token and paste it into the **Bot Token** field below.\n\n### Notes\n\n- The bot must be started by each user before it can send them messages (the user sends `/start` to the bot once).\n- For group chats, add the bot to the group and it will respond to messages where it is @mentioned.\n- To get your bot's username, send `/mybots` to @BotFather.\n",
+        "help_url": "https://core.telegram.org/bots/tutorial",
+        "fields": [
+          {
+            "name": "bot_token",
+            "label": "Bot Token",
+            "type": "password",
+            "required": true,
+            "secret": true,
+            "placeholder": "123456789:ABC-defGhIJKlmNoPQRsTUVwxyZ",
+            "description": "Token from @BotFather. Starts with your bot's numeric ID followed by a colon."
+          },
+          {
+            "name": "bot_username",
+            "label": "Bot Username (optional)",
+            "type": "text",
+            "required": false,
+            "placeholder": "MyAntonBot",
+            "description": "Optional. The bot's @username without the @ sign. Used to detect @mentions in group chats so Anton only responds when addressed directly."
+          }
+        ]
+      }
+    ]
+  }
+}
