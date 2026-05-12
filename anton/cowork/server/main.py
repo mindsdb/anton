@@ -117,6 +117,7 @@ from .routes.dispatch import (
     start_dispatch,
     stop_dispatch,
 )
+from .routes.dispatch_slack import router as dispatch_slack_router
 from .routes.connectors import router as connectors_router
 from . import COWORK_SERVER_PROTOCOL_VERSION, COWORK_SERVER_VERSION
 
@@ -204,6 +205,7 @@ app.include_router(browse_router)
 app.include_router(integrations_router, prefix="/v1/integrations", tags=["integrations"])
 app.include_router(datavault_router, prefix="/v1/datavault", tags=["datavault"])
 app.include_router(dispatch_router, prefix="/v1/dispatch", tags=["dispatch"])
+app.include_router(dispatch_slack_router, prefix="/v1/dispatch", tags=["dispatch-slack"])
 # Predefined connector registry — server/connectors/*.json
 app.include_router(connectors_router)
 
