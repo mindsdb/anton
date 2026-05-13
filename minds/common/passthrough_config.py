@@ -1,27 +1,32 @@
 """Passthrough alias resolution.
 
-Callers write ``_xxx_`` in the request ``model`` field; we resolve that to a
-concrete upstream provider + model + credentials at request time. Adding a
-new alias means: (1) add a model-name setting on the relevant provider block
-in :mod:`minds.common.settings.app_settings`, and (2) add an entry to
-``_ALIAS_PRIORITY`` below. No new factory functions per alias — the
-provider-level builders read the model name from settings.
+Callers write ``latest:<model>`` in the request ``model`` field; we resolve
+that to a concrete upstream provider + model + credentials at request time.
+Adding a new alias means: (1) add a model-name setting on the relevant
+provider block in :mod:`minds.common.settings.app_settings`, and (2) add an
+entry to ``_ALIAS_PRIORITY`` below. No new factory functions per alias —
+the provider-level builders read the model name from settings.
+
+The alias body is versionless on purpose (``latest:kimi`` not
+``latest:kimi-k2.6``); upstream version bumps are an env-var change, not a
+client-facing rename.
 
 Routing layout:
 
-    _reason_           — Anthropic ``passthrough_reason_model``, falls back to
-                          OpenAI ``passthrough_reason_model`` (capability tier)
-    _code_             — Anthropic ``passthrough_code_model``, falls back to
-                          OpenAI ``passthrough_code_model`` (capability tier)
-    _sonnet_           — Anthropic ``passthrough_sonnet_model``
-    _opus_             — Anthropic ``passthrough_opus_model``
-    _haiku_            — Anthropic ``passthrough_haiku_model``
-    _gpt-5.5-low_      — OpenAI ``passthrough_gpt55_model`` + reasoning.effort=low
-    _gpt-5.5-medium_   — OpenAI ``passthrough_gpt55_model`` + reasoning.effort=medium
-    _gpt-5.5-high_     — OpenAI ``passthrough_gpt55_model`` + reasoning.effort=high
-    _gemini-3.1_       — Google ``passthrough_gemini_31_model`` (native generateContent API)
-    _kimi-k2.6_        — Fireworks ``passthrough_kimi_k26_model`` (Anthropic-shape API)
-    _deepseek-v4_      — Fireworks ``passthrough_deepseek_v4_model`` (Anthropic-shape API)
+    latest:sonnet      — Anthropic ``passthrough_sonnet_model``
+    latest:opus        — Anthropic ``passthrough_opus_model``
+    latest:haiku       — Anthropic ``passthrough_haiku_model``
+    latest:gpt         — OpenAI  ``passthrough_gpt_model``       + reasoning.effort=low (default)
+    latest:gpt-low     — OpenAI  ``passthrough_gpt_model``       + reasoning.effort=low
+    latest:gpt-medium  — OpenAI  ``passthrough_gpt_model``       + reasoning.effort=medium
+    latest:gpt-high    — OpenAI  ``passthrough_gpt_model``       + reasoning.effort=high
+    latest:gpt-codex   — OpenAI  ``passthrough_gpt_codex_model``
+    latest:gpt-mini    — OpenAI  ``passthrough_gpt_mini_model``
+    latest:gpt-nano    — OpenAI  ``passthrough_gpt_nano_model``
+    latest:gemini      — Google  ``passthrough_gemini_model``    (native generateContent API)
+    latest:kimi        — Fireworks ``passthrough_kimi_model``    (Anthropic-shape API)
+    latest:deepseek    — Fireworks ``passthrough_deepseek_model`` (Anthropic-shape API)
+    latest:qwen        — Fireworks ``passthrough_qwen_model``    (Anthropic-shape API)
 
 When a single-provider alias is requested but its key isn't configured we
 raise HTTP 400 rather than silently falling back — otherwise callers get
@@ -38,7 +43,7 @@ from pydantic import BaseModel
 
 from minds.common.settings.app_settings import AppSettings, get_app_settings
 
-_PASSTHROUGH_PATTERN = re.compile(r"^_([a-zA-Z0-9.\-]+)_$")
+_PASSTHROUGH_PATTERN = re.compile(r"^latest:([a-zA-Z0-9\-]+)$")
 
 
 class ApiKind(StrEnum):
@@ -65,11 +70,12 @@ class PassthroughModelConfig:
     ``api_kind`` chooses the SDK and translation path; ``base_url`` is None
     for OpenAI/Anthropic-direct (SDK default) and set for Anthropic-shape
     proxies like Fireworks. ``label`` survives the old ``provider`` string
-    for log-grep continuity. ``alias`` is the bare alias string (no
-    underscores) the resolver matched — preserved here so observability can
-    record it as metadata without re-parsing the request model. For OpenAI
-    reasoning-capable aliases like ``_gpt-5.5-low_``, ``reasoning_effort``
-    holds the effort level baked in by the alias; clients never set it.
+    for log-grep continuity. ``alias`` is the bare alias body the resolver
+    captured (e.g. ``"sonnet"`` for ``"latest:sonnet"``) — preserved here so
+    observability can record it as metadata without re-parsing the request
+    model. For OpenAI reasoning-tier aliases like ``latest:gpt-medium``,
+    ``reasoning_effort`` holds the effort level baked in by the alias;
+    clients never set it.
     """
 
     api_kind: ApiKind
@@ -118,7 +124,7 @@ class PassthroughObservabilityMetadata(BaseModel):
 
 
 def is_passthrough_model(model: str) -> bool:
-    """Return True if *model* matches the ``_xxx_`` passthrough pattern."""
+    """Return True if *model* matches the ``latest:<alias>`` passthrough pattern."""
     return _PASSTHROUGH_PATTERN.match(model) is not None
 
 
@@ -217,35 +223,16 @@ def _config_for_gemini(settings: AppSettings, model_name: str, *, alias: str) ->
 #
 # Each entry's builder is a ``Callable[[AppSettings], PassthroughModelConfig]``
 # that reads the model name from settings; the first predicate that returns
-# True wins. Single-provider aliases (``kimi``, ``gemini``) deliberately
-# have only one entry — missing key → 400, not silent fallback.
+# True wins. Every alias here has exactly one entry — there is no
+# cross-provider fallback. Missing key for the requested alias → 400, never
+# silent rerouting. (Callers ask for a specific model surface; we don't
+# guess which other model they would have accepted.)
 
 AliasBuilder = Callable[[AppSettings], PassthroughModelConfig]
 AliasPredicate = Callable[[AppSettings], bool]
 
 
 _ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
-    # Semantic capability-tier aliases — multi-provider fallback chain.
-    "reason": [
-        (
-            _anthropic_available,
-            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_reason_model, alias="reason"),
-        ),
-        (
-            _openai_available,
-            lambda s: _config_for_openai(s, s.openai.passthrough_reason_model, alias="reason"),
-        ),
-    ],
-    "code": [
-        (
-            _anthropic_available,
-            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_code_model, alias="code"),
-        ),
-        (
-            _openai_available,
-            lambda s: _config_for_openai(s, s.openai.passthrough_code_model, alias="code"),
-        ),
-    ],
     # Anthropic explicit-model aliases.
     "sonnet": [
         (
@@ -265,61 +252,91 @@ _ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
             lambda s: _config_for_anthropic(s, s.anthropic.passthrough_haiku_model, alias="haiku"),
         ),
     ],
-    # OpenAI gpt-5.5 with three reasoning levels — same upstream model name,
-    # reasoning_effort baked into config so clients don't have to know.
-    "gpt-5.5-low": [
+    # OpenAI flagship reasoning model with three effort levels. ``latest:gpt``
+    # is a deliberate alias for ``latest:gpt-low`` (the cheapest, fastest
+    # variant of the flagship) — gives callers a one-word default without
+    # having to know about reasoning_effort.
+    "gpt": [
+        (
+            _openai_available,
+            lambda s: _config_for_openai(s, s.openai.passthrough_gpt_model, alias="gpt", reasoning_effort="low"),
+        ),
+    ],
+    "gpt-low": [
+        (
+            _openai_available,
+            lambda s: _config_for_openai(s, s.openai.passthrough_gpt_model, alias="gpt-low", reasoning_effort="low"),
+        ),
+    ],
+    "gpt-medium": [
         (
             _openai_available,
             lambda s: _config_for_openai(
-                s, s.openai.passthrough_gpt55_model, alias="gpt-5.5-low", reasoning_effort="low"
+                s, s.openai.passthrough_gpt_model, alias="gpt-medium", reasoning_effort="medium"
             ),
         ),
     ],
-    "gpt-5.5-medium": [
+    "gpt-high": [
         (
             _openai_available,
-            lambda s: _config_for_openai(
-                s, s.openai.passthrough_gpt55_model, alias="gpt-5.5-medium", reasoning_effort="medium"
-            ),
+            lambda s: _config_for_openai(s, s.openai.passthrough_gpt_model, alias="gpt-high", reasoning_effort="high"),
         ),
     ],
-    "gpt-5.5-high": [
+    # OpenAI specialized variants — distinct upstream models, no reasoning
+    # level (those are configured server-side per model family).
+    "gpt-codex": [
         (
             _openai_available,
-            lambda s: _config_for_openai(
-                s, s.openai.passthrough_gpt55_model, alias="gpt-5.5-high", reasoning_effort="high"
-            ),
+            lambda s: _config_for_openai(s, s.openai.passthrough_gpt_codex_model, alias="gpt-codex"),
+        ),
+    ],
+    "gpt-mini": [
+        (
+            _openai_available,
+            lambda s: _config_for_openai(s, s.openai.passthrough_gpt_mini_model, alias="gpt-mini"),
+        ),
+    ],
+    "gpt-nano": [
+        (
+            _openai_available,
+            lambda s: _config_for_openai(s, s.openai.passthrough_gpt_nano_model, alias="gpt-nano"),
         ),
     ],
     # Single-provider explicit-model aliases.
-    "gemini-3.1": [
+    "gemini": [
         (
             _gemini_available,
-            lambda s: _config_for_gemini(s, s.gemini.passthrough_gemini_31_model, alias="gemini-3.1"),
+            lambda s: _config_for_gemini(s, s.gemini.passthrough_gemini_model, alias="gemini"),
         ),
     ],
-    "kimi-k2.6": [
+    "kimi": [
         (
             _fireworks_available,
-            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_kimi_k26_model, alias="kimi-k2.6"),
+            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_kimi_model, alias="kimi"),
         ),
     ],
-    "deepseek-v4": [
+    "deepseek": [
         (
             _fireworks_available,
-            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_deepseek_v4_model, alias="deepseek-v4"),
+            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_deepseek_model, alias="deepseek"),
+        ),
+    ],
+    "qwen": [
+        (
+            _fireworks_available,
+            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_qwen_model, alias="qwen"),
         ),
     ],
 }
 
 
 def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
-    """Resolve a ``_xxx_`` model name to a fully-populated config.
+    """Resolve a ``latest:<model>`` name to a fully-populated config.
 
     Unknown aliases raise ``HTTPException(400)``. Likewise, when an alias's
     priority list has no entry whose key is configured we raise 400 —
     keeps the passthrough contract honest instead of silently routing
-    ``_kimi-k2.6_`` to Claude.
+    ``latest:kimi`` to Claude.
     """
     m = _PASSTHROUGH_PATTERN.match(model)
     if not m:
@@ -333,7 +350,8 @@ def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Unknown passthrough alias '_{alias}_'. See service docs for the supported alias → provider mapping."
+                f"Unknown passthrough alias 'latest:{alias}'. "
+                "See service docs for the supported alias → provider mapping."
             ),
         )
     for predicate, builder in candidates:
@@ -343,7 +361,7 @@ def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
     raise HTTPException(
         status_code=400,
         detail=(
-            f"No provider configured for passthrough alias '_{alias}_'. "
+            f"No provider configured for passthrough alias 'latest:{alias}'. "
             "Set the API key for at least one supported provider on this "
             "alias (see service docs for the alias → provider mapping)."
         ),

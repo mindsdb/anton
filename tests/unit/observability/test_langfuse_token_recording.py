@@ -153,7 +153,7 @@ async def test_passthrough_records_alias_and_concrete_model_metadata(
     from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
 
     handler = _build_handler(
-        mock_session, mock_context, sample_messages, stream=False, model="_sonnet_", is_passthrough=True
+        mock_session, mock_context, sample_messages, stream=False, model="latest:sonnet", is_passthrough=True
     )
     # Real PassthroughAgent instance carrying a resolved config — the handler
     # reads cfg.model_name / cfg.alias / cfg.label / cfg.api_kind / cfg.reasoning_effort.

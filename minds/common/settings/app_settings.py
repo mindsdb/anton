@@ -61,25 +61,30 @@ class OpenAISettings(Settings):
         default=["gpt-4.1", "gpt-5.3-codex", "gpt-5.3-instant"], description="The supported OpenAI coding models"
     )  # OPENAI__SUPPORTED_CODING_MODELS
 
-    # Passthrough-agent alias → model mappings. These pick which OpenAI model
-    # the ``_reason_`` / ``_code_`` aliases resolve to when OpenAI is the
-    # winning provider; defaults match the current production picks. Override
-    # via env to pin or upgrade independently of code releases.
-    passthrough_reason_model: str = Field(
-        default="gpt-5.2",
-        description="OpenAI model used for the passthrough `_reason_` alias.",
-    )  # OPENAI__PASSTHROUGH_REASON_MODEL
-    passthrough_code_model: str = Field(
-        default="gpt-5.1-codex",
-        description="OpenAI model used for the passthrough `_code_` alias.",
-    )  # OPENAI__PASSTHROUGH_CODE_MODEL
-    # Backs the three reasoning-level aliases ``_gpt-5.5-low_`` /
-    # ``_gpt-5.5-medium_`` / ``_gpt-5.5-high_``; the alias selects the
-    # reasoning_effort, the settings field selects the upstream model.
-    passthrough_gpt55_model: str = Field(
+    # Passthrough-agent alias → model mappings. Aliases drop the version
+    # from the request-facing name (``latest:gpt``, ``latest:gpt-mini`` etc.)
+    # so client code doesn't churn when ops bump a major upstream version;
+    # the actual model identifier lives here and can be overridden via env.
+    passthrough_gpt_model: str = Field(
         default="gpt-5.5",
-        description="OpenAI model used for the `_gpt-5.5-{low,medium,high}_` aliases.",
-    )  # OPENAI__PASSTHROUGH_GPT55_MODEL
+        description=(
+            "OpenAI model used for the `latest:gpt` / `latest:gpt-low|medium|high` "
+            "aliases. The alias selects reasoning_effort; this setting selects "
+            "the upstream model."
+        ),
+    )  # OPENAI__PASSTHROUGH_GPT_MODEL
+    passthrough_gpt_codex_model: str = Field(
+        default="gpt-5.3-codex",
+        description="OpenAI model used for the `latest:gpt-codex` alias.",
+    )  # OPENAI__PASSTHROUGH_GPT_CODEX_MODEL
+    passthrough_gpt_mini_model: str = Field(
+        default="gpt-5.4-mini",
+        description="OpenAI model used for the `latest:gpt-mini` alias.",
+    )  # OPENAI__PASSTHROUGH_GPT_MINI_MODEL
+    passthrough_gpt_nano_model: str = Field(
+        default="gpt-5.4-nano",
+        description="OpenAI model used for the `latest:gpt-nano` alias.",
+    )  # OPENAI__PASSTHROUGH_GPT_NANO_MODEL
 
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
@@ -116,31 +121,20 @@ class AnthropicSettings(Settings):
         "web_fetch tool. Example: 'web-fetch-2025-09-10'.",
     )  # ANTHROPIC__WEB_FETCH_BETA_HEADER
 
-    # Passthrough-agent alias → model mappings. These pick which Anthropic
-    # model the ``_reason_`` / ``_code_`` aliases resolve to. Override via
-    # env to pin or upgrade independently of code releases.
-    passthrough_reason_model: str = Field(
-        default="claude-sonnet-4-6",
-        description="Anthropic model used for the passthrough `_reason_` alias.",
-    )  # ANTHROPIC__PASSTHROUGH_REASON_MODEL
-    passthrough_code_model: str = Field(
-        default="claude-haiku-4-5-20251001",
-        description="Anthropic model used for the passthrough `_code_` alias.",
-    )  # ANTHROPIC__PASSTHROUGH_CODE_MODEL
-    # Explicit-model aliases. Kept distinct from the semantic ``_reason_`` /
-    # ``_code_`` fields so ops can move semantic aliases to next-gen models
-    # without disturbing callers that asked for a specific model by name.
+    # Passthrough-agent explicit-model aliases. Override via env to pin
+    # or upgrade independently of code releases — the alias surface stays
+    # stable while the upstream model can move.
     passthrough_sonnet_model: str = Field(
         default="claude-sonnet-4-6",
-        description="Anthropic model used for the passthrough `_sonnet_` alias.",
+        description="Anthropic model used for the `latest:sonnet` alias.",
     )  # ANTHROPIC__PASSTHROUGH_SONNET_MODEL
     passthrough_opus_model: str = Field(
         default="claude-opus-4-7",
-        description="Anthropic model used for the passthrough `_opus_` alias.",
+        description="Anthropic model used for the `latest:opus` alias.",
     )  # ANTHROPIC__PASSTHROUGH_OPUS_MODEL
     passthrough_haiku_model: str = Field(
         default="claude-haiku-4-5-20251001",
-        description="Anthropic model used for the passthrough `_haiku_` alias.",
+        description="Anthropic model used for the `latest:haiku` alias.",
     )  # ANTHROPIC__PASSTHROUGH_HAIKU_MODEL
 
     @field_validator("supported_models", "supported_coding_models", mode="before")
@@ -158,17 +152,21 @@ class FireworksSettings(Settings):
         description="Anthropic-compatible base URL for Fireworks (SDK appends /v1/messages)",
     )  # FIREWORKS__ANTHROPIC_BASE_URL
 
-    # Passthrough-agent alias → Fireworks-hosted model name. Adding a new
-    # Fireworks-hosted model is a settings entry plus a one-line table
-    # change in passthrough_config — no new factory function required.
-    passthrough_kimi_k26_model: str = Field(
+    # Passthrough-agent alias → Fireworks-hosted model name. Aliases are
+    # versionless (``latest:kimi``); the version-pinned identifier lives
+    # here so a Kimi/DeepSeek/Qwen point-release is a one-env-var change.
+    passthrough_kimi_model: str = Field(
         default="accounts/fireworks/models/kimi-k2p6",
-        description="Fireworks model used for the passthrough `_kimi-k2.6_` alias.",
-    )  # FIREWORKS__PASSTHROUGH_KIMI_K26_MODEL
-    passthrough_deepseek_v4_model: str = Field(
-        default="accounts/fireworks/models/deepseek-v4",
-        description="Fireworks model used for the passthrough `_deepseek-v4_` alias.",
-    )  # FIREWORKS__PASSTHROUGH_DEEPSEEK_V4_MODEL
+        description="Fireworks model used for the `latest:kimi` alias.",
+    )  # FIREWORKS__PASSTHROUGH_KIMI_MODEL
+    passthrough_deepseek_model: str = Field(
+        default="accounts/fireworks/models/deepseek-v4-pro",
+        description="Fireworks model used for the `latest:deepseek` alias.",
+    )  # FIREWORKS__PASSTHROUGH_DEEPSEEK_MODEL
+    passthrough_qwen_model: str = Field(
+        default="accounts/fireworks/models/qwen3p6-plus",
+        description="Fireworks model used for the `latest:qwen` alias.",
+    )  # FIREWORKS__PASSTHROUGH_QWEN_MODEL
 
 
 class GeminiSettings(Settings):
@@ -176,10 +174,10 @@ class GeminiSettings(Settings):
 
     # Passthrough-agent alias → Gemini model. Override via env to pin or
     # upgrade independently of code releases.
-    passthrough_gemini_31_model: str = Field(
+    passthrough_gemini_model: str = Field(
         default="gemini-3.1-pro-preview",
-        description="Gemini model used for the passthrough `_gemini-3.1_` alias.",
-    )  # GEMINI__PASSTHROUGH_GEMINI_31_MODEL
+        description="Gemini model used for the `latest:gemini` alias.",
+    )  # GEMINI__PASSTHROUGH_GEMINI_MODEL
 
 
 class MindsDBSettings(Settings):
