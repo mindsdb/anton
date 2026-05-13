@@ -73,6 +73,13 @@ class OpenAISettings(Settings):
         default="gpt-5.1-codex",
         description="OpenAI model used for the passthrough `_code_` alias.",
     )  # OPENAI__PASSTHROUGH_CODE_MODEL
+    # Backs the three reasoning-level aliases ``_gpt-5.5-low_`` /
+    # ``_gpt-5.5-medium_`` / ``_gpt-5.5-high_``; the alias selects the
+    # reasoning_effort, the settings field selects the upstream model.
+    passthrough_gpt55_model: str = Field(
+        default="gpt-5.5",
+        description="OpenAI model used for the `_gpt-5.5-{low,medium,high}_` aliases.",
+    )  # OPENAI__PASSTHROUGH_GPT55_MODEL
 
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
@@ -120,6 +127,21 @@ class AnthropicSettings(Settings):
         default="claude-haiku-4-5-20251001",
         description="Anthropic model used for the passthrough `_code_` alias.",
     )  # ANTHROPIC__PASSTHROUGH_CODE_MODEL
+    # Explicit-model aliases. Kept distinct from the semantic ``_reason_`` /
+    # ``_code_`` fields so ops can move semantic aliases to next-gen models
+    # without disturbing callers that asked for a specific model by name.
+    passthrough_sonnet_model: str = Field(
+        default="claude-sonnet-4-6",
+        description="Anthropic model used for the passthrough `_sonnet_` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_SONNET_MODEL
+    passthrough_opus_model: str = Field(
+        default="claude-opus-4-7",
+        description="Anthropic model used for the passthrough `_opus_` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_OPUS_MODEL
+    passthrough_haiku_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Anthropic model used for the passthrough `_haiku_` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_HAIKU_MODEL
 
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
@@ -139,10 +161,14 @@ class FireworksSettings(Settings):
     # Passthrough-agent alias → Fireworks-hosted model name. Adding a new
     # Fireworks-hosted model is a settings entry plus a one-line table
     # change in passthrough_config — no new factory function required.
-    passthrough_kimi_model: str = Field(
+    passthrough_kimi_k26_model: str = Field(
         default="accounts/fireworks/models/kimi-k2p6",
-        description="Fireworks model used for the passthrough `_kimi_` alias.",
-    )  # FIREWORKS__PASSTHROUGH_KIMI_MODEL
+        description="Fireworks model used for the passthrough `_kimi-k2.6_` alias.",
+    )  # FIREWORKS__PASSTHROUGH_KIMI_K26_MODEL
+    passthrough_deepseek_v4_model: str = Field(
+        default="accounts/fireworks/models/deepseek-v4",
+        description="Fireworks model used for the passthrough `_deepseek-v4_` alias.",
+    )  # FIREWORKS__PASSTHROUGH_DEEPSEEK_V4_MODEL
 
 
 class GeminiSettings(Settings):
@@ -150,10 +176,10 @@ class GeminiSettings(Settings):
 
     # Passthrough-agent alias → Gemini model. Override via env to pin or
     # upgrade independently of code releases.
-    passthrough_model: str = Field(
+    passthrough_gemini_31_model: str = Field(
         default="gemini-3.1-pro-preview",
-        description="Gemini model used for the passthrough `_gemini_` alias.",
-    )  # GEMINI__PASSTHROUGH_MODEL
+        description="Gemini model used for the passthrough `_gemini-3.1_` alias.",
+    )  # GEMINI__PASSTHROUGH_GEMINI_31_MODEL
 
 
 class MindsDBSettings(Settings):

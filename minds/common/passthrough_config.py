@@ -7,17 +7,25 @@ in :mod:`minds.common.settings.app_settings`, and (2) add an entry to
 ``_ALIAS_PRIORITY`` below. No new factory functions per alias — the
 provider-level builders read the model name from settings.
 
-Routing layout for v1:
+Routing layout:
 
-    _reason_   — Anthropic claude-sonnet-4-6, falls back to OpenAI gpt-5.2
-    _code_     — Anthropic claude-haiku-4-5-20251001, falls back to OpenAI gpt-5.1-codex
-    _kimi_     — Fireworks Kimi K2.6 (Anthropic-shape API at fireworks.ai)
-    _gemini_   — Google gemini-3.1-pro-preview (native generateContent API)
+    _reason_           — Anthropic ``passthrough_reason_model``, falls back to
+                          OpenAI ``passthrough_reason_model`` (capability tier)
+    _code_             — Anthropic ``passthrough_code_model``, falls back to
+                          OpenAI ``passthrough_code_model`` (capability tier)
+    _sonnet_           — Anthropic ``passthrough_sonnet_model``
+    _opus_             — Anthropic ``passthrough_opus_model``
+    _haiku_            — Anthropic ``passthrough_haiku_model``
+    _gpt-5.5-low_      — OpenAI ``passthrough_gpt55_model`` + reasoning.effort=low
+    _gpt-5.5-medium_   — OpenAI ``passthrough_gpt55_model`` + reasoning.effort=medium
+    _gpt-5.5-high_     — OpenAI ``passthrough_gpt55_model`` + reasoning.effort=high
+    _gemini-3.1_       — Google ``passthrough_gemini_31_model`` (native generateContent API)
+    _kimi-k2.6_        — Fireworks ``passthrough_kimi_k26_model`` (Anthropic-shape API)
+    _deepseek-v4_      — Fireworks ``passthrough_deepseek_v4_model`` (Anthropic-shape API)
 
-When a single-provider alias (``_kimi_``, ``_gemini_``) is requested but its
-key isn't configured we raise HTTP 400 rather than silently falling back —
-otherwise callers get strictly different model behavior than they asked for
-with no signal.
+When a single-provider alias is requested but its key isn't configured we
+raise HTTP 400 rather than silently falling back — otherwise callers get
+strictly different model behavior than they asked for with no signal.
 """
 
 import re
@@ -26,10 +34,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from fastapi import HTTPException
+from pydantic import BaseModel
 
 from minds.common.settings.app_settings import AppSettings, get_app_settings
 
-_PASSTHROUGH_PATTERN = re.compile(r"^_([a-zA-Z0-9]+)_$")
+_PASSTHROUGH_PATTERN = re.compile(r"^_([a-zA-Z0-9.\-]+)_$")
 
 
 class ApiKind(StrEnum):
@@ -56,7 +65,11 @@ class PassthroughModelConfig:
     ``api_kind`` chooses the SDK and translation path; ``base_url`` is None
     for OpenAI/Anthropic-direct (SDK default) and set for Anthropic-shape
     proxies like Fireworks. ``label`` survives the old ``provider`` string
-    for log-grep continuity.
+    for log-grep continuity. ``alias`` is the bare alias string (no
+    underscores) the resolver matched — preserved here so observability can
+    record it as metadata without re-parsing the request model. For OpenAI
+    reasoning-capable aliases like ``_gpt-5.5-low_``, ``reasoning_effort``
+    holds the effort level baked in by the alias; clients never set it.
     """
 
     api_kind: ApiKind
@@ -65,6 +78,43 @@ class PassthroughModelConfig:
     base_url: str | None = None
     web_search_mode: WebSearchMode = WebSearchMode.DROP
     label: str = ""
+    alias: str = ""
+    reasoning_effort: str | None = None
+
+    def to_observability_metadata(self) -> "PassthroughObservabilityMetadata":
+        """Project the config into the metadata blob recorded on Langfuse.
+
+        Centralized here (rather than constructed inline at the handler)
+        so adding a new metadata field is a one-place change and a typo in
+        a field name surfaces at this construction site, not downstream.
+        """
+        return PassthroughObservabilityMetadata(
+            passthrough_alias=self.alias,
+            provider=self.label,
+            api_kind=self.api_kind.value,
+            reasoning_effort=self.reasoning_effort,
+        )
+
+
+class PassthroughObservabilityMetadata(BaseModel):
+    """Metadata attached to the Langfuse generation for a passthrough request.
+
+    Mirrors :class:`minds.requests.context.LangfuseContextMetadata`'s pattern
+    of typing observability payloads rather than passing free-form dicts —
+    a typo in a key name now fails at construction instead of producing an
+    unfilterable trace. ``to_metadata()`` returns the dict the Langfuse SDK
+    accepts, dropping fields whose value is None so the dashboard doesn't
+    render spurious ``null`` rows for aliases (Anthropic, Gemini, Fireworks)
+    that have no reasoning-level concept.
+    """
+
+    passthrough_alias: str
+    provider: str
+    api_kind: str
+    reasoning_effort: str | None = None
+
+    def to_metadata(self) -> dict:
+        return self.model_dump(exclude_none=True)
 
 
 def is_passthrough_model(model: str) -> bool:
@@ -104,7 +154,13 @@ def _gemini_available(settings: AppSettings) -> bool:
 # per alias.
 
 
-def _config_for_openai(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
+def _config_for_openai(
+    settings: AppSettings,
+    model_name: str,
+    *,
+    alias: str,
+    reasoning_effort: str | None = None,
+) -> PassthroughModelConfig:
     return PassthroughModelConfig(
         api_kind=ApiKind.OPENAI_RESPONSES,
         model_name=model_name,
@@ -112,20 +168,23 @@ def _config_for_openai(settings: AppSettings, model_name: str) -> PassthroughMod
         base_url=settings.openai.api_url,
         web_search_mode=WebSearchMode.OPENAI_NATIVE,
         label="openai",
+        alias=alias,
+        reasoning_effort=reasoning_effort,
     )
 
 
-def _config_for_anthropic(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
+def _config_for_anthropic(settings: AppSettings, model_name: str, *, alias: str) -> PassthroughModelConfig:
     return PassthroughModelConfig(
         api_kind=ApiKind.ANTHROPIC_MESSAGES,
         model_name=model_name,
         api_key=settings.anthropic.api_key,
         web_search_mode=WebSearchMode.ANTHROPIC_NATIVE,
         label="anthropic",
+        alias=alias,
     )
 
 
-def _config_for_fireworks(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
+def _config_for_fireworks(settings: AppSettings, model_name: str, *, alias: str) -> PassthroughModelConfig:
     # Fireworks exposes an Anthropic-compatible Messages API at this base
     # URL; the Anthropic SDK appends /v1/messages. Web search is unavailable
     # — Fireworks doesn't host a search index — so generic web_search/fetch
@@ -137,16 +196,18 @@ def _config_for_fireworks(settings: AppSettings, model_name: str) -> Passthrough
         base_url=settings.fireworks.anthropic_base_url,
         web_search_mode=WebSearchMode.DROP,
         label="fireworks",
+        alias=alias,
     )
 
 
-def _config_for_gemini(settings: AppSettings, model_name: str) -> PassthroughModelConfig:
+def _config_for_gemini(settings: AppSettings, model_name: str, *, alias: str) -> PassthroughModelConfig:
     return PassthroughModelConfig(
         api_kind=ApiKind.GEMINI_NATIVE,
         model_name=model_name,
         api_key=settings.gemini.api_key,
         web_search_mode=WebSearchMode.GEMINI_GOOGLE_SEARCH,
         label="gemini",
+        alias=alias,
     )
 
 
@@ -164,36 +225,91 @@ AliasPredicate = Callable[[AppSettings], bool]
 
 
 _ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
+    # Semantic capability-tier aliases — multi-provider fallback chain.
     "reason": [
         (
             _anthropic_available,
-            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_reason_model),
+            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_reason_model, alias="reason"),
         ),
         (
             _openai_available,
-            lambda s: _config_for_openai(s, s.openai.passthrough_reason_model),
+            lambda s: _config_for_openai(s, s.openai.passthrough_reason_model, alias="reason"),
         ),
     ],
     "code": [
         (
             _anthropic_available,
-            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_code_model),
+            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_code_model, alias="code"),
         ),
         (
             _openai_available,
-            lambda s: _config_for_openai(s, s.openai.passthrough_code_model),
+            lambda s: _config_for_openai(s, s.openai.passthrough_code_model, alias="code"),
         ),
     ],
-    "kimi": [
+    # Anthropic explicit-model aliases.
+    "sonnet": [
         (
-            _fireworks_available,
-            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_kimi_model),
+            _anthropic_available,
+            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_sonnet_model, alias="sonnet"),
         ),
     ],
-    "gemini": [
+    "opus": [
+        (
+            _anthropic_available,
+            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_opus_model, alias="opus"),
+        ),
+    ],
+    "haiku": [
+        (
+            _anthropic_available,
+            lambda s: _config_for_anthropic(s, s.anthropic.passthrough_haiku_model, alias="haiku"),
+        ),
+    ],
+    # OpenAI gpt-5.5 with three reasoning levels — same upstream model name,
+    # reasoning_effort baked into config so clients don't have to know.
+    "gpt-5.5-low": [
+        (
+            _openai_available,
+            lambda s: _config_for_openai(
+                s, s.openai.passthrough_gpt55_model, alias="gpt-5.5-low", reasoning_effort="low"
+            ),
+        ),
+    ],
+    "gpt-5.5-medium": [
+        (
+            _openai_available,
+            lambda s: _config_for_openai(
+                s, s.openai.passthrough_gpt55_model, alias="gpt-5.5-medium", reasoning_effort="medium"
+            ),
+        ),
+    ],
+    "gpt-5.5-high": [
+        (
+            _openai_available,
+            lambda s: _config_for_openai(
+                s, s.openai.passthrough_gpt55_model, alias="gpt-5.5-high", reasoning_effort="high"
+            ),
+        ),
+    ],
+    # Single-provider explicit-model aliases.
+    "gemini-3.1": [
         (
             _gemini_available,
-            lambda s: _config_for_gemini(s, s.gemini.passthrough_model),
+            lambda s: _config_for_gemini(s, s.gemini.passthrough_gemini_31_model, alias="gemini-3.1"),
+        ),
+    ],
+    "kimi-k2.6": [
+        (
+            _fireworks_available,
+            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_kimi_k26_model, alias="kimi-k2.6"),
+        ),
+    ],
+    "deepseek-v4": [
+        (
+            _fireworks_available,
+            lambda s: _config_for_fireworks(
+                s, s.fireworks.passthrough_deepseek_v4_model, alias="deepseek-v4"
+            ),
         ),
     ],
 }
@@ -202,10 +318,10 @@ _ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
 def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
     """Resolve a ``_xxx_`` model name to a fully-populated config.
 
-    Unknown aliases fall back to ``_reason_``'s table (matches prior behavior).
-    Raises ``HTTPException(400)`` when no entry in the alias's priority list
-    has its key configured — keeps the passthrough contract honest instead of
-    silently routing ``_kimi_`` to Claude.
+    Unknown aliases raise ``HTTPException(400)``. Likewise, when an alias's
+    priority list has no entry whose key is configured we raise 400 —
+    keeps the passthrough contract honest instead of silently routing
+    ``_kimi-k2.6_`` to Claude.
     """
     m = _PASSTHROUGH_PATTERN.match(model)
     if not m:
@@ -214,7 +330,15 @@ def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
     alias = m.group(1).lower()
     settings = get_app_settings()
 
-    candidates = _ALIAS_PRIORITY.get(alias, _ALIAS_PRIORITY["reason"])
+    candidates = _ALIAS_PRIORITY.get(alias)
+    if candidates is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown passthrough alias '_{alias}_'. "
+                "See service docs for the supported alias → provider mapping."
+            ),
+        )
     for predicate, builder in candidates:
         if predicate(settings):
             return builder(settings)
