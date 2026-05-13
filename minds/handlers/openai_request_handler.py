@@ -200,6 +200,15 @@ class OpenAIRequestHandler:
         - dict   → caller is outside the @observe scope (streaming body
           iterator runs after the handler returns); the helper attaches a
           child generation observation to the captured trace.
+
+        For passthrough requests, Langfuse records the **concrete** upstream
+        model (``cfg.model_name`` like ``claude-sonnet-4-6``) rather than the
+        alias (``_sonnet_``) so its cost rollup lands against an actual entry
+        in its model registry. The alias plus provider context goes onto
+        ``metadata`` so analytics can still slice by the alias surface. The
+        DB ``ChatCompletion`` row keeps ``self.model`` (the alias) because
+        that's what the client called us with — useful for attribution back
+        to the alias.
         """
         chat_completion = ChatCompletion(
             organization_id=self.context.organization_id,
@@ -217,10 +226,26 @@ class OpenAIRequestHandler:
             f"{usage[0] if usage else 0} in / {usage[1] if usage else 0} out"
         )
 
+        model_for_langfuse = self.model
+        metadata: dict | None = None
+        if self.is_passthrough and isinstance(self.agent, PassthroughAgent):
+            cfg = self.agent.config
+            model_for_langfuse = cfg.model_name
+            # Typed Pydantic metadata model — typos surface at construction,
+            # ``exclude_none`` drops reasoning_effort for aliases that have
+            # no reasoning-level concept (Anthropic, Gemini, Fireworks).
+            metadata = cfg.to_observability_metadata().to_metadata()
+            logger.debug(
+                f"[{self.request_id}] Passthrough Langfuse metadata: "
+                f"model={model_for_langfuse} alias={cfg.alias} "
+                f"provider={cfg.label} reasoning_effort={cfg.reasoning_effort}"
+            )
+
         update_generation_usage(
             usage=usage,
-            model=self.model,
+            model=model_for_langfuse,
             trace_context=langfuse_trace_context,
+            metadata=metadata,
         )
 
     async def chat_completions(self, streamer: MessageStreamer):
