@@ -42,6 +42,7 @@ from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, COMMANDS
 
 from anton.utils.clipboard import (
     ImageRefLexer,
+    ImageTooLargeError,
     attach_image_path_detector,
     build_image_ref_message,
     ensure_clipboard,
@@ -1318,7 +1319,16 @@ async def _chat_loop(
 
             # Expand any [Image #N] placeholders into multimodal blocks. After
             # this, the registry only keeps entries that were actually sent.
-            expanded, ref_ids = build_image_ref_message(user_input, image_registry)
+            try:
+                expanded, ref_ids = build_image_ref_message(user_input, image_registry)
+            except ImageTooLargeError as exc:
+                console.print(
+                    f"[anton.warning]Image is too large ({human_size(exc.size_bytes)}), "
+                    f"max ~3.7 MB raw (5 MB base64 limit). "
+                    f"Please resize and re-attach.[/]"
+                )
+                image_registry.prune_unused(set())
+                continue
             if isinstance(expanded, list):
                 message_content = expanded
                 stripped = ""
@@ -1335,7 +1345,15 @@ async def _chat_loop(
                             f"({uploaded.width}x{uploaded.height}, "
                             f"{human_size(uploaded.size_bytes)})[/]"
                         )
-                        message_content = format_clipboard_image_message(uploaded)
+                        try:
+                            message_content = format_clipboard_image_message(uploaded)
+                        except ImageTooLargeError as exc:
+                            console.print(
+                                f"[anton.warning]Image is too large ({human_size(exc.size_bytes)}), "
+                                f"max ~3.7 MB raw (5 MB base64 limit). "
+                                f"Please resize and re-attach.[/]"
+                            )
+                            continue
                     elif clip.file_paths:
                         stripped = format_file_message("", clip.file_paths, console)
                 if not stripped and message_content is None:
@@ -1525,9 +1543,17 @@ async def _chat_loop(
                             f"{human_size(uploaded.size_bytes)})[/]"
                         )
                         user_text = parts[1] if len(parts) > 1 else ""
-                        message_content = format_clipboard_image_message(
-                            uploaded, user_text
-                        )
+                        try:
+                            message_content = format_clipboard_image_message(
+                                uploaded, user_text
+                            )
+                        except ImageTooLargeError as exc:
+                            console.print(
+                                f"[anton.warning]Image is too large ({human_size(exc.size_bytes)}), "
+                                f"max ~3.7 MB raw (5 MB base64 limit). "
+                                f"Please resize and re-attach.[/]"
+                            )
+                            continue
                         # Fall through to turn_stream (don't continue)
                     else:
                         console.print("[anton.warning]No image found on clipboard.[/]")

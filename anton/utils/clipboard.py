@@ -17,6 +17,29 @@ from anton.clipboard import (
 )
 
 
+MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB base64 limit per Anthropic API
+
+
+class ImageTooLargeError(Exception):
+    """Raised when an image exceeds the Claude API base64 size limit."""
+
+    def __init__(self, size_bytes: int) -> None:
+        self.size_bytes = size_bytes
+        super().__init__(
+            f"Image too large: {self._format_size(size_bytes)} "
+            "(base64 would exceed 5 MB)"
+        )
+
+    @staticmethod
+    def _format_size(nbytes: int) -> str:
+        """Format bytes as human-readable size."""
+        for unit in ("B", "KB", "MB", "GB"):
+            if nbytes < 1024:
+                return f"{nbytes:.0f}{unit}" if unit == "B" else f"{nbytes:.1f}{unit}"
+            nbytes /= 1024
+        return f"{nbytes:.1f}TB"
+
+
 def human_size(nbytes: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if nbytes < 1024:
@@ -82,6 +105,9 @@ def format_file_message(text: str, paths: list[Path], console: Console) -> str:
 def format_clipboard_image_message(uploaded: object, user_text: str = "") -> list[dict]:
     """Build a multimodal LLM message for a clipboard image upload."""
     import base64
+
+    if uploaded.size_bytes * 4 // 3 > MAX_IMAGE_BYTES:
+        raise ImageTooLargeError(uploaded.size_bytes)
 
     text = (
         user_text.strip()
@@ -348,6 +374,8 @@ def build_image_ref_message(
                     _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
                     raw = buf.getvalue()
                     fmt = "PNG"
+                if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
+                    raise ImageTooLargeError(len(raw))
                 b64 = base64.standard_b64encode(raw).decode("ascii")
                 blocks.append({
                     "type": "image",
