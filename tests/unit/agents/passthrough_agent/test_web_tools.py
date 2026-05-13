@@ -922,6 +922,7 @@ def _fake_settings(
     fireworks_deepseek_model: str = "accounts/fireworks/models/deepseek-v4-pro",
     fireworks_qwen_model: str = "accounts/fireworks/models/qwen3p6-plus",
     gemini_model: str = "gemini-3.1-pro-preview",
+    gemini_flash_model: str = "gemini-3-flash-preview",
 ) -> SimpleNamespace:
     """Build a stand-in for AppSettings exposing only the fields the resolver reads.
 
@@ -954,6 +955,7 @@ def _fake_settings(
         gemini=SimpleNamespace(
             api_key=gemini_key,
             passthrough_gemini_model=gemini_model,
+            passthrough_gemini_flash_model=gemini_flash_model,
         ),
     )
 
@@ -1082,6 +1084,19 @@ def test_resolve_gemini_without_key_raises_400(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         resolve_passthrough_model("latest:gemini")
     assert exc_info.value.status_code == 400
+
+
+def test_resolve_gemini_flash_uses_flash_model(monkeypatch):
+    # Two distinct Gemini aliases must resolve to distinct model names so
+    # callers can pick Pro vs Flash without a shared override.
+    _patch_settings(monkeypatch, _fake_settings(gemini_key="gm-key"))
+    cfg = resolve_passthrough_model("latest:gemini-flash")
+    assert cfg.api_kind == "gemini_native"
+    assert cfg.model_name == "gemini-3-flash-preview"
+    assert cfg.label == "gemini"
+    assert cfg.alias == "gemini-flash"
+    # Sanity: distinct from `latest:gemini` (Pro line).
+    assert cfg.model_name != resolve_passthrough_model("latest:gemini").model_name
 
 
 def test_resolve_kimi_uses_fireworks_with_anthropic_shape(monkeypatch):
@@ -1731,10 +1746,12 @@ async def test_live_latest_openai_aliases(alias: str):
 
 
 @requires_gemini
+@pytest.mark.parametrize("alias", ["latest:gemini", "latest:gemini-flash"])
 @pytest.mark.asyncio
-async def test_live_latest_gemini_alias():
-    text = await _exercise_alias("latest:gemini")
-    assert text.strip()
+async def test_live_latest_gemini_aliases(alias: str):
+    """End-to-end: both Gemini aliases (Pro + Flash) return a real response."""
+    text = await _exercise_alias(alias)
+    assert text.strip(), f"empty text for {alias!r}"
 
 
 @requires_fireworks

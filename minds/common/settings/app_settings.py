@@ -178,6 +178,12 @@ class GeminiSettings(Settings):
         default="gemini-3.1-pro-preview",
         description="Gemini model used for the `latest:gemini` alias.",
     )  # GEMINI__PASSTHROUGH_GEMINI_MODEL
+    passthrough_gemini_flash_model: str = Field(
+        default="gemini-3-flash-preview",
+        description=(
+            "Gemini Flash model used for the `latest:gemini-flash` alias — cheaper, faster sibling of the Pro line."
+        ),
+    )  # GEMINI__PASSTHROUGH_GEMINI_FLASH_MODEL
 
 
 class MindsDBSettings(Settings):

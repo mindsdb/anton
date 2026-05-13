@@ -23,7 +23,8 @@ Routing layout:
     latest:gpt-codex   — OpenAI  ``passthrough_gpt_codex_model``
     latest:gpt-mini    — OpenAI  ``passthrough_gpt_mini_model``
     latest:gpt-nano    — OpenAI  ``passthrough_gpt_nano_model``
-    latest:gemini      — Google  ``passthrough_gemini_model``    (native generateContent API)
+    latest:gemini      — Google  ``passthrough_gemini_model``       (native generateContent API)
+    latest:gemini-flash — Google ``passthrough_gemini_flash_model`` (Flash sibling, lower latency/cost)
     latest:kimi        — Fireworks ``passthrough_kimi_model``    (Anthropic-shape API)
     latest:deepseek    — Fireworks ``passthrough_deepseek_model`` (Anthropic-shape API)
     latest:qwen        — Fireworks ``passthrough_qwen_model``    (Anthropic-shape API)
@@ -307,6 +308,12 @@ _ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
         (
             _gemini_available,
             lambda s: _config_for_gemini(s, s.gemini.passthrough_gemini_model, alias="gemini"),
+        ),
+    ],
+    "gemini-flash": [
+        (
+            _gemini_available,
+            lambda s: _config_for_gemini(s, s.gemini.passthrough_gemini_flash_model, alias="gemini-flash"),
         ),
     ],
     "kimi": [
