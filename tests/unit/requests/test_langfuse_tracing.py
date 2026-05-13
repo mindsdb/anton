@@ -265,6 +265,7 @@ class TestUpdateGenerationUsage:
             usage_details={"input": 11, "output": 7, "total": 18},
             input=None,
             output=None,
+            metadata=None,
         )
         client.start_observation.assert_not_called()
 
@@ -292,6 +293,7 @@ class TestUpdateGenerationUsage:
             usage_details={"input": 5, "output": 3, "total": 8},
             input=None,
             output="hello",
+            metadata=None,
         )
         observation.end.assert_called_once()
         client.update_current_generation.assert_not_called()
@@ -341,6 +343,41 @@ class TestUpdateGenerationUsage:
         mock_logger.error.assert_any_call("Error updating Langfuse generation usage: boom")
 
     @patch("minds.requests.langfuse_tracing.get_client")
+    def test_forwards_metadata_kwarg_in_scope(self, mock_get_client):
+        """Passthrough flows pass alias/provider metadata; the helper must
+        forward it to ``update_current_generation`` verbatim."""
+        client = MagicMock()
+        mock_get_client.return_value = client
+
+        meta = {"passthrough_alias": "sonnet", "provider": "anthropic"}
+        update_generation_usage((1, 2), model="claude-sonnet-4-6", metadata=meta)
+
+        client.update_current_generation.assert_called_once_with(
+            model="claude-sonnet-4-6",
+            usage_details={"input": 1, "output": 2, "total": 3},
+            input=None,
+            output=None,
+            metadata=meta,
+        )
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_forwards_metadata_kwarg_detached(self, mock_get_client):
+        """Detached mode (streaming) also forwards metadata to ``start_observation``."""
+        client = MagicMock()
+        client.start_observation.return_value = MagicMock()
+        mock_get_client.return_value = client
+
+        meta = {"passthrough_alias": "gpt-5.5-medium", "reasoning_effort": "medium"}
+        update_generation_usage(
+            (4, 8),
+            model="gpt-5.5",
+            trace_context={"trace_id": "t"},
+            metadata=meta,
+        )
+
+        assert client.start_observation.call_args.kwargs["metadata"] == meta
+
+    @patch("minds.requests.langfuse_tracing.get_client")
     def test_handles_zero_token_counts(self, mock_get_client):
         """Zero counts still produce a well-formed usage_details payload."""
         client = MagicMock()
@@ -353,6 +390,7 @@ class TestUpdateGenerationUsage:
             usage_details={"input": 0, "output": 0, "total": 0},
             input=None,
             output=None,
+            metadata=None,
         )
 
 

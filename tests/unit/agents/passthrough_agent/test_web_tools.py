@@ -43,6 +43,33 @@ from minds.common.passthrough_config import (
 from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.chat import Message, Role
 
+
+def test_public_api_reexports_from_agent_module():
+    """File-split smoke test: every name historically imported from
+    ``passthrough_agent.agent`` must still resolve after the per-provider
+    refactor (each provider module star-exports into agent.py)."""
+    from minds.agents.passthrough_agent.agent import (  # noqa: F401
+        AnthropicToolsTranslation,
+        ChatCompletionsFunctionTool,
+        GenericFetchTool,
+        GenericWebSearchTool,
+        PassthroughAgent,
+        _chat_messages_to_gemini,
+        _chat_messages_to_responses_input,
+        _chat_tool_choice_to_gemini,
+        _chat_tool_choice_to_responses,
+        _classify_tool,
+        _gemini_response_to_openai,
+        _is_generic_web_tool,
+        _only_web_tools,
+        _responses_response_to_chat_completion,
+        _translate_tools_for_anthropic,
+        _translate_tools_for_gemini,
+        _translate_tools_for_openai,
+    )
+    assert callable(PassthroughAgent)
+
+
 # ---------------------------------------------------------------------------
 # Test config helpers
 # ---------------------------------------------------------------------------
@@ -728,6 +755,52 @@ async def test_proxy_openai_specific_function_tool_choice_translated(monkeypatch
     assert kwargs["tool_choice"] == {"type": "function", "name": "f"}
 
 
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+@pytest.mark.asyncio
+async def test_proxy_openai_passes_reasoning_effort_when_set(monkeypatch, effort: str):
+    """When the resolved config carries ``reasoning_effort``, the OpenAI proxy
+    forwards it as ``reasoning={"effort": ...}`` on ``responses.create``."""
+    cfg = PassthroughModelConfig(
+        api_kind="openai_responses",
+        model_name="gpt-5.5",
+        api_key="test-key",
+        web_search_mode="openai_native",
+        label="openai",
+        alias=f"gpt-5.5-{effort}",
+        reasoning_effort=effort,
+    )
+    agent = PassthroughAgent(config=cfg)
+
+    create_mock = AsyncMock(return_value=_make_openai_responses_response())
+    monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
+
+    await agent._proxy_openai(
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        request_id="req-reason",
+    )
+
+    kwargs = create_mock.await_args.kwargs
+    assert kwargs["reasoning"] == {"effort": effort}
+
+
+@pytest.mark.asyncio
+async def test_proxy_openai_omits_reasoning_when_unset(monkeypatch):
+    """When ``reasoning_effort`` is None, no ``reasoning`` kwarg is sent."""
+    agent = PassthroughAgent(config=_openai_config())  # no reasoning_effort
+
+    create_mock = AsyncMock(return_value=_make_openai_responses_response())
+    monkeypatch.setattr(agent, "_get_openai_client", lambda: _fake_openai_client(create_mock))
+
+    await agent._proxy_openai(
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        request_id="req-no-reason",
+    )
+
+    assert "reasoning" not in create_mock.await_args.kwargs
+
+
 # ---------------------------------------------------------------------------
 # web_search_mode="drop" — Fireworks parity
 # ---------------------------------------------------------------------------
@@ -839,10 +912,15 @@ def _fake_settings(
     gemini_key: str = "",
     openai_reason_model: str = "gpt-5.2",
     openai_code_model: str = "gpt-5.1-codex",
+    openai_gpt55_model: str = "gpt-5.5",
     anthropic_reason_model: str = "claude-sonnet-4-6",
     anthropic_code_model: str = "claude-haiku-4-5-20251001",
-    fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6",
-    gemini_model: str = "gemini-3.1-pro-preview",
+    anthropic_sonnet_model: str = "claude-sonnet-4-6",
+    anthropic_opus_model: str = "claude-opus-4-7",
+    anthropic_haiku_model: str = "claude-haiku-4-5-20251001",
+    fireworks_kimi_k26_model: str = "accounts/fireworks/models/kimi-k2p6",
+    fireworks_deepseek_v4_model: str = "accounts/fireworks/models/deepseek-v4",
+    gemini_gemini_31_model: str = "gemini-3.1-pro-preview",
 ) -> SimpleNamespace:
     """Build a stand-in for AppSettings exposing only the fields the resolver reads.
 
@@ -856,20 +934,25 @@ def _fake_settings(
             api_url="https://api.openai.com/v1",
             passthrough_reason_model=openai_reason_model,
             passthrough_code_model=openai_code_model,
+            passthrough_gpt55_model=openai_gpt55_model,
         ),
         anthropic=SimpleNamespace(
             api_key=anthropic_key,
             passthrough_reason_model=anthropic_reason_model,
             passthrough_code_model=anthropic_code_model,
+            passthrough_sonnet_model=anthropic_sonnet_model,
+            passthrough_opus_model=anthropic_opus_model,
+            passthrough_haiku_model=anthropic_haiku_model,
         ),
         fireworks=SimpleNamespace(
             api_key=fireworks_key,
             anthropic_base_url="https://api.fireworks.ai/inference",
-            passthrough_kimi_model=fireworks_kimi_model,
+            passthrough_kimi_k26_model=fireworks_kimi_k26_model,
+            passthrough_deepseek_v4_model=fireworks_deepseek_v4_model,
         ),
         gemini=SimpleNamespace(
             api_key=gemini_key,
-            passthrough_model=gemini_model,
+            passthrough_gemini_31_model=gemini_gemini_31_model,
         ),
     )
 
@@ -904,41 +987,54 @@ def test_resolve_code_prefers_anthropic_haiku_when_both_keys_set(monkeypatch):
     assert cfg.model_name == "claude-haiku-4-5-20251001"
 
 
-def test_resolve_kimi_uses_fireworks_with_anthropic_shape(monkeypatch):
+def test_resolve_kimi_k2_6_uses_fireworks_with_anthropic_shape(monkeypatch):
     _patch_settings(monkeypatch, _fake_settings(fireworks_key="fw-key"))
-    cfg = resolve_passthrough_model("_kimi_")
+    cfg = resolve_passthrough_model("_kimi-k2.6_")
     assert cfg.api_kind == "anthropic_messages"
     assert cfg.model_name == "accounts/fireworks/models/kimi-k2p6"
     assert cfg.api_key == "fw-key"
     assert cfg.base_url == "https://api.fireworks.ai/inference"
     assert cfg.web_search_mode == "drop"
     assert cfg.label == "fireworks"
+    assert cfg.alias == "kimi-k2.6"
 
 
-def test_resolve_kimi_without_fireworks_key_raises_400_no_silent_fallback(monkeypatch):
-    # Critical: even with Anthropic + OpenAI keys present, _kimi_ must NOT
+def test_resolve_kimi_k2_6_without_fireworks_key_raises_400_no_silent_fallback(monkeypatch):
+    # Critical: even with Anthropic + OpenAI keys present, _kimi-k2.6_ must NOT
     # silently fall back to Claude or GPT. Callers asked for Kimi.
     _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key", anthropic_key="an-key"))
     with pytest.raises(HTTPException) as exc_info:
-        resolve_passthrough_model("_kimi_")
+        resolve_passthrough_model("_kimi-k2.6_")
     assert exc_info.value.status_code == 400
-    assert "_kimi_" in exc_info.value.detail
+    assert "kimi-k2.6" in exc_info.value.detail
 
 
-def test_resolve_gemini_uses_native_api_with_google_search(monkeypatch):
+def test_resolve_deepseek_v4_uses_fireworks(monkeypatch):
+    # Two distinct Fireworks aliases must resolve to distinct model names so
+    # callers can pick between Kimi and DeepSeek without a shared override.
+    _patch_settings(monkeypatch, _fake_settings(fireworks_key="fw-key"))
+    cfg = resolve_passthrough_model("_deepseek-v4_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "accounts/fireworks/models/deepseek-v4"
+    assert cfg.label == "fireworks"
+    assert cfg.alias == "deepseek-v4"
+
+
+def test_resolve_gemini_31_uses_native_api_with_google_search(monkeypatch):
     _patch_settings(monkeypatch, _fake_settings(gemini_key="gm-key"))
-    cfg = resolve_passthrough_model("_gemini_")
+    cfg = resolve_passthrough_model("_gemini-3.1_")
     assert cfg.api_kind == "gemini_native"
     assert cfg.model_name == "gemini-3.1-pro-preview"
     assert cfg.api_key == "gm-key"
     assert cfg.web_search_mode == "gemini_google_search"
     assert cfg.label == "gemini"
+    assert cfg.alias == "gemini-3.1"
 
 
-def test_resolve_gemini_without_key_raises_400(monkeypatch):
+def test_resolve_gemini_31_without_key_raises_400(monkeypatch):
     _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key", anthropic_key="an-key"))
     with pytest.raises(HTTPException) as exc_info:
-        resolve_passthrough_model("_gemini_")
+        resolve_passthrough_model("_gemini-3.1_")
     assert exc_info.value.status_code == 400
 
 
@@ -958,24 +1054,105 @@ def test_resolve_reads_model_names_from_settings_not_hardcoded(monkeypatch):
             anthropic_key="an-key",
             anthropic_reason_model="claude-future-model-1",
             fireworks_key="fw-key",
-            fireworks_kimi_model="accounts/fireworks/models/kimi-future",
+            fireworks_kimi_k26_model="accounts/fireworks/models/kimi-future",
             gemini_key="gm-key",
-            gemini_model="gemini-future-pro",
+            gemini_gemini_31_model="gemini-future-pro",
         ),
     )
     assert resolve_passthrough_model("_reason_").model_name == "claude-future-model-1"
-    assert resolve_passthrough_model("_kimi_").model_name == "accounts/fireworks/models/kimi-future"
-    assert resolve_passthrough_model("_gemini_").model_name == "gemini-future-pro"
+    assert resolve_passthrough_model("_kimi-k2.6_").model_name == "accounts/fireworks/models/kimi-future"
+    assert resolve_passthrough_model("_gemini-3.1_").model_name == "gemini-future-pro"
 
 
-def test_resolve_unknown_alias_falls_back_to_reason_table(monkeypatch):
-    # Preserves prior behavior: unknown aliases route through _reason_'s
-    # priority list, so they still resolve to *something* when at least one
-    # of the _reason_ providers is configured.
+# ---------------------------------------------------------------------------
+# New explicit-model aliases
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_sonnet_uses_anthropic(monkeypatch):
     _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
-    cfg = resolve_passthrough_model("_mystery_")
+    cfg = resolve_passthrough_model("_sonnet_")
     assert cfg.api_kind == "anthropic_messages"
     assert cfg.model_name == "claude-sonnet-4-6"
+    assert cfg.label == "anthropic"
+    assert cfg.alias == "sonnet"
+
+
+def test_resolve_opus_uses_anthropic(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    cfg = resolve_passthrough_model("_opus_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "claude-opus-4-7"
+    assert cfg.alias == "opus"
+
+
+def test_resolve_haiku_uses_anthropic(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    cfg = resolve_passthrough_model("_haiku_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "claude-haiku-4-5-20251001"
+    assert cfg.alias == "haiku"
+
+
+def test_resolve_sonnet_without_anthropic_key_raises_400(monkeypatch):
+    # Anthropic explicit-model aliases must not silently fall back to OpenAI.
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key"))
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_passthrough_model("_sonnet_")
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("alias", "expected_effort"),
+    [
+        ("_gpt-5.5-low_", "low"),
+        ("_gpt-5.5-medium_", "medium"),
+        ("_gpt-5.5-high_", "high"),
+    ],
+)
+def test_resolve_gpt55_aliases_set_reasoning_effort(monkeypatch, alias: str, expected_effort: str):
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key"))
+    cfg = resolve_passthrough_model(alias)
+    assert cfg.api_kind == "openai_responses"
+    assert cfg.model_name == "gpt-5.5"
+    assert cfg.reasoning_effort == expected_effort
+    # alias preserves the bracketed token (minus underscores) so observability
+    # records the reasoning level distinctly per call.
+    assert cfg.alias == alias.strip("_")
+
+
+def test_resolve_gpt55_low_without_openai_key_raises_400(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    with pytest.raises(HTTPException):
+        resolve_passthrough_model("_gpt-5.5-low_")
+
+
+def test_resolve_dotted_alias_pattern_accepts_dot_and_hyphen():
+    """Regex relaxation: ``.`` and ``-`` must be permitted inside the alias body."""
+    from minds.common.passthrough_config import is_passthrough_model
+    assert is_passthrough_model("_gpt-5.5-high_") is True
+    assert is_passthrough_model("_kimi-k2.6_") is True
+    assert is_passthrough_model("_gemini-3.1_") is True
+    # No wrapping underscores → still rejected (real model names aren't aliases).
+    assert is_passthrough_model("gpt-5.5") is False
+    assert is_passthrough_model("kimi-k2.6") is False
+
+
+def test_resolve_alias_field_populated_for_semantic_alias(monkeypatch):
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    assert resolve_passthrough_model("_reason_").alias == "reason"
+    assert resolve_passthrough_model("_code_").alias == "code"
+
+
+def test_resolve_unknown_alias_raises_400(monkeypatch):
+    # Unknown aliases no longer silently fall back to _reason_ — with ten
+    # explicit aliases, masking a misconfigured alias would be more harmful
+    # than surfacing it.
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_passthrough_model("_mystery_")
+    assert exc_info.value.status_code == 400
+    assert "mystery" in exc_info.value.detail
 
 
 # ---------------------------------------------------------------------------
