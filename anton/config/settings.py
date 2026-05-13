@@ -38,6 +38,7 @@ class AntonSettings(CoreSettings):
     openai_api_version: str | None = None  # Azure api-version query param
 
     memory_enabled: bool = True
+    # TODO: Calling this memory_dir is a bit misleading, because there are other directories that live here
     memory_dir: str = ".anton"
 
     context_dir: str = ".anton/context"
@@ -131,4 +132,4 @@ class AntonSettings(CoreSettings):
         if not Path(self.context_dir).is_absolute():
             self.context_dir = str(base / self.context_dir)
         if not Path(self.artifacts_dir).is_absolute():
-            self.artifacts_dir = str(base / self.artifacts_dir)
+            self.artifacts_dir = str(self.memory_dir / self.artifacts_dir)
