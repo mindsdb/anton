@@ -274,5 +274,3 @@ def _emit_chunk(
         choices=[ChunkChoice(index=0, delta=delta, finish_reason=finish_reason)],
     )
     return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
-
-

@@ -307,9 +307,7 @@ _ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
     "deepseek-v4": [
         (
             _fireworks_available,
-            lambda s: _config_for_fireworks(
-                s, s.fireworks.passthrough_deepseek_v4_model, alias="deepseek-v4"
-            ),
+            lambda s: _config_for_fireworks(s, s.fireworks.passthrough_deepseek_v4_model, alias="deepseek-v4"),
         ),
     ],
 }
@@ -335,8 +333,7 @@ def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Unknown passthrough alias '_{alias}_'. "
-                "See service docs for the supported alias → provider mapping."
+                f"Unknown passthrough alias '_{alias}_'. See service docs for the supported alias → provider mapping."
             ),
         )
     for predicate, builder in candidates:

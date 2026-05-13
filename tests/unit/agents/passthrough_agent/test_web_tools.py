@@ -67,6 +67,7 @@ def test_public_api_reexports_from_agent_module():
         _translate_tools_for_gemini,
         _translate_tools_for_openai,
     )
+
     assert callable(PassthroughAgent)
 
 
@@ -1130,6 +1131,7 @@ def test_resolve_gpt55_low_without_openai_key_raises_400(monkeypatch):
 def test_resolve_dotted_alias_pattern_accepts_dot_and_hyphen():
     """Regex relaxation: ``.`` and ``-`` must be permitted inside the alias body."""
     from minds.common.passthrough_config import is_passthrough_model
+
     assert is_passthrough_model("_gpt-5.5-high_") is True
     assert is_passthrough_model("_kimi-k2.6_") is True
     assert is_passthrough_model("_gemini-3.1_") is True

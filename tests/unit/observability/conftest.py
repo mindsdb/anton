@@ -100,7 +100,7 @@ class LangfuseCapture:
         for k, v in span.attributes.items():
             if not k.startswith(prefix):
                 continue
-            inner_key = k[len(prefix):]
+            inner_key = k[len(prefix) :]
             # Values may be plain strings or JSON-encoded; try JSON first.
             try:
                 collected[inner_key] = json.loads(v) if isinstance(v, str) else v
