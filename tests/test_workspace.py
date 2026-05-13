@@ -79,10 +79,10 @@ class TestInitialization:
 
     def test_creates_artifacts_dir(self, ws, tmp_path):
         ws.initialize()
-        assert (tmp_path / "artifacts").is_dir()
+        assert (tmp_path / ".anton" / "artifacts").is_dir()
 
     def test_artifacts_dir_property(self, ws, tmp_path):
-        assert ws.artifacts_dir == tmp_path / "artifacts"
+        assert ws.artifacts_dir == tmp_path / ".anton" / "artifacts"
 
 
 class TestAntonMd:
