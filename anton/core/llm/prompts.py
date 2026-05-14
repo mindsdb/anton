@@ -430,7 +430,10 @@ where `<artifact_path>` is the folder path returned by `create_artifact` in step
   - Include all CSS and JS inlined (no external file references)
   - Follow the VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT guidelines
   - Save to `<artifact_path>/index.html` (or frontend.html)
-  - It should fetch data from http://localhost:PORT/api/endpoints as defined in step 2
+  - API calls MUST use RELATIVE paths only (e.g. `fetch('/api/items')`, NOT \
+`fetch('http://localhost:PORT/api/items')` and NOT any hardcoded base URL). \
+The frontend is served by the same backend at `/`, so relative paths resolve to the \
+correct origin automatically — this keeps the app portable across ports and hosts.
 
 6. LAUNCH THE BACKEND: In a new scratchpad, start the server with `action='serve'`:
   - Navigate to `<artifact_path>/` and run the backend code
