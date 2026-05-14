@@ -26,6 +26,7 @@ MEMORY_COMMANDS = [
     Command("/memory rules", "show behavioral rules"),
     Command("/memory rules delete <n>", "delete rule #n"),
     Command("/memory rules edit <n>", "edit rule #n"),
+    Command("/memory rankings", "show retrieval/ignored counters per rule"),
     None,
     Command("/memory lessons", "show learned lessons"),
     Command("/memory lessons delete <n>", "delete lesson #n"),
@@ -114,6 +115,7 @@ class MemoryManage:
         self.SUBCOMMANDS: dict[str, object] = {
             "help":        self.help,
             "rules":       self.rules,
+            "rankings":    self.rankings,
             "lessons":     self.lessons,
             "identity":     self.identity,
             "episodes":    self.episodes,
@@ -237,6 +239,83 @@ class MemoryManage:
 
         self.console.print("  [bold]/memory rules delete <n>[/]  — delete rule #n")
         self.console.print("  [bold]/memory rules edit <n>[/]    — edit rule #n")
+
+    async def rankings(self, *_args) -> None:
+        """Show retrieval-scoring telemetry for every stored rule.
+
+        Layer 3 debug surface. Per rule (across both scopes), prints:
+          - RETR    : times this rule was selected into a system prompt
+          - IGNORED : times the rule was loaded AND the pattern it
+                      warns against fired anyway (Phase C outcome bridge)
+          - LAST    : when the rule was last retrieved (ISO date)
+          - RULE    : the rule text (truncated to keep rows scannable)
+
+        Useful for: spotting cold rules (RETR=0 — candidates for
+        compaction), spotting noisy rules (high IGNORED — the LLM
+        keeps seeing them and not following them), and confirming
+        the ranker is doing reasonable things.
+        """
+        c = self.console
+        stats = getattr(self.cortex, "_rule_stats", None)
+        if stats is None:
+            c.print()
+            c.print("  [anton.warning]No rule-stats backend on this cortex.[/]")
+            c.print("  [dim]Stats are recorded only when the hippocampus has a local "
+                    "memory directory. Remote/protocol backends skip this telemetry.[/]")
+            c.print()
+            return
+
+        # Gather all rules from both scopes, tagged by their hash so we
+        # can join against the stats sidecar.
+        from anton.core.memory.rule_stats import rule_id as _rid
+
+        rows: list[tuple[str, int, int, str, str]] = []  # (rid, retr, ignored, last, text)
+        seen: set[str] = set()
+        for scope_hc in (self.cortex.global_hc, self.cortex.project_hc):
+            for engram in scope_hc.get_rules():
+                rid = _rid(engram.text)
+                if rid in seen:
+                    continue
+                seen.add(rid)
+                rec = stats.get(engram.text)
+                last = (rec.get("last_retrieved") or "—")[:10]  # YYYY-MM-DD
+                rows.append((
+                    rid,
+                    int(rec.get("retrievals", 0)),
+                    int(rec.get("ignored", 0)),
+                    last,
+                    engram.text,
+                ))
+
+        if not rows:
+            c.print()
+            c.print("  [dim]No rules in memory yet.[/]")
+            c.print()
+            return
+
+        # Sort by retrievals desc, then ignored desc (noisy-but-loaded
+        # rules float up under heavy-use rules) so the most actionable
+        # entries are at the top.
+        rows.sort(key=lambda r: (r[1], r[2]), reverse=True)
+
+        c.print()
+        c.print("[anton.cyan]Rule rankings[/] [dim](retrieval-scoring telemetry)[/]")
+        c.print()
+        c.print(f"  [dim]{'RETR':>5}  {'IGN':>4}  {'LAST':<10}  RULE[/]")
+        for _rid_unused, retr, ignored, last, text in rows:
+            short = text if len(text) <= 90 else text[:87] + "…"
+            # Highlight noisy rules (IGN > 0) and cold rules (RETR = 0).
+            tag = ""
+            if ignored > 0:
+                tag = "[anton.warning]"
+            elif retr == 0:
+                tag = "[dim]"
+            close = "[/]" if tag else ""
+            c.print(f"  {tag}{retr:>5}  {ignored:>4}  {last:<10}  {short}{close}")
+        c.print()
+        c.print("  [dim]RETR = times loaded into the system prompt · "
+                "IGN = pattern fired despite the rule being loaded[/]")
+        c.print()
 
     async def lessons(self, action: str = None, num: str = None) -> None:
         """Display stored lessons, numbered for easy reference."""
