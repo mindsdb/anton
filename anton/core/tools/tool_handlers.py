@@ -203,13 +203,42 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     except (TypeError, ValueError):
         return "Error: `health_timeout` must be a number."
 
-    venv_python = await session._scratchpads.venv_python()
+    venv_python = await session._scratchpads.venv_python(slug)
     if not venv_python:
         return (
             "Error: scratchpad venv Python is not available. "
             "This usually means the runtime is remote, or no scratchpad cell "
             "has run yet to provision the venv."
         )
+
+    req_path = folder / "requirements.txt"
+    if req_path.is_file():
+        packages: list[str] = []
+        for raw_line in req_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or line.startswith("-"):
+                continue
+            packages.append(line)
+        if packages:
+            from datetime import datetime, timezone
+
+            pad = await session._scratchpads.get_or_create(slug)
+            install_result = await pad.install_packages(packages)
+            banner = (
+                f"\n=== requirements.txt install "
+                f"({datetime.now(timezone.utc).isoformat(timespec='seconds')}) ===\n"
+            )
+            with open(folder / "backend.log", "ab", buffering=0) as install_log:
+                install_log.write(banner.encode("utf-8"))
+                install_log.write(install_result.encode("utf-8"))
+                install_log.write(b"\n")
+            if install_result.startswith("Install failed") or install_result.startswith(
+                "Install timed out"
+            ):
+                return (
+                    "Error: dependency install failed for `requirements.txt`.\n"
+                    + install_result
+                )
 
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:

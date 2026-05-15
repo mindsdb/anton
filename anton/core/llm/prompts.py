@@ -451,14 +451,21 @@ the application. The specification MUST include:
   - If the answer to any question is "no" — go back to step 2 and revise the technical \
     specification based on what you learned about the actual data
 
-4. IMPLEMENT BACKEND: In a dedicated scratchpad, implement the backend code:
+4. IMPLEMENT BACKEND: In a scratchpad **named exactly the artifact slug** \
+(use the `slug` returned by `create_artifact` / `open_artifact` as the scratchpad \
+name), implement the backend code. `launch_backend` runs the backend in this same \
+scratchpad's venv, so any packages you install or imports you test here will be \
+present at launch.
   - Write the complete backend application (http.server, Bottle, Flask, FastAPI, etc.)
   - Save it to `<artifact_path>/backend.py`, where `<artifact_path>` is the folder \
 path returned by `create_artifact` in step 1
   - If the backend uses any non-stdlib libraries (Bottle, Flask, FastAPI, requests, \
-pandas, etc.), save a `requirements.txt` in the same directory listing them. \
-If the backend uses ONLY the Python standard library (http.server, json, sqlite3, etc.), \
-do NOT create requirements.txt.
+pandas, etc.), save a `requirements.txt` in the same directory listing them — \
+one package spec per line (`pkg` or `pkg==1.2`). `launch_backend` reads this file \
+and installs everything into the slug-named scratchpad before spawning the process. \
+Note: only simple lines are supported — `-r`, `-e`, `--index-url` are ignored, as \
+are blank lines and `#` comments. If the backend uses ONLY the Python standard \
+library (http.server, json, sqlite3, etc.), do NOT create requirements.txt.
   - The backend MUST accept `--port` via argparse and bind to that port. \
 NEVER hardcode the port — `launch_backend` picks a free one and passes it in.
   - The backend serves the frontend at `/` (single-origin, no CORS for stateless backends)
@@ -479,6 +486,11 @@ correct origin automatically — this keeps the app portable across ports and ho
 `python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, \
 waits for readiness, writes the port into `metadata.json`, and returns \
 `{{slug, port, pid, url, log_path}}` as JSON.
+  - Uses the scratchpad named `<slug>` — created automatically on first call. If \
+`<artifact_path>/requirements.txt` exists, its packages are installed into that \
+scratchpad's venv before spawn (install output is appended to `backend.log` with a \
+banner). An install failure aborts the launch and is returned as an error string — \
+fix `requirements.txt` and retry.
   - Backend stdout/stderr stream to `<artifact_path>/backend.log` — read it if \
 the launch fails or the API misbehaves.
   - Do NOT call `update_artifact(port=...)` manually — `launch_backend` does it.
