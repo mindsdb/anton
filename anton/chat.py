@@ -92,6 +92,7 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
+from anton.commands.goal import parse_goal_args, run_goal_loop
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -1056,6 +1057,8 @@ def _desktop_greeting(console: Console, settings) -> None:
     _persist_first_run_done(settings)
 
 
+
+
 def run_chat(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
@@ -1527,6 +1530,19 @@ async def _chat_loop(
                     continue
                 elif cmd == "/explain":
                     handle_explain(console, settings.workspace_path)
+                    continue
+                elif cmd == "/goal":
+                    _raw_goal_arg = parts[1] if len(parts) > 1 else ""
+                    if not _raw_goal_arg.strip():
+                        console.print("[anton.warning]Usage: /goal \"objective\" [--turns N][/]")
+                        console.print()
+                        continue
+                    goal_objective, goal_max_turns = parse_goal_args(_raw_goal_arg)
+                    if not goal_objective:
+                        console.print("[anton.warning]Usage: /goal \"objective\" [--turns N][/]")
+                        console.print()
+                        continue
+                    await run_goal_loop(console, session, display, goal_objective, goal_max_turns)
                     continue
                 elif cmd == "/help":
                     print_slash_help(console)
