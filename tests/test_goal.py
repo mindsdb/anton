@@ -54,10 +54,6 @@ class TestParseGoalArgs:
         assert turns == 5
 
 
-# ---------------------------------------------------------------------------
-# ToolRegistry.unregister_tool
-# ---------------------------------------------------------------------------
-
 def _make_tool(name: str) -> ToolDef:
     async def _noop(_session, _input):
         return ""
