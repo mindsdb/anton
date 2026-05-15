@@ -153,23 +153,19 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
 async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     """Launch the artifact's backend script as a standalone subprocess.
 
-    Picks a free TCP port, runs
-    `<scratchpad venv python> <backend script> --port <port> [...extra_args]`
-    with the artifact folder as cwd, waits for the server to become
-    reachable, persists the port in metadata.json, and tracks the
-    process on the session so it can be reaped on close.
+    Thin wrapper over `launch_artifact_backend`: validates tool-call shape,
+    resolves the artifact folder via the session's ArtifactStore, hands
+    the session's scratchpad pool + tracked-backends dict to the helper,
+    then persists the discovered port into metadata.json.
 
-    Idempotent: a fresh call for the same slug terminates any
-    previously-tracked backend before launching the new one.
+    The actual subprocess lifecycle (free-port discovery, dependency
+    install, health probe, idempotent reap) lives in
+    `anton.core.artifacts.backend_launcher.launch_artifact_backend` so
+    other entry points (e.g. cowork's auto-relaunch) can reuse it.
     """
-    import asyncio
     import json
-    import os
-    import signal
-    import socket
-    import sys
-    import urllib.error
-    import urllib.request
+
+    from anton.core.artifacts.backend_launcher import launch_artifact_backend
 
     store = _artifact_store(session)
     if store is None:
@@ -182,203 +178,35 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     if artifact is None:
         return f"Error: no artifact found for slug `{slug}`."
 
-    folder = store.folder_for(slug)
     rel_path = (tc_input.get("path") or "backend.py").strip()
-    script = (folder / rel_path).resolve()
-    try:
-        script.relative_to(folder.resolve())
-    except ValueError:
-        return f"Error: `path` must stay within the artifact folder ({folder})."
-    if not script.is_file():
-        return f"Error: backend script not found at {script}."
-
     extra_args = tc_input.get("extra_args") or []
-    if not isinstance(extra_args, list) or not all(isinstance(x, str) for x in extra_args):
-        return "Error: `extra_args` must be a list of strings."
     health_path = tc_input.get("health_path") or "/"
-    if not health_path.startswith("/"):
-        health_path = "/" + health_path
     try:
         health_timeout = float(tc_input.get("health_timeout", 10))
     except (TypeError, ValueError):
         return "Error: `health_timeout` must be a number."
-
-    venv_python = await session._scratchpads.venv_python(slug)
-    if not venv_python:
-        return (
-            "Error: scratchpad venv Python is not available. "
-            "This usually means the runtime is remote, or no scratchpad cell "
-            "has run yet to provision the venv."
-        )
-
-    req_path = folder / "requirements.txt"
-    if req_path.is_file():
-        packages: list[str] = []
-        for raw_line in req_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.split("#", 1)[0].strip()
-            if not line or line.startswith("-"):
-                continue
-            packages.append(line)
-        if packages:
-            from datetime import datetime, timezone
-
-            pad = await session._scratchpads.get_or_create(slug)
-            install_result = await pad.install_packages(packages)
-            banner = (
-                f"\n=== requirements.txt install "
-                f"({datetime.now(timezone.utc).isoformat(timespec='seconds')}) ===\n"
-            )
-            with open(folder / "backend.log", "ab", buffering=0) as install_log:
-                install_log.write(banner.encode("utf-8"))
-                install_log.write(install_result.encode("utf-8"))
-                install_log.write(b"\n")
-            if install_result.startswith("Install failed") or install_result.startswith(
-                "Install timed out"
-            ):
-                return (
-                    "Error: dependency install failed for `requirements.txt`.\n"
-                    + install_result
-                )
 
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:
         tracked = {}
         session._tracked_backends = tracked
 
-    # Reap any previously-tracked backend for this slug before launching
-    # the new one — keeps the call idempotent across hot reloads.
-    prev = tracked.pop(slug, None)
-    if prev is not None:
-        prev_proc = prev.get("proc")
-        if prev_proc is not None and prev_proc.returncode is None:
-            try:
-                prev_proc.terminate()
-                try:
-                    await asyncio.wait_for(prev_proc.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    prev_proc.kill()
-                    await prev_proc.wait()
-            except ProcessLookupError:
-                pass
+    result = await launch_artifact_backend(
+        slug=slug,
+        artifact_folder=store.folder_for(slug),
+        scratchpad_pool=session._scratchpads,
+        tracked_backends=tracked,
+        path=rel_path,
+        extra_args=extra_args,
+        health_path=health_path,
+        health_timeout=health_timeout,
+    )
+    if isinstance(result, str):
+        return result
 
-    # Bind-and-close to discover a free port. There is a TOCTOU window
-    # before the backend picks it up — acceptable in single-user dev.
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-
-    cmd = [venv_python, str(script), "--port", str(port), *extra_args]
-    log_path = folder / "backend.log"
-    log_fd = open(log_path, "ab", buffering=0)
-
-    # PR_SET_PDEATHSIG so the backend dies with Anton on Linux. macOS
-    # has no equivalent; we rely on close() to reap there.
-    preexec_fn = None
-    if sys.platform.startswith("linux"):
-        def _set_pdeathsig() -> None:
-            try:
-                import ctypes
-
-                libc = ctypes.CDLL("libc.so.6", use_errno=True)
-                PR_SET_PDEATHSIG = 1
-                libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
-            except Exception:
-                pass
-
-        preexec_fn = _set_pdeathsig
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(folder),
-            stdout=log_fd,
-            stderr=log_fd,
-            stdin=asyncio.subprocess.DEVNULL,
-            preexec_fn=preexec_fn,
-            env={**os.environ},
-        )
-    except OSError as exc:
-        log_fd.close()
-        return f"Error: failed to spawn backend: {exc}"
-    finally:
-        # The subprocess holds its own dup of the fd; we can close ours.
-        try:
-            log_fd.close()
-        except OSError:
-            pass
-
-    # Readiness — try HTTP first, fall back to TCP-connect. HTTP 4xx
-    # still counts as "process is alive and answering" → ready.
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + health_timeout
-    ready = False
-    last_err: str | None = None
-    while loop.time() < deadline:
-        if proc.returncode is not None:
-            tail = ""
-            try:
-                tail = log_path.read_text(errors="replace")[-2000:]
-            except OSError:
-                pass
-            return (
-                f"Error: backend exited early (rc={proc.returncode}) before "
-                f"binding to :{port}.\nLog tail:\n{tail}"
-            )
-        url = f"http://127.0.0.1:{port}{health_path}"
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, lambda: urllib.request.urlopen(url, timeout=1).close()
-                ),
-                timeout=1.5,
-            )
-            ready = True
-            break
-        except urllib.error.HTTPError:
-            # 4xx/5xx → process is alive and listening
-            ready = True
-            break
-        except Exception as exc:
-            last_err = str(exc)
-            # Fallback: bare TCP connect
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                    ready = True
-                    break
-            except OSError:
-                await asyncio.sleep(0.2)
-
-    if not ready:
-        try:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-        except ProcessLookupError:
-            pass
-        tail = ""
-        try:
-            tail = log_path.read_text(errors="replace")[-2000:]
-        except OSError:
-            pass
-        return (
-            f"Error: backend did not become ready on :{port} within "
-            f"{health_timeout}s (last error: {last_err}).\nLog tail:\n{tail}"
-        )
-
-    tracked[slug] = {"proc": proc, "port": port, "pid": proc.pid, "log_path": str(log_path)}
-    store.update(slug, port=port)
-
+    store.update(slug, port=result["port"])
     return json.dumps(
-        {
-            "slug": slug,
-            "port": port,
-            "pid": proc.pid,
-            "url": f"http://127.0.0.1:{port}",
-            "log_path": str(log_path),
-        },
+        {k: v for k, v in result.items() if k != "proc"},
         indent=2,
     )
 

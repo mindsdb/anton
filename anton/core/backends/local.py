@@ -172,6 +172,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return self._venv_python
         return None
 
+    def ensure_venv(self) -> str | None:
+        """Provision the venv on disk (recycle if present, create if not) and
+        return its python interpreter path.
+
+        Public counterpart to the internal `_ensure_venv` used by `start()`
+        and `install_packages`. Exposed for callers that need only the venv
+        — not the full runtime sidecar — to spawn auxiliary processes
+        (e.g. cowork's artifact backend relaunch). Cheap when the venv
+        already exists; falls back to a fresh `uv venv` / `python -m venv`
+        otherwise.
+        """
+        self._ensure_venv()
+        return self.venv_python()
+
     def _verify_venv_python(self) -> bool:
         if self._venv_python is None:
             return False
