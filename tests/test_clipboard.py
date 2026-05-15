@@ -12,11 +12,13 @@ import pytest
 from anton.clipboard import (
     ClipboardImage,
     ClipboardResult,
+    PastedImageRegistry,
     UploadedFile,
     cleanup_old_uploads,
     grab_clipboard,
     is_clipboard_supported,
     parse_dropped_paths,
+    replace_image_paths_in_pasted,
     save_clipboard_image,
 )
 
@@ -28,9 +30,23 @@ class TestIsClipboardSupported:
             with patch.dict("sys.modules", {"PIL": MagicMock(), "PIL.ImageGrab": MagicMock()}):
                 assert is_clipboard_supported() is True
 
-    def test_unsupported_linux(self):
+    def test_linux_supported_with_tools_and_pillow(self):
         with patch("anton.clipboard.platform") as mock_platform:
             mock_platform.system.return_value = "Linux"
+            with patch("anton.clipboard._linux_clipboard_tool", return_value="xclip"):
+                with patch.dict("sys.modules", {"PIL": MagicMock(), "PIL.ImageGrab": MagicMock()}):
+                    assert is_clipboard_supported() is True
+
+    def test_linux_unsupported_without_tools(self):
+        with patch("anton.clipboard.platform") as mock_platform:
+            mock_platform.system.return_value = "Linux"
+            with patch("anton.clipboard._linux_clipboard_tool", return_value=None):
+                with patch.dict("sys.modules", {"PIL": MagicMock(), "PIL.ImageGrab": MagicMock()}):
+                    assert is_clipboard_supported() is False
+
+    def test_unsupported_other_platform(self):
+        with patch("anton.clipboard.platform") as mock_platform:
+            mock_platform.system.return_value = "FreeBSD"
             assert is_clipboard_supported() is False
 
     def test_unsupported_no_pillow(self):
@@ -228,6 +244,87 @@ class TestCleanupOldUploads:
         nonexistent = tmp_path / "nope"
         removed = cleanup_old_uploads(nonexistent)
         assert removed == 0
+
+
+class TestReplaceImagePathsInPasted:
+    def test_single_image_path(self, tmp_path):
+        f = tmp_path / "test.png"
+        f.write_text("image data")
+        registry = PastedImageRegistry()
+
+        text = f"Check this: {f}"
+        rewritten, registered = replace_image_paths_in_pasted(text, registry)
+
+        assert len(registered) == 1
+        assert registered[0].id == 1
+        assert f"[Image #1]" in rewritten
+        assert str(f) not in rewritten
+
+    def test_quoted_image_path(self, tmp_path):
+        f = tmp_path / "test.jpg"
+        f.write_text("image data")
+        registry = PastedImageRegistry()
+
+        text = f"'{f}'"
+        rewritten, registered = replace_image_paths_in_pasted(text, registry)
+
+        assert len(registered) == 1
+        assert "[Image #1]" in rewritten
+
+    def test_multiple_image_paths(self, tmp_path):
+        f1 = tmp_path / "first.png"
+        f2 = tmp_path / "second.jpg"
+        f1.write_text("img1")
+        f2.write_text("img2")
+        registry = PastedImageRegistry()
+
+        text = f"{f1} {f2}"
+        rewritten, registered = replace_image_paths_in_pasted(text, registry)
+
+        assert len(registered) == 2
+        assert "[Image #1]" in rewritten
+        assert "[Image #2]" in rewritten
+
+    def test_placeholder_followed_by_path_with_space(self, tmp_path):
+        """Test: [Image #1] '/path/to/image.png' with space between them.
+
+        When detector adds a space before processing (the fix for the paste bug),
+        the function receives text like this and should detect the path correctly.
+        """
+        f = tmp_path / "second.png"
+        f.write_text("image data")
+        registry = PastedImageRegistry()
+
+        # First, add a dummy image to start ID at 2
+        registry.add(tmp_path / "dummy.png")
+
+        # After detector inserts space: [Image #1] '/path/to/image.png'
+        text = f"[Image #1] '{f}'"
+        rewritten, registered = replace_image_paths_in_pasted(text, registry)
+
+        assert len(registered) == 1
+        assert registered[0].id == 2  # Registry continues from 1
+        assert "[Image #2]" in rewritten
+        assert str(f) not in rewritten
+
+    def test_nonexistent_path_ignored(self, tmp_path):
+        registry = PastedImageRegistry()
+        text = "/nonexistent/path.png other text"
+        rewritten, registered = replace_image_paths_in_pasted(text, registry)
+
+        assert len(registered) == 0
+        assert rewritten == text  # Unchanged
+
+    def test_non_image_extensions_ignored(self, tmp_path):
+        f = tmp_path / "file.txt"
+        f.write_text("text")
+        registry = PastedImageRegistry()
+
+        text = f"{f}"
+        rewritten, registered = replace_image_paths_in_pasted(text, registry)
+
+        assert len(registered) == 0
+        assert rewritten == text
 
 
 class TestParseDroppedPaths:

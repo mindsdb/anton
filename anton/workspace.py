@@ -12,6 +12,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from anton.config.settings import AntonSettings
+
 ANTON_MD_TEMPLATE = """\
 # Anton Workspace
 
@@ -31,6 +33,9 @@ class Workspace:
         self._anton_md = self._anton_dir / "anton.md"
         self._env_file = self._anton_dir / ".env"
         self._anton_md_last_read: datetime | None = None
+
+        settings = AntonSettings()
+        self._artifacts_dir = self._anton_dir / settings.artifacts_dir
 
     @property
     def base(self) -> Path:
@@ -99,17 +104,16 @@ class Workspace:
         # the legacy hidden `.anton/output/` dump — one folder per
         # artifact, each owning its own metadata.json + README.md.
         # Idempotent: existing artifact subfolders are left alone.
-        artifacts_dir = self._base / "artifacts"
-        if not artifacts_dir.exists():
-            artifacts_dir.mkdir(parents=True, exist_ok=True)
-            actions.append(f"Created {artifacts_dir}")
+        if not self._artifacts_dir.exists():
+            self._artifacts_dir.mkdir(parents=True, exist_ok=True)
+            actions.append(f"Created {self._artifacts_dir}")
 
         return actions
 
     @property
     def artifacts_dir(self) -> Path:
         """Where artifacts live. Created lazily by `initialize()`."""
-        return self._base / "artifacts"
+        return self._artifacts_dir
 
     # ── anton.md reading ─────────────────────────────────────────
 

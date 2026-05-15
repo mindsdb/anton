@@ -24,6 +24,7 @@ from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
 
 from anton.chat import ChatSession
+from anton.chat_session import get_runtime_factory
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.client import LLMClient
 from anton.core.backends.manager import ScratchpadManager
@@ -35,6 +36,22 @@ from anton.commands.datasource import (
     handle_test_datasource
 )
 from anton.minds_client import test_llm
+
+
+def _build_scratchpad_manager(
+    settings,
+    llm_client: LLMClient | None = None,
+) -> ScratchpadManager:
+    llm_client = llm_client or LLMClient.from_settings(settings)
+    coding_conn = llm_client.coding_provider.export_connection_info()
+    return ScratchpadManager(
+        runtime_factory=get_runtime_factory(settings),
+        coding_provider=coding_conn.provider,
+        coding_model=llm_client.coding_model,
+        coding_api_key=coding_conn.api_key or "",
+        coding_base_url=coding_conn.base_url or "",
+        workspace_path=settings.workspace_path,
+    )
 
 
 
@@ -1210,16 +1227,7 @@ def connect_data_source(
     _ensure_api_key(settings)
 
     llm_client = LLMClient.from_settings(settings)
-    scratchpads = ScratchpadManager(
-        coding_provider=settings.coding_provider,
-        coding_model=settings.coding_model,
-        coding_api_key=(
-            settings.anthropic_api_key
-            if settings.coding_provider == "anthropic"
-            else settings.openai_api_key
-        )
-        or "",
-    )
+    scratchpads = _build_scratchpad_manager(settings, llm_client)
     session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
@@ -1254,16 +1262,7 @@ def edit_data_source(
     _ensure_api_key(settings)
 
     llm_client = LLMClient.from_settings(settings)
-    scratchpads = ScratchpadManager(
-        coding_provider=settings.coding_provider,
-        coding_model=settings.coding_model,
-        coding_api_key=(
-            settings.anthropic_api_key
-            if settings.coding_provider == "anthropic"
-            else settings.openai_api_key
-        )
-        or "",
-    )
+    scratchpads = _build_scratchpad_manager(settings, llm_client)
     session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
@@ -1302,16 +1301,7 @@ def test_data_source(
     _ensure_workspace(settings)
     _ensure_api_key(settings)
 
-    scratchpads = ScratchpadManager(
-        coding_provider=settings.coding_provider,
-        coding_model=settings.coding_model,
-        coding_api_key=(
-            settings.anthropic_api_key
-            if settings.coding_provider == "anthropic"
-            else settings.openai_api_key
-        )
-        or "",
-    )
+    scratchpads = _build_scratchpad_manager(settings)
 
     async def _run() -> None:
         await _handle_test_datasource(console, scratchpads, name)
