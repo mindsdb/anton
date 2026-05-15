@@ -183,6 +183,21 @@ ANTON_ANALYTICS_ENABLED=false
 
 ---
 
+## Trace headers
+When the planning provider is openai-compatible Anton can attach `Langfuse-Session-Id`, `Langfuse-Tags`, and `Langfuse-Metadata` headers so the router can attribute traces. To enable the same headers against any other openai-compatible endpoint (e.g. a self-hosted Langfuse proxy in front of ollama or vLLM), set:
+
+```bash
+export ANTON_LANGFUSE_HEADERS=1
+```
+
+Or add it to your workspace config (`.anton/.env`):
+
+```
+ANTON_LANGFUSE_HEADERS=1
+```
+
+---
+
 ## Dev guidelines
 
 We use three long-lived branches: `dev` → `staging` → `main`.
