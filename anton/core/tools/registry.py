@@ -37,6 +37,10 @@ class ToolRegistry:
             raise ValueError(f"Tool {tool_name} not found")
         return await tool_def.handler(session, tc_input)
 
+    def unregister_tool(self, name: str) -> None:
+        """Remove a tool by name. No-op if not found."""
+        self._tools = [t for t in self._tools if t.name != name]
+
     def dump(self) -> list[dict]:
         """
         Dump the registry as a list of LLM-facing tool schemas.
