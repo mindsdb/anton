@@ -1,0 +1,8 @@
+[
+  {"kind": "tool_call",   "severity": 1, "detail": {"name": "publish_or_preview", "args_summary": "action=publish"}, "round_idx": 6},
+  {"kind": "tool_result", "severity": 5, "detail": {"name": "publish_or_preview", "success": false, "error": "PUBLISH FAILED: settings module unavailable"}, "round_idx": 6},
+  {"kind": "tool_call",   "severity": 1, "detail": {"name": "publish_or_preview", "args_summary": "action=publish"}, "round_idx": 8},
+  {"kind": "tool_result", "severity": 5, "detail": {"name": "publish_or_preview", "success": false, "error": "PUBLISH FAILED: settings module unavailable"}, "round_idx": 8},
+  {"kind": "tool_call",   "severity": 1, "detail": {"name": "publish_or_preview", "args_summary": "action=publish"}, "round_idx": 10},
+  {"kind": "tool_result", "severity": 6, "detail": {"name": "publish_or_preview", "success": false, "error": "PUBLISH FAILED: settings module unavailable"}, "round_idx": 10}
+]

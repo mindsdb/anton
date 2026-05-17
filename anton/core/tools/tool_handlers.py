@@ -294,11 +294,33 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
     if not name:
         return "Scratchpad name is required."
 
+    # ACC emit helper: use the session's safe wrapper if it exists,
+    # otherwise no-op. Defined as a local closure so each emit site
+    # stays a single line.
+    def _acc_observe(kind: str, detail: dict, *, severity: int = 1) -> None:
+        fn = getattr(session, "_acc_observe", None)
+        if fn is not None:
+            fn(kind, detail, severity=severity)
+
     if action == "exec":
         result = await prepare_scratchpad_exec(session, tc_input)
         if isinstance(result, str):
+            # Empty / malformed code parameter — the dispatcher rejected
+            # it before reaching the runtime. This is exactly the
+            # "silent code-clip" failure mode the ACC's
+            # detect_oversized_cell watches for.
+            _acc_observe("scratchpad_empty_code", {"name": name}, severity=7)
             return result
         pad, code, description, estimated_time, estimated_seconds = result
+
+        _acc_observe(
+            "scratchpad_call",
+            {
+                "name": name,
+                "code_len": len(code or ""),
+                "one_line_description": description or "",
+            },
+        )
 
         # Notify pre-execute observers (e.g. cerebellum). The runtime
         # never sees these — observation is an orchestration concern,
@@ -325,6 +347,31 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
                 pad_name=name, description=description, cell=cell,
             )
             await _fire_post_execute(session, cell)
+            # ACC: distinguish "killed" (timeout/cancel/OOM) from a
+            # plain runtime error. The local backend sets cell.error
+            # to a string starting with "Cancelled" or matching the
+            # "Cell timed out"/"Cell killed" prefixes from the
+            # asyncio.TimeoutError path. Everything else (NameError,
+            # ImportError, …) is a regular result with success=False.
+            err = (cell.error or "").strip()
+            if err.startswith(("Cancelled", "Cell timed out", "Cell killed")):
+                _acc_observe(
+                    "scratchpad_killed",
+                    {"name": name, "reason": err[:120]},
+                    severity=6,
+                )
+            else:
+                success = not err and not (cell.stderr or "").strip()
+                _acc_observe(
+                    "scratchpad_result",
+                    {
+                        "name": name,
+                        "success": success,
+                        "stdout_len": len(cell.stdout or ""),
+                        "error": err[:300] if err else "",
+                    },
+                    severity=5 if not success else 1,
+                )
         return format_cell_result(cell)
 
     elif action == "view":
@@ -338,6 +385,11 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         if pad is None:
             return f"No scratchpad named '{name}'."
         await pad.reset()
+        _acc_observe(
+            "scratchpad_reset",
+            {"name": name, "reason": "manual"},
+            severity=5,
+        )
         return f"Scratchpad '{name}' reset. All state cleared."
 
     elif action == "remove":
