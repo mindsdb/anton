@@ -1370,7 +1370,7 @@ class TestConversationsService:
         token = result.image_url.split("token=")[1]
         assert isinstance(result, ChartImageResponse)
         assert result.image_url.startswith(
-            f"/api/v1/conversations/{sample_conversation.id}/items/{assistant_message.id}/chart?token="
+            f"/v1/conversations/{sample_conversation.id}/items/{assistant_message.id}/chart?token="
         )
         assert service._parse_chart_image_token(token) == intent
 

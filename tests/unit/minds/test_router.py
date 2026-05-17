@@ -40,19 +40,19 @@ class TestAPIV1Router:
 
     def test_router_prefix(self):
         """Test that router has correct prefix."""
-        assert api_router.prefix == "/api/v1"
+        assert api_router.prefix == "/v1"
 
     def test_router_includes_all_endpoints(self, client):
         """Test that all expected endpoints are available."""
 
         # Test health endpoints
-        response = client.get("/api/v1/health/")
+        response = client.get("/v1/health/")
         assert response.status_code == 200
 
-        response = client.get("/api/v1/health/ready")
+        response = client.get("/v1/health/ready")
         assert response.status_code == 200
 
-        response = client.get("/api/v1/health/live")
+        response = client.get("/v1/health/live")
         assert response.status_code == 200
 
     @patch("minds.client.mindsdb.connect")
@@ -69,16 +69,16 @@ class TestAPIV1Router:
         mock_context.return_value.user_id = UUID("00000000-0000-0000-0000-000000000001")
         mock_context.return_value.organization_id = UUID("00000000-0000-0000-0000-000000000002")
 
-        response = client.get("/api/v1/minds/")
+        response = client.get("/v1/minds/")
         assert response.status_code != 404  # Endpoint should exist
 
-        response = client.get("/api/v1/minds/test-mind")
+        response = client.get("/v1/minds/test-mind")
         # This can legitimately be 404 if the mind doesn't exist; we're only asserting route registration.
         assert response.status_code in {200, 400, 401, 403, 404, 422, 500}
 
     def test_chat_endpoints_registered(self, client):
         """Test that chat endpoints are registered."""
-        response = client.post("/api/v1/chat/completions", json={})
+        response = client.post("/v1/chat/completions", json={})
         assert response.status_code in [422, 500]  # Not 404 - endpoint exists
 
     @patch("minds.client.mindsdb.connect")
@@ -95,7 +95,7 @@ class TestAPIV1Router:
         mock_context.return_value.user_id = UUID("00000000-0000-0000-0000-000000000001")
         mock_context.return_value.organization_id = UUID("00000000-0000-0000-0000-000000000002")
 
-        response = client.get("/api/v1/datasources/")
+        response = client.get("/v1/datasources/")
         assert response.status_code != 404  # Endpoint should exist
 
     @patch("minds.client.mindsdb.connect")
@@ -113,7 +113,7 @@ class TestAPIV1Router:
         mock_context.return_value.user_id = UUID("00000000-0000-0000-0000-000000000001")
         mock_context.return_value.organization_id = UUID("00000000-0000-0000-0000-000000000002")
 
-        response = client.get("/api/v1/tree/")
+        response = client.get("/v1/tree/")
         # Could be 200 (success), 422 (validation), or 500 (dependency error) - just not 404
         assert response.status_code != 404  # Endpoint should exist
 
@@ -122,7 +122,7 @@ class TestAPIV1Router:
         # Check that the router was configured with proper tags
         routes = api_router.routes
 
-        # Find routes and verify tags (routes have /api/v1 prefix)
+        # Find routes and verify tags (routes have /v1 prefix)
         health_routes = [r for r in routes if "/health" in r.path]
         minds_routes = [r for r in routes if "/minds" in r.path]
         chat_routes = [r for r in routes if "/chat" in r.path]
@@ -149,25 +149,25 @@ class TestAPIV1Router:
 
         # Verify some key paths exist
         paths = openapi_schema["paths"]
-        assert "/api/v1/health/" in paths
-        assert "/api/v1/minds/" in paths
-        assert "/api/v1/chat/completions" in paths
+        assert "/v1/health/" in paths
+        assert "/v1/minds/" in paths
+        assert "/v1/chat/completions" in paths
 
     def test_route_path_prefixes(self):
         """Test that all routes have correct path prefixes."""
         routes = api_router.routes
 
         for route in routes:
-            # All routes should start with /api/v1/ then the expected prefixes
+            # All routes should start with /v1/ then the expected prefixes
             expected_prefixes = [
-                "/api/v1/health",
-                "/api/v1/minds",
-                "/api/v1/chat",
-                "/api/v1/conversations",
-                "/api/v1/datasources",
-                "/api/v1/responses",
-                "/api/v1/tree",
-                "/api/v1/limits",
+                "/v1/health",
+                "/v1/minds",
+                "/v1/chat",
+                "/v1/conversations",
+                "/v1/datasources",
+                "/v1/responses",
+                "/v1/tree",
+                "/v1/limits",
             ]
             assert any(route.path.startswith(prefix) for prefix in expected_prefixes), (
                 f"Route {route.path} doesn't match expected prefixes {expected_prefixes}"

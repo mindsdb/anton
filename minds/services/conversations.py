@@ -1090,7 +1090,7 @@ class ConversationsService:
                 intent=intent,
             )
             token = self._build_chart_image_token(intent)
-            image_url = f"/api/v1/conversations/{conversation_id}/items/{message_id}/chart?token={token}"
+            image_url = f"/v1/conversations/{conversation_id}/items/{message_id}/chart?token={token}"
 
             return ChartImageResponse(
                 image_url=image_url,

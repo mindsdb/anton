@@ -129,7 +129,7 @@ def headers():
 
 def test_healthz(server_app):
     client = TestClient(server_app)
-    r = client.get("/api/v1/health/")
+    r = client.get("/v1/health/")
     assert r.status_code == 200 and r.json() == {"status": "ok", "version": "v1"}
 
 
@@ -140,7 +140,7 @@ def test_chat_completions(server_app, headers):
         "messages": [{"role": "user", "content": "q"}],
         "metadata": {"doc_id": "1"},
     }
-    r = client.post("/api/v1/chat/completions", json=payload, headers=headers)
+    r = client.post("/v1/chat/completions", json=payload, headers=headers)
     expected_response = {
         "id": "test-completion",
         "object": "chat.completion",
@@ -162,7 +162,7 @@ def test_chat_completions_v1(server_app, headers):
         "messages": [{"role": "user", "content": "q"}],
         "metadata": {"doc_id": "1"},
     }
-    r = client.post("/api/v1/chat/completions", json=payload, headers=headers)
+    r = client.post("/v1/chat/completions", json=payload, headers=headers)
     expected_response = {
         "id": "test-completion",
         "object": "chat.completion",

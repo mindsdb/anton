@@ -431,7 +431,7 @@ services:
     ports:
       - "9010:9010"
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9010/api/v1/health/" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:9010/v1/health/" ]
       interval: 10s
       timeout: 9s
       retries: 5

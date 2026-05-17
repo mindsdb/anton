@@ -57,8 +57,12 @@ def create_app() -> FastAPI:
         max_age=3600,
     )
 
-    # Include v1 API routes
+    # Include v1 API routes at the canonical /v1/* mount, plus a legacy
+    # /api/v1/* alias for older clients (mdb-ai axios fallback, anton CLI,
+    # cowork, Terraform-managed CI integration tests). Drop the alias once
+    # all callers are migrated.
     app.include_router(v1_router)
+    app.include_router(v1_router, prefix="/api")
 
     logger.info("Minds application created successfully")
     return app

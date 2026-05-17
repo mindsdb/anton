@@ -18,14 +18,14 @@ deployment:
   livenessProbe:
     enabled: true
     initialDelaySeconds: 30
-    path: /api/v1/health/live
+    path: /v1/health/live
 
   # readinessProbes are used to determine when a container is ready to start accepting traffic
   # Only specify the values you need to override from the defaults
   readinessProbe:
     enabled: true
     initialDelaySeconds: 30
-    path: /api/v1/health/ready
+    path: /v1/health/ready
 
   # deployment container resource requests/limits
   # this is set VERY low by default, to be aggressive above resource limiting, please override this if necessary
@@ -50,7 +50,8 @@ deployment:
       nginx.ingress.kubernetes.io/proxy-read-timeout: "1200"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "1200"
       nginx.ingress.kubernetes.io/proxy-body-size: 500m
-      nginx.ingress.kubernetes.io/enable-cors: "false"
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
       nginx.ingress.kubernetes.io/cors-allow-methods: "GET,OPTIONS,PUT,POST,PATCH,DELETE"
       nginx.ingress.kubernetes.io/cors-allow-origin: "http://localhost:3000"
       nginx.ingress.kubernetes.io/cors-allow-headers: >-
@@ -59,8 +60,29 @@ deployment:
         X-Organization-Id,X-User-Roles,X-Forwarded-User,X-Billing-Period-Start,X-Billing-Period-End
       nginx.ingress.kubernetes.io/cors-max-age: "3600"
       nginx.ingress.kubernetes.io/use-regex: "true"
-      
+      nginx.ingress.kubernetes.io/auth-url: "auth-url" # Modify per environment
+      nginx.ingress.kubernetes.io/auth-method: "GET"
+      nginx.ingress.kubernetes.io/auth-response-headers: >-
+        X-Organization-Id,X-User-Id,X-User-Email,X-User-Roles,X-Forwarded-User,X-Billing-Period-Start,X-Billing-Period-End
+      nginx.ingress.kubernetes.io/auth-request-headers: "Authorization,Cookie"
 
+  ingress_secondary:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-connect-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-body-size: 500m
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+      nginx.ingress.kubernetes.io/cors-allow-methods: "GET,OPTIONS,PUT,POST,PATCH,DELETE"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "http://localhost:3000"
+      nginx.ingress.kubernetes.io/cors-allow-headers: >-
+        DNT,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,
+        Authorization,X-CSRF-Token,Accept,Origin,Access-Control-Allow-Origin,X-File-Name,Set-Cookie,X-User-Id,X-User-Email,
+        X-Organization-Id,X-User-Roles,X-Forwarded-User,X-Billing-Period-Start,X-Billing-Period-End
+      nginx.ingress.kubernetes.io/cors-max-age: "3600"
+      nginx.ingress.kubernetes.io/use-regex: "true"
       nginx.ingress.kubernetes.io/auth-url: "auth-url" # Modify per environment
       nginx.ingress.kubernetes.io/auth-method: "GET"
       nginx.ingress.kubernetes.io/auth-response-headers: >-
