@@ -297,7 +297,7 @@ class TestRuntimeContext:
 class TestMindsSetupRecovery:
     def test_describe_minds_http_401_is_factual(self):
         error = urllib.error.HTTPError(
-            "https://mdb.ai/api/v1/minds/",
+            "https://api.mindshub.ai/v1/minds/",
             401,
             "Unauthorized",
             None,
