@@ -5,10 +5,29 @@ deployment:
       # Gives permission to use the mind-castle kms key
       eks.amazonaws.com/role-arn: arn:aws:iam::065786718370:role/minds-20260204214712848900000002
   
+
   ingress:
+    name: minds
     annotations:
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "https://console.mindshub.ai, https://mdb.ai, https://hub.mindsdb.com"
+      nginx.ingress.kubernetes.io/auth-url: "http://auth.prod.svc.cluster.local:80/v1/authenticate/"
+    hosts:
+      - host: api.mindshub.ai
+        enableMultiPath: true
+        paths:
+          - path: /v1
+            serviceName: minds
+            servicePort: 80
+  
+  ingress_secondary:
+    name: minds-legacy
+    annotations:
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      
       # Forward auth configuration using your gateway service
-      nginx.ingress.kubernetes.io/auth-url: "http://auth.prod.svc.cluster.local:80/api/v1/authenticate/"
+      nginx.ingress.kubernetes.io/auth-url: "http://auth.prod.svc.cluster.local:80/v1/authenticate/"
+
     hosts:
       - host: minds.mdb.ai
         enableMultiPath: true
@@ -41,6 +60,8 @@ deployment:
           - path: /api/v1/limits
             serviceName: minds
             servicePort: 80
+
+
   extraEnvs:
 
     # ====================================

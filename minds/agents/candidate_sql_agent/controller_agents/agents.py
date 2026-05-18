@@ -12,11 +12,11 @@ from minds.agents.candidate_sql_agent.controller_agents.models import AnswerFeed
 from minds.agents.candidate_sql_agent.settings import CandidateSQLAgentSettings
 from minds.agents.helpers import current_date_time_layer, mind_layer
 from minds.cache import data_catalog_cache
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.model.mind import Mind
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 agent_settings = CandidateSQLAgentSettings()
 

@@ -2,13 +2,13 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from datetime import datetime
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
 from minds.model.mind_datasource import DataCatalogStatus
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 

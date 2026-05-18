@@ -18,7 +18,7 @@ from minds.api.v1.deps import (
 )
 from minds.common.guards import ResourceType, require_usage_available
 from minds.common.llm_provider import get_supported_models_by_provider
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.requests.context import Context
 from minds.schemas.minds import MindCreateRequest, MindResponse, MindUpdateRequest
@@ -28,7 +28,7 @@ from minds.services.limits import LimitsService
 from minds.services.minds import MindAlreadyExistsError, MindNotFoundError, MindsService, MindsServiceError
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 
 router = APIRouter()
 

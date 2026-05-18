@@ -9,16 +9,13 @@ Both execution modes are handled by Prefect.
 from enum import Enum
 from uuid import UUID
 
-from prefect.deployments import run_deployment
-from prefect.exceptions import PrefectException
 from sqlmodel import Session
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
-from minds.jobs.data_catalog_loader_flow import load_data_catalog
 from minds.model.mind_datasource import MindDatasource
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 
@@ -55,6 +52,9 @@ class DataCatalogLoader:
 
         logger.debug(f"Running the data catalog loader flow in {settings.data_catalog.execution_mode} mode")
         if DataCatalogExecutionMode.ASYNC.value == settings.data_catalog.execution_mode:
+            from prefect.deployments import run_deployment
+            from prefect.exceptions import PrefectException
+
             # Debug logging to trace parameter values before sending to Prefect
             logger.info(
                 f"Calling run_deployment with parameters: "
@@ -90,6 +90,8 @@ class DataCatalogLoader:
             self.session.commit()
 
         else:
+            from minds.jobs.data_catalog_loader_flow import load_data_catalog
+
             load_data_catalog(
                 mind_datasource_id=mind_datasource.id,
                 organization_id=self.organization_id,

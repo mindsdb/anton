@@ -7,8 +7,6 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Any
 
-import pandas as pd
-
 from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.charts import AxisSpec, RenderChartType, RenderPlan, SeriesSpec
@@ -141,6 +139,7 @@ def _draw_scatter_matplotlib(axis: Any, render_plan: RenderPlan) -> None:
 
 def _resolve_xy_x_values(labels: list[Any], scale_type: str) -> tuple[list[Any], bool]:
     if scale_type == "timeseries":
+        import pandas as pd
         from matplotlib.dates import date2num
 
         parsed = pd.to_datetime(pd.Series(labels), errors="coerce", utc=True)

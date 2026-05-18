@@ -15,7 +15,7 @@ from minds.agents.database_agent.prompt_templates import (
 from minds.agents.exceptions import QueryGenerationError
 from minds.agents.llm import get_llm_config
 from minds.cache import data_catalog_cache
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.model.data_catalog import DataCatalog
 from minds.model.database_agent import QueryGenerationResult, QueryGenerationResultRetry, QueryPlanResult
@@ -23,7 +23,7 @@ from minds.model.mind import Mind
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Role
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 

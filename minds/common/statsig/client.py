@@ -5,14 +5,14 @@ import threading
 
 from statsig_python_core import Statsig, StatsigOptions
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import AppSettings, get_app_settings
 from minds.common.statsig.offline import apply_offline_overrides
 
 _lock = threading.Lock()
 _client: Statsig | None = None
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 def build_statsig_options(settings: AppSettings) -> StatsigOptions:

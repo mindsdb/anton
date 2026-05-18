@@ -1,8 +1,10 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TreeNodeResponse(BaseModel):
     """Response schema for tree nodes."""
+
+    model_config = ConfigDict(populate_by_name=True)  # Allow both 'class_' and 'class' as field names
 
     name: str = Field(..., description="Name of the tree node")
     class_: str = Field(..., alias="class", description="Type of node (db, table, schema, job)")
@@ -12,9 +14,6 @@ class TreeNodeResponse(BaseModel):
     visible: bool = Field(True, description="Whether the node is visible")
     schema: str | None = Field(None, description="Schema name (for tables)")
     children: list["TreeNodeResponse"] | None = Field(None, description="Child nodes")
-
-    class Config:
-        populate_by_name = True  # Allow both 'class_' and 'class' as field names
 
 
 # Enable forward reference for self-referencing model

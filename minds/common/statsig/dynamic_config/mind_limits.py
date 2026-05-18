@@ -3,14 +3,14 @@ Mind limits config from Statsig dynamic config.
 """
 
 from minds.common.constants import DYNAMIC_CONFIG_MIND_USAGE_LIMITS
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import AppSettings, DeploymentMode, get_app_settings
 from minds.common.statsig.client import get_statsig
 from minds.common.statsig.users import build_statsig_user
 from minds.requests.context import Context
 from minds.schemas.limits import MindLimitsConfig
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 def get_mind_limits_config(context: Context, settings: AppSettings | None = None) -> MindLimitsConfig:

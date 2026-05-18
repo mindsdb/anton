@@ -4,12 +4,12 @@ from mindsdb_sdk.server import Server
 
 from minds.common import get_authorization_bearer_token, get_headers_for_mindsdb_client
 from minds.common.authentication import MindsDBHeaders
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.requests.context import Context
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 

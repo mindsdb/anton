@@ -70,7 +70,7 @@ class TestDataCatalogLoader:
             patch(
                 "minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "synchronous"
             ),
-            patch("minds.services.data_catalog.data_catalog_loader.load_data_catalog") as mock_load_flow,
+            patch("minds.jobs.data_catalog_loader_flow.load_data_catalog") as mock_load_flow,
         ):
             # Execute load
             await data_catalog_loader.load(mock_mind_datasource, ["table1", "table2"])
@@ -96,9 +96,7 @@ class TestDataCatalogLoader:
             patch(
                 "minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "asynchronous"
             ),
-            patch(
-                "minds.services.data_catalog.data_catalog_loader.run_deployment", side_effect=mock_run_deployment
-            ) as mock_run_deployment_patch,
+            patch("prefect.deployments.run_deployment", side_effect=mock_run_deployment) as mock_run_deployment_patch,
         ):
             # Execute load
             await data_catalog_loader.load(mock_mind_datasource, ["table1", "table2"])
@@ -138,7 +136,7 @@ class TestDataCatalogLoader:
             patch(
                 "minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "synchronous"
             ),
-            patch("minds.services.data_catalog.data_catalog_loader.load_data_catalog") as mock_load_flow,
+            patch("minds.jobs.data_catalog_loader_flow.load_data_catalog") as mock_load_flow,
         ):
             # Execute load with None table_names
             await data_catalog_loader.load(mock_mind_datasource, None)
@@ -162,7 +160,7 @@ class TestDataCatalogLoader:
             patch(
                 "minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "asynchronous"
             ),
-            patch("minds.services.data_catalog.data_catalog_loader.run_deployment", side_effect=mock_run_deployment),
+            patch("prefect.deployments.run_deployment", side_effect=mock_run_deployment),
             pytest.raises(Exception, match="Deployment failed"),
         ):
             # Execute load and expect exception
@@ -175,7 +173,7 @@ class TestDataCatalogLoader:
             patch(
                 "minds.services.data_catalog.data_catalog_loader.settings.data_catalog.execution_mode", "synchronous"
             ),
-            patch("minds.services.data_catalog.data_catalog_loader.load_data_catalog") as mock_load_flow,
+            patch("minds.jobs.data_catalog_loader_flow.load_data_catalog") as mock_load_flow,
             pytest.raises(DataCatalogLoaderError, match="Flow execution failed"),
         ):
             mock_load_flow.side_effect = DataCatalogLoaderError("Flow execution failed")

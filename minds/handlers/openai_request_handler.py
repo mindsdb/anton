@@ -6,7 +6,7 @@ from minds.agents.agent_controller import AgentController
 from minds.agents.base import AgentRunContext
 from minds.agents.helpers import get_agent
 from minds.agents.passthrough_agent.agent import PassthroughAgent
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.passthrough_config import is_passthrough_model, resolve_passthrough_model
 from minds.common.settings.app_settings import get_app_settings
 from minds.model.chat_completion import ChatCompletion
@@ -23,7 +23,7 @@ from minds.services.conversations import ConversationsService
 from minds.services.limits import LimitsService
 from minds.services.minds import MindsService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 

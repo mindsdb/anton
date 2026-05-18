@@ -1,10 +1,10 @@
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import AppSettings, DeploymentMode, get_app_settings
 from minds.common.statsig.client import get_statsig
 from minds.common.statsig.users import build_statsig_user
 from minds.requests.context import Context
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 def is_model_selection_enabled(context: Context, settings: AppSettings | None = None) -> bool:

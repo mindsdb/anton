@@ -10,22 +10,32 @@ deployment:
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
     command: ["python", "-m", "uvicorn", "minds.server:create_app"]
-    args: ["--factory", "--workers", " 12", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
+    # Async FastAPI: the event loop handles concurrency per worker. Scale via
+    # replicas (and HPA) rather than worker count to avoid duplicating ~300 MiB
+    # of imports per process and to keep startup CPU under the limit.
+    args: ["--factory", "--workers", "6", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
 
 
-  # livenessProbes are used to determine when to restart a container
-  # Only specify the values you need to override from the defaults
+  # Liveness restarts the pod if it fails. Kept tolerant (failureThreshold * periodSeconds = 60s)
+  # so a transient stall on a single worker doesn't take the pod down. The endpoint itself does
+  # NOT hit external deps — DB hiccups should not trigger restarts.
   livenessProbe:
     enabled: true
-    initialDelaySeconds: 30
-    path: /api/v1/health/live
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+    path: /v1/health/live
 
-  # readinessProbes are used to determine when a container is ready to start accepting traffic
-  # Only specify the values you need to override from the defaults
+  # Readiness gates traffic on DB connectivity. Polls quickly so the pod returns to service fast
+  # after a hiccup. failureThreshold * periodSeconds = 15s before the pod is pulled from endpoints.
   readinessProbe:
     enabled: true
-    initialDelaySeconds: 30
-    path: /api/v1/health/ready
+    initialDelaySeconds: 15
+    periodSeconds: 5
+    timeoutSeconds: 4
+    failureThreshold: 3
+    path: /v1/health/ready
 
   # deployment container resource requests/limits
   # this is set VERY low by default, to be aggressive above resource limiting, please override this if necessary
@@ -34,14 +44,19 @@ deployment:
   resources:
     limits:
       cpu: 4
-      memory: 8Gi
+      memory: 6Gi
     requests:
       cpu: 2
-      memory: 8Gi
+      memory: 4Gi
 
-  # Enable autoscaling
+  # Enable autoscaling. Async FastAPI: scale via replicas, not workers.
+  # Target 65% CPU so HPA reacts before workers saturate.
   autoscaling:
-    enabled: false
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 65
+    targetMemoryUtilizationPercentage: 80
 
   ingress:
     enabled: true
@@ -50,7 +65,8 @@ deployment:
       nginx.ingress.kubernetes.io/proxy-read-timeout: "1200"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "1200"
       nginx.ingress.kubernetes.io/proxy-body-size: 500m
-      nginx.ingress.kubernetes.io/enable-cors: "false"
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
       nginx.ingress.kubernetes.io/cors-allow-methods: "GET,OPTIONS,PUT,POST,PATCH,DELETE"
       nginx.ingress.kubernetes.io/cors-allow-origin: "http://localhost:3000"
       nginx.ingress.kubernetes.io/cors-allow-headers: >-
@@ -59,8 +75,29 @@ deployment:
         X-Organization-Id,X-User-Roles,X-Forwarded-User,X-Billing-Period-Start,X-Billing-Period-End
       nginx.ingress.kubernetes.io/cors-max-age: "3600"
       nginx.ingress.kubernetes.io/use-regex: "true"
-      
+      nginx.ingress.kubernetes.io/auth-url: "auth-url" # Modify per environment
+      nginx.ingress.kubernetes.io/auth-method: "GET"
+      nginx.ingress.kubernetes.io/auth-response-headers: >-
+        X-Organization-Id,X-User-Id,X-User-Email,X-User-Roles,X-Forwarded-User,X-Billing-Period-Start,X-Billing-Period-End
+      nginx.ingress.kubernetes.io/auth-request-headers: "Authorization,Cookie"
 
+  ingress_secondary:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-connect-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "1200"
+      nginx.ingress.kubernetes.io/proxy-body-size: 500m
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+      nginx.ingress.kubernetes.io/cors-allow-methods: "GET,OPTIONS,PUT,POST,PATCH,DELETE"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "http://localhost:3000"
+      nginx.ingress.kubernetes.io/cors-allow-headers: >-
+        DNT,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,
+        Authorization,X-CSRF-Token,Accept,Origin,Access-Control-Allow-Origin,X-File-Name,Set-Cookie,X-User-Id,X-User-Email,
+        X-Organization-Id,X-User-Roles,X-Forwarded-User,X-Billing-Period-Start,X-Billing-Period-End
+      nginx.ingress.kubernetes.io/cors-max-age: "3600"
+      nginx.ingress.kubernetes.io/use-regex: "true"
       nginx.ingress.kubernetes.io/auth-url: "auth-url" # Modify per environment
       nginx.ingress.kubernetes.io/auth-method: "GET"
       nginx.ingress.kubernetes.io/auth-response-headers: >-
@@ -71,8 +108,6 @@ deployment:
     targetPort: 9010
 
   globalEnvs:
-    - name: LOG_LEVEL
-      value: "INFO"
 
     - name: DEPLOYMENT_MODE
       value: "cloud"

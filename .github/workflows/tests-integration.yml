@@ -20,16 +20,26 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     environment:
       name: ${{ inputs.deploy-env }}
-      url: ${{ vars.MDB_ENV_URL }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Load env config
+        run: |
+          env_file="tests/integration/envs/.env.${{ inputs.deploy-env }}"
+          if [ ! -f "$env_file" ]; then
+            echo "::error::Missing $env_file for deploy-env '${{ inputs.deploy-env }}'"
+            exit 1
+          fi
+          set -a; source "$env_file"; set +a
+          {
+            echo "MINDS_API_BASE_URL=$MINDS_API_BASE_URL"
+            echo "MINDS_API_PREFIX=$MINDS_API_PREFIX"
+          } >> "$GITHUB_ENV"
       - name: Run integration tests
         run: make test/integration
         env:
-          MINDS_API_BASE_URL: ${{ vars.MDB_ENV_URL }}
           GATEWAY_INTERNAL_URL: ${{ vars.GATEWAY_INTERNAL_URL }}
           MINDS_API_KEY: ${{ secrets.MINDS_TEST_USER_API_KEY }}
