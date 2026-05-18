@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from anton.core.dispatch.adapter import (
     ActionCard,
@@ -101,6 +103,12 @@ class DispatchRepository:
         raise NotImplementedError
 
     async def get_agent_group(self, agent_group_id: str) -> AgentGroup:
+        raise NotImplementedError
+
+    async def create_agent_group(self, group: AgentGroup) -> AgentGroup:
+        raise NotImplementedError
+
+    async def add_wiring(self, wiring: MessagingGroupAgent) -> None:
         raise NotImplementedError
 
     async def resolve_session(
@@ -208,8 +216,25 @@ class DispatchRouter:
 
         wirings = await self.repo.get_wirings(mg.id)
         if not wirings:
-            _log.debug("no wirings for %s/%s", addr.channel_type, addr.platform_id)
-            return
+            # An unwired channel would otherwise silently drop every
+            # message. Bootstrap a default agent on the first one so
+            # dispatch works with zero manual setup — identical behaviour
+            # on the desktop app, the web build, and cloud instances.
+            is_group = (
+                event.message.is_group
+                if event.message.is_group is not None
+                else mg.is_group
+            )
+            if await self._auto_provision(mg, is_group=is_group) is None:
+                _log.warning(
+                    "no wirings and auto-provision failed for %s/%s",
+                    addr.channel_type,
+                    addr.platform_id,
+                )
+                return
+            wirings = await self.repo.get_wirings(mg.id)
+            if not wirings:
+                return
 
         for wiring in wirings:
             agent_group = await self.repo.get_agent_group(wiring.agent_group_id)
@@ -240,6 +265,100 @@ class DispatchRouter:
                 store.close()
 
             await self.runtime.wake(session, agent_group)
+
+    # -----------------------------------------------------------------
+    # Auto-provisioning — first message on an unwired channel
+    # -----------------------------------------------------------------
+
+    async def _auto_provision(
+        self,
+        mg: MessagingGroup,
+        *,
+        is_group: bool | None,
+    ) -> AgentGroup | None:
+        """Create a default agent group + wiring for an unwired channel.
+
+        A messaging group with no wiring drops every inbound message. The
+        first message instead bootstraps a working agent: one agent group
+        with an isolated per-channel workspace, wired so subsequent
+        messages route straight through.
+
+        ``trigger_rule`` adapts to the channel: a DM gets
+        :attr:`TriggerRule.ALWAYS` (every message is for the agent), while
+        a group/channel gets :attr:`TriggerRule.MENTION_ONLY` so the agent
+        replies only when addressed, not to every message in a shared
+        Slack/Discord channel. An unknown ``is_group`` is treated as a
+        group — the conservative choice.
+
+        Idempotent: ``create_agent_group`` / ``add_wiring`` both INSERT OR
+        REPLACE, and the agent-group id is derived from ``mg.id``, so a
+        concurrent first message re-creates identical rows. Returns the
+        group, or ``None`` if persistence raised (the caller logs + drops
+        the message).
+        """
+        try:
+            workspace = self._auto_workspace(mg)
+            workspace.mkdir(parents=True, exist_ok=True)
+            group = AgentGroup(
+                id=f"auto-{mg.id}",
+                name=f"{mg.channel_type} agent",
+                workspace=workspace,
+            )
+            await self.repo.create_agent_group(group)
+            await self.repo.add_wiring(
+                MessagingGroupAgent(
+                    messaging_group_id=mg.id,
+                    agent_group_id=group.id,
+                    session_mode=SessionMode.PER_MESSAGING_GROUP,
+                    trigger_rule=(
+                        TriggerRule.ALWAYS
+                        if is_group is False
+                        else TriggerRule.MENTION_ONLY
+                    ),
+                    priority=100,
+                )
+            )
+            _log.info(
+                "auto-provisioned agent group %s for %s/%s "
+                "(workspace=%s, is_group=%s)",
+                group.id,
+                mg.channel_type,
+                mg.platform_id,
+                workspace,
+                is_group,
+            )
+            return group
+        except Exception:
+            _log.exception(
+                "auto-provision failed for %s/%s",
+                mg.channel_type,
+                mg.platform_id,
+            )
+            return None
+
+    @staticmethod
+    def _auto_workspace(mg: MessagingGroup) -> Path:
+        """Resolve the isolated workspace dir for an auto-provisioned group.
+
+        Defaults to ``~/.anton/dispatch-workspaces/<channel>-<id>/`` — the
+        one location that exists and persists identically on the desktop
+        app, the headless web build, and the cloud container (whose only
+        persistent volume is mounted at ``~/.anton``). A home-directory or
+        project-tree workspace would be lost on every cloud redeploy and
+        would expose the operator's whole home tree to any inbound sender.
+        Override the base with ``ANTON_DISPATCH_WORKSPACE_ROOT``.
+        """
+        root = os.environ.get("ANTON_DISPATCH_WORKSPACE_ROOT", "").strip()
+        base = (
+            Path(root).expanduser()
+            if root
+            else Path.home() / ".anton" / "dispatch-workspaces"
+        )
+        # platform_id may carry '/', ':' or other unsafe characters —
+        # slugify so the workspace stays a single directory level deep.
+        raw = f"{mg.channel_type}-{mg.platform_id}"
+        slug = "".join(c if c.isalnum() or c in "-_." else "-" for c in raw)
+        return (base / slug).resolve()
 
     async def on_metadata(
         self,
