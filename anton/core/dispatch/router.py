@@ -67,6 +67,14 @@ from anton.core.dispatch.session_store import SessionStoreProtocol
 _log = logging.getLogger("anton.dispatch.router")
 
 
+# The dispatch system runs a single shared agent identity — "Anton". Multiple
+# agent groups remain modelled (entities + FK) so a future multi-agent feature
+# can plug other agents in, but auto-provisioning and the cowork UI route every
+# channel to this one group.
+DEFAULT_AGENT_GROUP_ID = "anton"
+DEFAULT_AGENT_GROUP_NAME = "Anton"
+
+
 # ---------------------------------------------------------------------------
 # Repository protocol — abstracts the central DB
 # ---------------------------------------------------------------------------
@@ -298,7 +306,7 @@ class DispatchRouter:
         message).
         """
         try:
-            group = await self._default_agent_group(mg.channel_type)
+            group = await self._default_agent_group()
             await self.repo.add_wiring(
                 MessagingGroupAgent(
                     messaging_group_id=mg.id,
@@ -328,40 +336,37 @@ class DispatchRouter:
             )
             return None
 
-    async def _default_agent_group(self, channel_type: str) -> AgentGroup:
-        """Return the single shared agent group for a channel type.
+    async def _default_agent_group(self) -> AgentGroup:
+        """Return the single shared "Anton" agent group.
 
-        One agent group backs every messaging group on a connection — all
-        the DMs and channels of a Slack workspace share one identity,
-        workspace, and memory, while :attr:`SessionMode.PER_MESSAGING_GROUP`
-        on each wiring keeps their conversations separate. The router
-        therefore never creates more than one auto agent group per channel
-        type.
+        One agent identity backs every channel — all the DMs and channels
+        of every connected platform share one workspace and memory, while
+        :attr:`SessionMode.PER_MESSAGING_GROUP` on each wiring keeps their
+        conversations separate.
 
         Created once, on demand, then reused: an existing group is returned
-        untouched, so renaming it or repointing its workspace from the UI
-        survives later inbound messages.
+        untouched, so renaming it or repointing its workspace survives
+        later inbound messages.
         """
-        group_id = f"auto-{channel_type}"
         try:
-            return await self.repo.get_agent_group(group_id)
+            return await self.repo.get_agent_group(DEFAULT_AGENT_GROUP_ID)
         except KeyError:
             pass
-        workspace = self._auto_workspace(channel_type)
+        workspace = self._auto_workspace()
         workspace.mkdir(parents=True, exist_ok=True)
         return await self.repo.create_agent_group(
             AgentGroup(
-                id=group_id,
-                name=f"{channel_type} agent",
+                id=DEFAULT_AGENT_GROUP_ID,
+                name=DEFAULT_AGENT_GROUP_NAME,
                 workspace=workspace,
             )
         )
 
     @staticmethod
-    def _auto_workspace(channel_type: str) -> Path:
-        """Resolve the workspace dir for a channel type's shared agent group.
+    def _auto_workspace() -> Path:
+        """Resolve the workspace dir for the shared Anton agent group.
 
-        Defaults to ``~/.anton/dispatch-workspaces/<channel>/`` — the one
+        Defaults to ``~/.anton/dispatch-workspaces/anton/`` — the one
         location that exists and persists identically on the desktop app,
         the headless web build, and the cloud container (whose only
         persistent volume is mounted at ``~/.anton``). A home-directory or
@@ -375,12 +380,7 @@ class DispatchRouter:
             if root
             else Path.home() / ".anton" / "dispatch-workspaces"
         )
-        # channel_type is a known adapter slug, but stay defensive and
-        # keep the workspace a single directory level deep regardless.
-        slug = "".join(
-            c if c.isalnum() or c in "-_." else "-" for c in channel_type
-        )
-        return (base / slug).resolve()
+        return (base / DEFAULT_AGENT_GROUP_ID).resolve()
 
     async def on_metadata(
         self,

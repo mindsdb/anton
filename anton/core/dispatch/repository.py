@@ -349,6 +349,42 @@ class SqliteDispatchRepository(DispatchRepository):
         )
         return cursor.rowcount > 0
 
+    async def collapse_to_single_agent_group(self, keep_id: str) -> int:
+        """Re-point every wiring and session onto ``keep_id``, drop the rest.
+
+        One-time migration to the single-agent ("Anton") model: any agent
+        group other than ``keep_id`` has its wirings and sessions reassigned,
+        then its row is deleted. ``UPDATE OR REPLACE`` collapses the rare
+        case where two groups were wired to the same messaging group (or
+        held the same session_key) — the duplicate is dropped, not errored.
+
+        Returns the number of agent groups removed. Idempotent: a second
+        call finds nothing to collapse and returns ``0``.
+        """
+        others = [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT id FROM agent_groups WHERE id != ?", (keep_id,)
+            ).fetchall()
+        ]
+        if not others:
+            return 0
+        self._conn.execute(
+            "UPDATE OR REPLACE messaging_group_agents SET agent_group_id = ? "
+            "WHERE agent_group_id != ?",
+            (keep_id, keep_id),
+        )
+        self._conn.execute(
+            "UPDATE OR REPLACE sessions SET agent_group_id = ? "
+            "WHERE agent_group_id != ?",
+            (keep_id, keep_id),
+        )
+        self._conn.executemany(
+            "DELETE FROM agent_groups WHERE id = ?",
+            [(group_id,) for group_id in others],
+        )
+        return len(others)
+
     async def list_messaging_groups(self) -> list[MessagingGroup]:
         """Every messaging group seen so far. Created lazily on first inbound event."""
         rows = self._conn.execute(
