@@ -116,6 +116,25 @@ class PassthroughAgent:
     async def get_last_run_usage(self) -> tuple[int, int] | None:
         return self._usage_box.value
 
+    def get_last_run_output(self) -> dict[str, Any] | None:
+        """The OpenAI-shape assistant message from the most recent ``proxy`` call.
+
+        Available once the response is fully translated (non-streaming) or
+        the stream has reached its terminal event (streaming). The handler
+        passes this to Langfuse as ``generation.output`` so traces are
+        eval-replayable without re-fetching from the provider.
+        """
+        return self._usage_box.output_payload
+
+    def get_last_run_server_artifacts(self) -> list[dict[str, Any]]:
+        """Server-side intermediates (web_search, web_fetch, reasoning) for this run.
+
+        Always a list (possibly empty) so callers can splat without a None
+        check. The list is never surfaced in the client response — it lives
+        on the Langfuse trace's metadata for evals / troubleshooting only.
+        """
+        return list(self._usage_box.server_artifacts)
+
     # ------------------------------------------------------------------
     # Thin instance-method wrappers around the module-level proxies.
     # Kept on the class so tests and external callers that historically
