@@ -11,7 +11,7 @@ dependencies = [
     "pyodbc>=4.0.39",
     "httpx==0.28.1",
     "click==8.4.0",
-    "langfuse==3.10.3",
+    "langfuse==3.14.6",
     "alembic==1.16.4",
     "sqlmodel==0.0.24",
     "SQLAlchemy==2.0.43",

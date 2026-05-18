@@ -36,10 +36,10 @@ from minds.agents.candidate_sql_agent.candidate_generator_agent.instructions_tem
 )
 from minds.agents.candidate_sql_agent.linker_agent.agent import LinkedSchema
 from minds.agents.candidate_sql_agent.settings import CandidateSQLAgentSettings
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 agent_settings = CandidateSQLAgentSettings()
 

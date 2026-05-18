@@ -10,21 +10,31 @@ deployment:
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
     command: ["python", "-m", "uvicorn", "minds.server:create_app"]
-    args: ["--factory", "--workers", " 12", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
+    # Async FastAPI: the event loop handles concurrency per worker. Scale via
+    # replicas (and HPA) rather than worker count to avoid duplicating ~300 MiB
+    # of imports per process and to keep startup CPU under the limit.
+    args: ["--factory", "--workers", "6", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
 
 
-  # livenessProbes are used to determine when to restart a container
-  # Only specify the values you need to override from the defaults
+  # Liveness restarts the pod if it fails. Kept tolerant (failureThreshold * periodSeconds = 60s)
+  # so a transient stall on a single worker doesn't take the pod down. The endpoint itself does
+  # NOT hit external deps — DB hiccups should not trigger restarts.
   livenessProbe:
     enabled: true
-    initialDelaySeconds: 30
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
     path: /v1/health/live
 
-  # readinessProbes are used to determine when a container is ready to start accepting traffic
-  # Only specify the values you need to override from the defaults
+  # Readiness gates traffic on DB connectivity. Polls quickly so the pod returns to service fast
+  # after a hiccup. failureThreshold * periodSeconds = 15s before the pod is pulled from endpoints.
   readinessProbe:
     enabled: true
-    initialDelaySeconds: 30
+    initialDelaySeconds: 15
+    periodSeconds: 5
+    timeoutSeconds: 4
+    failureThreshold: 3
     path: /v1/health/ready
 
   # deployment container resource requests/limits
@@ -34,14 +44,19 @@ deployment:
   resources:
     limits:
       cpu: 4
-      memory: 8Gi
+      memory: 6Gi
     requests:
       cpu: 2
-      memory: 8Gi
+      memory: 4Gi
 
-  # Enable autoscaling
+  # Enable autoscaling. Async FastAPI: scale via replicas, not workers.
+  # Target 65% CPU so HPA reacts before workers saturate.
   autoscaling:
-    enabled: false
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 65
+    targetMemoryUtilizationPercentage: 80
 
   ingress:
     enabled: true
@@ -93,8 +108,6 @@ deployment:
     targetPort: 9010
 
   globalEnvs:
-    - name: LOG_LEVEL
-      value: "INFO"
 
     - name: DEPLOYMENT_MODE
       value: "cloud"

@@ -9,12 +9,12 @@ from typing import Any
 
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.passthrough_config import PassthroughModelConfig
 from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.chat import Message, Role
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 

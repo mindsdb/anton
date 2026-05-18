@@ -13,7 +13,7 @@ deployment:
       nginx.ingress.kubernetes.io/cors-allow-origin: "https://console.mindshub.ai, https://mdb.ai, https://hub.mindsdb.com"
       nginx.ingress.kubernetes.io/auth-url: "http://auth.prod.svc.cluster.local:80/v1/authenticate/"
     hosts:
-      - host: api.prod.mindshub.ai
+      - host: api.mindshub.ai
         enableMultiPath: true
         paths:
           - path: /v1

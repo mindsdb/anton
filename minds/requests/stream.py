@@ -4,11 +4,10 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 from uuid import UUID
 
-from langfuse import get_client
 from pydantic import BaseModel
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.schemas.chat import ChatCompletion, ChatCompletionChunk, Choice, Message, Role, StreamChoice, StreamMessage
 from minds.schemas.responses import (
     Response,
@@ -23,7 +22,7 @@ from minds.schemas.responses import (
 )
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 def create_stream_message(role: Role, content: Any, request_id: str) -> StreamMessage:
@@ -368,6 +367,8 @@ async def process_streaming_producer(
     Returns:
         StreamingResponse: A response that streams the messages as Server-Sent Events (SSE).
     """
+    from langfuse import get_client
+
     trace_id = get_client().get_current_trace_id()
     observation_id = get_client().get_current_observation_id()
 

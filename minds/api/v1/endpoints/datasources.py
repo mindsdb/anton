@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from minds.api.v1.deps import get_datasources_service, get_limits_service
 from minds.common.guards import ResourceType, require_usage_available
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.schemas.datasources import (
     ColumnResponse,
     DataCatalogResponse,
@@ -41,7 +41,7 @@ from minds.services.datasources import (
 from minds.services.limits import LimitsService
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 
 router = APIRouter()
 

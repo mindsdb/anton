@@ -25,7 +25,7 @@ from minds.agents.anton_agent.settings import AntonAgentSettings
 from minds.agents.helpers import is_anton_agent
 
 # Common imports.
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.mindsdb import extract_database_engines_from_select
 from minds.common.settings.app_settings import get_app_settings
 from minds.common.utilities import format_numeric_columns
@@ -46,7 +46,7 @@ from minds.schemas.conversations import ConversationCreateRequest, ConversationM
 from minds.schemas.messages import MessageContent, MessageContentType, MessageResponse, MessageResultResponse
 from minds.services.minds import MindNotFoundError, MindsService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 app_settings = get_app_settings()
 

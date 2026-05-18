@@ -13,9 +13,9 @@ from pydantic_ai import Agent
 from minds.agents.candidate_sql_agent.candidate_generator_agent.agent import SQLCandidate
 from minds.agents.candidate_sql_agent.selection_agent.instructions_template import SELECTION_SYSTEM_PROMPT
 from minds.agents.helpers import model_for
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from minds.model.mind import Mind

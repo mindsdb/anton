@@ -4,7 +4,7 @@ Unit tests for API v1 router.
 Tests the router configuration and endpoint aggregation.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from uuid import UUID
 
 import pytest
@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from minds.api.v1.router import api_router
+from minds.db.pg_session import get_session
 
 
 class TestAPIV1Router:
@@ -22,6 +23,11 @@ class TestAPIV1Router:
         """Create FastAPI app with v1 router included."""
         app = FastAPI()
         app.include_router(api_router)
+
+        # Override get_session so the readiness probe's SELECT 1 succeeds without a real DB.
+        fake_session = MagicMock()
+        fake_session.execute.return_value = MagicMock()
+        app.dependency_overrides[get_session] = lambda: fake_session
 
         return app
 

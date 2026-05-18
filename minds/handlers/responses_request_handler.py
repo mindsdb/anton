@@ -1,15 +1,14 @@
-from langfuse import observe
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
 from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.agents.helpers import is_anton_agent
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.db.pg_session import get_open_session
 from minds.handlers.openai_request_handler import OpenAIRequestHandler
 from minds.requests.context import Context
-from minds.requests.langfuse_tracing import get_langfuse_trace_id, setup_langfuse_observation
+from minds.requests.langfuse_tracing import get_langfuse_trace_id, lazy_observe, setup_langfuse_observation
 from minds.requests.responses_request import ResponsesRequest
 from minds.requests.stream import (
     format_messages_for_non_streaming_responses_api,
@@ -23,7 +22,7 @@ from minds.services.conversations import ConversationsService
 from minds.services.limits import LimitsService
 from minds.services.minds import MindsService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class ConversationMindMismatchError(Exception):
@@ -32,7 +31,7 @@ class ConversationMindMismatchError(Exception):
     pass
 
 
-@observe(name="Responses Handler v1", as_type="generation")
+@lazy_observe(name="Responses Handler v1", as_type="generation")
 async def responses_request_handler(
     session: Session,
     context: Context,

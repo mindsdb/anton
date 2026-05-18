@@ -70,6 +70,13 @@ deployment:
       value: "terabase-dev"
 
     # ====================================
+    # LOGGING SETTINGS
+    # ====================================
+
+    - name: LOG_LEVEL
+      value: "WARNING"
+
+    # ====================================
     # LANGFUSE SETTINGS
     # ====================================
 

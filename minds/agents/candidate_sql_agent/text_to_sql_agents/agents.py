@@ -50,14 +50,14 @@ from minds.agents.candidate_sql_agent.text_to_sql_agents.models import (
 from minds.agents.exceptions import DataCatalogValidationError, QueryGenerationError, QueryPlanningError
 from minds.agents.helpers import charting_layer, current_date_time_layer, mind_layer, model_for
 from minds.cache import data_catalog_cache
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.model.data_catalog import DataCatalog
 from minds.model.mind import Mind
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Role
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 agent_settings = CandidateSQLAgentSettings()
 

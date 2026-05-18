@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from statsig_python_core import Statsig
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import AppSettings, get_app_settings
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 def apply_offline_overrides(statsig: Statsig, settings: AppSettings | None = None) -> None:

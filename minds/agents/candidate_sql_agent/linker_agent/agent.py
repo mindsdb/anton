@@ -18,14 +18,14 @@ from pydantic_ai import Agent, RunContext
 
 from minds.agents.candidate_sql_agent.linker_agent.instructions_template import SCHEMA_LINKING_PROMPT
 from minds.agents.helpers import current_date_time_layer, mind_layer, model_for
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 
 if TYPE_CHECKING:
     from minds.model.data_catalog import DataCatalog
     from minds.model.mind import Mind
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 

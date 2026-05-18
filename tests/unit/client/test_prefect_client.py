@@ -22,7 +22,7 @@ async def test_get_flow_run_state_uses_prefect_client():
     mock_client = Mock()
     mock_client.read_flow_run_states = AsyncMock(return_value=mock_state)
 
-    with patch("minds.client.prefect.get_client", return_value=_DummyAsyncContextManager(mock_client)):
+    with patch("prefect.client.orchestration.get_client", return_value=_DummyAsyncContextManager(mock_client)):
         pc = PrefectClient()
         result = await pc.get_flow_run_state("flow-123")
 
@@ -51,7 +51,7 @@ async def test_get_flow_run_task_states_returns_task_name_to_state_mapping():
     # Use a valid UUID format for the flow_run_id
     flow_run_id = "12345678-1234-5678-1234-567812345678"
 
-    with patch("minds.client.prefect.get_client", return_value=_DummyAsyncContextManager(mock_client)):
+    with patch("prefect.client.orchestration.get_client", return_value=_DummyAsyncContextManager(mock_client)):
         pc = PrefectClient()
         result = await pc.get_flow_run_task_states(flow_run_id)
 
@@ -76,7 +76,7 @@ async def test_cancel_flow_run_sets_cancelled_state():
     mock_client = Mock()
     mock_client.set_flow_run_state = AsyncMock(return_value=None)
 
-    with patch("minds.client.prefect.get_client", return_value=_DummyAsyncContextManager(mock_client)):
+    with patch("prefect.client.orchestration.get_client", return_value=_DummyAsyncContextManager(mock_client)):
         pc = PrefectClient()
         await pc.cancel_flow_run("flow-xyz")
 

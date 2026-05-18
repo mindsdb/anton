@@ -7,7 +7,7 @@ pyodbc>=4.0.39
 openai==2.30.0
 redis==6.4.0
 httpx==0.28.1
-langfuse==3.10.3
+langfuse==3.14.6
 alembic==1.16.4
 click==8.4.0
 sqlmodel==0.0.24
@@ -16,7 +16,7 @@ psycopg2-binary==2.9.10
 pydantic-ai==1.77.0
 sqlglot==27.2.0
 anthropic==0.91.0
-mindsdb_sdk @ https://github.com/mindsdb/mindsdb_python_sdk/archive/refs/heads/main.zip # Update to latest version once merged
+mindsdb_sdk==3.5.0
 pandas==2.3.1
 prefect==3.4.18
 matplotlib==3.10.8

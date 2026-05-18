@@ -115,7 +115,7 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(chat_mod, "require_usage_available", _async_noop)
 
-    return server.app
+    return server.create_app()
 
 
 @pytest.fixture()

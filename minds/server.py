@@ -66,7 +66,3 @@ def create_app() -> FastAPI:
 
     logger.info("Minds application created successfully")
     return app
-
-
-# Create the application instance
-app = create_app()

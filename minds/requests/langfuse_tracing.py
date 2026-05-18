@@ -1,28 +1,59 @@
+import functools
 import traceback
 
-try:
-    from langfuse import get_client
-except ImportError:
-
-    class NoOpClient:
-        def get_current_trace_id(self):
-            return "disabled"
-
-        def get_current_observation_id(self):
-            return "disabled"
-
-        def update_current_trace(self, **kwargs):
-            pass
-
-    def get_client():
-        return NoOpClient()
-
-
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.requests.context import Context, create_langfuse_context
 
-# Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
+
+
+class _NoOpLangfuseClient:
+    def get_current_trace_id(self):
+        return "disabled"
+
+    def get_current_observation_id(self):
+        return "disabled"
+
+    def update_current_trace(self, **kwargs):
+        pass
+
+
+def get_client():
+    """Lazy accessor for the langfuse client. Defers the (heavy) langfuse import
+    until first request, so workers don't pay the cost during startup."""
+    try:
+        from langfuse import get_client as _langfuse_get_client
+
+        return _langfuse_get_client()
+    except ImportError:
+        return _NoOpLangfuseClient()
+
+
+def lazy_observe(**observe_kwargs):
+    """Lazy variant of langfuse's @observe decorator.
+
+    Defers importing langfuse until the wrapped function is first called, so
+    decorating a module-level function does not trigger the import at boot.
+    """
+
+    def decorator(fn):
+        _wrapped = None
+
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            nonlocal _wrapped
+            if _wrapped is None:
+                try:
+                    from langfuse import observe
+
+                    _wrapped = observe(**observe_kwargs)(fn)
+                except ImportError:
+                    _wrapped = fn
+            return await _wrapped(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 def setup_langfuse_observation(context: Context):
