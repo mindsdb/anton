@@ -232,7 +232,8 @@ class LLMClient:
                 base_url=settings.openai_base_url,
                 ssl_verify=settings.minds_ssl_verify,
                 api_version=api_version,
-                supports_vision=False,
+                supports_vision=True,
+                vision_format="anthropic",
             ),
         }
 

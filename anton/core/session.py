@@ -1153,7 +1153,11 @@ class ChatSession:
     async def turn(self, user_input: str | list[dict]) -> str:
         self._append_history({"role": "user", "content": user_input})
 
-        user_msg_str = user_input if isinstance(user_input, str) else ""
+        user_msg_str = (
+            user_input
+            if isinstance(user_input, str)
+            else next((b["text"] for b in user_input if b.get("type") == "text"), "")
+        )
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
@@ -1282,7 +1286,11 @@ class ChatSession:
             )
             self._episodic.log_turn(self._turn_count + 1, "user", content)
 
-        user_msg_str = user_input if isinstance(user_input, str) else ""
+        user_msg_str = (
+            user_input
+            if isinstance(user_input, str)
+            else next((b["text"] for b in user_input if b.get("type") == "text"), "")
+        )
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0

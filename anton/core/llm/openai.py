@@ -53,7 +53,7 @@ def _translate_tool_choice(tool_choice: dict) -> dict | str:
     return "auto"
 
 
-def _translate_messages(system: str, messages: list[dict], supports_vision: bool = True) -> list[dict]:
+def _translate_messages(system: str, messages: list[dict], supports_vision: bool = True, vision_format: str = "openai") -> list[dict]:
     """Convert Anthropic-style messages to OpenAI chat format.
 
     Handles:
@@ -80,7 +80,7 @@ def _translate_messages(system: str, messages: list[dict], supports_vision: bool
             if role == "assistant":
                 result.extend(_translate_assistant_blocks(content))
             elif role == "user":
-                result.extend(_translate_user_blocks(content, supports_vision=supports_vision))
+                result.extend(_translate_user_blocks(content, supports_vision=supports_vision, vision_format=vision_format))
             else:
                 # Fallback: join text blocks
                 text = " ".join(
@@ -123,10 +123,17 @@ def _translate_assistant_blocks(blocks: list[dict]) -> list[dict]:
     return [msg]
 
 
-def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True) -> list[dict]:
-    """Convert user content blocks (including tool_result and image) to OpenAI messages."""
+def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vision_format: str = "openai") -> list[dict]:
+    """Convert user content blocks (including tool_result and image) to OpenAI messages.
+
+    vision_format controls how image blocks are serialised:
+    - "openai"     → {"type": "image_url", "image_url": {"url": "data:..."}}
+    - "anthropic"  → kept as-is {"type": "image", "source": {...}}  (for
+                     endpoints like MDB.AI that speak Anthropic content format
+                     over an OpenAI-compatible HTTP envelope)
+    """
     result: list[dict] = []
-    content_parts: list[dict] = []  # Accumulates text + image_url blocks
+    content_parts: list[dict] = []  # Accumulates text + image blocks
 
     for block in blocks:
         if block.get("type") == "tool_result":
@@ -150,17 +157,22 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True) -> 
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
         elif block.get("type") == "image" and supports_vision:
-            # Anthropic image block -> OpenAI image_url block
-            source = block.get("source", {})
-            if source.get("type") == "base64":
-                media_type = source.get("media_type", "image/png")
-                data = source.get("data", "")
-                content_parts.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{media_type};base64,{data}"},
-                    }
-                )
+            if vision_format == "anthropic":
+                # Keep Anthropic-format image block as-is — endpoints like
+                # MDB.AI pass content through to Claude and expect this format.
+                content_parts.append(block)
+            else:
+                # Anthropic image block -> OpenAI image_url block
+                source = block.get("source", {})
+                if source.get("type") == "base64":
+                    media_type = source.get("media_type", "image/png")
+                    data = source.get("data", "")
+                    content_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{media_type};base64,{data}"},
+                        }
+                    )
 
     if content_parts:
         # If only text parts, flatten to a simple string for compatibility
@@ -216,12 +228,14 @@ class OpenAIProvider(LLMProvider):
         ssl_verify: bool = True,
         api_version: str | None = None,
         supports_vision: bool = True,
+        vision_format: str = "openai",
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url
         self._ssl_verify = ssl_verify
         self._api_version = api_version
         self._supports_vision = supports_vision
+        self._vision_format = vision_format
 
         import httpx
 
@@ -265,7 +279,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -348,7 +362,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
     ) -> AsyncIterator[StreamEvent]:
-        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
