@@ -17,6 +17,7 @@ from anton.clipboard import (
     grab_clipboard,
     is_clipboard_supported,
     parse_dropped_paths as _parse_dropped_paths,
+    replace_at_image_paths,
     save_clipboard_image,
 )
 from anton.core.session import ChatSession, ChatSessionConfig
@@ -1319,6 +1320,11 @@ async def _chat_loop(
             # message_content holds what we send to the LLM — may be str or
             # list[dict] (multimodal content blocks for images).
             message_content: str | list[dict] | None = None
+
+            # Resolve manual @<path> image references → [Image #N] tokens so
+            # they go through the same base64/multimodal pipeline as
+            # drag-and-drop pastes.
+            user_input, _ = replace_at_image_paths(user_input, image_registry)
 
             # Expand any [Image #N] placeholders into multimodal blocks. After
             # this, the registry only keeps entries that were actually sent.

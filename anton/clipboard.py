@@ -23,6 +23,9 @@ from typing import Any
 
 IMAGE_EXTENSION_REGEX = re.compile(r"\.(png|jpe?g|gif|webp|bmp)$", re.IGNORECASE)
 IMAGE_REF_REGEX = re.compile(r"\[Image #(\d+)\]")
+AT_PATH_REGEX = re.compile(
+    r'(?:(?<=\s)|^)@(?:"([^"]+)"|\'([^\']+)\'|(\S+))'
+)
 
 
 @dataclass
@@ -152,6 +155,36 @@ def replace_image_paths_in_pasted(text: str, registry: PastedImageRegistry) -> t
         out_lines.append(body + suffix)
 
     return "".join(out_lines), registered
+
+
+def replace_at_image_paths(
+    text: str, registry: PastedImageRegistry
+) -> tuple[str, list[PastedImage]]:
+    """Find @<path> references to image files, register them, replace each with [Image #N].
+
+    Supports absolute paths and paths relative to cwd. Non-image or non-existent
+    paths are left untouched (the literal "@<path>" stays in the text).
+    """
+    registered: list[PastedImage] = []
+
+    def _sub(match: re.Match) -> str:
+        token = match.group(1) or match.group(2) or match.group(3) or ""
+        if not token or not is_image_path(token):
+            return match.group(0)
+        try:
+            candidate = Path(token).expanduser()
+            if not candidate.is_absolute():
+                candidate = (Path.cwd() / candidate).resolve()
+            if not candidate.is_file():
+                return match.group(0)
+        except OSError:
+            return match.group(0)
+        item = registry.add(candidate)
+        registered.append(item)
+        return format_image_ref(item.id)
+
+    new_text = AT_PATH_REGEX.sub(_sub, text)
+    return new_text, registered
 
 
 def _linux_clipboard_tool() -> str | None:
