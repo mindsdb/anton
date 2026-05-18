@@ -425,9 +425,9 @@ async def _handle_publish(
             return
         if has_key.lower() == "n":
             webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "https://auth.mindshub.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+                "&redirect_uri=https%3A%2F%2Fconsole.mindshub.ai"
             )
             console.print()
 
