@@ -16,9 +16,11 @@ class _NoOpObservation:
     def update(self, **kwargs):
         return self
 
+
 class NoOpClient:
     def get_current_trace_id(self):
         return "disabled"
+
 
 logger = get_logger(__name__)
 
