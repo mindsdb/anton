@@ -6,6 +6,7 @@ from typing import Any
 from minds.common.logger import get_logger
 from minds.requests.context import Context, create_langfuse_context
 
+
 class _NoOpObservation:
     """No-op observation returned by NoOpClient.start_observation."""
 
