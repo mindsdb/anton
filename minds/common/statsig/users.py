@@ -8,11 +8,11 @@ from minds.common.constants import (
     CONTEXT_FIELD_USER_ID,
     CONTEXT_FIELD_USER_ROLES,
 )
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import AppSettings, get_app_settings
 from minds.requests.context import Context
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 def build_statsig_user(context: Context, settings: AppSettings | None = None) -> StatsigUser:

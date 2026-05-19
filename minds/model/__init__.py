@@ -11,6 +11,8 @@ from .datasource import Datasource
 from .memory_rule import MemoryRule, RuleType
 from .memory_topic import MemoryTopic
 from .message import Message
+from .message_event import MessageEvent
+from .message_tracing import MessageTracing
 from .mind import Mind
 from .mind_datasource import MindDatasource
 from .mind_datasource_table import MindDatasourceTable
@@ -21,6 +23,8 @@ __all__ = [
     "Datasource",
     "Conversation",
     "Message",
+    "MessageEvent",
+    "MessageTracing",
     "MindDatasource",
     "MindDatasourceTable",
     "DataCatalog",

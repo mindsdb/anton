@@ -2,11 +2,11 @@ from functools import lru_cache
 
 from openai import AsyncOpenAI
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.schemas.chat import Message
 
-logger = setup_logging()
+logger = get_logger(__name__)
 settings = get_app_settings()
 
 

@@ -10,12 +10,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from mindsdb_sdk.server import Server
-from prefect.exceptions import PrefectException
 from sqlalchemy.orm import selectinload, with_loader_criteria
 from sqlmodel import Session, and_, func, select
 
 from minds.client.prefect import PrefectClient
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.utilities import safe_parse
 from minds.model.conversation import Conversation
 from minds.model.data_catalog.column import Column
@@ -43,7 +42,7 @@ if TYPE_CHECKING:
     from minds.services.conversations import ConversationsService
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class MindsServiceError(Exception):
@@ -925,16 +924,19 @@ class MindsService:
                     f"for user {self.user_id} in organization {self.organization_id}"
                 )
                 await data_catalog_loader.load(mind_datasource, table_names)
-            except PrefectException as e:
-                logger.error(
-                    f"Error starting data catalog loader flow for datasource {datasource_name} "
-                    f"to mind {mind.name} for user {self.user_id} in organization {self.organization_id}: {str(e)}"
-                )
             except Exception as e:
-                logger.error(
-                    f"Error adding datasource {datasource_name} to mind {mind.name} "
-                    f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
-                )
+                from prefect.exceptions import PrefectException
+
+                if isinstance(e, PrefectException):
+                    logger.error(
+                        f"Error starting data catalog loader flow for datasource {datasource_name} "
+                        f"to mind {mind.name} for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+                    )
+                else:
+                    logger.error(
+                        f"Error adding datasource {datasource_name} to mind {mind.name} "
+                        f"for user {self.user_id} in organization {self.organization_id}: {str(e)}"
+                    )
 
         # Commit all relationships at once
         try:

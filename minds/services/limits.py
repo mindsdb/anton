@@ -9,7 +9,7 @@ populates actual usage counts by delegating to MindsService,
 DatasourcesService, and UsageService.
 """
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.settings.app_settings import AppSettings, get_app_settings
 from minds.common.statsig.dynamic_config.mind_limits import get_mind_limits_config
 from minds.requests.context import Context
@@ -18,7 +18,7 @@ from minds.services.datasources import DatasourcesService
 from minds.services.minds import MindsService
 from minds.services.usage import UsageService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class LimitsService:

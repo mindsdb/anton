@@ -312,7 +312,7 @@ class TestMindDatasource:
 
         mind_datasource = MindDatasource(**sample_mind_datasource_data)
 
-        with patch("minds.model.mind_datasource.PrefectClient", return_value=mock_prefect_client):
+        with patch("minds.client.prefect.PrefectClient", return_value=mock_prefect_client):
             status = await mind_datasource.status
 
         assert isinstance(status, DetailedDataCatalogStatus)
@@ -340,7 +340,7 @@ class TestMindDatasource:
         mock_prefect_client.get_flow_run_task_states = AsyncMock()
         mock_prefect_client.get_flow_run_state = AsyncMock()
 
-        with patch("minds.model.mind_datasource.PrefectClient", return_value=mock_prefect_client):
+        with patch("minds.client.prefect.PrefectClient", return_value=mock_prefect_client):
             # When flow_run_id is None, the method doesn't enter the if block and returns None
             status = await mind_datasource.status
 
@@ -379,7 +379,7 @@ class TestMindDatasource:
 
         mind_datasource = MindDatasource(**sample_mind_datasource_data)
 
-        with patch("minds.model.mind_datasource.PrefectClient", return_value=mock_prefect_client):
+        with patch("minds.client.prefect.PrefectClient", return_value=mock_prefect_client):
             status = await mind_datasource.status
 
         assert isinstance(status, DetailedDataCatalogStatus)
@@ -412,7 +412,7 @@ class TestMindDatasource:
 
         mind_datasource = MindDatasource(**sample_mind_datasource_data)
 
-        with patch("minds.model.mind_datasource.PrefectClient", return_value=mock_prefect_client):
+        with patch("minds.client.prefect.PrefectClient", return_value=mock_prefect_client):
             status = await mind_datasource.status
 
         assert isinstance(status, DetailedDataCatalogStatus)
@@ -443,7 +443,7 @@ class TestMindDatasource:
 
         mind_datasource = MindDatasource(**sample_mind_datasource_data)
 
-        with patch("minds.model.mind_datasource.PrefectClient", return_value=mock_prefect_client):
+        with patch("minds.client.prefect.PrefectClient", return_value=mock_prefect_client):
             status = await mind_datasource.status
 
         assert isinstance(status, DetailedDataCatalogStatus)

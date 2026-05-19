@@ -22,13 +22,13 @@ from minds.agents.candidate_sql_agent.controller_agents.agents import (
 from minds.agents.candidate_sql_agent.settings import CandidateSQLAgentSettings
 from minds.agents.candidate_sql_agent.text_to_sql_agents.agents import TextToSQLPipeline
 from minds.agents.helpers import is_native_query_mode_enabled, model_for
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.model.mind import Mind
 from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
 
-logger = setup_logging()
+logger = get_logger(__name__)
 agent_settings = CandidateSQLAgentSettings()
 
 

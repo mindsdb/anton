@@ -13,6 +13,7 @@ from requests import Session
 # ===================================================================
 
 MINDS_API_BASE_URL = os.getenv("MINDS_API_BASE_URL")
+MINDS_API_PREFIX = os.getenv("MINDS_API_PREFIX", "/api/v1")
 MINDS_API_KEY = os.getenv("MINDS_API_KEY")
 
 # --- DATASOURCE CONFIGURATIONS ---
@@ -84,7 +85,7 @@ def poll_mind_transitions(api_client: Session, mind_name: str) -> dict:
     observed_states = set()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = api_client.get(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}")
+            resp = api_client.get(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/{mind_name}")
             resp.raise_for_status()
         except Exception as e:
             logging.warning(f"Attempt {attempt}: HTTP error for mind '{mind_name}': {e}")
@@ -119,13 +120,13 @@ def temporary_datasource(request, api_client: Session):
     logging.info(f"SETUP: Creating {config['engine']} datasource '{unique_name}'...")
 
     payload = {"name": unique_name, "engine": config["engine"], "connection_data": config["connection_data"]}
-    create_resp = api_client.post(f"{MINDS_API_BASE_URL}/api/v1/datasources/", json=payload)
+    create_resp = api_client.post(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/datasources/", json=payload)
     assert create_resp.status_code == 201, f"FIXTURE FAILED: Could not create datasource. Response: {create_resp.text}"
 
     yield unique_name, config
 
     logging.info(f"TEARDOWN: Deleting datasource '{unique_name}'...")
-    delete_resp = api_client.delete(f"{MINDS_API_BASE_URL}/api/v1/datasources/{unique_name}")
+    delete_resp = api_client.delete(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/datasources/{unique_name}")
     assert delete_resp.status_code in [204, 404], "FIXTURE FAILED: Could not delete datasource."
 
 
@@ -146,10 +147,10 @@ def temporary_mind(api_client: Session, temporary_datasource):
         "datasources": [{"name": ds_name, "tables": [config["sample_table"]]}],
     }
 
-    create_resp = api_client.post(f"{MINDS_API_BASE_URL}/api/v1/minds/", json=payload)
+    create_resp = api_client.post(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/", json=payload)
     assert create_resp.status_code == 201, f"FIXTURE FAILED: Could not create mind. {create_resp.text}"
 
     poll_mind_transitions(api_client, unique_name)
     yield unique_name, temporary_datasource
 
-    api_client.delete(f"{MINDS_API_BASE_URL}/api/v1/minds/{unique_name}")
+    api_client.delete(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/{unique_name}")

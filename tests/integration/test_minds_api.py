@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from .conftest import MINDS_API_BASE_URL, poll_mind_transitions
+from .conftest import MINDS_API_BASE_URL, MINDS_API_PREFIX, poll_mind_transitions
 
 
 def get_and_verify_mind(api_client, mind_name, expected_status=200):
@@ -12,8 +12,8 @@ def get_and_verify_mind(api_client, mind_name, expected_status=200):
     Reusable helper to fetch a mind and assert the HTTP status.
     Returns the mind's JSON data if 200, otherwise None.
     """
-    logging.info(f"HELPER: GET /api/v1/minds/{mind_name} (expecting {expected_status})")
-    get_resp = api_client.get(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}")
+    logging.info(f"HELPER: GET {MINDS_API_PREFIX}/minds/{mind_name} (expecting {expected_status})")
+    get_resp = api_client.get(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/{mind_name}")
 
     assert get_resp.status_code == expected_status, (
         f"Failed to get mind '{mind_name}'. "
@@ -58,7 +58,7 @@ class TestMindsAPI:
                 }
             ],
         }
-        create_resp = api_client.post(f"{MINDS_API_BASE_URL}/api/v1/minds/", json=payload)
+        create_resp = api_client.post(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/", json=payload)
         assert create_resp.status_code == 201, f"Failed to create mind. Response: {create_resp.text}"
 
         # --- 3. POLL until COMPLETED ---
@@ -95,7 +95,7 @@ class TestMindsAPI:
 
         update_payload = {"datasources": [{"name": ds_name, "tables": updated_tables}]}
 
-        update_resp = api_client.put(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}", json=update_payload)
+        update_resp = api_client.put(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/{mind_name}", json=update_payload)
         assert update_resp.status_code == 200, f"Failed to update mind. Response: {update_resp.text}"
 
         # Verify the change in the response from the PUT
@@ -129,7 +129,7 @@ class TestMindsAPI:
 
         # --- 7. DELETE (DELETE) ---
         logging.info(f"TEST: Deleting mind '{mind_name}'")
-        delete_resp = api_client.delete(f"{MINDS_API_BASE_URL}/api/v1/minds/{mind_name}")
+        delete_resp = api_client.delete(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/{mind_name}")
         assert delete_resp.status_code in (200, 204), f"Failed to delete mind. Response: {delete_resp.text}"
         logging.info("SUCCESS: Mind deleted.")
 
@@ -146,7 +146,7 @@ class TestMindsAPI:
         delay_seconds = 2
 
         for attempt in range(max_retries):
-            list_resp = api_client.get(f"{MINDS_API_BASE_URL}/api/v1/minds/")
+            list_resp = api_client.get(f"{MINDS_API_BASE_URL}{MINDS_API_PREFIX}/minds/")
             assert list_resp.status_code == 200, f"Failed to list minds. Response: {list_resp.text}"
             minds = list_resp.json()
             assert isinstance(minds, list)

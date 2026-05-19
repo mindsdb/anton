@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from minds.api.v1.deps import get_conversations_service, get_minds_service
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.schemas.charts import ChartImageResponse, ChartOutputFormat, ChartRequest, ChartResponse
 from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
 from minds.schemas.messages import MessageResponse, MessageResultResponse
@@ -27,7 +27,7 @@ from minds.services.conversations import (
 )
 from minds.services.minds import MindNotFoundError, MindsService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 router = APIRouter()
 
