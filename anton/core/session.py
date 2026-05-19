@@ -27,6 +27,11 @@ from anton.core.llm.provider import (
     StreamToolResult,
     TokenLimitExceeded,
 )
+from anton.core.llm.tracing import (
+    TraceContext,
+    reset_trace_context,
+    set_trace_context,
+)
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
@@ -84,6 +89,11 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
+    # Identifier for the host harness driving this session (e.g. "cowork",
+    # "cli"). Surfaced on telemetry / langfuse traces so the harness that
+    # produced a given trace is filterable in the dashboard. None means the
+    # host didn't identify itself.
+    harness: str | None = None
     proactive_dashboards: bool = False
     tools: list[ToolDef] = field(default_factory=list)
 
@@ -120,6 +130,11 @@ class ChatSession:
         )
         self._history_store = config.history_store
         self._session_id = config.session_id
+        self._harness = config.harness
+        # Set per-turn by `turn_stream` so any LLM call made during that
+        # turn can read the current turn identifier (used by telemetry /
+        # langfuse propagation in the provider layer).
+        self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
@@ -1274,9 +1289,20 @@ class ChatSession:
         return reply
 
     async def turn_stream(
-        self, user_input: str | list[dict]
+        self,
+        user_input: str | list[dict],
+        *,
+        turn_id: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Streaming version of turn(). Yields events as they arrive."""
+        """Streaming version of turn(). Yields events as they arrive.
+
+        `turn_id` lets the host (cowork, CLI, …) tag the turn with its
+        own identifier so downstream telemetry can correlate the LLM
+        calls + tool spans made during this turn. Stored on
+        `self._current_turn_id` so the provider layer can read it
+        without threading the arg through every internal call.
+        """
+        self._current_turn_id = turn_id
         self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
@@ -1298,6 +1324,21 @@ class ChatSession:
             self._explainability_store,
             turn=self._turn_count + 1,
             user_message=user_msg_str,
+        )
+
+        # Per-turn trace identity. The OpenAI provider reads this when
+        # talking to MindsHub and attaches langfuse-style headers so the
+        # router can attribute every LLM call (and any spans nested
+        # inside this turn via tools / scratchpad) to the right session.
+        # ContextVar propagation also covers `asyncio.create_task` spawns
+        # — the cerebellum flush + identity extraction tasks scheduled
+        # below inherit a copy of this context.
+        _trace_token = set_trace_context(
+            TraceContext(
+                session_id=self._session_id,
+                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+                harness=self._harness,
+            )
         )
 
         try:
@@ -1375,6 +1416,7 @@ class ChatSession:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
                 )
+            reset_trace_context(_trace_token)
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:

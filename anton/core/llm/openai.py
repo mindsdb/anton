@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 
 import openai
@@ -236,6 +237,24 @@ class OpenAIProvider(LLMProvider):
         self._api_version = api_version
         self._supports_vision = supports_vision
         self._vision_format = vision_format
+        # Whether to attach langfuse-style headers (Langfuse-Session-Id,
+        # Langfuse-Tags, Langfuse-Metadata) to outbound requests. Default-on
+        # only for the MindsHub-backed deployment, which is the curated
+        # langfuse-aware router we ship against. For every other openai-
+        # compatible endpoint (raw OpenAI, Azure, Gemini, self-hosted
+        # vLLM/ollama/LM Studio) we skip by default so the cowork session
+        # identity doesn't leak into third-party logs.
+        #
+        # Power-user opt-in: set `ANTON_LANGFUSE_HEADERS=1` to force-emit
+        # the headers regardless of base URL — useful when the user has
+        # pointed `base_url` at their own langfuse-instrumented proxy.
+        self._emit_trace_headers = bool(base_url) and (
+            "mindshub.ai" in base_url or "mdb.ai" in base_url
+        )
+        if os.environ.get("ANTON_LANGFUSE_HEADERS", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            self._emit_trace_headers = True
 
         import httpx
 
@@ -269,6 +288,35 @@ class OpenAIProvider(LLMProvider):
             api_version=self._api_version,
         )
 
+    def _build_trace_headers(self) -> dict[str, str] | None:
+        """Return langfuse-style headers for the active trace, or None.
+
+        Returns None unless trace-header emission is enabled for this
+        provider instance (default-on for MindsHub, opt-in for any other
+        openai-compatible endpoint via `ANTON_LANGFUSE_HEADERS=1`) AND a
+        `TraceContext` has been installed by `ChatSession.turn_stream`.
+        """
+        if not self._emit_trace_headers:
+            return None
+        from .tracing import get_trace_context
+
+        ctx = get_trace_context()
+        if ctx is None:
+            return None
+        headers: dict[str, str] = {}
+        if ctx.session_id:
+            headers["Langfuse-Session-Id"] = ctx.session_id
+        if ctx.harness:
+            headers["Langfuse-Tags"] = ctx.harness
+        extra: dict[str, object] = {}
+        if ctx.turn_id is not None:
+            extra["turn_id"] = ctx.turn_id
+        if ctx.harness:
+            extra["harness"] = ctx.harness
+        if extra:
+            headers["Langfuse-Metadata"] = json.dumps(extra)
+        return headers or None
+
     async def complete(
         self,
         *,
@@ -290,6 +338,9 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = _translate_tools(tools)
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice(tool_choice)
+        trace_headers = self._build_trace_headers()
+        if trace_headers:
+            kwargs["extra_headers"] = trace_headers
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -372,6 +423,9 @@ class OpenAIProvider(LLMProvider):
         )
         if tools:
             kwargs["tools"] = _translate_tools(tools)
+        trace_headers = self._build_trace_headers()
+        if trace_headers:
+            kwargs["extra_headers"] = trace_headers
 
         content_text = ""
         tool_calls: list[ToolCall] = []
