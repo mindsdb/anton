@@ -410,3 +410,92 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
 
     else:
         return f"Unknown scratchpad action: {action}"
+
+
+async def handle_read_image(
+    session: "ChatSession", tc_input: dict
+) -> str | list[dict]:
+    """Read an image file from disk and return it as an image content block.
+
+    Returns a list of content blocks (image + text) on success so the model
+    sees the picture on its next turn. Returns a plain error string on
+    failure (missing file, non-image extension, oversized image, etc.).
+    """
+    import base64
+    from pathlib import Path
+
+    from anton.clipboard import is_image_path
+    from anton.utils.clipboard import (
+        MAX_IMAGE_BYTES,
+        _media_type_for,
+        human_size,
+    )
+
+    file_path = (tc_input.get("file_path") or "").strip()
+    if not file_path:
+        return "Error: file_path is required."
+
+    try:
+        path = Path(file_path).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+    except OSError as exc:
+        return f"Error: invalid path '{file_path}': {exc}"
+
+    if not path.is_file():
+        return f"Error: file not found: {path}"
+
+    if not is_image_path(path.name):
+        return (
+            f"Error: '{path.name}' is not a supported image format "
+            "(expected .png/.jpg/.jpeg/.gif/.webp/.bmp)."
+        )
+
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return f"Error: cannot read '{path}': {exc}"
+
+    suffix = path.suffix.lstrip(".").lower()
+    if suffix == "bmp":
+        try:
+            import io
+            from PIL import Image as _PILImage
+
+            buf = io.BytesIO()
+            _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
+            raw = buf.getvalue()
+            suffix = "png"
+        except Exception as exc:
+            return f"Error: failed to convert BMP to PNG: {exc}"
+
+    if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
+        return (
+            f"Error: image is too large ({human_size(len(raw))}); "
+            "the API limit is ~3.7 MB raw / 5 MB base64. "
+            "Resize the image and try again."
+        )
+
+    b64 = base64.standard_b64encode(raw).decode("ascii")
+    media_type = _media_type_for(suffix)
+
+    summary = f"Loaded {path.name} ({human_size(len(raw))})."
+    try:
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(path) as im:
+            summary = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw))})."
+    except Exception:
+        pass
+
+    return [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": b64,
+            },
+        },
+        {"type": "text", "text": summary},
+    ]

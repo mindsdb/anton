@@ -13,6 +13,7 @@ from anton.clipboard import (
     IMAGE_REF_REGEX,
     PastedImageRegistry,
     clipboard_unavailable_reason,
+    is_image_path,
     replace_image_paths_in_pasted,
 )
 
@@ -80,8 +81,15 @@ def format_file_message(text: str, paths: list[Path], console: Console) -> str:
             )
             continue
 
+        if is_image_path(p.name):
+            parts.append(
+                f'\n<file path="{p}">\n(Image file — {human_size(size)}. '
+                f'Call the `read_image` tool with file_path="{p}" to view it, or use the scratchpad to process it)\n</file>'
+            )
+            continue
+
         if suffix in (
-            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+            ".ico",
             ".pdf", ".zip", ".tar", ".gz", ".exe", ".dll", ".so",
             ".pyc", ".pyo", ".whl", ".egg", ".db", ".sqlite",
         ):

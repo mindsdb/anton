@@ -30,8 +30,8 @@ class ToolRegistry:
 
     async def dispatch_tool(
         self, session: "ChatSession", tool_name: str, tc_input: dict
-    ) -> str:
-        """Dispatch a tool call by name. Returns result text."""
+    ) -> "str | list[dict]":
+        """Dispatch a tool call by name. Returns result text or multimodal blocks."""
         tool_def = next((t for t in self._tools if t.name == tool_name), None)
         if tool_def is None:
             raise ValueError(f"Tool {tool_name} not found")
