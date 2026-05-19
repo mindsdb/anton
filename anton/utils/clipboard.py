@@ -74,17 +74,21 @@ def format_file_message(text: str, paths: list[Path], console: Console) -> str:
 
         console.print(f"  [anton.muted]attached: {p.name} ({human_size(size)})[/]")
 
-        if size > 512_000:
-            parts.append(
-                f'\n<file path="{p}">\n(File too large to inline — {human_size(size)}. '
-                f"Use the scratchpad to read it.)\n</file>"
-            )
-            continue
-
+        # Image check runs before the size guard: `read_image` accepts files
+        # up to ~3.75 MB raw, well above 512 KB, so the generic 'too large
+        # to inline' message would silently hide the tool hint for typical
+        # photos and screenshots.
         if is_image_path(p.name):
             parts.append(
                 f'\n<file path="{p}">\n(Image file — {human_size(size)}. '
                 f'Call the `read_image` tool with file_path="{p}" to view it, or use the scratchpad to process it)\n</file>'
+            )
+            continue
+
+        if size > 512_000:
+            parts.append(
+                f'\n<file path="{p}">\n(File too large to inline — {human_size(size)}. '
+                f"Use the scratchpad to read it.)\n</file>"
             )
             continue
 
