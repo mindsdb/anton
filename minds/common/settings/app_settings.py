@@ -184,7 +184,7 @@ class GeminiSettings(Settings):
         description="Gemini model used for the `latest:gemini` alias.",
     )  # GEMINI__PASSTHROUGH_GEMINI_MODEL
     passthrough_gemini_flash_model: str = Field(
-        default="gemini-3-flash-preview",
+        default="gemini-3.5-flash",
         description=(
             "Gemini Flash model used for the `latest:gemini-flash` alias — cheaper, faster sibling of the Pro line."
         ),
