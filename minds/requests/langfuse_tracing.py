@@ -180,6 +180,7 @@ def update_generation_usage(
     name: str = "llm-usage",
     input: Any = None,
     output: Any = None,
+    metadata: dict | None = None,
 ) -> None:
     """
     Record LLM token usage on a Langfuse generation.
@@ -210,6 +211,11 @@ def update_generation_usage(
             in-scope mode).
         input: Optional input payload to attach (Langfuse displays it).
         output: Optional output payload to attach (Langfuse displays it).
+        metadata: Optional arbitrary metadata to attach to the generation
+            (Langfuse displays it and lets you filter traces by it). Used by
+            passthrough flows to record alias / provider / reasoning_effort
+            so downstream analytics can slice by alias surface separately
+            from the concrete upstream model.
     """
     if usage is None:
         logger.debug("update_generation_usage: usage is None, skipping")
@@ -232,8 +238,12 @@ def update_generation_usage(
                 usage_details=usage_details,
                 input=input,
                 output=output,
+                metadata=metadata,
             )
-            logger.debug(f"Updated current Langfuse generation with usage_details={usage_details} model={model}")
+            logger.debug(
+                f"Updated current Langfuse generation with usage_details={usage_details} "
+                f"model={model} metadata={metadata}"
+            )
         else:
             obs = langfuse_client.start_observation(
                 trace_context=trace_context,
@@ -243,6 +253,7 @@ def update_generation_usage(
                 usage_details=usage_details,
                 input=input,
                 output=output,
+                metadata=metadata,
             )
             # Defensive: ending may fail on stub clients; this is non-fatal.
             with contextlib.suppress(Exception):
@@ -251,7 +262,7 @@ def update_generation_usage(
                 "Attached child Langfuse generation "
                 f"trace_id={trace_context.get('trace_id')} "
                 f"parent_span_id={trace_context.get('parent_span_id')} "
-                f"usage_details={usage_details} model={model}"
+                f"usage_details={usage_details} model={model} metadata={metadata}"
             )
     except Exception as e:
         logger.error(f"Error updating Langfuse generation usage: {e}")

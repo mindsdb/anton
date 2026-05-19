@@ -1,24 +1,24 @@
 pydantic==2.12.5
 fastapi==0.128.0
-uvicorn==0.47.0
+uvicorn==0.40.0
 watchfiles==1.1.0
 python-dotenv==1.1.0
 pyodbc>=4.0.39
 openai==2.30.0
 redis==6.4.0
 httpx==0.28.1
-langfuse==3.14.6
+langfuse==3.10.3
 alembic==1.16.4
-click==8.4.0
 sqlmodel==0.0.24
 SQLAlchemy==2.0.43
 psycopg2-binary==2.9.10
 pydantic-ai==1.77.0
 sqlglot==27.2.0
 anthropic==0.91.0
-mindsdb_sdk==3.5.0
+google-genai==1.75.0
+mindsdb_sdk @ https://github.com/mindsdb/mindsdb_python_sdk/archive/refs/heads/main.zip # Update to latest version once merged
 pandas==2.3.1
-prefect==3.4.18
+prefect==3.5.0
 matplotlib==3.10.8
 async-property==0.2.2
 pydantic-settings==2.10.1
@@ -29,3 +29,9 @@ docker==7.1.0
 aiohttp==3.13.5
 fastmcp==3.2.0
 iterfzf==1.8.0.62.0
+# Pinned to fix Snyk SNYK-PYTHON-CLICK-16347201 (high-severity command
+# injection in click<=8.2.1). Pulled transitively by uvicorn/prefect.
+click==8.3.3
+# Transitive via prefect/mind-castle/huggingface_hub; pre-0.18 caps click<8.3
+# which conflicts with the click pin above. >=0.18 dropped that cap.
+typer>=0.18.0

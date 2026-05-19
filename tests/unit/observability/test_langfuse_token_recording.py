@@ -143,6 +143,63 @@ async def test_passthrough_non_streaming_records_usage_on_parent_generation(
 
 
 @pytest.mark.asyncio
+async def test_passthrough_records_alias_and_concrete_model_metadata(
+    langfuse_capture, mock_session, mock_context, sample_messages
+):
+    """Passthrough requests must record the concrete upstream model on Langfuse
+    (so its cost rollup matches a model-registry entry) and surface the alias
+    + provider + reasoning_effort as ``metadata`` so analytics can slice by the
+    alias surface separately from the model."""
+    from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
+
+    handler = _build_handler(
+        mock_session, mock_context, sample_messages, stream=False, model="latest:sonnet", is_passthrough=True
+    )
+    # Real PassthroughAgent instance carrying a resolved config — the handler
+    # reads cfg.model_name / cfg.alias / cfg.label / cfg.api_kind / cfg.reasoning_effort.
+    from minds.agents.passthrough_agent.agent import PassthroughAgent
+
+    cfg = PassthroughModelConfig(
+        api_kind=ApiKind.ANTHROPIC_MESSAGES,
+        model_name="claude-sonnet-4-6",
+        api_key="x",
+        web_search_mode="anthropic_native",
+        label="anthropic",
+        alias="sonnet",
+        reasoning_effort=None,
+    )
+    handler.agent = PassthroughAgent(config=cfg)
+    handler.agent.proxy = AsyncMock(return_value=Mock(spec=JSONResponse))
+    handler.agent.get_last_run_usage = AsyncMock(return_value=(11, 7))
+
+    @_real_observe(name="Chat Completions Handler v1", as_type="generation")
+    async def run_through():
+        setup_langfuse_observation(context=mock_context)
+        handler.langfuse_trace_context = capture_langfuse_generation_context()
+        return await handler.proxy_chat_completions()
+
+    await run_through()
+
+    spans = langfuse_capture.get_spans()
+    parents = [s for s in spans if s.name == "Chat Completions Handler v1"]
+    assert len(parents) == 1
+    parent = parents[0]
+
+    # Concrete upstream model — not the alias the client sent.
+    assert langfuse_capture.model_name(parent) == "claude-sonnet-4-6"
+    assert langfuse_capture.usage_details(parent) == {"input": 11, "output": 7, "total": 18}
+
+    metadata = langfuse_capture.metadata(parent) or {}
+    assert metadata.get("passthrough_alias") == "sonnet"
+    assert metadata.get("provider") == "anthropic"
+    assert metadata.get("api_kind") == "anthropic_messages"
+    # reasoning_effort is None for non-OpenAI aliases — the handler omits
+    # the key entirely in that case so the Langfuse UI doesn't display a
+    # spurious ``null`` row.
+    assert "reasoning_effort" not in metadata
+
+
+@pytest.mark.asyncio
 async def test_passthrough_streaming_attaches_child_generation_with_usage(
     langfuse_capture, mock_session, mock_context, sample_messages
 ):

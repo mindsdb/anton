@@ -79,6 +79,35 @@ class LangfuseCapture:
     def model_name(span) -> str | None:
         return span.attributes.get("langfuse.observation.model.name")
 
+    @staticmethod
+    def metadata(span) -> dict | None:
+        """Decode the JSON-encoded ``metadata`` attribute, if present.
+
+        Langfuse stores metadata under either a single ``langfuse.observation.metadata``
+        key (whole dict, JSON-encoded) or per-field keys
+        ``langfuse.observation.metadata.<k>`` depending on SDK version. We
+        normalize both shapes back to a Python dict.
+        """
+        raw = span.attributes.get("langfuse.observation.metadata")
+        if raw is not None:
+            try:
+                return json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+        # Per-field encoding: collect every attribute prefixed with the metadata namespace.
+        prefix = "langfuse.observation.metadata."
+        collected: dict = {}
+        for k, v in span.attributes.items():
+            if not k.startswith(prefix):
+                continue
+            inner_key = k[len(prefix) :]
+            # Values may be plain strings or JSON-encoded; try JSON first.
+            try:
+                collected[inner_key] = json.loads(v) if isinstance(v, str) else v
+            except (TypeError, ValueError):
+                collected[inner_key] = v
+        return collected or None
+
 
 @pytest.fixture(scope="session")
 def _real_langfuse_session():
