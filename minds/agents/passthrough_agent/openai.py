@@ -36,6 +36,7 @@ from minds.common.passthrough_config import PassthroughModelConfig, WebSearchMod
 __all__ = [
     "_chat_messages_to_responses_input",
     "_chat_tool_choice_to_responses",
+    "_collect_responses_server_artifacts",
     "_get_openai_client",
     "_responses_response_to_chat_completion",
     "_translate_tools_for_openai",
@@ -365,7 +366,65 @@ async def proxy_openai(
             media_type="text/event-stream",
         )
     usage_box.value = (response.usage.input_tokens, response.usage.output_tokens)
-    return JSONResponse(content=_responses_response_to_chat_completion(response, config.model_name))
+    completion = _responses_response_to_chat_completion(response, config.model_name)
+    # Capture the assistant message for Langfuse generation.output and any
+    # server-side intermediates the translator skipped — both end up on the
+    # parent generation as part of the eval-replay surface.
+    usage_box.output_payload = completion["choices"][0]["message"]
+    usage_box.server_artifacts.extend(_collect_responses_server_artifacts(response))
+    return JSONResponse(content=completion)
+
+
+def _collect_responses_server_artifacts(response: Any) -> list[dict[str, Any]]:
+    """Pull server-side intermediates off a Responses API response/event.
+
+    The Responses API returns ``web_search_call`` and ``reasoning`` items
+    alongside the regular ``message`` / ``function_call`` items the
+    translator surfaces to the client. They are intentionally not part of
+    the ChatCompletion-shaped client response — but they carry the model's
+    web-search queries and chain-of-thought summaries, which are exactly
+    the artifacts we want available on Langfuse for evals and
+    troubleshooting. Returns a list of plain dicts (one per intermediate)
+    suitable for stuffing into ``metadata["server_artifacts"]``.
+    """
+    out: list[dict[str, Any]] = []
+    for item in getattr(response, "output", []) or []:
+        item_type = getattr(item, "type", None)
+        if item_type == "web_search_call":
+            out.append(
+                {
+                    "type": "web_search_call",
+                    "id": getattr(item, "id", None),
+                    "status": getattr(item, "status", None),
+                    # Responses' web_search action carries the query under
+                    # ``action.query`` on recent SDK versions; fall back to
+                    # the top-level ``query`` field for older shapes.
+                    "query": getattr(getattr(item, "action", None), "query", None) or getattr(item, "query", None),
+                }
+            )
+        elif item_type == "reasoning":
+            out.append(
+                {
+                    "type": "reasoning",
+                    "id": getattr(item, "id", None),
+                    # ``summary`` is a list of text parts; flatten to a
+                    # single string for readability in the Langfuse UI.
+                    "summary": _flatten_reasoning_summary(getattr(item, "summary", None)),
+                }
+            )
+    return out
+
+
+def _flatten_reasoning_summary(summary: Any) -> str | None:
+    """Render the SDK's structured reasoning ``summary`` list as one string."""
+    if not summary:
+        return None
+    parts: list[str] = []
+    for entry in summary:
+        text = getattr(entry, "text", None)
+        if text:
+            parts.append(text)
+    return "\n".join(parts) if parts else None
 
 
 async def stream_openai_responses_as_chat(
@@ -402,6 +461,12 @@ async def stream_openai_responses_as_chat(
     finish_reason: str = "stop"
     input_tokens = 0
     output_tokens = 0
+    # Mirror of the assistant message we'd emit non-streaming — built up as
+    # text + arg deltas arrive so Langfuse can record the full output even
+    # though the body runs after the @observe scope closes.
+    text_parts: list[str] = []
+    tool_calls_accum: dict[int, dict] = {}
+    server_artifacts_local: list[dict] = []
 
     logger.debug(
         "OpenAI Responses stream begin",
@@ -428,6 +493,11 @@ async def stream_openai_responses_as_chat(
                     "id": call_id,
                     "name": name,
                 }
+                tool_calls_accum[tc_index] = {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": ""},
+                }
                 logger.debug(
                     "Opening tool_call delta",
                     extra={"request_id": request_id, "tc_index": tc_index, "name": name},
@@ -445,11 +515,15 @@ async def stream_openai_responses_as_chat(
                 )
 
         elif event_type == "response.output_text.delta":
+            text_parts.append(event.delta or "")
             yield _emit_chunk(**emit_kwargs, content=event.delta)
 
         elif event_type == "response.function_call_arguments.delta":
             tc_info = function_calls_by_output_index.get(event.output_index)
             if tc_info is not None:
+                accum = tool_calls_accum.get(tc_info["tc_index"])
+                if accum is not None:
+                    accum["function"]["arguments"] += event.delta or ""
                 yield _emit_chunk(
                     **emit_kwargs,
                     tool_calls=[
@@ -470,6 +544,11 @@ async def stream_openai_responses_as_chat(
                 if getattr(item, "type", None) == "function_call":
                     finish_reason = "tool_calls"
                     break
+            # Capture server-side intermediates for Langfuse metadata. The
+            # client-facing stream stays clean (these events are not emitted
+            # as ChatCompletion chunks), but they're the highest-signal
+            # artifacts when grading whether the model grounded correctly.
+            server_artifacts_local.extend(_collect_responses_server_artifacts(full))
             logger.debug(
                 "OpenAI Responses stream completed",
                 extra={
@@ -485,4 +564,14 @@ async def stream_openai_responses_as_chat(
         # etc.) are intentionally not forwarded.
 
     usage_box.value = (input_tokens, output_tokens)
+    # Reconstruct the OpenAI-shape assistant message so Langfuse records the
+    # full output even though this generator runs after the @observe scope.
+    final_text = "".join(text_parts)
+    assistant_message: dict[str, Any] = {"role": "assistant", "content": final_text or None}
+    final_tool_calls = [tool_calls_accum[i] for i in sorted(tool_calls_accum)] if tool_calls_accum else []
+    if final_tool_calls:
+        assistant_message["tool_calls"] = final_tool_calls
+    usage_box.output_payload = assistant_message
+    if server_artifacts_local:
+        usage_box.server_artifacts.extend(server_artifacts_local)
     yield "data: [DONE]\n\n"

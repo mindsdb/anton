@@ -40,6 +40,7 @@ from minds.common.settings.app_settings import get_app_settings
 
 __all__ = [
     "_anthropic_response_to_openai",
+    "_collect_anthropic_server_artifacts",
     "_openai_messages_to_anthropic",
     "_openai_tool_choice_to_anthropic",
     "_translate_tools_for_anthropic",
@@ -188,6 +189,59 @@ def _anthropic_response_to_openai(response: Any, model_name: str) -> dict:
             "total_tokens": usage.input_tokens + usage.output_tokens,
         },
     }
+
+
+def _collect_anthropic_server_artifacts(content: Any) -> list[dict[str, Any]]:
+    """Extract server-side tool blocks from an Anthropic Messages response.
+
+    When the request opts into Anthropic's native web_search / web_fetch
+    tools, the response carries ``server_tool_use`` and
+    ``web_search_tool_result`` / ``web_fetch_tool_result`` content blocks
+    alongside the regular text/tool_use blocks. The client-facing
+    translator (``_anthropic_response_to_openai``) intentionally drops them,
+    but they're the highest-signal artifacts for evals — capture them as
+    plain dicts to attach as Langfuse metadata.
+    """
+    out: list[dict[str, Any]] = []
+    for block in content or []:
+        btype = getattr(block, "type", None)
+        if btype == "server_tool_use":
+            out.append(
+                {
+                    "type": btype,
+                    "id": getattr(block, "id", None),
+                    "name": getattr(block, "name", None),
+                    "input": getattr(block, "input", None),
+                }
+            )
+        elif btype in ("web_search_tool_result", "web_fetch_tool_result"):
+            out.append(
+                {
+                    "type": btype,
+                    "tool_use_id": getattr(block, "tool_use_id", None),
+                    # ``content`` here is an SDK model; ``.model_dump()`` if
+                    # present, else stringify so the trace stays JSON-safe.
+                    "content": _safe_dump(getattr(block, "content", None)),
+                }
+            )
+    return out
+
+
+def _safe_dump(value: Any) -> Any:
+    """Best-effort JSON-safe rendering for Anthropic SDK content blocks."""
+    if value is None:
+        return None
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump()
+        except Exception:  # pragma: no cover - defensive
+            pass
+    if isinstance(value, list):
+        return [_safe_dump(v) for v in value]
+    if isinstance(value, dict | str | int | float | bool):
+        return value
+    return str(value)
 
 
 def _translate_tools_for_anthropic(
@@ -362,7 +416,12 @@ async def proxy_anthropic(
             media_type="text/event-stream",
         )
     usage_box.value = (response.usage.input_tokens, response.usage.output_tokens)
-    return JSONResponse(content=_anthropic_response_to_openai(response, config.model_name))
+    completion = _anthropic_response_to_openai(response, config.model_name)
+    usage_box.output_payload = completion["choices"][0]["message"]
+    # Server-side ``web_search`` / ``web_fetch`` content blocks live on the
+    # response itself for non-streaming requests; capture them as artifacts.
+    usage_box.server_artifacts.extend(_collect_anthropic_server_artifacts(response.content))
+    return JSONResponse(content=completion)
 
 
 async def stream_anthropic_as_openai(
@@ -394,6 +453,15 @@ async def stream_anthropic_as_openai(
     # Track tool calls in progress
     current_tool_calls: dict[int, dict] = {}
     tool_call_index = 0
+    # Mirror of the assistant message we'd emit non-streaming, plus server-side
+    # tool blocks (web_search / web_fetch) we want on the Langfuse trace but
+    # not in the client-facing stream.
+    text_parts: list[str] = []
+    tool_calls_accum: dict[int, dict] = {}
+    server_artifacts_local: list[dict] = []
+    # Track which content block index is the active server tool block so the
+    # streamed input_json_delta on it lands on the right artifact entry.
+    server_tool_block: dict[str, Any] | None = None
 
     logger.debug(
         "Anthropic stream begin",
@@ -412,6 +480,11 @@ async def stream_anthropic_as_openai(
             block = event.content_block
             if block.type == "tool_use":
                 current_tool_calls[tool_call_index] = {"id": block.id, "name": block.name}
+                tool_calls_accum[tool_call_index] = {
+                    "id": block.id,
+                    "type": "function",
+                    "function": {"name": block.name, "arguments": ""},
+                }
                 logger.debug(
                     "Opening Anthropic tool_use",
                     extra={"request_id": request_id, "tc_index": tool_call_index, "name": block.name},
@@ -427,24 +500,42 @@ async def stream_anthropic_as_openai(
                         )
                     ],
                 )
+            elif block.type in ("server_tool_use", "web_search_tool_result", "web_fetch_tool_result"):
+                server_tool_block = {
+                    "type": block.type,
+                    "id": getattr(block, "id", None),
+                    "name": getattr(block, "name", None),
+                    "input": "",
+                }
+                server_artifacts_local.append(server_tool_block)
 
         elif event_type == "content_block_delta":
             delta = event.delta
             if delta.type == "text_delta":
+                text_parts.append(delta.text or "")
                 yield _emit_chunk(**emit_kwargs, content=delta.text)
             elif delta.type == "input_json_delta":
-                yield _emit_chunk(
-                    **emit_kwargs,
-                    tool_calls=[
-                        ChoiceDeltaToolCall(
-                            index=tool_call_index,
-                            function=ChoiceDeltaToolCallFunction(arguments=delta.partial_json),
-                        )
-                    ],
-                )
+                if server_tool_block is not None:
+                    # Accumulate the server-side tool's input JSON for the trace.
+                    server_tool_block["input"] += delta.partial_json or ""
+                else:
+                    accum = tool_calls_accum.get(tool_call_index)
+                    if accum is not None:
+                        accum["function"]["arguments"] += delta.partial_json or ""
+                    yield _emit_chunk(
+                        **emit_kwargs,
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=tool_call_index,
+                                function=ChoiceDeltaToolCallFunction(arguments=delta.partial_json),
+                            )
+                        ],
+                    )
 
         elif event_type == "content_block_stop":
-            if tool_call_index in current_tool_calls:
+            if server_tool_block is not None:
+                server_tool_block = None
+            elif tool_call_index in current_tool_calls:
                 tool_call_index += 1
 
         elif event_type == "message_delta":
@@ -468,4 +559,12 @@ async def stream_anthropic_as_openai(
             pass
 
     usage_box.value = (input_tokens, output_tokens)
+    final_text = "".join(text_parts)
+    assistant_message: dict[str, Any] = {"role": "assistant", "content": final_text or None}
+    final_tool_calls = [tool_calls_accum[i] for i in sorted(tool_calls_accum)] if tool_calls_accum else []
+    if final_tool_calls:
+        assistant_message["tool_calls"] = final_tool_calls
+    usage_box.output_payload = assistant_message
+    if server_artifacts_local:
+        usage_box.server_artifacts.extend(server_artifacts_local)
     yield "data: [DONE]\n\n"

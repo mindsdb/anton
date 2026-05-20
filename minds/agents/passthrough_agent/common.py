@@ -9,7 +9,7 @@ that import directly from ``passthrough_agent.agent`` keep working.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -56,15 +56,34 @@ logger = setup_logging()
 
 @dataclass
 class UsageBox:
-    """Mutable usage container written by per-provider proxies.
+    """Mutable container the per-provider proxies write to as the request runs.
 
     Streaming bodies run on the ASGI server *after* the handler returns, so
-    the agent can't read a method-local return value to capture token counts.
-    A shared box lets the proxy assign on completion (whether streaming or
-    not) and the agent's ``get_last_run_usage()`` read it later.
+    the agent can't read a method-local return value to capture token counts
+    or the assistant response. A shared box lets the proxy assign on
+    completion (whether streaming or not) and the agent's accessors read it
+    later — most notably ``OpenAIRequestHandler._save_usage`` which needs
+    tokens + the assistant message + any server-side intermediates to attach
+    them to the Langfuse generation that lives outside the @observe scope.
+
+    Fields:
+        value: ``(input_tokens, output_tokens)`` once known; ``None`` until then.
+        output_payload: The OpenAI-shaped assistant message dict
+            (``{"role": "assistant", "content": ..., "tool_calls": [...]}``).
+            Populated by the non-streaming response translator and by the
+            streaming converter at end-of-stream so Langfuse can record the
+            full response as the generation's ``output``.
+        server_artifacts: Provider-side intermediates that are intentionally
+            not surfaced to the client (Anthropic ``server_tool_use`` /
+            ``web_search_tool_result`` / ``web_fetch_tool_result``, OpenAI
+            ``web_search_call`` / ``reasoning``). Captured here so we can
+            attach them as Langfuse metadata for evals / troubleshooting
+            without changing the client-facing response shape.
     """
 
     value: tuple[int, int] | None = None
+    output_payload: dict[str, Any] | None = None
+    server_artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

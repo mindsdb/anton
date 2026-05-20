@@ -88,20 +88,63 @@ class LangfuseCapture:
         ``langfuse.observation.metadata.<k>`` depending on SDK version. We
         normalize both shapes back to a Python dict.
         """
-        raw = span.attributes.get("langfuse.observation.metadata")
+        return LangfuseCapture._collect_namespaced(span, "langfuse.observation.metadata")
+
+    @staticmethod
+    def trace_metadata(span) -> dict | None:
+        """Decode metadata attached to the trace (vs. to the observation)."""
+        return LangfuseCapture._collect_namespaced(span, "langfuse.trace.metadata")
+
+    @staticmethod
+    def trace_name(span) -> str | None:
+        return span.attributes.get("langfuse.trace.name")
+
+    @staticmethod
+    def trace_tags(span) -> tuple | None:
+        """The trace's tags tuple (Langfuse encodes them as a tuple attribute)."""
+        return span.attributes.get("langfuse.trace.tags")
+
+    @staticmethod
+    def session_id(span) -> str | None:
+        return span.attributes.get("session.id")
+
+    @staticmethod
+    def input(span):
+        """Decode the JSON-encoded ``input`` attribute, if present."""
+        return LangfuseCapture._decode_json_attr(span, "langfuse.observation.input")
+
+    @staticmethod
+    def output(span):
+        """Decode the JSON-encoded ``output`` attribute, if present."""
+        return LangfuseCapture._decode_json_attr(span, "langfuse.observation.output")
+
+    @staticmethod
+    def _decode_json_attr(span, key: str):
+        raw = span.attributes.get(key)
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (TypeError, ValueError):
+                return raw
+        return raw
+
+    @staticmethod
+    def _collect_namespaced(span, prefix: str) -> dict | None:
+        """Read a namespaced attribute set (``<prefix>`` whole-dict or ``<prefix>.<k>`` per-key)."""
+        raw = span.attributes.get(prefix)
         if raw is not None:
             try:
                 return json.loads(raw)
             except (TypeError, ValueError):
                 return None
-        # Per-field encoding: collect every attribute prefixed with the metadata namespace.
-        prefix = "langfuse.observation.metadata."
+        dot_prefix = prefix + "."
         collected: dict = {}
         for k, v in span.attributes.items():
-            if not k.startswith(prefix):
+            if not k.startswith(dot_prefix):
                 continue
-            inner_key = k[len(prefix) :]
-            # Values may be plain strings or JSON-encoded; try JSON first.
+            inner_key = k[len(dot_prefix) :]
             try:
                 collected[inner_key] = json.loads(v) if isinstance(v, str) else v
             except (TypeError, ValueError):
