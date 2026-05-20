@@ -1107,6 +1107,33 @@ class ChatSession:
             return
 
         lessons = acc.at_end_of_turn()
+
+        # Phase C — outcome bridge. For every lesson the ACC just
+        # produced, ask the cortex "was the rule version of this
+        # lesson actually loaded into this turn's system prompt?".
+        # If yes, the LLM SAW the rule and violated the pattern
+        # anyway → bump that rule's `ignored` counter. High `ignored`
+        # values are the consolidator's signal to rewrite or escalate.
+        #
+        # Done BEFORE engram encoding so a brand-new lesson (which
+        # would just-now create its rule) can't accidentally count
+        # itself as ignored. Existing rules that fired their pattern
+        # again ARE counted.
+        retrieved_ids: set[str] = set()
+        if hasattr(cortex, "consume_retrieved_this_turn"):
+            retrieved_ids = cortex.consume_retrieved_this_turn()
+        rule_stats = getattr(cortex, "_rule_stats", None)
+        if lessons and rule_stats is not None and retrieved_ids:
+            try:
+                from anton.core.memory.rule_stats import rule_id as _rid
+                for lesson in lessons:
+                    if _rid(lesson.rule) in retrieved_ids:
+                        rule_stats.record_ignored(lesson.rule)
+                rule_stats.flush()
+            except OSError:
+                # Stats are telemetry — never break the turn.
+                pass
+
         if not lessons:
             acc.clear()
             return

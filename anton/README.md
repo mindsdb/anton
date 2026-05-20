@@ -614,8 +614,7 @@ Modes (env var `ANTON_ACC_MODE`, mirrors `ANTON_MEMORY_MODE`):
 | `passive` (default) | Layer 1 only. Lessons drain to memory at end-of-turn; next turn's system prompt picks them up. Adds zero surface to the turn loop. |
 | `active` | Layer 1 + Layer 2. Lessons ALSO inject inline as text blocks in `tool_results` so the LLM sees them on the very next round. Stronger learning signal; more invasive. |
 
-What is NOT yet wired (deliberate):
-  - **Layer 3 — retrieval-scored rule ranking.** At system-prompt assembly, score each candidate rule by relevance to the current turn's context and load the top-K within the token budget. Per-rule retrieval counters age out rules that never make the cut. Pairs with optional outcome-tracking (did the rule reduce its target pattern after it landed?). Needs a small embedding index over rules + a ranker call on the load path.
+  - **Layer 3 — retrieval-scored rule ranking.** Built. `Cortex.build_memory_context()` now routes `## When` rules through a BM25 ranker (`anton/core/memory/ranker.py`) scored against the current user message; only the top-K within the char budget land in the prompt. `## Always` / `## Never` rules bypass the ranker — they're unconditional by definition. Every rule that lands gets a retrieval counter bump in `rules.stats.json` (the sidecar at `anton/core/memory/rule_stats.py`). The Phase C outcome bridge wires the ACC's end-of-turn flush back into stats: when a detector fires AND its corresponding rule was loaded this turn, the rule's `ignored` counter bumps — high `ignored` is the consolidator's signal to rewrite or escalate. `/memory rankings` is the debug surface.
 
 ### Vocabulary discipline
 
@@ -658,6 +657,67 @@ Detectors are stateless functions of `Sequence[Event] → Lesson | None`. Each d
 ### Producer, not storage
 
 Like the cerebellum, the ACC is a *producer*. It does not own storage. Lessons it generates flow into the same Engram pipeline that the cerebellum and consolidator already use. The de-dupe predicate is caller-supplied (`has_similar_lesson`) so the wiring layer can choose substring, embedding, or semantic similarity without changing ACC internals.
+
+## Layer 3 — Retrieval-Scored Rule Ranking
+
+Layers 1 and 2 produce rules; Layer 3 decides which ones to load on any given turn. The Cortex no longer dumps every `## When` rule into the system prompt — it scores each rule by relevance to the current user message and loads the top-K within budget. The mechanism is BM25 (lexical) rather than embeddings (semantic) because the corpus is tiny (<50 rules typically), the rules are 1–3 sentences, and rules + user messages share domain nouns. Microseconds per call, no LLM dependency.
+
+### What ranks vs. what doesn't
+
+| Section in `rules.md` | Treatment | Reason |
+|---|---|---|
+| `## Always` | Loaded in full every turn | Unconditional — ranking would defeat the point |
+| `## Never` | Loaded in full every turn | Unconditional |
+| `## When` | Ranked by BM25 relevance, top-K within budget | Conditional rules ARE relevance-shaped by construction |
+
+### Pieces
+
+| Module | Role |
+|---|---|
+| `anton/core/memory/ranker.py` | `Ranker.rank(rules, query)` → BM25-scored `RankedRule`s. `Ranker.select_within_budget(ranked, budget_tokens, floor_k, cap_k)` → final selection. No LLM call, no API key, deterministic. |
+| `anton/core/memory/rule_stats.py` | `RuleStats` sidecar at `~/.anton/memory/rules.stats.json`. Buffer-and-flush write pattern — `record_retrieval` / `record_ignored` are in-memory dict updates; `flush()` does a single atomic `.tmp + os.replace` under `fcntl.flock`. One disk write per turn, not one per rule. |
+| `anton/core/memory/cortex.py` | `_retrieve_relevant_rules` rewrites the `## When` section through the ranker and records retrievals. `consume_retrieved_this_turn()` exposes the per-turn rule-id set to the outcome bridge. |
+| `anton/core/session.py` | `_schedule_acc_flush` now consults the per-turn retrieval set and bumps `ignored` on rules whose ACC-detected pattern fired despite being loaded. |
+| `anton/memory/manage.py` | `/memory rankings` debug surface. Highlights noisy rules (high `ignored`) and cold rules (zero retrievals). |
+
+### Cold-start behaviour
+
+- No user message yet OR query has no scorable terms after stopword removal → all rules loaded in input order. Ranker only filters under budget pressure.
+- Corpus under `_RULES_BUDGET_CHARS` (~6000 chars) → no ranking; full corpus loaded.
+- New rule (just encoded) → starts at zero retrievals/ignored, isn't penalised at tiebreak. First retrieval creates its record.
+
+### Stable rule identity
+
+Stats key: `sha256(rule.text.strip().lower())[:16]`. Stable for the rule's lifetime — but a consolidator rewrite changes the hash and resets the counters. Acceptable v1 trade-off; v2 should attach a UUID in the rule's HTML-comment metadata so edits preserve identity. Without that, large-scale rephrasing zeroes out the very telemetry we'd use to decide which rules to keep.
+
+### The outcome bridge (Phase C)
+
+Layer 1's `_schedule_acc_flush()` already drains lessons through `cortex.encode()`. Layer 3 adds one step before encoding:
+
+1. Get the ACC's fired lessons via `at_end_of_turn()`.
+2. Call `cortex.consume_retrieved_this_turn()` — returns the set of rule IDs that landed in this turn's prompt, and clears the set.
+3. For each fired lesson, if its rule-ID is in the retrieved set, bump `rule_stats.record_ignored(rule.rule)`. The LLM saw the rule and the pattern fired anyway — that's a strong "this rule isn't sticking" signal.
+4. Flush stats. Then encode the engrams as before.
+
+Brand-new lessons (never been retrieved because the rule was just created) correctly skip the bump — the LLM can't be ignoring a rule it hasn't seen.
+
+### Debug surface — `/memory rankings`
+
+```
+$ anton  → /memory rankings
+
+Rule rankings (retrieval-scoring telemetry)
+
+   RETR   IGN  LAST        RULE
+     12     0  2026-05-14  Use ONE scratchpad name per task and reuse it for every cell...
+     11     2  2026-05-14  When a tool fails, don't retry with the same arguments...
+      7     0  2026-05-13  When the same error message appears repeatedly in one turn...
+      3     0  2026-05-12  Don't reset the scratchpad to recover from errors...
+      1     0  2026-04-30  For CSV files with mixed column types, pass low_memory=False...
+      0     0  —           Use httpx instead of requests for HTTP calls.
+```
+
+Noisy rules (`IGN > 0`) render in warning color — candidates for rewriting or escalation. Cold rules (`RETR = 0`) render dim — candidates for compaction. The consolidator can later read `rules.stats.json` directly to drive automated aging-out.
 
 ## Structured Output — `LLMClient.generate_object`
 
@@ -778,6 +838,8 @@ anton/core/memory/                 LONG-TERM MEMORY (brain-mapped modules)
 ├── consolidator.py     Consolidator class (sleep-replay → Engrams)
 ├── cerebellum.py       Cerebellum class (per-cell supervised error learning)
 ├── acc.py              AnteriorCingulate class (turn-level pattern error detection)
+├── ranker.py           BM25 ranker for retrieval-scored rule selection (Layer 3)
+├── rule_stats.py       Per-rule retrieval/ignored counter sidecar (Layer 3)
 └── skills.py           Skill, SkillStore, SkillStats — procedural memory storage layer
 
 anton/memory/                      LEGACY / ORTHOGONAL (not the brain-mapped memory system)

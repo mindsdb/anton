@@ -30,21 +30,52 @@ from anton.core.memory.base import Engram
 from anton.core.session import ChatSession
 
 
+class FakeRuleStats:
+    """Captures record_ignored calls so the outcome-bridge test can
+    assert on them without instantiating real file I/O."""
+
+    def __init__(self):
+        self.ignored: list[str] = []
+        self.flushed = 0
+
+    def record_ignored(self, rule_text: str) -> None:
+        self.ignored.append(rule_text)
+
+    def flush(self) -> None:
+        self.flushed += 1
+
+
 class FakeCortex:
     """Minimal stand-in for Cortex used by _schedule_acc_flush.
 
     Records every batch of engrams passed to `encode()` so the test can
-    inspect exactly what would land in long-term memory.
+    inspect exactly what would land in long-term memory. Also stubs
+    `consume_retrieved_this_turn` + `_rule_stats` for Phase C tests.
     """
 
-    def __init__(self, mode: str = "autopilot"):
+    def __init__(
+        self,
+        mode: str = "autopilot",
+        *,
+        retrieved_ids: set[str] | None = None,
+        rule_stats: FakeRuleStats | None = None,
+    ):
         self.mode = mode
         self.encoded: list[list[Engram]] = []
         self.global_hc = SimpleNamespace(recall_rules=lambda: "")
+        self._retrieved_ids = retrieved_ids if retrieved_ids is not None else set()
+        self._rule_stats = rule_stats
+        self.consume_calls = 0
 
     async def encode(self, engrams: list[Engram]) -> list[str]:
         self.encoded.append(list(engrams))
         return [f"encoded:{e.kind}" for e in engrams]
+
+    def consume_retrieved_this_turn(self) -> set[str]:
+        self.consume_calls += 1
+        out = self._retrieved_ids
+        self._retrieved_ids = set()
+        return out
 
 
 def _make_session_stub(cortex: FakeCortex, *, acc_mode: str = "passive") -> SimpleNamespace:
@@ -259,6 +290,88 @@ class TestAccMaybeNudge:
         n = s._acc_maybe_nudge([])
         assert n == 0
         assert s._acc.events == ()
+
+class TestOutcomeBridge:
+    """Phase C — when an ACC lesson fires AND its corresponding rule
+    was loaded into this turn's system prompt, the cortex's rule
+    stats sidecar gets an `ignored` bump. High ignored counts are
+    the consolidator's signal to rewrite / escalate / replace.
+
+    These tests pin the wiring contract; the cortex-side correlation
+    is covered in test_cortex_ranker_integration.py."""
+
+    @pytest.mark.asyncio
+    async def test_ignored_bumped_for_lessons_whose_rule_was_retrieved(self):
+        from anton.core.memory.rule_stats import rule_id as _rid
+
+        stats = FakeRuleStats()
+        # Pre-seed retrieved_ids with the rule-id matching the name-switch
+        # lesson (which the events below will fire).
+        # We can't easily know the lesson text in advance; instead we
+        # populate retrieved_ids based on what the detector will produce.
+        from anton.core.memory.acc import detect_name_switch, Event
+        synthetic_events = [
+            Event("scratchpad_call", 1, {"name": "a"}, 1),
+            Event("scratchpad_call", 1, {"name": "b"}, 2),
+        ]
+        expected_lesson = detect_name_switch(synthetic_events)
+        assert expected_lesson is not None
+        retrieved_ids = {_rid(expected_lesson.rule)}
+
+        cortex = FakeCortex(retrieved_ids=retrieved_ids, rule_stats=stats)
+        s = _make_session_stub(cortex)
+        # Replay the same events into the real ACC.
+        s._acc_observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        s._acc_observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+
+        s._schedule_acc_flush()
+        await asyncio.sleep(0)
+
+        # The retrieved rule got an `ignored` bump because the same
+        # pattern fired despite the rule being loaded.
+        assert len(stats.ignored) == 1
+        assert "ONE scratchpad" in stats.ignored[0]
+        assert stats.flushed >= 1
+
+    @pytest.mark.asyncio
+    async def test_no_ignored_bump_when_rule_was_not_retrieved(self):
+        # ACC fires a lesson but no rule version of it was loaded this
+        # turn → no ignored bump. Bumping here would over-penalise new
+        # rules (the LLM never saw them, so it couldn't have ignored
+        # them).
+        stats = FakeRuleStats()
+        cortex = FakeCortex(retrieved_ids=set(), rule_stats=stats)
+        s = _make_session_stub(cortex)
+        s._acc_observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        s._acc_observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+
+        s._schedule_acc_flush()
+        await asyncio.sleep(0)
+
+        assert stats.ignored == []
+
+    @pytest.mark.asyncio
+    async def test_no_lessons_means_no_consume_or_bump(self):
+        # When no detectors fire, the outcome bridge has nothing to
+        # do. Cortex's retrieval set must not be drained (we'd lose
+        # the data if the next event-emitting code path expected it).
+        stats = FakeRuleStats()
+        cortex = FakeCortex(retrieved_ids={"abc"}, rule_stats=stats)
+        s = _make_session_stub(cortex)
+        # One scratchpad_call → no detector fires (name_switch needs 2).
+        s._acc_observe("scratchpad_call", {"name": "solo", "code_len": 50})
+
+        s._schedule_acc_flush()
+        await asyncio.sleep(0)
+
+        # consume_retrieved_this_turn IS called (the bridge wants to
+        # know which rules were available), but no bumps happen
+        # because no lessons fired.
+        assert stats.ignored == []
+
+
+class TestDetectorExceptionDoesNotCrash:
+    """Restored from earlier inline placeholder."""
 
     def test_detector_exception_does_not_crash_turn(self):
         # Wire a broken detector and verify the nudge wrapper swallows

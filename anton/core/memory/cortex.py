@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 from anton.core.memory.base import HippocampusProtocol
 from anton.core.memory.base import Engram
 from anton.core.memory.hippocampus import Hippocampus
+from anton.core.memory.ranker import Ranker
+from anton.core.memory.rule_stats import RuleStats, rule_id
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
@@ -129,6 +131,32 @@ class Cortex:
         self._llm = llm_client
         self._turn_count = 0
 
+        # Layer 3 — retrieval-scored rule ranking.
+        # Stateless BM25 ranker (no LLM call, no API key). The
+        # cortex re-uses it for both global and project rule paths.
+        self._ranker = Ranker()
+        # Per-rule retrieval / outcome counters. Sidecar JSON lives
+        # alongside global rules.md (one file across project switches —
+        # rules can fire either scope). Best-effort: when the
+        # hippocampus is a remote / protocol-only backend without a
+        # local `_dir`, RuleStats stays None and the cortex skips the
+        # counter bumps without losing the ranker behaviour itself.
+        global_dir = getattr(global_hc, "_dir", None)
+        self._rule_stats: RuleStats | None = (
+            RuleStats(Path(global_dir) / "rules.stats.json")
+            if isinstance(global_dir, (str, Path))
+            else None
+        )
+        # Phase C — outcome bridge. Cumulative set of rule IDs that
+        # landed in this turn's system prompt across however many
+        # `build_memory_context` calls happened (a turn may rebuild
+        # the prompt mid-flight on retries/compaction). The ACC's
+        # end-of-turn flush drains this via `consume_retrieved_this_turn`
+        # and, for each lesson whose rule_id is in the set, bumps the
+        # corresponding rule's `ignored` counter — the LLM saw the
+        # rule and the pattern still fired.
+        self._retrieved_this_turn: set[str] = set()
+
         # One-time migration: identity is singular and global. Any entries that
         # landed in project scope from the old encode() bug are merged upward.
         # Global wins on key conflicts — orphaned entries are likely stale
@@ -213,28 +241,121 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if minds_topic:
             sections.append(f"## Minds — Datasource Context\n{minds_topic}")
 
+        # Layer 3 — flush the buffered retrieval counters once per
+        # build (one disk write per turn, not one per rule). Best-
+        # effort: if there's no stats backing store (remote
+        # hippocampus, missing dir), this is a no-op.
+        if self._rule_stats is not None:
+            try:
+                self._rule_stats.flush()
+            except OSError:
+                # Stats are telemetry, not gating data — a failed write
+                # must not break system-prompt assembly.
+                pass
+
         if not sections:
             return ""
 
         return "\n\n" + "\n\n".join(sections)
 
-    async def _retrieve_relevant_rules(self, all_rules: str, user_message: str) -> str:
-        """Filter rules to only those relevant to the current user message.
+    # Regex to strip <!-- ... --> metadata from a rule line. Module-
+    # scoped at the class for readability; cheap to (re)compile.
+    import re as _re
+    _METADATA_RE = _re.compile(r"<!--.*?-->", _re.DOTALL)
 
-        Brain analog: dlPFC cue-dependent recall — the prefrontal cortex
-        selects which memories to activate based on current goals, rather
-        than loading everything into working memory.
+    def _extract_rule_body(self, line: str) -> str:
+        """Pull the human-readable rule text out of a bullet line.
 
-        Always/Never rules are behavioral constraints — always loaded in full.
-        Only conditional (When/If) rules are filtered by relevance.
-        If rules are under budget or no LLM is available, returns as-is.
+        ``- Use httpx instead of requests <!-- confidence:high ts:... -->``
+        →
+        ``Use httpx instead of requests``
+
+        Used as both the BM25 document AND the stable-hash input for
+        `RuleStats`, so the metadata comments (which carry per-rule
+        timestamps that change on every write) don't corrupt either.
         """
-        if not user_message or self._llm is None:
-            return all_rules
-        if len(all_rules) <= self._RULES_BUDGET_CHARS:
+        s = (line or "").strip()
+        if s.startswith("- "):
+            s = s[2:].strip()
+        s = self._METADATA_RE.sub("", s).strip()
+        return s
+
+    def _record_retrievals_for_lines(self, lines: list[str]) -> None:
+        """Bump retrieval counters for every rule-bullet line that
+        actually carries content. Section headers / blank lines are
+        skipped — they aren't rules. No-op when ``_rule_stats`` is
+        unavailable (remote backend, etc.).
+
+        Also populates ``self._retrieved_this_turn`` (rule-ID set)
+        so the Phase C outcome bridge can correlate fired lessons
+        against rules-that-were-actually-loaded."""
+        if self._rule_stats is None:
+            return
+        for line in lines:
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                continue
+            body = self._extract_rule_body(line)
+            if body:
+                self._rule_stats.record_retrieval(body)
+                self._retrieved_this_turn.add(rule_id(body))
+
+    def consume_retrieved_this_turn(self) -> set[str]:
+        """Return the set of rule IDs retrieved into the system prompt
+        since the last call, AND clear the set.
+
+        Take-and-clear: the consumer (typically the ACC end-of-turn
+        flush) reads the snapshot once per turn. Multiple consumers
+        would each see a different filtered view, which is rarely
+        what callers want — if more than one consumer needs the
+        signal, build a fan-out at the wiring layer instead.
+
+        Empty set is a valid answer (cold start, no rules in memory,
+        or remote hippocampus where stats tracking is disabled)."""
+        out = self._retrieved_this_turn
+        self._retrieved_this_turn = set()
+        return out
+
+    async def _retrieve_relevant_rules(self, all_rules: str, user_message: str) -> str:
+        """Select the rules that go into the system prompt.
+
+        Layer 3 — retrieval-scored rule ranking:
+
+          - ``## Always`` / ``## Never`` rules are unconditional and
+            always loaded in full. They're not ranked because ranking
+            unconditional rules is a category error.
+          - ``## When`` rules are ranked by BM25 relevance against the
+            current ``user_message``. The top-K within budget land in
+            the prompt; the rest are dropped for this turn.
+          - Every rule that lands in the prompt bumps its retrieval
+            counter via ``RuleStats``. Phase C (outcome bridge) will
+            later use these counters to compute an "ignored" signal
+            when ACC detects the corresponding pattern despite the
+            rule having been loaded.
+
+        Cold-start behaviour: when the corpus fits in the char budget
+        OR the user message has no scorable terms, all rules are
+        loaded and their retrievals recorded. The ranker is a
+        budget-pressure tool, not a permanent filter.
+
+        Brain analog: dlPFC cue-dependent recall. The PFC scores
+        relevance against current goals and activates the top
+        candidates rather than loading everything into working memory.
+        """
+        # No query → unfiltered. Still record retrievals so the
+        # telemetry is honest about what's in the prompt.
+        if not user_message:
+            self._record_retrievals_for_lines(all_rules.splitlines())
             return all_rules
 
-        # Split rules into mandatory (Always/Never) and filterable (When)
+        # Under budget → no point ranking; load all + record.
+        if len(all_rules) <= self._RULES_BUDGET_CHARS:
+            self._record_retrievals_for_lines(all_rules.splitlines())
+            return all_rules
+
+        # Split into mandatory (Always / Never / non-section lines) vs.
+        # rankable (When bullets). Section headers stay with mandatory
+        # so the output keeps its markdown structure.
         lines = all_rules.splitlines()
         mandatory_lines: list[str] = []
         when_lines: list[str] = []
@@ -250,7 +371,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 mandatory_lines.append(line)
             elif stripped.startswith("## When"):
                 current_section = "when"
-                mandatory_lines.append(line)  # keep the header
+                mandatory_lines.append(line)
             elif stripped.startswith("## ") or stripped.startswith("# "):
                 current_section = ""
                 mandatory_lines.append(line)
@@ -259,37 +380,54 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             else:
                 mandatory_lines.append(line)
 
-        # If When section is small, no need to filter
+        # Tiny When section → no ranking work to do.
         when_text = "\n".join(when_lines).strip()
         if not when_text or len(when_text) < 1000:
+            self._record_retrievals_for_lines(lines)
             return all_rules
 
-        # Filter only the When rules
-        try:
-            response = await self._llm.code(
-                system=self._RULES_RETRIEVAL_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"User message: {user_message}\n\nRules:\n{when_text}",
-                    }
-                ],
-                max_tokens=4096,
-            )
-            result = response.content.strip()
-            if result.upper() == "NONE":
-                filtered_when = ""
-            elif result:
-                filtered_when = result
-            else:
-                filtered_when = when_text
-        except Exception:
-            filtered_when = when_text
+        # Build (body, original_line) pairs so we can rank on bodies
+        # but emit the original markdown lines (preserving metadata
+        # comments the consumer / consolidator might still read).
+        candidates: list[tuple[str, str]] = []
+        for line in when_lines:
+            body = self._extract_rule_body(line)
+            if body:
+                candidates.append((body, line))
 
-        # Reassemble: mandatory sections + filtered When rules
+        if not candidates:
+            self._record_retrievals_for_lines(lines)
+            return all_rules
+
+        bodies = [b for b, _ in candidates]
+        body_to_line = {b: l for b, l in candidates}
+
+        ranked = self._ranker.rank(bodies, user_message)
+
+        # Remaining char budget = total budget minus what mandatory
+        # lines already consume. Convert to a rough token budget
+        # (~4 chars/token English heuristic) for the ranker's selector.
+        mandatory_chars = sum(len(l) + 1 for l in mandatory_lines)
+        remaining_chars = max(0, self._RULES_BUDGET_CHARS - mandatory_chars)
+        remaining_tokens = max(100, remaining_chars // 4)
+        selected = self._ranker.select_within_budget(
+            ranked, budget_tokens=remaining_tokens
+        )
+
+        selected_lines: list[str] = []
+        for r in selected:
+            line = body_to_line.get(r.text)
+            if line is not None:
+                selected_lines.append(line)
+
+        # Record retrievals for everything that lands in the prompt —
+        # mandatory rules AND the selected When rules. (Section
+        # headers and blanks are filtered inside the helper.)
+        self._record_retrievals_for_lines(mandatory_lines + selected_lines)
+
         output = "\n".join(mandatory_lines)
-        if filtered_when:
-            output += "\n" + filtered_when
+        if selected_lines:
+            output += "\n" + "\n".join(selected_lines)
         return output
 
     def get_scratchpad_context(self) -> str:
