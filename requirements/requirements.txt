@@ -16,9 +16,10 @@ psycopg2-binary==2.9.10
 pydantic-ai==1.77.0
 sqlglot==27.2.0
 anthropic==0.91.0
+google-genai==1.75.0
 mindsdb_sdk==3.5.0
 pandas==2.3.1
-prefect==3.4.18
+prefect==3.5.0
 matplotlib==3.10.8
 async-property==0.2.2
 pydantic-settings==2.10.1
@@ -29,3 +30,6 @@ docker==7.1.0
 aiohttp==3.13.5
 fastmcp==3.2.0
 iterfzf==1.8.0.62.0
+# Transitive via prefect/mind-castle/huggingface_hub; pre-0.18 caps click<8.3
+# which conflicts with the click pin above. >=0.18 dropped that cap.
+typer>=0.18.0

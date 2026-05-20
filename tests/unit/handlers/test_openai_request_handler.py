@@ -213,3 +213,31 @@ async def test_responses_updates_conversation_message(mock_session, mock_context
         assert kwargs["message"] == message
         assert kwargs["content"] == "final answer"
         assert kwargs["sql_query"] == "SELECT 1"
+
+
+@pytest.mark.asyncio
+async def test_create_factory_threads_langfuse_trace_context(
+    mock_session, mock_context, mock_mindsdb_client, sample_messages
+):
+    """OpenAIRequestHandler.create accepts and stores langfuse_trace_context."""
+    with (
+        patch("minds.handlers.openai_request_handler.is_passthrough_model", return_value=True),
+        patch("minds.handlers.openai_request_handler.resolve_passthrough_model"),
+        patch("minds.handlers.openai_request_handler.PassthroughAgent") as mock_passthrough,
+    ):
+        mock_passthrough.return_value = Mock()
+
+        ctx = {"trace_id": "t", "parent_span_id": "p"}
+        handler = await OpenAIRequestHandler.create(
+            session=mock_session,
+            context=mock_context,
+            mindsdb_client=mock_mindsdb_client,
+            messages=sample_messages,
+            model="passthrough-model",
+            stream=True,
+            metadata=None,
+            instrument=True,
+            langfuse_trace_context=ctx,
+        )
+
+    assert handler.langfuse_trace_context == ctx

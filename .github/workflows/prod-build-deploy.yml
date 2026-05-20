@@ -112,6 +112,13 @@ jobs:
       MIND_CASTLE_AWS_USE_ENV_AUTH: true
       MIND_CASTLE_AWS_REGION: us-east-1
       MIND_CASTLE_AWS_KMS_KEY_ARN: "arn:aws:kms:us-east-1:065786718370:key/1787cc0e-18e5-4c7d-af9f-6f9f01b06f17"
+      # AnthropicSettings requires these explicitly (no defaults). alembic's
+      # env.py imports SQLModel models which transitively load AppSettings, so
+      # missing values fail validation before migrations run. Mirror of the
+      # deployment Helm chart values in deployment/minds/values.yaml.
+      ANTHROPIC__WEB_SEARCH_TOOL_TYPE: web_search_20250305
+      ANTHROPIC__WEB_FETCH_TOOL_TYPE: web_fetch_20250910
+      ANTHROPIC__WEB_FETCH_BETA_HEADER: web-fetch-2025-09-10
 
     steps:
       - uses: actions/checkout@v4
@@ -128,7 +135,7 @@ jobs:
       - name: Migrate Database
         run: |
           env PYTHONPATH=../../ alembic upgrade head
-  
+
   deploy:
     runs-on: mdb-prod
     needs: [build, migrate]

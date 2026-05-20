@@ -66,6 +66,31 @@ class OpenAISettings(Settings):
         default=["gpt-4.1", "gpt-5.3-codex", "gpt-5.3-instant"], description="The supported OpenAI coding models"
     )  # OPENAI__SUPPORTED_CODING_MODELS
 
+    # Passthrough-agent alias → model mappings. Aliases drop the version
+    # from the request-facing name (``latest:gpt``, ``latest:gpt-mini`` etc.)
+    # so client code doesn't churn when ops bump a major upstream version;
+    # the actual model identifier lives here and can be overridden via env.
+    passthrough_gpt_model: str = Field(
+        default="gpt-5.5",
+        description=(
+            "OpenAI model used for the `latest:gpt` / `latest:gpt-low|medium|high` "
+            "aliases. The alias selects reasoning_effort; this setting selects "
+            "the upstream model."
+        ),
+    )  # OPENAI__PASSTHROUGH_GPT_MODEL
+    passthrough_gpt_codex_model: str = Field(
+        default="gpt-5.3-codex",
+        description="OpenAI model used for the `latest:gpt-codex` alias.",
+    )  # OPENAI__PASSTHROUGH_GPT_CODEX_MODEL
+    passthrough_gpt_mini_model: str = Field(
+        default="gpt-5.4-mini",
+        description="OpenAI model used for the `latest:gpt-mini` alias.",
+    )  # OPENAI__PASSTHROUGH_GPT_MINI_MODEL
+    passthrough_gpt_nano_model: str = Field(
+        default="gpt-5.4-nano",
+        description="OpenAI model used for the `latest:gpt-nano` alias.",
+    )  # OPENAI__PASSTHROUGH_GPT_NANO_MODEL
+
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
     def split_supported_openai_models(cls, v: list[str] | str) -> list[str]:
@@ -86,12 +111,84 @@ class AnthropicSettings(Settings):
         description="The supported Anthropic coding models",
     )  # ANTHROPIC__SUPPORTED_CODING_MODELS
 
+    # Native web-tool versions used by the passthrough agent. These are
+    # Anthropic-versioned API contracts (e.g. "web_search_20250305") that
+    # change in a regular cadence. No defaults — operators must set them
+    # explicitly so version bumps are a conscious config change.
+    web_search_tool_type: str = Field(
+        description="Anthropic native web_search tool type (versioned). Example: 'web_search_20250305'.",
+    )  # ANTHROPIC__WEB_SEARCH_TOOL_TYPE
+    web_fetch_tool_type: str = Field(
+        description="Anthropic native web_fetch tool type (versioned). Example: 'web_fetch_20250910'.",
+    )  # ANTHROPIC__WEB_FETCH_TOOL_TYPE
+    web_fetch_beta_header: str = Field(
+        description="Value for the 'anthropic-beta' header required by the "
+        "web_fetch tool. Example: 'web-fetch-2025-09-10'.",
+    )  # ANTHROPIC__WEB_FETCH_BETA_HEADER
+
+    # Passthrough-agent explicit-model aliases. Override via env to pin
+    # or upgrade independently of code releases — the alias surface stays
+    # stable while the upstream model can move.
+    passthrough_sonnet_model: str = Field(
+        default="claude-sonnet-4-6",
+        description="Anthropic model used for the `latest:sonnet` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_SONNET_MODEL
+    passthrough_opus_model: str = Field(
+        default="claude-opus-4-7",
+        description="Anthropic model used for the `latest:opus` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_OPUS_MODEL
+    passthrough_haiku_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Anthropic model used for the `latest:haiku` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_HAIKU_MODEL
+
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
     def split_supported_anthropic_models(cls, v: list[str] | str) -> list[str]:
         if isinstance(v, str):
             return [model.strip() for model in v.split(",")]
         return [model.strip() for model in v]
+
+
+class FireworksSettings(Settings):
+    api_key: str = Field(default="", description="The Fireworks.ai API key")  # FIREWORKS__API_KEY
+    anthropic_base_url: str = Field(
+        default="https://api.fireworks.ai/inference",
+        description="Anthropic-compatible base URL for Fireworks (SDK appends /v1/messages)",
+    )  # FIREWORKS__ANTHROPIC_BASE_URL
+
+    # Passthrough-agent alias → Fireworks-hosted model name. Aliases are
+    # versionless (``latest:kimi``); the version-pinned identifier lives
+    # here so a Kimi/DeepSeek/Qwen point-release is a one-env-var change.
+    passthrough_kimi_model: str = Field(
+        default="accounts/fireworks/models/kimi-k2p6",
+        description="Fireworks model used for the `latest:kimi` alias.",
+    )  # FIREWORKS__PASSTHROUGH_KIMI_MODEL
+    passthrough_deepseek_model: str = Field(
+        default="accounts/fireworks/models/deepseek-v4-pro",
+        description="Fireworks model used for the `latest:deepseek` alias.",
+    )  # FIREWORKS__PASSTHROUGH_DEEPSEEK_MODEL
+    passthrough_qwen_model: str = Field(
+        default="accounts/fireworks/models/qwen3p6-plus",
+        description="Fireworks model used for the `latest:qwen` alias.",
+    )  # FIREWORKS__PASSTHROUGH_QWEN_MODEL
+
+
+class GeminiSettings(Settings):
+    api_key: str = Field(default="", description="The Google Gemini API key")  # GEMINI__API_KEY
+
+    # Passthrough-agent alias → Gemini model. Override via env to pin or
+    # upgrade independently of code releases.
+    passthrough_gemini_model: str = Field(
+        default="gemini-3.1-pro-preview",
+        description="Gemini model used for the `latest:gemini` alias.",
+    )  # GEMINI__PASSTHROUGH_GEMINI_MODEL
+    passthrough_gemini_flash_model: str = Field(
+        default="gemini-3.5-flash",
+        description=(
+            "Gemini Flash model used for the `latest:gemini-flash` alias — cheaper, faster sibling of the Pro line."
+        ),
+    )  # GEMINI__PASSTHROUGH_GEMINI_FLASH_MODEL
 
 
 class MindsDBSettings(Settings):
@@ -226,6 +323,8 @@ class AppSettings(Settings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)  # DATABASE__*
     openai: OpenAISettings = Field(default_factory=OpenAISettings)  # OPENAI__*
     anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)  # ANTHROPIC__*
+    fireworks: FireworksSettings = Field(default_factory=FireworksSettings)  # FIREWORKS__*
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)  # GEMINI__*
     mindsdb: MindsDBSettings = Field(default_factory=MindsDBSettings)  # MINDSDB__*
     data_catalog: DataCatalogSettings = Field(default_factory=DataCatalogSettings)  # DATA_CATALOG__*
     default_models: DefaultModelsSettings = Field(default_factory=DefaultModelsSettings)  # DEFAULT_MODELS__*

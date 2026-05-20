@@ -6,7 +6,12 @@ from minds.common.logger import get_logger
 from minds.handlers.openai_request_handler import OpenAIRequestHandler
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import Context
-from minds.requests.langfuse_tracing import get_langfuse_trace_id, lazy_observe, setup_langfuse_observation
+from minds.requests.langfuse_tracing import (
+    capture_langfuse_generation_context,
+    get_langfuse_trace_id,
+    lazy_observe,
+    setup_langfuse_observation,
+)
 from minds.requests.stream import (
     format_messages_for_non_streaming_chat_completions_api,
     format_messages_for_streaming_chat_completions_api,
@@ -46,6 +51,13 @@ async def chat_completions_request_handler(
     setup_langfuse_observation(context=context)
     request_id = get_langfuse_trace_id() or str(context.request_id)
 
+    # Capture the @observe trace context so the handler can attach a child
+    # generation carrying token usage from streaming code paths that run
+    # AFTER this decorated function returns (the StreamingResponse body
+    # iterator is consumed by the ASGI server only after the route handler
+    # returns, by which point the @observe span has already closed).
+    langfuse_trace_context = capture_langfuse_generation_context()
+
     logger.debug(f"🔄[{request_id}] Chat Completion Request: {chat_completions_request.model_dump()}")
 
     stream = chat_completions_request.stream if chat_completions_request.stream is not None else False
@@ -77,6 +89,7 @@ async def chat_completions_request_handler(
         instrument=instrument,
         request_id=request_id,
         langfuse_trace_id=get_langfuse_trace_id(),
+        langfuse_trace_context=langfuse_trace_context,
         tools=tools,
         tool_choice=tool_choice,
         temperature=temperature,

@@ -389,6 +389,12 @@ services:
       OPENAI__API_URL: "${OPENAI_API_URL}"
       OPENAI__API_KEY: "${OPENAI_API_KEY}"
 
+      ANTHROPIC__API_KEY: "${ANTHROPIC_API_KEY}"
+      # Native web-tool versions (required, no defaults — see app_settings.AnthropicSettings).
+      ANTHROPIC__WEB_SEARCH_TOOL_TYPE: "${ANTHROPIC_WEB_SEARCH_TOOL_TYPE}"
+      ANTHROPIC__WEB_FETCH_TOOL_TYPE: "${ANTHROPIC_WEB_FETCH_TOOL_TYPE}"
+      ANTHROPIC__WEB_FETCH_BETA_HEADER: "${ANTHROPIC_WEB_FETCH_BETA_HEADER}"
+
       LANGFUSE_PUBLIC_KEY: "redacted"
       LANGFUSE_SECRET_KEY: "redacted"
       LANGFUSE_HOST: "http://langfuse:3000"
@@ -448,6 +454,12 @@ services:
 
       OPENAI__API_URL: "${OPENAI_API_URL}"
       OPENAI__API_KEY: "${OPENAI_API_KEY}"
+
+      ANTHROPIC__API_KEY: "${ANTHROPIC_API_KEY}"
+      # Native web-tool versions (required, no defaults — see app_settings.AnthropicSettings).
+      ANTHROPIC__WEB_SEARCH_TOOL_TYPE: "${ANTHROPIC_WEB_SEARCH_TOOL_TYPE}"
+      ANTHROPIC__WEB_FETCH_TOOL_TYPE: "${ANTHROPIC_WEB_FETCH_TOOL_TYPE}"
+      ANTHROPIC__WEB_FETCH_BETA_HEADER: "${ANTHROPIC_WEB_FETCH_BETA_HEADER}"
 
       # Auth
       AUTH__DISABLE: "true" # Disable auth for local development
