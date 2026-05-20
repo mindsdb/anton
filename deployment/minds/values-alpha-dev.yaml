@@ -5,12 +5,29 @@ deployment:
       # Gives permission to use the mind-castle kms key
       eks.amazonaws.com/role-arn: arn:aws:iam::168681354662:role/minds-20260204203650912200000002
       
+
   ingress:
+    enabled: true
+    name: minds
+    annotations:
+      nginx.ingress.kubernetes.io/enable-cors: "true"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "https://console-alpha.dev.mindshub.ai, https://alpha.dev.mdb.ai, https://hub-alpha.dev.mindsdb.com"
+      nginx.ingress.kubernetes.io/auth-url: "http://auth.alpha-dev.svc.cluster.local:80/v1/authenticate/"
+    hosts:
+      - host: api-alpha.dev.mindshub.ai
+        enableMultiPath: true
+        paths:
+          - path: /v1
+            serviceName: minds
+            servicePort: 80
+  
+  ingress_secondary:
+    name: minds-legacy
     annotations:
       nginx.ingress.kubernetes.io/enable-cors: "true"
       
       # Forward auth configuration using your gateway service
-      nginx.ingress.kubernetes.io/auth-url: "http://auth.alpha-dev.svc.cluster.local:80/api/v1/authenticate/"
+      nginx.ingress.kubernetes.io/auth-url: "http://auth.alpha-dev.svc.cluster.local:80/v1/authenticate/"
     hosts:
       - host: minds-alpha.dev.mdb.ai
         enableMultiPath: true
@@ -52,6 +69,13 @@ deployment:
 
     - name: ENV
       value: "alpha-dev"
+
+    # ====================================
+    # LOGGING SETTINGS
+    # ====================================
+
+    - name: LOG_LEVEL
+      value: "WARNING"
 
     # ====================================
     # LANGFUSE SETTINGS

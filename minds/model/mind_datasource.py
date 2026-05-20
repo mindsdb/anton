@@ -13,16 +13,16 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from async_property import async_property
-from prefect import states
 from pydantic import computed_field
 from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, Relationship, SQLModel
 
-from minds.client.prefect import PrefectClient
 from minds.model.base import BaseSQLModel
 from minds.model.mind_datasource_table import MindDatasourceTable
 
 if TYPE_CHECKING:
+    from prefect import states
+
     from minds.model.datasource import Datasource
     from minds.model.mind import Mind
 
@@ -91,6 +91,8 @@ class MindDatasource(BaseSQLModel, table=True):
         This awaits the Prefect client which exposes async methods.
         Callers should `await mind_datasource.status` from async code.
         """
+        from minds.client.prefect import PrefectClient
+
         prefect_client = PrefectClient()
         if self.flow_run_id:
             # Get task states and overall flow run state concurrently
@@ -116,7 +118,7 @@ class MindDatasource(BaseSQLModel, table=True):
 
             return DetailedDataCatalogStatus(tasks=tasks, progress=progress, overall_status=status)
 
-    def _prefect_state_to_data_catalog_status(self, state: states.State) -> DataCatalogStatus:
+    def _prefect_state_to_data_catalog_status(self, state: "states.State") -> DataCatalogStatus:
         """
         Convert a Prefect state to a data catalog status.
         """

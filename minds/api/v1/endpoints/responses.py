@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 
 from minds.api.v1.deps import get_conversations_service, get_limits_service, get_mindsdb_client
 from minds.common.guards import ResourceType, require_usage_available
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.statsig import is_langfuse_enabled
 from minds.db.pg_session import get_session
 from minds.handlers.responses_request_handler import (
@@ -23,7 +23,7 @@ from minds.requests.responses_request import ResponsesRequest
 from minds.services.conversations import ConversationsService
 from minds.services.limits import LimitsService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 router = APIRouter()
 

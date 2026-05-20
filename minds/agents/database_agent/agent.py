@@ -11,13 +11,13 @@ from minds.agents.base_response import AgentResponse
 from minds.agents.database_agent.database_toolkit import DatabaseToolkit
 from minds.agents.database_agent.prompt_templates import CHART_GENERATION_INSTRUCTIONS
 from minds.agents.llm import get_llm_config
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.model.mind import Mind
 from minds.requests.context import Context
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message, Role
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 @dataclass

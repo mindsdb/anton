@@ -862,7 +862,7 @@ class TestConversationsAPI:
     async def test_generate_chart_output_image_url(self, mock_conversations_service):
         """Test unified chart endpoint with output=image_url returns image URL."""
         response = ChartImageResponse(
-            image_url="/api/v1/conversations/a/items/b/chart?token=opaque-token",
+            image_url="/v1/conversations/a/items/b/chart?token=opaque-token",
             meta=ChartMeta(row_count=10, used_rows=10, points=3, series=1, fields=None),
             warnings=[],
         )

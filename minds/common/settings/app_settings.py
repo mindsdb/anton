@@ -29,14 +29,19 @@ class DatabaseSettings(Settings):
         default="postgresql://minds:minds@localhost:35432/minds", description="The database connection URI"
     )  # DATABASE__URI
 
-    # Connection pool configurations
+    # Connection pool configurations. Sized for async FastAPI where each worker's
+    # event loop multiplexes many requests but only a handful are mid-query at once.
+    # Total Postgres connections = replicas * workers * (pool_size + max_overflow).
+    # At HPA max (8 replicas * 6 workers * 15) = 720 connections worst case.
     max_overflow: int = Field(
-        default=20, description="The maximum overflow size of the database connection pool"
+        default=10, description="The maximum overflow size of the database connection pool"
     )  # DATABASE__MAX_OVERFLOW
     pool_pre_ping: bool = Field(default=True, description="Whether to enable pool pre-ping")  # DATABASE__POOL_PRE_PING
     pool_recycle: int = Field(default=300, description="The pool recycle time in seconds")  # DATABASE__POOL_RECYCLE
-    pool_size: int = Field(default=20, description="The size of the database connection pool")  # DATABASE__POOL_SIZE
-    pool_timeout: int = Field(default=300, description="The pool timeout in seconds")  # DATABASE__POOL_TIMEOUT
+    pool_size: int = Field(default=5, description="The size of the database connection pool")  # DATABASE__POOL_SIZE
+    # Lower than the legacy 5-minute default: if a worker waits >30s for a connection the pool
+    # is exhausted (likely a leaked session). Fail fast so we see the issue instead of hiding it.
+    pool_timeout: int = Field(default=30, description="The pool timeout in seconds")  # DATABASE__POOL_TIMEOUT
 
     # Query timeout configurations
     query_timeout: int = Field(default=300, description="The query timeout in seconds")  # DATABASE__QUERY_TIMEOUT
@@ -179,7 +184,7 @@ class GeminiSettings(Settings):
         description="Gemini model used for the `latest:gemini` alias.",
     )  # GEMINI__PASSTHROUGH_GEMINI_MODEL
     passthrough_gemini_flash_model: str = Field(
-        default="gemini-3-flash-preview",
+        default="gemini-3.5-flash",
         description=(
             "Gemini Flash model used for the `latest:gemini-flash` alias — cheaper, faster sibling of the Pro line."
         ),

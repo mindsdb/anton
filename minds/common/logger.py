@@ -137,8 +137,19 @@ def setup_console_handler():
     return handler
 
 
-def setup_logging():
-    """Setup comprehensive logging configuration"""
+_logging_configured = False
+
+
+def setup_logging(force: bool = False):
+    """Setup comprehensive logging configuration.
+
+    Idempotent: subsequent calls are no-ops unless force=True. This avoids
+    the cost (and races) of re-running basicConfig on every module import.
+    """
+    global _logging_configured
+    if _logging_configured and not force:
+        return logging.getLogger(__name__)
+
     log_level_str = os.getenv("LOG_LEVEL", "WARNING")
     enable_file_logging = os.getenv("ENABLE_FILE_LOGGING", "false").lower() == "true"
     log_dir = os.getenv("LOG_DIR", "logs")
@@ -191,6 +202,10 @@ def setup_logging():
         "botocore",
         "s3transfer",
         "transformers",
+        # mind_castle warns once per worker about missing static AWS creds.
+        # We use IRSA (eks.amazonaws.com/role-arn on the service account), so
+        # the static-cred path is intentionally absent — silence the noise.
+        "mind_castle.stores",
         "torch",
         "tensorflow",
         "urllib3.connectionpool",
@@ -206,6 +221,7 @@ def setup_logging():
     # Create application logger
     logger = logging.getLogger(__name__)
 
+    _logging_configured = True
     return logger
 
 

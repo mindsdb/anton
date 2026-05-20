@@ -1,8 +1,9 @@
 import ast
 import json
+from typing import TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 def safe_parse(s: str) -> dict:
@@ -21,7 +22,7 @@ def safe_parse(s: str) -> dict:
         return ast.literal_eval(s)
 
 
-def format_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
+def format_numeric_columns(df: "pd.DataFrame") -> "pd.DataFrame":
     """
     Format numeric columns to prevent scientific notation.
 
@@ -31,6 +32,9 @@ def format_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         The formatted DataFrame.
     """
+    import numpy as np
+    import pandas as pd
+
     numeric_cols = df.select_dtypes(include=[np.number]).columns
 
     for col in numeric_cols:

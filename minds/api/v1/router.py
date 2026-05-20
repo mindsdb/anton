@@ -9,8 +9,9 @@ from fastapi import APIRouter
 
 from minds.api.v1.endpoints import chat, conversations, datasources, health, limits, memory, minds, responses, tree
 
-# Create the v1 API router
-api_router = APIRouter(prefix="/api/v1")
+# Create the v1 API router. Canonical mount is /v1/*; server.py also includes
+# this router under /api/* (giving /api/v1/*) as a legacy alias.
+api_router = APIRouter(prefix="/v1")
 
 # Include all endpoint routers
 api_router.include_router(health.router, prefix="/health", tags=["health"])

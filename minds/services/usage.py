@@ -20,12 +20,12 @@ from datetime import datetime
 
 from sqlmodel import Session, and_, func, select
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.model.chat_completion import ChatCompletion
 from minds.model.message import Message
 from minds.requests.context import Context
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class UsageServiceError(Exception):

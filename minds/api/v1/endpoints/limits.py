@@ -8,11 +8,11 @@ providing a v1 API interface for limits management.
 from fastapi import APIRouter, Depends, HTTPException
 
 from minds.api.v1.deps import get_limits_service
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.schemas.limits import MindLimitsConfig
 from minds.services.limits import LimitsService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 router = APIRouter()
 

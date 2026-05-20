@@ -18,7 +18,7 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import Session, and_, select
 
 from minds.client.mindsdb import create_mindsdb_client_with_credentials
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.utilities import safe_parse
 from minds.db.pg_session import get_session
 from minds.jobs.settings import get_prefect_settings
@@ -30,7 +30,7 @@ from minds.model.mind import Mind  # noqa: F401
 from minds.model.mind_datasource import MindDatasource
 from minds.model.mind_datasource_table import MindDatasourceTable
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class DataCatalogLoaderError(Exception):

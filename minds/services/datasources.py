@@ -17,7 +17,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 from sqlmodel import Session, and_, func, select
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.mindsdb import extract_databases_from_select
 from minds.common.utilities import safe_parse
 from minds.model.data_catalog.column import Column
@@ -44,7 +44,7 @@ from minds.schemas.datasources import (
 )
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class DatasourceServiceError(Exception):

@@ -1,15 +1,15 @@
-from langfuse import observe
 from mindsdb_sdk.server import Server
 from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.handlers.openai_request_handler import OpenAIRequestHandler
 from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import Context
 from minds.requests.langfuse_tracing import (
     capture_langfuse_generation_context,
     get_langfuse_trace_id,
+    lazy_observe,
     setup_langfuse_observation,
 )
 from minds.requests.stream import (
@@ -21,7 +21,7 @@ from minds.requests.stream import (
 from minds.services.limits import LimitsService
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 # ``capture_input=False`` / ``capture_output=False``:
@@ -36,7 +36,7 @@ logger = setup_logging()
 #   silently clobbers the assistant message dict we attach via
 #   ``update_generation_usage(output=...)``. Disabling auto-capture lets
 #   our explicit value land on the span.
-@observe(
+@lazy_observe(
     name="Chat Completions Handler v1",
     as_type="generation",
     capture_input=False,

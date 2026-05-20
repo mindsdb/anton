@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 
 from minds.api.v1.deps import get_limits_service, get_mindsdb_client
 from minds.common.guards import ResourceType, require_usage_available
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.common.statsig import is_langfuse_enabled
 from minds.db.pg_session import get_session
 from minds.handlers.chat_completions_request_handler import (
@@ -22,7 +22,7 @@ from minds.requests.context import extract_context_from_request
 from minds.services.limits import LimitsService
 
 # Set up logging
-logger = setup_logging()
+logger = get_logger(__name__)
 
 # Create router for chat completion endpoints
 router = APIRouter()

@@ -21,13 +21,13 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
-from minds.common.logger import setup_logging
+from minds.common.logger import get_logger
 from minds.schemas.limits import UNLIMITED, ResourceUsageConfig
 
 if TYPE_CHECKING:
     from minds.services.limits import LimitsService
 
-logger = setup_logging()
+logger = get_logger(__name__)
 
 
 class ResourceType(str, Enum):

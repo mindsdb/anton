@@ -922,7 +922,7 @@ def _fake_settings(
     fireworks_deepseek_model: str = "accounts/fireworks/models/deepseek-v4-pro",
     fireworks_qwen_model: str = "accounts/fireworks/models/qwen3p6-plus",
     gemini_model: str = "gemini-3.1-pro-preview",
-    gemini_flash_model: str = "gemini-3-flash-preview",
+    gemini_flash_model: str = "gemini-3.5-flash",
 ) -> SimpleNamespace:
     """Build a stand-in for AppSettings exposing only the fields the resolver reads.
 
@@ -1092,7 +1092,7 @@ def test_resolve_gemini_flash_uses_flash_model(monkeypatch):
     _patch_settings(monkeypatch, _fake_settings(gemini_key="gm-key"))
     cfg = resolve_passthrough_model("latest:gemini-flash")
     assert cfg.api_kind == "gemini_native"
-    assert cfg.model_name == "gemini-3-flash-preview"
+    assert cfg.model_name == "gemini-3.5-flash"
     assert cfg.label == "gemini"
     assert cfg.alias == "gemini-flash"
     # Sanity: distinct from `latest:gemini` (Pro line).
