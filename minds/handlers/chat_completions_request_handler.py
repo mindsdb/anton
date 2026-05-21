@@ -24,24 +24,7 @@ from minds.services.limits import LimitsService
 logger = get_logger(__name__)
 
 
-# ``capture_input=False`` / ``capture_output=False``:
-# - ``input``  defaults to the function's args (Session, Context, MindsDB
-#   client, ...) which don't serialize to anything an eval can replay.
-#   The handler attaches the actual request payload (model / messages /
-#   tools / temperature / max_tokens) via ``update_generation_usage(input=...)``
-#   inside ``proxy_chat_completions`` instead.
-# - ``output`` defaults to the function's return value (a ``JSONResponse``
-#   or ``StreamingResponse``), which is a Starlette object whose dict
-#   shape (status_code / body / raw_headers) is useless for replays and
-#   silently clobbers the assistant message dict we attach via
-#   ``update_generation_usage(output=...)``. Disabling auto-capture lets
-#   our explicit value land on the span.
-@lazy_observe(
-    name="Chat Completions Handler v1",
-    as_type="generation",
-    capture_input=False,
-    capture_output=False,
-)
+@lazy_observe(name="Chat Completions Handler v1", as_type="generation")
 async def chat_completions_request_handler(
     session: Session,
     context: Context,

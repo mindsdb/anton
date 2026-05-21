@@ -414,9 +414,7 @@ async def proxy_gemini(
         (usage_metadata.prompt_token_count if usage_metadata is not None else 0) or 0,
         (usage_metadata.candidates_token_count if usage_metadata is not None else 0) or 0,
     )
-    completion = _gemini_response_to_openai(response, config.model_name)
-    usage_box.output_payload = completion["choices"][0]["message"]
-    return JSONResponse(content=completion)
+    return JSONResponse(content=_gemini_response_to_openai(response, config.model_name))
 
 
 async def stream_gemini_as_openai(
@@ -446,8 +444,6 @@ async def stream_gemini_as_openai(
     prompt_tokens = 0
     completion_tokens = 0
     last_finish_reason: genai_types.FinishReason | None = None
-    text_parts: list[str] = []
-    tool_calls_accum: list[dict] = []
 
     def _role_chunk_sse() -> str | None:
         nonlocal sent_role_chunk
@@ -476,22 +472,12 @@ async def stream_gemini_as_openai(
 
             for part in _gemini_parts_for(candidate):
                 if part.text:
-                    text_parts.append(part.text)
                     yield _emit_chunk(**emit_kwargs, content=part.text)
 
                 fn_call = part.function_call
                 if fn_call is not None:
                     tool_calls_emitted = True
                     args = fn_call.args or {}
-                    call_id = f"call_{uuid.uuid4().hex[:8]}"
-                    args_json = json.dumps(args)
-                    tool_calls_accum.append(
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {"name": fn_call.name or "", "arguments": args_json},
-                        }
-                    )
                     # Whole tool_call atomically — Gemini doesn't stream
                     # incremental argument deltas.
                     yield _emit_chunk(
@@ -499,11 +485,11 @@ async def stream_gemini_as_openai(
                         tool_calls=[
                             ChoiceDeltaToolCall(
                                 index=tool_call_index,
-                                id=call_id,
+                                id=f"call_{uuid.uuid4().hex[:8]}",
                                 type="function",
                                 function=ChoiceDeltaToolCallFunction(
                                     name=fn_call.name or "",
-                                    arguments=args_json,
+                                    arguments=json.dumps(args),
                                 ),
                             )
                         ],
@@ -544,9 +530,4 @@ async def stream_gemini_as_openai(
     yield _emit_chunk(**emit_kwargs, finish_reason=finish_reason)
 
     usage_box.value = (prompt_tokens, completion_tokens)
-    final_text = "".join(text_parts)
-    assistant_message: dict[str, Any] = {"role": "assistant", "content": final_text or None}
-    if tool_calls_accum:
-        assistant_message["tool_calls"] = tool_calls_accum
-    usage_box.output_payload = assistant_message
     yield "data: [DONE]\n\n"

@@ -1,6 +1,5 @@
 import contextlib
 import functools
-import json
 import traceback
 from typing import Any
 
@@ -90,15 +89,6 @@ def setup_langfuse_observation(context: Context):
     This function creates a Langfuse context from the provided request context,
     updates the current observation, and retrieves the trace ID.
 
-    When the request carries the Langfuse-proxy convention headers
-    (``Langfuse-Session-Id`` / ``Langfuse-Tags`` / ``Langfuse-Metadata``)
-    the trace is also stamped with ``session_id``, the client-supplied tags
-    are merged into our identity tags, the metadata blob is merged into the
-    trace's metadata, and — when both ``harness`` and ``turn_id`` are present
-    in the client metadata — the trace's display name is set to
-    ``"{harness}:turn-{turn_id}"`` so dashboards can scan multi-turn loops
-    without opening each trace.
-
     Args:
             context (Context): The context for the request, including user and metadata.
     Returns:
@@ -110,50 +100,22 @@ def setup_langfuse_observation(context: Context):
         current_langfuse_context = create_langfuse_context(context)
 
         tags_string = [str(item) for item in current_langfuse_context.tags]
-        # Merge our identity metadata with the client-supplied Langfuse-Metadata.
-        # Identity wins on conflict because we record user_id / org / request_id
-        # for filtering and they should be authoritative even if the client
-        # passes the same keys.
-        metadata_dict: dict[str, Any] = dict(current_langfuse_context.extra_metadata or {})
-        metadata_dict.update(current_langfuse_context.metadata.model_dump())
+        metadata_dict = current_langfuse_context.metadata.model_dump()
 
         langfuse_client = get_client()
 
-        update_kwargs: dict[str, Any] = {
-            "user_id": str(context.user_id),
-            "metadata": metadata_dict,
-            "tags": tags_string,
-        }
-        if current_langfuse_context.session_id:
-            update_kwargs["session_id"] = current_langfuse_context.session_id
-        if current_langfuse_context.trace_name:
-            update_kwargs["name"] = current_langfuse_context.trace_name
-
-        # update_current_trace is unaware of the harness convention; pass the
-        # subset of keyword args it supports, fall back to the legacy 3-arg
-        # call if the SDK rejects the new keys (defensive against older
-        # stubs in tests).
-        try:
-            langfuse_client.update_current_trace(**update_kwargs)
-        except TypeError as exc:
-            logger.warning(
-                "update_current_trace rejected extended kwargs, retrying with legacy args: %s",
-                exc,
-            )
-            langfuse_client.update_current_trace(
-                user_id=str(context.user_id),
-                metadata=metadata_dict,
-                tags=tags_string,
-            )
+        # Create Langfuse context for tracing
+        langfuse_client.update_current_trace(
+            user_id=str(context.user_id),
+            metadata=metadata_dict,
+            tags=tags_string,
+        )
 
         trace_id = langfuse_client.get_current_trace_id()
         logger.debug(f"Trace ID: {trace_id}")
 
         if trace_id:
-            logger.debug(
-                f"Created langfuse context with trace ID: {trace_id} session_id="
-                f"{current_langfuse_context.session_id} name={current_langfuse_context.trace_name}"
-            )
+            logger.debug(f"Created langfuse context with trace ID: {trace_id}")
         else:
             logger.error("Failed to retrieve trace ID from Langfuse context.")
 
@@ -305,84 +267,3 @@ def update_generation_usage(
     except Exception as e:
         logger.error(f"Error updating Langfuse generation usage: {e}")
         logger.error(traceback.format_exc())
-
-
-def record_tool_call_spans(
-    *,
-    tool_calls: list[dict] | None,
-    trace_context: dict | None,
-    metadata: dict | None = None,
-) -> None:
-    """
-    Emit one Langfuse child span per ``tool_call`` returned by the model.
-
-    Today's passthrough surfaces ``tool_calls`` in the final ChatCompletion
-    response and expects the client to execute each one and post the result
-    back on the next turn. From Langfuse's perspective every tool call is its
-    own unit of work — we record it as a ``span`` observation with
-    ``name="tool:{tool_name}"``, ``input`` = parsed JSON arguments (falling
-    back to the raw string if the model emitted malformed JSON), and
-    ``metadata`` carrying the call id plus any caller-provided extras (alias,
-    provider, etc.). This makes tool selection + arguments filterable in the
-    Langfuse UI without re-parsing the parent generation's output.
-
-    No tool *result* span is emitted here — the result arrives on the next
-    request as a ``tool``-role message and lands on that turn's trace via
-    the input payload, not this one.
-
-    Args:
-        tool_calls: ChatCompletion ``tool_calls`` list (OpenAI shape, with
-            ``id`` and ``function.name`` / ``function.arguments``). ``None``
-            or empty → no-op.
-        trace_context: Detached-mode trace context (from
-            :func:`capture_langfuse_generation_context`). When ``None``,
-            spans are attached to the current ``@observe`` scope. Pass the
-            captured context whenever this runs after the parent scope has
-            closed (streaming body iterators).
-        metadata: Extra metadata merged into every emitted span (e.g.
-            ``{"alias": "sonnet", "provider": "anthropic"}``).
-    """
-    # Defensive: callers occasionally hand us non-list values (a Mock from a
-    # test, or a None when no tool_calls were emitted). Anything other than a
-    # non-empty list is a no-op — silently rather than raising, since this is
-    # an observability side effect and shouldn't fail the request.
-    if not isinstance(tool_calls, list) or not tool_calls:
-        return
-
-    base_metadata = dict(metadata or {})
-
-    try:
-        langfuse_client = get_client()
-    except Exception as exc:  # pragma: no cover - defensive against stub clients
-        logger.warning(f"Could not get Langfuse client for tool-call span emission: {exc}")
-        return
-
-    for tc in tool_calls:
-        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-        name = fn.get("name") or "unknown"
-        raw_args = fn.get("arguments")
-        parsed_args: Any
-        if isinstance(raw_args, str):
-            try:
-                parsed_args = json.loads(raw_args) if raw_args else {}
-            except json.JSONDecodeError:
-                parsed_args = {"_raw_arguments": raw_args}
-        else:
-            parsed_args = raw_args if raw_args is not None else {}
-
-        span_metadata = {**base_metadata, "call_id": tc.get("id")}
-
-        try:
-            kwargs: dict[str, Any] = {
-                "name": f"tool:{name}",
-                "as_type": "span",
-                "input": parsed_args,
-                "metadata": span_metadata,
-            }
-            if trace_context is not None:
-                kwargs["trace_context"] = trace_context
-            obs = langfuse_client.start_observation(**kwargs)
-            with contextlib.suppress(Exception):
-                obs.end()
-        except Exception as exc:
-            logger.warning(f"Failed to record tool-call span for {name!r}: {exc}")
