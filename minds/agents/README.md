@@ -12,13 +12,13 @@ An agent must:
 2. Stream user-facing output via `MessageStreamer`
 3. Return a final result that conforms to `AgentResponse`
 
-> **Agent layout:** Each agent implementation resides in its own subdirectory under `agents/`. The directory name must end in `_agent` and include an `agent.py` module — `agent_controller.py` discovers agents by scanning subdirectories whose names end in `_agent` and importing `<name>.agent`.
+> **Agent layout:** Each agent implementation resides in its own subdirectory under `agents/`. The directory name must end in '_agents' and include an `agents.py` module.
 
 ---
 
 ## Implementing an Agent
 
-To create a new agent, add a new subdirectory (Python package) under `agents/`. Each agent package **must** include an `agent.py` module, which acts as the entry point for that agent's implementations.
+To create a new agent, add a new subdirectory (Python package) under `agents/`. Each agent package **must** include an `agents.py` module, which acts as the entry point for that agent’s implementations.
 
 Example structure:
 
@@ -26,11 +26,9 @@ Example structure:
 agents/
   └── my_agent/
       ├── __init__.py
-      ├── agent.py
+      ├── agents.py
       └── ...
 ```
-
-> **Note:** `passthrough_agent/` follows the same `agent.py` convention but is excluded from auto-discovery (it doesn't subclass `BaseAgent`); it's invoked through `OpenAIRequestHandler`'s passthrough short-circuit instead.
 
 Then, subclass `BaseAgent` and implement the `run()` method.
 

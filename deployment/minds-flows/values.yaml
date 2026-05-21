@@ -104,18 +104,6 @@ globalEnvsAlias: &globalEnvsYamlAlias
           name: mindsdb-secrets
           key: ANTHROPIC_API_KEY
 
-    # Anthropic native web-tool versions (required by app_settings.AnthropicSettings,
-    # no defaults — version bumps are an explicit config change). minds-flows runs
-    # `prefect deploy` which imports flow entrypoints, which transitively load
-    # AppSettings at module import time, so missing values crash the Job pod
-    # before Prefect can run. Mirror of deployment/minds/values.yaml.
-    - name: ANTHROPIC__WEB_SEARCH_TOOL_TYPE
-      value: "web_search_20250305"
-    - name: ANTHROPIC__WEB_FETCH_TOOL_TYPE
-      value: "web_fetch_20250910"
-    - name: ANTHROPIC__WEB_FETCH_BETA_HEADER
-      value: "web-fetch-2025-09-10"
-
     # ====================================
     # MINDSDB SETTINGS
     # ====================================
