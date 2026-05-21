@@ -38,6 +38,7 @@ from minds.agents.passthrough_agent.agent import (
 )
 from minds.common.passthrough_config import (
     PassthroughModelConfig,
+    list_available_passthrough_models,
     resolve_passthrough_model,
 )
 from minds.common.settings.app_settings import get_app_settings
@@ -996,6 +997,38 @@ def test_resolve_haiku_uses_anthropic(monkeypatch):
     assert cfg.alias == "haiku"
 
 
+def test_resolve_deprecated_reason_alias_routes_to_sonnet(monkeypatch):
+    # Pre-`latest:*` callers used the bare name `_reason_`; it must resolve
+    # to whatever `latest:sonnet` resolves to today, but keep the deprecated
+    # spelling on the returned config so observability can measure adoption.
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    cfg = resolve_passthrough_model("_reason_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "claude-sonnet-4-6"
+    assert cfg.label == "anthropic"
+    assert cfg.alias == "_reason_"
+
+
+def test_resolve_deprecated_code_alias_routes_to_haiku(monkeypatch):
+    # Pre-`latest:*` callers used the bare name `_code_`; routes to haiku
+    # with the deprecated spelling preserved on the returned config.
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    cfg = resolve_passthrough_model("_code_")
+    assert cfg.api_kind == "anthropic_messages"
+    assert cfg.model_name == "claude-haiku-4-5-20251001"
+    assert cfg.alias == "_code_"
+
+
+def test_resolve_deprecated_alias_without_anthropic_key_raises_400(monkeypatch):
+    # The deprecated path shares provider-availability checks with the canonical
+    # path — no silent fallback to a non-Anthropic provider just because the
+    # legacy name was used.
+    _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key"))
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_passthrough_model("_reason_")
+    assert exc_info.value.status_code == 400
+
+
 def test_resolve_sonnet_without_anthropic_key_raises_400(monkeypatch):
     # Anthropic explicit-model aliases must not silently fall back to OpenAI.
     _patch_settings(monkeypatch, _fake_settings(openai_key="ok-key"))
@@ -1181,7 +1214,11 @@ def test_passthrough_pattern_accepts_latest_prefix():
     assert is_passthrough_model("latest:gpt-high") is True
     assert is_passthrough_model("latest:gpt-codex") is True
     assert is_passthrough_model("latest:qwen") is True
-    # Old underscore form no longer recognized — hard cutover.
+    # Two specific underscore names kept alive for backwards compatibility.
+    assert is_passthrough_model("_reason_") is True
+    assert is_passthrough_model("_code_") is True
+    # Other underscore-wrapped names are NOT a general alias surface — only
+    # the two whitelisted legacy names above resolve.
     assert is_passthrough_model("_sonnet_") is False
     assert is_passthrough_model("_gpt-5.5-high_") is False
     # Bare model names still don't match (real model strings stay untouched).
@@ -1197,6 +1234,25 @@ def test_resolve_unknown_alias_raises_400(monkeypatch):
         resolve_passthrough_model("latest:mystery")
     assert exc_info.value.status_code == 400
     assert "latest:mystery" in exc_info.value.detail
+
+
+def test_list_available_passthrough_models_filters_by_configured_providers(monkeypatch):
+    # Only Anthropic key set — only the three Anthropic aliases should come
+    # back. Deprecated underscore aliases (_reason_/_code_) are not part of
+    # the discovery surface and must never appear here.
+    _patch_settings(monkeypatch, _fake_settings(anthropic_key="an-key"))
+    configs = list_available_passthrough_models()
+    assert {cfg.label for cfg in configs} == {"anthropic"}
+    assert {cfg.alias for cfg in configs} == {"sonnet", "opus", "haiku"}
+
+
+def test_list_available_passthrough_models_spans_all_providers_when_configured(monkeypatch):
+    _patch_settings(
+        monkeypatch,
+        _fake_settings(anthropic_key="a", openai_key="o", fireworks_key="f", gemini_key="g"),
+    )
+    configs = list_available_passthrough_models()
+    assert {cfg.label for cfg in configs} == {"anthropic", "openai", "fireworks", "gemini"}
 
 
 # ---------------------------------------------------------------------------

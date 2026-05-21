@@ -34,6 +34,7 @@ raise HTTP 400 rather than silently falling back — otherwise callers get
 strictly different model behavior than they asked for with no signal.
 """
 
+import dataclasses
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,6 +46,14 @@ from pydantic import BaseModel
 from minds.common.settings.app_settings import AppSettings, get_app_settings
 
 _PASSTHROUGH_PATTERN = re.compile(r"^latest:([a-zA-Z0-9\-]+)$")
+
+# Pre-`latest:*` model names that some callers still send. Each maps to the
+# canonical alias body it should resolve through; the resolver preserves the
+# deprecated spelling on the returned config so observability can track usage.
+_DEPRECATED_ALIASES: dict[str, str] = {
+    "_reason_": "sonnet",
+    "_code_": "haiku",
+}
 
 
 class ApiKind(StrEnum):
@@ -125,7 +134,13 @@ class PassthroughObservabilityMetadata(BaseModel):
 
 
 def is_passthrough_model(model: str) -> bool:
-    """Return True if *model* matches the ``latest:<alias>`` passthrough pattern."""
+    """Return True if *model* is a passthrough name.
+
+    Matches the canonical ``latest:<alias>`` pattern or one of the deprecated
+    bare spellings in :data:`_DEPRECATED_ALIASES`.
+    """
+    if model in _DEPRECATED_ALIASES:
+        return True
     return _PASSTHROUGH_PATTERN.match(model) is not None
 
 
@@ -337,19 +352,13 @@ _ALIAS_PRIORITY: dict[str, list[tuple[AliasPredicate, AliasBuilder]]] = {
 }
 
 
-def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
-    """Resolve a ``latest:<model>`` name to a fully-populated config.
+def _resolve_alias(alias: str) -> PassthroughModelConfig:
+    """Resolve an alias body (e.g. ``"sonnet"``) to a populated config.
 
-    Unknown aliases raise ``HTTPException(400)``. Likewise, when an alias's
-    priority list has no entry whose key is configured we raise 400 —
-    keeps the passthrough contract honest instead of silently routing
-    ``latest:kimi`` to Claude.
+    Shared between the canonical ``latest:<alias>`` path and the deprecated
+    bare-name path so both go through the same provider-availability checks
+    and raise the same 400s.
     """
-    m = _PASSTHROUGH_PATTERN.match(model)
-    if not m:
-        raise ValueError(f"{model!r} is not a valid passthrough model name")
-
-    alias = m.group(1).lower()
     settings = get_app_settings()
 
     candidates = _ALIAS_PRIORITY.get(alias)
@@ -373,3 +382,44 @@ def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
             "alias (see service docs for the alias → provider mapping)."
         ),
     )
+
+
+def resolve_passthrough_model(model: str) -> PassthroughModelConfig:
+    """Resolve a passthrough model name to a fully-populated config.
+
+    Accepts either the canonical ``latest:<alias>`` form or one of the
+    deprecated bare spellings in :data:`_DEPRECATED_ALIASES`. Unknown
+    aliases raise ``HTTPException(400)``. Likewise, when an alias's
+    priority list has no entry whose key is configured we raise 400 —
+    keeps the passthrough contract honest instead of silently routing
+    ``latest:kimi`` to Claude.
+    """
+    if model in _DEPRECATED_ALIASES:
+        config = _resolve_alias(_DEPRECATED_ALIASES[model])
+        # Preserve the deprecated spelling on the returned config so
+        # observability records that the legacy name was used; lets us
+        # measure adoption before actually deleting these.
+        return dataclasses.replace(config, alias=model)
+
+    m = _PASSTHROUGH_PATTERN.match(model)
+    if not m:
+        raise ValueError(f"{model!r} is not a valid passthrough model name")
+
+    return _resolve_alias(m.group(1).lower())
+
+
+def list_available_passthrough_models() -> list[PassthroughModelConfig]:
+    """Resolve every alias in :data:`_ALIAS_PRIORITY` whose provider is configured.
+
+    Used by ``GET /v1/models`` to advertise currently-callable models.
+    Deprecated aliases (``_reason_``, ``_code_``) are not in
+    :data:`_ALIAS_PRIORITY` so they're excluded by construction.
+    """
+    settings = get_app_settings()
+    configs: list[PassthroughModelConfig] = []
+    for candidates in _ALIAS_PRIORITY.values():
+        for predicate, builder in candidates:
+            if predicate(settings):
+                configs.append(builder(settings))
+                break
+    return configs

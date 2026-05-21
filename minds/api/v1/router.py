@@ -7,7 +7,18 @@ that can be included in the main FastAPI application.
 
 from fastapi import APIRouter
 
-from minds.api.v1.endpoints import chat, conversations, datasources, health, limits, memory, minds, responses, tree
+from minds.api.v1.endpoints import (
+    chat,
+    conversations,
+    datasources,
+    health,
+    limits,
+    memory,
+    minds,
+    models,
+    responses,
+    tree,
+)
 
 # Create the v1 API router. Canonical mount is /v1/*; server.py also includes
 # this router under /api/* (giving /api/v1/*) as a legacy alias.
@@ -20,6 +31,7 @@ api_router.include_router(conversations.router, prefix="/conversations", tags=["
 api_router.include_router(datasources.router, prefix="/datasources", tags=["datasources"])
 api_router.include_router(minds.router, prefix="/minds", tags=["minds"])
 api_router.include_router(memory.router, prefix="/minds/{mind_name}/memory", tags=["memory"])
+api_router.include_router(models.router, prefix="/models", tags=["models"])
 api_router.include_router(responses.router, prefix="/responses", tags=["responses"])
 api_router.include_router(tree.router, prefix="/tree", tags=["tree"])
 api_router.include_router(limits.router, prefix="/limits", tags=["limits"])
