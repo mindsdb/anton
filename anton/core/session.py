@@ -39,6 +39,7 @@ from anton.core.tools.tool_defs import (
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
     OPEN_ARTIFACT_TOOL,
+    READ_IMAGE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
     SET_ARTIFACT_PRIMARY_TOOL,
@@ -605,6 +606,7 @@ class ChatSession:
                 )
 
         self.tool_registry.register_tool(scratchpad_tool)
+        self.tool_registry.register_tool(READ_IMAGE_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -1234,25 +1236,42 @@ class ChatSession:
             tool_results: list[dict] = []
             for tc in response.tool_calls:
                 try:
-                    result_text = await self.tool_registry.dispatch_tool(
+                    result = await self.tool_registry.dispatch_tool(
                         self, tc.name, tc.input
                     )
                 except Exception as exc:
-                    result_text = f"Tool '{tc.name}' failed: {exc}"
+                    result = f"Tool '{tc.name}' failed: {exc}"
 
-                result_text = scrub_credentials(result_text)
-                result_text = self._apply_error_tracking(
-                    result_text,
-                    tc.name,
-                    error_streak,
-                    resilience_nudged,
-                )
+                if isinstance(result, list):
+                    # Multimodal tool result — scrub credentials from text
+                    # blocks; image-block payloads are raw bytes and have
+                    # nothing to scrub. A list result signals success, so
+                    # mirror the success branch of `_apply_error_tracking`
+                    # and reset the streak instead of running the full
+                    # string-only nudge logic.
+                    content: "str | list[dict]" = [
+                        {**b, "text": scrub_credentials(b.get("text", ""))}
+                        if b.get("type") == "text"
+                        else b
+                        for b in result
+                    ]
+                    error_streak[tc.name] = 0
+                    resilience_nudged.discard(tc.name)
+                else:
+                    result = scrub_credentials(result)
+                    result = self._apply_error_tracking(
+                        result,
+                        tc.name,
+                        error_streak,
+                        resilience_nudged,
+                    )
+                    content = result
 
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": tc.id,
-                        "content": result_text,
+                        "content": content,
                     }
                 )
 
@@ -1730,6 +1749,43 @@ class ChatSession:
                                 )
                     except Exception as exc:
                         result_text = f"Tool '{tc.name}' failed: {exc}"
+
+                    if isinstance(result_text, list):
+                        # Multimodal tool result — scrub credentials from text
+                        # blocks (image payloads carry no secrets). A list
+                        # result signals success, so mirror the success
+                        # branch of `_apply_error_tracking` and reset the
+                        # streak instead of running the full string-only
+                        # nudge logic.
+                        scrubbed_blocks = [
+                            {**b, "text": scrub_credentials(b.get("text", ""))}
+                            if b.get("type") == "text"
+                            else b
+                            for b in result_text
+                        ]
+                        error_streak[tc.name] = 0
+                        resilience_nudged.discard(tc.name)
+                        if self._episodic is not None:
+                            self._episodic.log_turn(
+                                self._turn_count + 1,
+                                "tool_result",
+                                f"[{tc.name} → multimodal result]",
+                                tool=tc.name,
+                            )
+                        self._acc_observe(
+                            "tool_result",
+                            {"name": tc.name, "success": True, "error": ""},
+                            severity=1,
+                            round_idx=tool_round,
+                        )
+                        tool_results.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tc.id,
+                                "content": scrubbed_blocks,
+                            }
+                        )
+                        continue
 
                     if self._episodic is not None:
                         self._episodic.log_turn(

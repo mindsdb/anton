@@ -142,19 +142,60 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
             if content_parts:
                 result.append({"role": "user", "content": content_parts})
                 content_parts = []
-            # tool_result -> role:tool message
-            content = block.get("content", "")
-            if isinstance(content, list):
-                content = "\n".join(
-                    b.get("text", "") for b in content if b.get("type") == "text"
-                )
+            # tool_result -> role:tool message. The Chat Completions API only
+            # accepts a string in `tool` messages, so when the tool returned
+            # multimodal blocks (image + text), we split them: text → tool
+            # message, image → a follow-up role:user message right after.
+            raw = block.get("content", "")
+            extra_images: list[dict] = []
+            if isinstance(raw, list):
+                text_parts_for_tool: list[str] = []
+                for b in raw:
+                    if b.get("type") == "text":
+                        text_parts_for_tool.append(b.get("text", ""))
+                    elif b.get("type") == "image" and supports_vision:
+                        extra_images.append(b)
+                if text_parts_for_tool:
+                    tool_text = "\n".join(text_parts_for_tool)
+                elif extra_images:
+                    tool_text = "Image attached in next user message."
+                else:
+                    tool_text = ""
+            else:
+                tool_text = str(raw)
+
             result.append(
                 {
                     "role": "tool",
                     "tool_call_id": block["tool_use_id"],
-                    "content": str(content),
+                    "content": tool_text,
                 }
             )
+
+            if extra_images:
+                img_parts: list[dict] = [
+                    {
+                        "type": "text",
+                        "text": "Image(s) returned by previous tool call:",
+                    }
+                ]
+                for img in extra_images:
+                    if vision_format == "anthropic":
+                        img_parts.append(img)
+                        continue
+                    source = img.get("source", {})
+                    if source.get("type") == "base64":
+                        media_type = source.get("media_type", "image/png")
+                        data = source.get("data", "")
+                        img_parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{data}"
+                                },
+                            }
+                        )
+                result.append({"role": "user", "content": img_parts})
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
         elif block.get("type") == "image" and supports_vision:
