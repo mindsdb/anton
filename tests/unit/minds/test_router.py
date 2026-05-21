@@ -168,6 +168,7 @@ class TestAPIV1Router:
             expected_prefixes = [
                 "/v1/health",
                 "/v1/minds",
+                "/v1/models",
                 "/v1/chat",
                 "/v1/conversations",
                 "/v1/datasources",
