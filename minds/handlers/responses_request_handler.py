@@ -8,7 +8,12 @@ from minds.common.logger import get_logger
 from minds.db.pg_session import get_open_session
 from minds.handlers.openai_request_handler import OpenAIRequestHandler
 from minds.requests.context import Context
-from minds.requests.langfuse_tracing import get_langfuse_trace_id, lazy_observe, setup_langfuse_observation
+from minds.requests.langfuse_tracing import (
+    capture_langfuse_generation_context,
+    get_langfuse_trace_id,
+    lazy_observe,
+    setup_langfuse_observation,
+)
 from minds.requests.responses_request import ResponsesRequest
 from minds.requests.stream import (
     format_messages_for_non_streaming_responses_api,
@@ -58,6 +63,11 @@ async def responses_request_handler(
     # Set up Langfuse observation
     setup_langfuse_observation(context=context)
     request_id = get_langfuse_trace_id() or str(context.request_id)
+
+    # Capture the @observe trace context so streaming code paths can attach
+    # a child generation carrying token usage after this decorated handler
+    # returns (the StreamingResponse body iterator outlives @observe).
+    langfuse_trace_context = capture_langfuse_generation_context()
 
     logger.debug(f"🔄[{request_id}] Responses Request: {responses_request.model_dump()}")
 
@@ -182,6 +192,7 @@ async def responses_request_handler(
             stream=stream,
             metadata=metadata,
             instrument=instrument,
+            langfuse_trace_context=langfuse_trace_context,
             limits_service=limits_service,
         )
 

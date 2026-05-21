@@ -17,4 +17,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Run unit tests
+        env:
+          # AnthropicSettings requires these explicitly (no defaults) so a
+          # version bump is a conscious config change in deploy manifests.
+          # See deployment/minds/values.yaml for the production values.
+          ANTHROPIC__WEB_SEARCH_TOOL_TYPE: web_search_20250305
+          ANTHROPIC__WEB_FETCH_TOOL_TYPE: web_fetch_20250910
+          ANTHROPIC__WEB_FETCH_BETA_HEADER: web-fetch-2025-09-10
         run: make test/unit/coverage
