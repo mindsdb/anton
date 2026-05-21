@@ -1,4 +1,4 @@
-"""Shared ChatSession builder for any host (CoWork desktop, dispatch, CLI integrations).
+"""Shared ChatSession builder for any host (Cowork desktop, dispatch, CLI integrations).
 
 Wraps the boilerplate that used to live inline in `anton-cowork/server/routes/anton_bridge.py`
 so the same workspace + memory + vault wiring is reused by every host. Hosts customize
@@ -12,6 +12,7 @@ Public API:
     AntonConfigurationError        — raise when setup is missing/invalid
     AntonRuntimeError              — raise when an Anton call fails after configuration is OK
 """
+
 from __future__ import annotations
 
 import logging
