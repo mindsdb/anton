@@ -80,12 +80,26 @@ if _scratchpad_model:
                 "ANTON_OPENAI_API_KEY"
             )
             _llm_api_version = os.environ.get("ANTON_OPENAI_API_VERSION") or None
-            _llm_provider = _ProviderClass(
-                api_key=_llm_api_key or None,
-                base_url=_llm_base_url or None,
-                ssl_verify=_llm_ssl_verify,
-                api_version=_llm_api_version,
+            # Mirror LLMClient.from_settings: openai-compatible endpoints
+            # (Minds/MindsHub) expect image blocks in Anthropic native format,
+            # not OpenAI image_url data-URLs.
+            _llm_provider_kwargs: dict = {
+                "api_key": _llm_api_key or None,
+                "base_url": _llm_base_url or None,
+                "ssl_verify": _llm_ssl_verify,
+                "api_version": _llm_api_version,
+            }
+            # Endpoints that proxy to Minds / MindsHub / MDB.AI
+            # speak Anthropic content format over the OpenAI HTTP envelope,
+            # so image blocks must be Anthropic-shaped, not OpenAI image_url.
+            _llm_url_lower = (_llm_base_url or "").lower()
+            _anthropic_proxy = any(
+                host in _llm_url_lower for host in ("mdb.ai", "mindshub.ai")
             )
+            if _scratchpad_provider_name == "openai-compatible" or _anthropic_proxy:
+                _llm_provider_kwargs["supports_vision"] = True
+                _llm_provider_kwargs["vision_format"] = "anthropic"
+            _llm_provider = _ProviderClass(**_llm_provider_kwargs)
         else:
             _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
         _llm_model = _scratchpad_model

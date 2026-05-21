@@ -215,6 +215,31 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
                             "image_url": {"url": f"data:{media_type};base64,{data}"},
                         }
                     )
+        elif block.get("type") == "image_url" and supports_vision:
+            # Inbound OpenAI-format image (e.g. scratchpad code that built the
+            # message in OpenAI shape). Translate to the configured outbound
+            # format so it actually reaches the model.
+            url = (block.get("image_url") or {}).get("url", "")
+            if vision_format == "anthropic" and url.startswith("data:"):
+                # data:<media_type>;base64,<data>  ->  Anthropic image block
+                try:
+                    header, data = url.split(",", 1)
+                    media_type = header[len("data:") : header.index(";")]
+                except (ValueError, IndexError):
+                    media_type, data = "image/png", ""
+                content_parts.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        },
+                    }
+                )
+            else:
+                # Already OpenAI format — pass through.
+                content_parts.append(block)
 
     if content_parts:
         # If only text parts, flatten to a simple string for compatibility
