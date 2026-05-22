@@ -228,9 +228,11 @@ WHEN TO REGISTER:
 `type="dataset"`, `primary="data.csv"`.
 - Generated images (PNG, SVG, etc.) → `type="image"`, `primary="chart.png"`.
 - Self-contained HTML + JS + CSS apps that run with no backend → \
-`type="fullstack-stateless-app"`, `primary="index.html"`.
+`type="fullstack-stateless-app"`, `primary="static/index.html"`. The frontend \
+lives in a `static/` subfolder of the artifact.
 - Web apps that need a backend process (see BACKEND & FULLSTACK section) → \
-`type="fullstack-stateful-app"`, `primary="index.html"`.
+`type="fullstack-stateful-app"`, `primary="static/index.html"`. The frontend \
+lives in a `static/` subfolder of the artifact, served by `backend.py`.
 
 WHEN NOT TO REGISTER:
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
@@ -475,9 +477,11 @@ API-driven system, follow this workflow:
 1. REGISTER THE ARTIFACT: Follow the universal artifact contract from the \
 ARTIFACTS section. For backend apps specifically:
   - `type`: `"fullstack-stateful-app"` (every app built here needs a backend process).
-  - `primary`: set to `"index.html"` when you know that will be the frontend entry-point.
-  Use the returned `<artifact_path>` for ALL subsequent writes (backend.py, \
-index.html, requirements.txt, etc.).
+  - `primary`: set to `"static/index.html"` — the frontend ALWAYS lives in a \
+`static/` subfolder of the artifact (see steps 4 and 5 below).
+  Use the returned `<artifact_path>` for ALL subsequent writes — `backend.py` \
+and `requirements.txt` go directly in `<artifact_path>/`; ALL frontend files \
+(HTML, CSS, JS, images, fonts) go into `<artifact_path>/static/`.
 
 2. TECHNICAL SPECIFICATION (as a system analyst): Create a brief technical specification for \
 the application. The specification MUST include:
@@ -519,14 +523,22 @@ are blank lines and `#` comments. If the backend uses ONLY the Python standard \
 library (http.server, json, sqlite3, etc.), do NOT create requirements.txt.
   - The backend MUST accept `--port` via argparse and bind to that port. \
 NEVER hardcode the port — `launch_backend` picks a free one and passes it in.
-  - The backend serves the frontend at `/` (single-origin, no CORS for stateless backends)
+  - The backend MUST serve the frontend from the sibling `static/` directory \
+(single-origin, no CORS): `GET /` returns `static/index.html`, and any other \
+non-API path is resolved against `static/` (e.g. `GET /app.css` → \
+`static/app.css`). Compute the static dir relative to the backend file: \
+`STATIC_DIR = Path(__file__).parent / "static"`.
   - Do NOT start the server inside the scratchpad — use `launch_backend` in step 6.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
   - Follow the VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT guidelines
-  - Save to `<artifact_path>/index.html` (or frontend.html)
+  - Save the entry-point to `<artifact_path>/static/index.html` (create the \
+`static/` subfolder if needed). ANY additional frontend assets (separate CSS, \
+JS, images, fonts, large data .js payloads) MUST also live under \
+`<artifact_path>/static/` — never at the artifact root, since the backend only \
+serves files from `static/`.
   - API calls MUST use RELATIVE paths only (e.g. `fetch('/api/items')`, NOT \
 `fetch('http://localhost:PORT/api/items')` and NOT any hardcoded base URL). \
 The frontend is served by the same backend at `/`, so relative paths resolve to the \
