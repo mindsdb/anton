@@ -44,6 +44,9 @@ deployment:
           - path: /api/v1/minds
             serviceName: minds
             servicePort: 80
+          - path: /api/v1/models
+            serviceName: minds
+            servicePort: 80
           - path: /api/v1/datasources
             serviceName: minds
             servicePort: 80
