@@ -360,11 +360,33 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
     if not name:
         return "Scratchpad name is required."
 
+    # ACC emit helper: use the session's safe wrapper if it exists,
+    # otherwise no-op. Defined as a local closure so each emit site
+    # stays a single line.
+    def _acc_observe(kind: str, detail: dict, *, severity: int = 1) -> None:
+        fn = getattr(session, "_acc_observe", None)
+        if fn is not None:
+            fn(kind, detail, severity=severity)
+
     if action == "exec":
         result = await prepare_scratchpad_exec(session, tc_input)
         if isinstance(result, str):
+            # Empty / malformed code parameter — the dispatcher rejected
+            # it before reaching the runtime. This is exactly the
+            # "silent code-clip" failure mode the ACC's
+            # detect_oversized_cell watches for.
+            _acc_observe("scratchpad_empty_code", {"name": name}, severity=7)
             return result
         pad, code, description, estimated_time, estimated_seconds = result
+
+        _acc_observe(
+            "scratchpad_call",
+            {
+                "name": name,
+                "code_len": len(code or ""),
+                "one_line_description": description or "",
+            },
+        )
 
         # Notify pre-execute observers (e.g. cerebellum). The runtime
         # never sees these — observation is an orchestration concern,
@@ -391,6 +413,31 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
                 pad_name=name, description=description, cell=cell,
             )
             await _fire_post_execute(session, cell)
+            # ACC: distinguish "killed" (timeout/cancel/OOM) from a
+            # plain runtime error. The local backend sets cell.error
+            # to a string starting with "Cancelled" or matching the
+            # "Cell timed out"/"Cell killed" prefixes from the
+            # asyncio.TimeoutError path. Everything else (NameError,
+            # ImportError, …) is a regular result with success=False.
+            err = (cell.error or "").strip()
+            if err.startswith(("Cancelled", "Cell timed out", "Cell killed")):
+                _acc_observe(
+                    "scratchpad_killed",
+                    {"name": name, "reason": err[:120]},
+                    severity=6,
+                )
+            else:
+                success = not err and not (cell.stderr or "").strip()
+                _acc_observe(
+                    "scratchpad_result",
+                    {
+                        "name": name,
+                        "success": success,
+                        "stdout_len": len(cell.stdout or ""),
+                        "error": err[:300] if err else "",
+                    },
+                    severity=5 if not success else 1,
+                )
         return format_cell_result(cell)
 
     elif action == "view":
@@ -404,6 +451,11 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         if pad is None:
             return f"No scratchpad named '{name}'."
         await pad.reset()
+        _acc_observe(
+            "scratchpad_reset",
+            {"name": name, "reason": "manual"},
+            severity=5,
+        )
         return f"Scratchpad '{name}' reset. All state cleared."
 
     elif action == "remove":
@@ -424,3 +476,92 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
 
     else:
         return f"Unknown scratchpad action: {action}"
+
+
+async def handle_read_image(
+    session: "ChatSession", tc_input: dict
+) -> str | list[dict]:
+    """Read an image file from disk and return it as an image content block.
+
+    Returns a list of content blocks (image + text) on success so the model
+    sees the picture on its next turn. Returns a plain error string on
+    failure (missing file, non-image extension, oversized image, etc.).
+    """
+    import base64
+    from pathlib import Path
+
+    from anton.clipboard import is_image_path
+    from anton.utils.clipboard import (
+        MAX_IMAGE_BYTES,
+        _media_type_for,
+        human_size,
+    )
+
+    file_path = (tc_input.get("file_path") or "").strip()
+    if not file_path:
+        return "Error: file_path is required."
+
+    try:
+        path = Path(file_path).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+    except OSError as exc:
+        return f"Error: invalid path '{file_path}': {exc}"
+
+    if not path.is_file():
+        return f"Error: file not found: {path}"
+
+    if not is_image_path(path.name):
+        return (
+            f"Error: '{path.name}' is not a supported image format "
+            "(expected .png/.jpg/.jpeg/.gif/.webp/.bmp)."
+        )
+
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return f"Error: cannot read '{path}': {exc}"
+
+    suffix = path.suffix.lstrip(".").lower()
+    if suffix == "bmp":
+        try:
+            import io
+            from PIL import Image as _PILImage
+
+            buf = io.BytesIO()
+            _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
+            raw = buf.getvalue()
+            suffix = "png"
+        except Exception as exc:
+            return f"Error: failed to convert BMP to PNG: {exc}"
+
+    if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
+        return (
+            f"Error: image is too large ({human_size(len(raw))}); "
+            "the API limit is ~3.7 MB raw / 5 MB base64. "
+            "Resize the image and try again."
+        )
+
+    b64 = base64.standard_b64encode(raw).decode("ascii")
+    media_type = _media_type_for(suffix)
+
+    summary = f"Loaded {path.name} ({human_size(len(raw))})."
+    try:
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(path) as im:
+            summary = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw))})."
+    except Exception:
+        pass
+
+    return [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": b64,
+            },
+        },
+        {"type": "text", "text": summary},
+    ]

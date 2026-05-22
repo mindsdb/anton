@@ -4,12 +4,15 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 import json
+import os
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+from anton.core.memory.acc import AnteriorCingulate
+from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
@@ -24,6 +27,11 @@ from anton.core.llm.provider import (
     StreamToolResult,
     TokenLimitExceeded,
 )
+from anton.core.llm.tracing import (
+    TraceContext,
+    reset_trace_context,
+    set_trace_context,
+)
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
@@ -32,6 +40,7 @@ from anton.core.tools.tool_defs import (
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
     OPEN_ARTIFACT_TOOL,
+    READ_IMAGE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
@@ -82,6 +91,11 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
+    # Identifier for the host harness driving this session (e.g. "cowork",
+    # "cli"). Surfaced on telemetry / langfuse traces so the harness that
+    # produced a given trace is filterable in the dashboard. None means the
+    # host didn't identify itself.
+    harness: str | None = None
     proactive_dashboards: bool = False
     tools: list[ToolDef] = field(default_factory=list)
     output_dir: str = ".anton/output"
@@ -120,6 +134,11 @@ class ChatSession:
         )
         self._history_store = config.history_store
         self._session_id = config.session_id
+        self._harness = config.harness
+        # Set per-turn by `turn_stream` so any LLM call made during that
+        # turn can read the current turn identifier (used by telemetry /
+        # langfuse propagation in the provider layer).
+        self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
@@ -149,10 +168,55 @@ class ChatSession:
             cortex=self._cortex,
             llm=self._llm,
         )
+        # Anterior Cingulate Cortex: turn-level pattern detection.
+        # Where the cerebellum looks at one cell and asks "did this
+        # cell do what it claimed", the ACC looks at the whole turn
+        # and asks "is the same failure pattern firing more than
+        # once". Emit points are scattered (scratchpad dispatcher,
+        # tool dispatch, history-repair, round-cap) rather than
+        # routed through the scratchpad observer list, because most
+        # of what the ACC watches isn't scratchpad-scoped. The
+        # session holds the reference; emit sites call
+        # `session._acc.observe(kind, detail, ...)` directly.
+        #
+        # has_similar_lesson: cheap substring check against the
+        # current rules.md content. Avoids re-encoding the same
+        # rule every turn. Embedding similarity is a v2 upgrade.
+        def _acc_has_similar(rule: str) -> bool:
+            cortex = getattr(self, "_cortex", None)
+            hc = getattr(cortex, "global_hc", None) if cortex else None
+            if hc is None:
+                return False
+            try:
+                existing = hc.recall_rules() or ""
+            except Exception:
+                return False
+            probe = (rule or "")[:60].lower()
+            return bool(probe) and probe in existing.lower()
+
+        self._acc = AnteriorCingulate(has_similar_lesson=_acc_has_similar)
+        # ANTON_ACC_MODE controls how aggressively ACC affects the
+        # turn. Mirrors ANTON_MEMORY_MODE for shape consistency:
+        #   "off"     — ACC observes nothing (skipped at every emit site).
+        #   "passive" — Layer 1: lessons drain to memory at end-of-turn,
+        #               next turn's system prompt picks them up. SAFE
+        #               DEFAULT — adds no surface-area to the turn loop.
+        #   "active"  — Layer 2: ALSO inject lessons inline as text
+        #               blocks in tool_results so the LLM sees them on
+        #               the very next round. Stronger learning signal,
+        #               but more invasive — the LLM has to handle the
+        #               nudge gracefully without confusing it for a
+        #               user instruction.
+        _mode_raw = os.environ.get("ANTON_ACC_MODE", "passive").strip().lower()
+        self._acc_mode = _mode_raw if _mode_raw in ("off", "passive", "active") else "passive"
         # Scratchpad observers — list of objects with on_pre_execute /
         # on_post_execute. Fired by handle_scratchpad around pad.execute.
         # The runtime never sees this list; observation lives at the
         # dispatcher layer to keep local/remote runtimes interchangeable.
+        # ACC is intentionally NOT in this list — its emit footprint
+        # is broader than scratchpad cells (it also needs to see tool
+        # calls, history repairs, the round cap), so it's wired via
+        # direct `session._acc.observe(...)` at each emit site.
         self._scratchpad_observers: list = [self._cerebellum]
         self._explainability_store = (
             ExplainabilityStore(config.workspace.base) if config.workspace is not None else None
@@ -551,6 +615,7 @@ class ChatSession:
                 )
 
         self.tool_registry.register_tool(scratchpad_tool)
+        self.tool_registry.register_tool(READ_IMAGE_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -802,6 +867,15 @@ class ChatSession:
                 last_assistant_idx + 1,
                 {"role": "user", "content": synth_blocks},
             )
+        # ACC: emit history_repair so detect_repair_churn can fire
+        # when the LLM is generating malformed tool_use/result pairs
+        # repeatedly. One repair is a hiccup; three in a turn is the
+        # conversation derailing.
+        self._acc_observe(
+            "history_repair",
+            {"reason": reason, "sealed_count": len(missing)},
+            severity=5,
+        )
         return len(missing)
 
     def hard_truncate_history(self, keep: int = 4) -> None:
@@ -965,6 +1039,141 @@ class ChatSession:
         async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
             yield event
 
+    def _acc_observe(
+        self,
+        kind: str,
+        detail: dict | None = None,
+        *,
+        severity: int = 1,
+        round_idx: int = 0,
+    ) -> None:
+        """Safe-emit wrapper for ACC events.
+
+        Returns silently when:
+          - the ACC isn't attached (defensive — should always be set),
+          - the cortex is disabled (`mode == "off"`), so observation
+            without persistence is pointless,
+          - `observe()` raises (e.g. unknown kind from a stale call site).
+
+        Emit sites call this rather than touching `self._acc` directly
+        so that adding/renaming kinds, or turning the ACC off via a
+        future env var, lives in one place.
+        """
+        acc = getattr(self, "_acc", None)
+        if acc is None:
+            return
+        if getattr(self, "_acc_mode", "passive") == "off":
+            return
+        cortex = getattr(self, "_cortex", None)
+        if cortex is not None and getattr(cortex, "mode", "") == "off":
+            return
+        try:
+            acc.observe(kind, detail or {}, severity=severity, round_idx=round_idx)
+        except ValueError:
+            # Unknown event kind from a stale emit site — log via the
+            # cerebellum's logger contract once we have one; for now,
+            # swallow so observation drift never breaks a turn.
+            pass
+
+    def _acc_maybe_nudge(self, tool_results: list[dict]) -> int:
+        """Layer 2 — mid-turn nudging.
+
+        If `ANTON_ACC_MODE == "active"`, run the ACC's per-round
+        detection pass and append any newly-fired lessons as text
+        blocks INSIDE the `tool_results` content list. They piggy-back
+        on the user-role message that's about to be appended to
+        history, so the LLM sees them on its very next round.
+
+        Why text blocks alongside tool_result blocks (vs. a separate
+        user message)? Anthropic's API allows a user message to mix
+        types in its content array. Reusing the same message keeps the
+        nudge tightly bound to the round that produced it and avoids
+        introducing a new consecutive-user-message edge case that the
+        history validator would have to learn about.
+
+        Returns the number of nudges appended (mostly for tests /
+        observability). Zero in passive mode, zero when no detectors
+        newly fired.
+        """
+        if getattr(self, "_acc_mode", "passive") != "active":
+            return 0
+        acc = getattr(self, "_acc", None)
+        if acc is None:
+            return 0
+        try:
+            lessons = acc.at_round_n()
+        except Exception:
+            # Defensive: a buggy detector should never crash the turn.
+            # Layer 1 still drains at end-of-turn so we lose nothing.
+            return 0
+        if not lessons:
+            return 0
+        for lesson in lessons:
+            tool_results.append({
+                "type": "text",
+                "text": (
+                    f"[Anton self-check — {lesson.detector}] {lesson.rule} "
+                    "(This is an automatic mid-turn observation from your own "
+                    "monitoring layer, not a user message.)"
+                ),
+            })
+        return len(lessons)
+
+    def _schedule_acc_flush(self) -> None:
+        """Drain the ACC's turn buffer into Engrams and clear it.
+
+        Parallel to `_schedule_cerebellum_flush()`: same fire-and-
+        forget contract, same end-of-turn slot. The ACC's detectors
+        are pure functions (no LLM call), so running them is cheap;
+        the only async work is `cortex.encode()`, which writes the
+        lessons to disk. We still wrap it in `asyncio.create_task`
+        so the user-facing reply isn't blocked on file I/O.
+
+        Best-effort: if there's no event loop (sync test, edge case),
+        we drop the buffer rather than raise.
+        """
+        acc = getattr(self, "_acc", None)
+        if acc is None:
+            return
+        cortex = getattr(self, "_cortex", None)
+        if cortex is None or getattr(cortex, "mode", "") == "off":
+            acc.clear()
+            return
+
+        lessons = acc.at_end_of_turn()
+        if not lessons:
+            acc.clear()
+            return
+
+        engrams = [
+            Engram(
+                text=l.rule,
+                kind=l.kind,         # always / never / when from the detector
+                scope="global",      # ACC lessons are cross-project
+                confidence="high",   # detectors only fire on confirmed patterns
+                source="consolidation",
+            )
+            for l in lessons
+        ]
+
+        # Check for a running event loop first so we don't construct a
+        # coroutine object only to drop it (which triggers an unawaited-
+        # coroutine warning). ACC learning is best-effort, same as
+        # cerebellum learning — if there's no loop we drop the buffer.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            acc.clear()
+            return
+
+        async def _drain() -> None:
+            try:
+                await cortex.encode(engrams)
+            finally:
+                acc.clear()
+
+        asyncio.create_task(_drain())
+
     def _schedule_cerebellum_flush(self) -> None:
         """Fire the cerebellum's batched diff pass without blocking the turn.
 
@@ -993,7 +1202,11 @@ class ChatSession:
     async def turn(self, user_input: str | list[dict]) -> str:
         self._append_history({"role": "user", "content": user_input})
 
-        user_msg_str = user_input if isinstance(user_input, str) else ""
+        user_msg_str = (
+            user_input
+            if isinstance(user_input, str)
+            else next((b["text"] for b in user_input if b.get("type") == "text"), "")
+        )
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
@@ -1055,25 +1268,42 @@ class ChatSession:
             tool_results: list[dict] = []
             for tc in response.tool_calls:
                 try:
-                    result_text = await self.tool_registry.dispatch_tool(
+                    result = await self.tool_registry.dispatch_tool(
                         self, tc.name, tc.input
                     )
                 except Exception as exc:
-                    result_text = f"Tool '{tc.name}' failed: {exc}"
+                    result = f"Tool '{tc.name}' failed: {exc}"
 
-                result_text = scrub_credentials(result_text)
-                result_text = self._apply_error_tracking(
-                    result_text,
-                    tc.name,
-                    error_streak,
-                    resilience_nudged,
-                )
+                if isinstance(result, list):
+                    # Multimodal tool result — scrub credentials from text
+                    # blocks; image-block payloads are raw bytes and have
+                    # nothing to scrub. A list result signals success, so
+                    # mirror the success branch of `_apply_error_tracking`
+                    # and reset the streak instead of running the full
+                    # string-only nudge logic.
+                    content: "str | list[dict]" = [
+                        {**b, "text": scrub_credentials(b.get("text", ""))}
+                        if b.get("type") == "text"
+                        else b
+                        for b in result
+                    ]
+                    error_streak[tc.name] = 0
+                    resilience_nudged.discard(tc.name)
+                else:
+                    result = scrub_credentials(result)
+                    result = self._apply_error_tracking(
+                        result,
+                        tc.name,
+                        error_streak,
+                        resilience_nudged,
+                    )
+                    content = result
 
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": tc.id,
-                        "content": result_text,
+                        "content": content,
                     }
                 )
 
@@ -1105,13 +1335,25 @@ class ChatSession:
         # in the background. Brain analogue: cerebellar plasticity
         # operates in parallel with continued action, not blocking it.
         self._schedule_cerebellum_flush()
+        self._schedule_acc_flush()
 
         return reply
 
     async def turn_stream(
-        self, user_input: str | list[dict]
+        self,
+        user_input: str | list[dict],
+        *,
+        turn_id: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Streaming version of turn(). Yields events as they arrive."""
+        """Streaming version of turn(). Yields events as they arrive.
+
+        `turn_id` lets the host (cowork, CLI, …) tag the turn with its
+        own identifier so downstream telemetry can correlate the LLM
+        calls + tool spans made during this turn. Stored on
+        `self._current_turn_id` so the provider layer can read it
+        without threading the arg through every internal call.
+        """
+        self._current_turn_id = turn_id
         self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
@@ -1121,7 +1363,11 @@ class ChatSession:
             )
             self._episodic.log_turn(self._turn_count + 1, "user", content)
 
-        user_msg_str = user_input if isinstance(user_input, str) else ""
+        user_msg_str = (
+            user_input
+            if isinstance(user_input, str)
+            else next((b["text"] for b in user_input if b.get("type") == "text"), "")
+        )
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
@@ -1129,6 +1375,21 @@ class ChatSession:
             self._explainability_store,
             turn=self._turn_count + 1,
             user_message=user_msg_str,
+        )
+
+        # Per-turn trace identity. The OpenAI provider reads this when
+        # talking to MindsHub and attaches langfuse-style headers so the
+        # router can attribute every LLM call (and any spans nested
+        # inside this turn via tools / scratchpad) to the right session.
+        # ContextVar propagation also covers `asyncio.create_task` spawns
+        # — the cerebellum flush + identity extraction tasks scheduled
+        # below inherit a copy of this context.
+        _trace_token = set_trace_context(
+            TraceContext(
+                session_id=self._session_id,
+                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+                harness=self._harness,
+            )
         )
 
         try:
@@ -1206,6 +1467,7 @@ class ChatSession:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
                 )
+            reset_trace_context(_trace_token)
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:
@@ -1228,6 +1490,7 @@ class ChatSession:
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
         self._schedule_cerebellum_flush()
+        self._schedule_acc_flush()
 
     async def _stream_and_handle_tools(
         self, user_message: str = ""
@@ -1306,6 +1569,12 @@ class ChatSession:
                 tool_round += 1
                 if tool_round > self._max_tool_rounds:
                     _max_rounds_hit = True
+                    self._acc_observe(
+                        "cap_exhausted",
+                        {"cap": self._max_tool_rounds},
+                        severity=9,
+                        round_idx=tool_round,
+                    )
                     self._append_history(
                         {"role": "assistant", "content": llm_response.content or ""}
                     )
@@ -1349,6 +1618,17 @@ class ChatSession:
 
                 tool_results: list[dict] = []
                 for tc in llm_response.tool_calls:
+                    # ACC: tool_call emit. Args_summary is intentionally
+                    # truncated — the ACC vocabulary documents it as a
+                    # summary string, not a full payload. Detectors
+                    # don't read args today; this is reserved for a
+                    # future `detect_orphaned_tool_call`.
+                    self._acc_observe(
+                        "tool_call",
+                        {"name": tc.name, "args_summary": str(tc.input)[:120]},
+                        severity=1,
+                        round_idx=tool_round,
+                    )
                     if self._episodic is not None:
                         self._episodic.log_turn(
                             self._turn_count + 1,
@@ -1502,6 +1782,43 @@ class ChatSession:
                     except Exception as exc:
                         result_text = f"Tool '{tc.name}' failed: {exc}"
 
+                    if isinstance(result_text, list):
+                        # Multimodal tool result — scrub credentials from text
+                        # blocks (image payloads carry no secrets). A list
+                        # result signals success, so mirror the success
+                        # branch of `_apply_error_tracking` and reset the
+                        # streak instead of running the full string-only
+                        # nudge logic.
+                        scrubbed_blocks = [
+                            {**b, "text": scrub_credentials(b.get("text", ""))}
+                            if b.get("type") == "text"
+                            else b
+                            for b in result_text
+                        ]
+                        error_streak[tc.name] = 0
+                        resilience_nudged.discard(tc.name)
+                        if self._episodic is not None:
+                            self._episodic.log_turn(
+                                self._turn_count + 1,
+                                "tool_result",
+                                f"[{tc.name} → multimodal result]",
+                                tool=tc.name,
+                            )
+                        self._acc_observe(
+                            "tool_result",
+                            {"name": tc.name, "success": True, "error": ""},
+                            severity=1,
+                            round_idx=tool_round,
+                        )
+                        tool_results.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tc.id,
+                                "content": scrubbed_blocks,
+                            }
+                        )
+                        continue
+
                     if self._episodic is not None:
                         self._episodic.log_turn(
                             self._turn_count + 1,
@@ -1513,6 +1830,28 @@ class ChatSession:
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged
                     )
+                    # ACC: tool_result emit. Heuristic success-detection
+                    # from the result text — anton-core does not have a
+                    # structured success/error envelope at this layer,
+                    # so we look for the conventional "Tool 'X' failed"
+                    # prefix that the exception branch above sets, plus
+                    # any handler that prefixed its return with "Error:"
+                    # or the dispatcher's own error-tracking markers.
+                    _failed = (
+                        f"Tool '{tc.name}' failed:" in result_text
+                        or result_text.startswith("Error:")
+                        or "ERROR:" in result_text[:200].upper()
+                    )
+                    self._acc_observe(
+                        "tool_result",
+                        {
+                            "name": tc.name,
+                            "success": not _failed,
+                            "error": result_text[:300] if _failed else "",
+                        },
+                        severity=5 if _failed else 1,
+                        round_idx=tool_round,
+                    )
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -1520,6 +1859,12 @@ class ChatSession:
                             "content": result_text,
                         }
                     )
+
+                # ACC Layer 2 — mid-turn nudge. No-op when mode != "active"
+                # or when no new patterns fired this round. When it does
+                # fire, the lesson text appears inline alongside tool_results
+                # so the LLM sees the alarm before its next decision.
+                self._acc_maybe_nudge(tool_results)
 
                 self._append_history({"role": "user", "content": tool_results})
 

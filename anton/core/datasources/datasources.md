@@ -604,6 +604,37 @@ test_snippet: |
 BigCommerce API tokens can be created in the BigCommerce control panel under Advanced Settings → API Accounts. Choose "Create API Account", then select "V2/V3 API Token" and grant the necessary permissions (e.g. "Products: Read-Only" to access product data).
 ---
 
+## WebArm Comarch Optima API
+
+```yaml
+engine: optima-api
+display_name: WebArm Comarch Optima API
+pip: httpx
+popular: false
+name_from: [api_base, firma]
+fields:
+  - { name: api_base, required: true,  secret: false, description: "Base URL of the WebArm Comarch Optima API, including scheme and port if needed (e.g. http://server:5000 or https://optima.example.com)" }
+  - { name: api_key,  required: true,  secret: true,  description: "API key/token sent in the X-Api-Key header" }
+  - { name: firma,    required: false, secret: false, description: "Optima company selector for X-Optima-Firma; use Baz_BazID when the company name contains non-ASCII characters" }
+test_snippet: |
+  import httpx, os
+  api_base = os.environ['DS_API_BASE'].rstrip('/')
+  api_key = os.environ['DS_API_KEY']
+  firma = os.environ.get('DS_FIRMA', '').strip()
+  headers = {'X-Api-Key': api_key}
+  if firma:
+      headers['X-Optima-Firma'] = firma
+  r = httpx.get(f'{api_base}/api/bazy', headers=headers, timeout=10)
+  assert r.status_code < 400, f'HTTP {r.status_code}: {r.text[:200]}'
+  print("ok")
+```
+
+WebArm Comarch Optima API is a REST API wrapper for Comarch Optima ERP. Use the public server URL
+as `api_base`; include a port only when the deployment is not published through a reverse proxy.
+The connection test calls `/api/bazy`, which validates `X-Api-Key` and lists available Optima
+companies without requiring `X-Optima-Firma`.
+---
+
 ## TimescaleDB
 
 ```yaml

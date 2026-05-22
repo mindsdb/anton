@@ -17,6 +17,7 @@ from anton.clipboard import (
     grab_clipboard,
     is_clipboard_supported,
     parse_dropped_paths as _parse_dropped_paths,
+    replace_at_image_paths,
     save_clipboard_image,
 )
 from anton.core.session import ChatSession, ChatSessionConfig
@@ -92,6 +93,7 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
+from anton.commands.goal import parse_goal_args, run_goal_loop
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -441,9 +443,9 @@ async def _handle_publish(
             return
         if has_key.lower() == "n":
             webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "https://auth.mindshub.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+                "&redirect_uri=https%3A%2F%2Fconsole.mindshub.ai"
             )
             console.print()
 
@@ -1088,6 +1090,8 @@ def _desktop_greeting(console: Console, settings) -> None:
     _persist_first_run_done(settings)
 
 
+
+
 def run_chat(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
@@ -1340,6 +1344,11 @@ async def _chat_loop(
             # list[dict] (multimodal content blocks for images).
             message_content: str | list[dict] | None = None
 
+            # Resolve manual @<path> image references → [Image #N] tokens so
+            # they go through the same base64/multimodal pipeline as
+            # drag-and-drop pastes.
+            user_input, _ = replace_at_image_paths(user_input, image_registry)
+
             # Expand any [Image #N] placeholders into multimodal blocks. After
             # this, the registry only keeps entries that were actually sent.
             try:
@@ -1550,6 +1559,19 @@ async def _chat_loop(
                     continue
                 elif cmd == "/explain":
                     handle_explain(console, settings.workspace_path)
+                    continue
+                elif cmd == "/goal":
+                    _raw_goal_arg = parts[1] if len(parts) > 1 else ""
+                    if not _raw_goal_arg.strip():
+                        console.print("[anton.warning]Usage: /goal \"objective\" [--turns N][/]")
+                        console.print()
+                        continue
+                    goal_objective, goal_max_turns = parse_goal_args(_raw_goal_arg)
+                    if not goal_objective:
+                        console.print("[anton.warning]Usage: /goal \"objective\" [--turns N][/]")
+                        console.print()
+                        continue
+                    await run_goal_loop(console, session, display, goal_objective, goal_max_turns)
                     continue
                 elif cmd == "/help":
                     print_slash_help(console)

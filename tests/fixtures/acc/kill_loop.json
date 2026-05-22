@@ -1,0 +1,6 @@
+[
+  {"kind": "scratchpad_call",   "severity": 1, "detail": {"name": "compute", "code_len": 420}, "round_idx": 2},
+  {"kind": "scratchpad_killed", "severity": 6, "detail": {"name": "compute", "reason": "timeout"}, "round_idx": 3},
+  {"kind": "scratchpad_call",   "severity": 1, "detail": {"name": "compute", "code_len": 420}, "round_idx": 5},
+  {"kind": "scratchpad_killed", "severity": 6, "detail": {"name": "compute", "reason": "timeout"}, "round_idx": 6}
+]

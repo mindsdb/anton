@@ -4,6 +4,7 @@ from anton.core.tools.tool_handlers import (
     handle_list_artifacts,
     handle_memorize,
     handle_open_artifact,
+    handle_read_image,
     handle_recall,
     handle_scratchpad,
     handle_update_artifact_metadata,
@@ -361,4 +362,29 @@ RECALL_TOOL = ToolDef(
         "required": ["query"],
     },
     handler=handle_recall,
+)
+
+
+READ_IMAGE_TOOL = ToolDef(
+    name="read_image",
+    description=(
+        "Read an image file from disk so you can see its contents. Use this "
+        "whenever the user references a path to an image file (PNG, JPG, "
+        "JPEG, GIF, WEBP, BMP) and you need to actually view the picture to "
+        "answer. Pass `file_path` as an absolute path or a path relative to "
+        "the current working directory. The image will appear in your next "
+        "turn as a vision input — do not call this tool again for the same "
+        "path within one turn."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Absolute or relative path to the image file.",
+            },
+        },
+        "required": ["file_path"],
+    },
+    handler=handle_read_image,
 )

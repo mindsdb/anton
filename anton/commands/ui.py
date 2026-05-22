@@ -39,6 +39,7 @@ COMMANDS = [
     Command("/skill", "Manage skills"),
     None,
     "Chat Tools",
+    Command("/goal",      "Run a goal autonomously until complete (/goal \"objective\" [--turns N])"),
     Command("/paste",     "Attach an image from your clipboard"),
     Command("/resume",    "Continue a previous session"),
     Command("/remote",    "Set up or manage remote scratchpad"),
