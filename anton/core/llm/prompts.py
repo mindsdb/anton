@@ -529,6 +529,14 @@ non-API path is resolved against `static/` (e.g. `GET /app.css` → \
 `static/app.css`). Compute the static dir relative to the backend file: \
 `STATIC_DIR = Path(__file__).parent / "static"`.
   - Do NOT start the server inside the scratchpad — use `launch_backend` in step 6.
+  - DECLARE DATASOURCES: if `backend.py` reads any `DS_<ENGINE>_<NAME>__<FIELD>` \
+env var, call `update_artifact(slug=<slug>, datasources=[...])` immediately \
+after writing the file. Pass a flat list of connection slugs (e.g. \
+`["postgres-prod_db", "hubspot-main"]`); each slug MUST match a connection \
+from the `Connected Data Sources` section of this prompt. This records the \
+deployable's credential dependencies in `metadata.json` so the artifact can \
+be redeployed with the right env vars later. Skip this call only when the \
+backend uses no `DS_*` vars at all.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface

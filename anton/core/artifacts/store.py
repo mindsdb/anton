@@ -25,6 +25,7 @@ from pathlib import Path
 from anton.core.artifacts.models import (
     Artifact,
     ArtifactType,
+    DatasourceRef,
     FileEntry,
     ProvenanceEntry,
     TurnEntry,
@@ -181,12 +182,14 @@ class ArtifactStore:
         *,
         primary: str | None = _UNSET,  # type: ignore[assignment]
         port: int | None = _UNSET,  # type: ignore[assignment]
+        datasources: list[DatasourceRef] | None = _UNSET,  # type: ignore[assignment]
     ) -> Artifact | None:
         """Update mutable agent-supplied fields on an existing artifact.
 
         Only fields explicitly passed are modified; omitted fields are
         left unchanged. Pass `primary=None` or `primary=""` to clear
         the entry-point pointer. Pass `port=None` to clear the port.
+        Pass `datasources=[]` to clear the datasource list.
         Returns the updated artifact, or None when the slug is missing.
         """
         artifact = self._load_silent(slug)
@@ -198,6 +201,8 @@ class ArtifactStore:
             )
         if port is not _UNSET:
             artifact.port = int(port) if port is not None else None
+        if datasources is not _UNSET:
+            artifact.datasources = list(datasources or [])
         artifact.updatedAt = _utc_now()
         self._save(artifact)
         return artifact
@@ -367,6 +372,11 @@ class ArtifactStore:
             for f in artifact.files:
                 size_kb = max(1, round(f.bytes / 1024))
                 lines.append(f"- `{f.path}` ({size_kb} KB)")
+            lines.append("")
+        if artifact.datasources:
+            lines.append("## Data sources")
+            for d in artifact.datasources:
+                lines.append(f"- `{d.slug}` ({d.engine}) — env prefix `{d.env_prefix}`")
             lines.append("")
         if artifact.provenance:
             lines.append("## Provenance")

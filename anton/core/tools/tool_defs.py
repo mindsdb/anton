@@ -213,7 +213,14 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
         "Pass empty string to clear (renderer reverts to heuristic: "
         "`index.html` → newest `.html` → newest non-housekeeping file).\n"
         "- `port`: port the backend process is listening on (fullstack-stateful-app only). "
-        "Set this after the server confirms it is up."
+        "Set this after the server confirms it is up.\n"
+        "- `datasources`: list of vault-connection slugs the artifact's backend "
+        "reads from (e.g. `[\"postgres-prod_db\", \"hubspot-main\"]`). REQUIRED "
+        "for `fullstack-stateful-app` whose `backend.py` references any `DS_*` "
+        "env var — declare it right after writing `backend.py` so metadata.json "
+        "captures which connections the deployable depends on. Slugs must match "
+        "existing vault connections (see `Connected Data Sources` in the system "
+        "prompt). Pass `[]` to clear."
     ),
     input_schema={
         "type": "object",
@@ -229,6 +236,18 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
             "port": {
                 "type": "integer",
                 "description": "Port number the backend process is listening on.",
+            },
+            "datasources": {
+                "type": "array",
+                "description": (
+                    "Vault-connection slugs the backend reads from. Replaces "
+                    "the existing list — pass the full set every time. Use "
+                    "`[]` to clear."
+                ),
+                "items": {
+                    "type": "string",
+                    "description": "Connection slug, e.g. \"postgres-prod_db\".",
+                },
             },
         },
         "required": ["slug"],

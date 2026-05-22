@@ -123,6 +123,8 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     Only fields present in the input are modified. Supports:
     - `primary`: entry-point file path (empty string to clear)
     - `port`: backend port number (fullstack-stateful-app only)
+    - `datasources`: list of vault-connection slugs the backend reads from.
+      `engine`, `name`, and `env_prefix` are derived from the vault.
     """
     import json
 
@@ -140,6 +142,44 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     if "port" in tc_input:
         kwargs["port"] = tc_input["port"]
 
+    if "datasources" in tc_input:
+        from anton.core.artifacts.models import DatasourceRef
+        from anton.core.datasources.data_vault import LocalDataVault, _slug_env_prefix
+
+        raw_list = tc_input.get("datasources") or []
+        if not isinstance(raw_list, list):
+            return "Error: `datasources` must be a list of slug strings."
+
+        vault = session._data_vault or LocalDataVault()
+        known = {f"{c['engine']}-{c['name']}": (c["engine"], c["name"])
+                 for c in vault.list_connections()}
+
+        refs: list[DatasourceRef] = []
+        unknown: list[str] = []
+        for item in raw_list:
+            if not isinstance(item, str):
+                return "Error: each entry in `datasources` must be a slug string."
+            ref_slug = item.strip()
+            if not ref_slug:
+                continue
+            if ref_slug not in known:
+                unknown.append(ref_slug)
+                continue
+            engine, name = known[ref_slug]
+            refs.append(DatasourceRef(
+                slug=ref_slug,
+                engine=engine,
+                name=name,
+                env_prefix=_slug_env_prefix(engine, name),
+            ))
+        if unknown:
+            return (
+                f"Error: unknown datasource slug(s): {', '.join(unknown)}. "
+                f"Each slug must match an existing vault connection "
+                f"(format: `<engine>-<name>`)."
+            )
+        kwargs["datasources"] = refs
+
     artifact = store.update(slug, **kwargs)
     if artifact is None:
         return f"Error: no artifact found for slug `{slug}`."
@@ -147,6 +187,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         "slug": artifact.slug,
         "primary": artifact.primary,
         "port": artifact.port,
+        "datasources": [d.model_dump() for d in artifact.datasources],
     }, indent=2)
 
 

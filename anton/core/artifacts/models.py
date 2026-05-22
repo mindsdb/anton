@@ -69,6 +69,23 @@ class TurnEntry(BaseModel):
     files_touched: list[str] = Field(default_factory=list)
 
 
+class DatasourceRef(BaseModel):
+    """A data-source connection that the artifact's backend reads from.
+
+    Declared by the agent at backend-build time so the metadata can
+    record which vault connections a fullstack artifact depends on.
+    Values are derived from the connection slug — `engine` and `name`
+    match a `~/.anton/data_vault/<engine>-<name>` record; `env_prefix`
+    is the `DS_<ENGINE>_<NAME>` token used to namespace the field-level
+    env vars handed to the backend subprocess.
+    """
+
+    slug: str  # e.g. "postgres-prod_db"
+    engine: str  # e.g. "postgres"
+    name: str  # e.g. "prod_db"
+    env_prefix: str  # e.g. "DS_POSTGRES_PROD_DB"
+
+
 class ProvenanceEntry(BaseModel):
     """Provenance for a single conversation that contributed to the artifact.
 
@@ -109,6 +126,13 @@ class Artifact(BaseModel):
     # to write).
     primary: str | None = None
     port: int | None = None
+
+    # ── Agent-declared datasources (fullstack apps) ─────────────
+    # Connections the backend reads from at runtime. Agent-supplied
+    # via `update_artifact(datasources=[...])` — typically right
+    # after writing `backend.py`, so the metadata stays in sync with
+    # the env-var references in the code.
+    datasources: list[DatasourceRef] = Field(default_factory=list)
 
     # ── Server-managed contents ─────────────────────────────────
     files: list[FileEntry] = Field(default_factory=list)
