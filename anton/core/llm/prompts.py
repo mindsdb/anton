@@ -491,10 +491,11 @@ the application. The specification MUST include:
     * Endpoints and HTTP methods
     * Request/response schemas (JSON examples)
     * Error handling
-  - Framework choice: PREFER Python's built-in http.server or http module if possible. \
-    If that's insufficient, use Bottle (simplest, minimal surface area). \
-    Only use FastAPI/Flask if the requirements demand it.
-  - Key dependencies and libraries needed
+  - Framework: ALWAYS use FastAPI. No other framework is supported here — \
+    every backend MUST be FastAPI so it can be invoked both locally and as \
+    an AWS Lambda function via the canonical template in step 4.
+  - Key dependencies and libraries needed (in addition to the mandatory \
+    `fastapi`, `mangum`, `uvicorn` — see step 4)
 
 3. FETCH & VALIDATE SAMPLE DATA: Using the scratchpad tool:
   - Fetch representative sample data from the user's data source (API, database, file)
@@ -511,23 +512,88 @@ the application. The specification MUST include:
 name), implement the backend code. `launch_backend` runs the backend in this same \
 scratchpad's venv, so any packages you install or imports you test here will be \
 present at launch.
-  - Write the complete backend application (http.server, Bottle, Flask, FastAPI, etc.)
-  - Save it to `<artifact_path>/backend.py`, where `<artifact_path>` is the folder \
-path returned by `create_artifact` in step 1
-  - If the backend uses any non-stdlib libraries (Bottle, Flask, FastAPI, requests, \
-pandas, etc.), save a `requirements.txt` in the same directory listing them — \
-one package spec per line (`pkg` or `pkg==1.2`). `launch_backend` reads this file \
-and installs everything into the slug-named scratchpad before spawning the process. \
-Note: only simple lines are supported — `-r`, `-e`, `--index-url` are ignored, as \
-are blank lines and `#` comments. If the backend uses ONLY the Python standard \
-library (http.server, json, sqlite3, etc.), do NOT create requirements.txt.
+
+  CANONICAL TEMPLATE (use this skeleton verbatim, add your routes inside the \
+`# === API routes ===` block). It runs unchanged both locally \
+(`python backend.py --port=NNN`) and on AWS Lambda (handler = `backend.handler`):
+
+  ```python
+  import argparse
+  from pathlib import Path
+  from fastapi import FastAPI
+  from fastapi.middleware.cors import CORSMiddleware
+  from fastapi.staticfiles import StaticFiles
+  from mangum import Mangum
+
+  app = FastAPI()
+
+  # CORS — frontend may be served from a different origin (e.g. CloudFront/S3
+  # in front of the Lambda). Tighten `allow_origins` in production.
+  app.add_middleware(
+      CORSMiddleware,
+      allow_origins=["*"],
+      allow_methods=["*"],
+      allow_headers=["*"],
+  )
+
+  # === API routes ===
+  @app.get("/api/hello")
+  async def hello():
+      return {{"hello": "world"}}
+
+  # Static mount MUST come AFTER all API routes (mount at "/" catches every
+  # remaining path). Used for local preview; in Lambda, statics are served
+  # by an external service (CloudFront/S3), so this mount is harmless there.
+  STATIC_DIR = Path(__file__).parent / "static"
+  if STATIC_DIR.exists():
+      app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+
+  # AWS Lambda entry-point. lifespan="off" is REQUIRED — Lambda has no
+  # long-lived process to run FastAPI's startup/shutdown events on.
+  handler = Mangum(app, lifespan="off")
+
+  if __name__ == "__main__":
+      import uvicorn
+      parser = argparse.ArgumentParser()
+      parser.add_argument("--port", type=int, required=True)
+      args = parser.parse_args()
+      uvicorn.run(app, host="127.0.0.1", port=args.port)
+  ```
+
+  RULES (critical):
+  - Save the file as `<artifact_path>/backend.py` — the filename and the \
+`handler` attribute name are load-bearing (Lambda config points to \
+`backend.handler`). Do NOT rename either.
+  - Keep `Mangum(app, lifespan="off")`. Without `lifespan="off"` Mangum \
+warns and may fail cold start.
+  - API routes MUST be registered BEFORE `app.mount("/", StaticFiles(...))`. \
+FastAPI matches in registration order — a mount at `/` swallows everything \
+after it.
   - The backend MUST accept `--port` via argparse and bind to that port. \
 NEVER hardcode the port — `launch_backend` picks a free one and passes it in.
-  - The backend MUST serve the frontend from the sibling `static/` directory \
-(single-origin, no CORS): `GET /` returns `static/index.html`, and any other \
-non-API path is resolved against `static/` (e.g. `GET /app.css` → \
-`static/app.css`). Compute the static dir relative to the backend file: \
-`STATIC_DIR = Path(__file__).parent / "static"`.
+  - Prefer `async def` for I/O-bound routes (DB queries, external HTTP \
+calls via `httpx.AsyncClient`). Sync `def` is fine for trivial CPU work, but \
+sync blocking I/O inside an async app stalls the event loop.
+  - STATELESS: no module-level mutable caches that matter across requests \
+(`USERS = {{}}`, `SESSIONS = []`). In Lambda these globals may or may not \
+survive between invocations — never rely on them. All persistence goes \
+through external data sources.
+  - FILESYSTEM: assume read-only. The only writable path in Lambda is \
+`/tmp` (ephemeral, 512 MB). Do NOT write to `<artifact_path>` at runtime.
+  - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go \
+to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
+  - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at \
+minimum:
+    ```
+    fastapi
+    mangum
+    uvicorn
+    ```
+    Add any other libraries the backend imports (one per line: `pkg` or \
+`pkg==1.2`). `launch_backend` reads this file and installs everything into \
+the slug-named scratchpad's venv before spawning the process. Only simple \
+lines are supported — `-r`, `-e`, `--index-url`, blank lines and `#` \
+comments are ignored.
   - Do NOT start the server inside the scratchpad — use `launch_backend` in step 6.
   - DECLARE DATASOURCES: if `backend.py` reads any `DS_<ENGINE>_<NAME>__<FIELD>` \
 env var, call `update_artifact(slug=<slug>, datasources=[...])` immediately \
@@ -579,10 +645,19 @@ its `fetch()` calls land on the same origin.
 to browser CORS/file:// restrictions.
 
 DEPLOYMENT NOTES:
-- Backend must be stateless (no mutable global state that matters across requests)
-- All data persistence should go through the user's connected data sources (databases, APIs)
-- The backend process shuts down when the Anton CLI session ends (per MVP constraints)
-- For production, the user must deploy the backend.py file to their own infrastructure
+- Same `backend.py` runs in two modes:
+  - LOCAL: `python backend.py --port=NNN` (used by `launch_backend`). \
+uvicorn serves the FastAPI app and the `static/` mount, frontend reachable at `/`.
+  - AWS LAMBDA: Lambda invokes `backend.handler` (Mangum-wrapped ASGI app) \
+per request. Statics are served by an external service (CloudFront/S3), so \
+the `StaticFiles` mount sits unused in Lambda — Lambda only sees `/api/*` \
+traffic via API Gateway / Function URL routing.
+- The local backend process shuts down when the Anton CLI session ends (per MVP constraints).
+- For production deployment to Lambda, the user packages `backend.py` + \
+`requirements.txt` (and any data files) as a zip or container image, \
+configures `Handler = backend.handler`, and exposes it via API Gateway or \
+Function URL. `DS_*` env vars from `datasources` in `metadata.json` must be \
+set on the Lambda function.
 
 PUBLISH OR SHARE:
 - Publishing is disabled for this MVP (per constraints), but preview is fully supported
