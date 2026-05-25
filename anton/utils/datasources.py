@@ -91,9 +91,9 @@ def scrub_credentials(text: str) -> str:
     """
     for key in _DS_SECRET_VARS:
         value = os.environ.get(key, "")
-        if not value:
+        if not value or len(value) < 4:
             continue
-        text = text.replace(value, f"[{key}]")
+        text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
     for key, value in os.environ.items():
         if not key.startswith("DS_") or key in _DS_KNOWN_VARS:
             continue
