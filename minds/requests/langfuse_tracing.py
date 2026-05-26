@@ -9,18 +9,13 @@ from minds.requests.context import Context, create_langfuse_context
 
 
 class _NoOpObservation:
-    """No-op observation returned by NoOpClient.start_observation."""
+    """No-op observation returned by _NoOpLangfuseClient.start_observation."""
 
     def end(self, **kwargs):
         return self
 
     def update(self, **kwargs):
         return self
-
-
-class NoOpClient:
-    def get_current_trace_id(self):
-        return "disabled"
 
 
 logger = get_logger(__name__)
@@ -38,9 +33,6 @@ class _NoOpLangfuseClient:
 
     def get_current_observation_id(self):
         return "disabled"
-
-    def get_client():
-        return NoOpClient()
 
     def update_current_trace(self, **kwargs):
         pass
