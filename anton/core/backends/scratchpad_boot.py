@@ -99,6 +99,30 @@ if _scratchpad_model:
             if _scratchpad_provider_name == "openai-compatible" or _anthropic_proxy:
                 _llm_provider_kwargs["supports_vision"] = True
                 _llm_provider_kwargs["vision_format"] = "anthropic"
+            # Resolve the OpenAI "flavor" so the injected web_search() helper can
+            # route through whatever native web tooling the endpoint exposes.
+            # Mirrors LLMClient._resolve_openai_compatible_flavor: direct OpenAI
+            # BYOK uses the Responses API (web_search); an openai-compatible base
+            # URL pointing at Minds/mdb.ai uses the chat.completions passthrough;
+            # any other openai-compatible endpoint is generic (no native search).
+            if _scratchpad_provider_name == "openai":
+                _llm_provider_kwargs["flavor"] = _ProviderClass.FLAVOR_OPENAI
+            else:
+                _minds_url_norm = (
+                    os.environ.get("ANTON_MINDS_URL", "").rstrip("/").lower()
+                )
+                _base_norm = (_llm_base_url or "").rstrip("/").lower()
+                if _minds_url_norm and _base_norm in (
+                    _minds_url_norm,
+                    f"{_minds_url_norm}/api/v1",
+                ):
+                    _llm_provider_kwargs["flavor"] = (
+                        _ProviderClass.FLAVOR_MINDS_PASSTHROUGH
+                    )
+                else:
+                    _llm_provider_kwargs["flavor"] = (
+                        _ProviderClass.FLAVOR_OPENAI_COMPATIBLE_GENERIC
+                    )
             _llm_provider = _ProviderClass(**_llm_provider_kwargs)
         else:
             _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
@@ -302,8 +326,52 @@ if _scratchpad_model:
             # Hit max_turns
             return response.content if response else ""
 
+        _WEB_SEARCH_SYSTEM = (
+            "You are a web research assistant. Use your web search tool to find "
+            "current, accurate information and answer the user's query directly "
+            "and thoroughly. Prefer recent, reputable sources, and cite the source "
+            "URLs you relied on inline or in a short list at the end."
+        )
+
+        def web_search(query, *, max_tokens=4096):
+            """Answer a query using the configured LLM's native web search.
+
+            Routes ``query`` to a single LLM completion with the provider's
+            server-side web search tool enabled — Anthropic ``web_search``,
+            OpenAI (BYOK) Responses-API ``web_search``, or the Minds Cloud /
+            mdb.ai passthrough, depending on the configured provider. The model
+            performs the search server-side and writes the answer in one round
+            trip; this returns that narrative answer (a string), which usually
+            includes the source links the model cited.
+
+            If the configured provider/endpoint exposes no native web search
+            (e.g. a generic OpenAI-compatible endpoint), a short explanatory
+            message is returned instead of raising.
+            """
+            available = _llm_provider.native_web_tools()
+            if "web_search" not in available:
+                return (
+                    "web_search is unavailable: the configured LLM "
+                    "provider/endpoint does not expose a native web search tool. "
+                    "Native web search is available on Anthropic, OpenAI (BYOK), "
+                    "and Minds Cloud (mdb.ai)."
+                )
+            response = _llm_asyncio.run(
+                _run_with_heartbeat(
+                    _llm_provider.complete(
+                        model=_llm_model,
+                        system=_WEB_SEARCH_SYSTEM,
+                        messages=[{"role": "user", "content": query}],
+                        native_web_tools=available & {"web_search", "web_fetch"},
+                        max_tokens=max_tokens,
+                    )
+                )
+            )
+            return response.content
+
         namespace["get_llm"] = get_llm
         namespace["agentic_loop"] = agentic_loop
+        namespace["web_search"] = web_search
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 

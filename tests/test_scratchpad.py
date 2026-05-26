@@ -470,6 +470,28 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
+    async def test_web_search_available_when_model_set(self):
+        """web_search() should be injected alongside get_llm()."""
+        pad = make_scratchpad(name="websearch-test", coding_model="claude-test-model")
+        await pad.start()
+        try:
+            cell = await pad.execute("print(callable(web_search))")
+            assert cell.stdout.strip() == "True"
+            assert cell.error is None
+        finally:
+            await pad.close()
+
+    async def test_web_search_not_available_without_model(self):
+        """web_search() should not be in namespace when no model is configured."""
+        pad = make_scratchpad(name="no-websearch")
+        await pad.start()
+        try:
+            cell = await pad.execute("web_search('anything')")
+            assert cell.error is not None
+            assert "NameError" in cell.error
+        finally:
+            await pad.close()
+
     async def test_generate_object_available_when_model_set(self):
         """generate_object() should be available on the LLM wrapper."""
         pad = make_scratchpad(name="genobj-test", coding_model="claude-test-model")
