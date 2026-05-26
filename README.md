@@ -6,6 +6,7 @@
 
 The Minds backend — a FastAPI service serving MindsHub's data + LLM endpoints at `api.mindshub.ai/v1/*`.
 
+
 ## What this repo is
 
 Exposes OpenAI-compatible `/chat/completions` and `/responses` (streaming + non-streaming), the `/minds` CRUD that wraps MindsDB-side agents, `/datasources` connection management, `/conversations` history, `/memory`, `/tree`, and `/limits` quota visibility. Built on FastAPI, SQLModel, Postgres 16, the MindsDB Python SDK, Statsig (feature-flag gates + per-user usage caps via dynamic config), and Langfuse for tracing.
