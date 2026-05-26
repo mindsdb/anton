@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from collections.abc import AsyncIterator
 
 import openai
+
+from minds.common.logger import get_logger
 
 from .provider import (
     ContextOverflowError,
@@ -19,6 +23,25 @@ from .provider import (
     Usage,
     compute_context_pressure,
 )
+
+logger = get_logger(__name__)
+
+
+def _is_valid_base64(data: str) -> bool:
+    """True if `data` is a non-empty, strictly base64-decodable string.
+
+    Langfuse's observation pipeline parses `data:...;base64,...` URIs out of
+    the observed input/output to upload media attachments; if the payload
+    isn't real base64 it raises ValueError in library internals. Guard at
+    the source so we never construct an invalid URI in the first place.
+    """
+    if not data or not isinstance(data, str):
+        return False
+    try:
+        base64.b64decode(data, validate=True)
+    except ValueError:
+        return False
+    return True
 
 
 def _translate_tools(tools: list[dict]) -> list[dict]:
@@ -134,6 +157,17 @@ def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
             if source.get("type") == "base64":
                 media_type = source.get("media_type", "image/png")
                 data = source.get("data", "")
+                if not _is_valid_base64(data):
+                    data_sha8 = (
+                        hashlib.sha256(data.encode("utf-8", errors="replace")).hexdigest()[:8] if data else "empty"
+                    )
+                    logger.warning(
+                        "Dropping image block with non-base64 data (media_type=%s, data_len=%d, data_sha8=%s)",
+                        media_type,
+                        len(data) if isinstance(data, str) else 0,
+                        data_sha8,
+                    )
+                    continue
                 content_parts.append(
                     {
                         "type": "image_url",

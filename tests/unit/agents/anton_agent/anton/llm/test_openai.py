@@ -204,13 +204,53 @@ async def test_openai_translate_user_blocks_image_branch():
         {"type": "text", "text": "hi"},
         {
             "type": "image",
-            "source": {"type": "base64", "media_type": "image/png", "data": "AAA"},
+            "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
         },
     ]
     msgs = _translate_user_blocks(blocks)
     assert msgs[0]["role"] == "user"
     assert isinstance(msgs[0]["content"], list)
-    assert any(p.get("type") == "image_url" for p in msgs[0]["content"])
+    image_parts = [p for p in msgs[0]["content"] if p.get("type") == "image_url"]
+    assert len(image_parts) == 1
+    assert image_parts[0]["image_url"]["url"] == "data:image/png;base64,AAAA"
+
+
+def test_openai_translate_user_blocks_drops_invalid_base64_image(caplog):
+    import logging
+
+    from minds.agents.anton_agent.anton.llm.openai import _translate_user_blocks
+
+    blocks = [
+        {"type": "text", "text": "hi"},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "not-base64!!"},
+        },
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": ""},
+        },
+    ]
+    with caplog.at_level(logging.WARNING):
+        msgs = _translate_user_blocks(blocks)
+    # Only the text part survives; both invalid images are dropped.
+    assert len(msgs) == 1
+    assert msgs[0]["role"] == "user"
+    # When only a text part remains, the joined-string form is emitted.
+    assert msgs[0]["content"] == "hi"
+    # Both invalid images produced a warning breadcrumb.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "non-base64" in r.getMessage()]
+    assert len(warnings) == 2
+
+
+def test_is_valid_base64_helper():
+    from minds.agents.anton_agent.anton.llm.openai import _is_valid_base64
+
+    assert _is_valid_base64("AAAA") is True
+    assert _is_valid_base64("") is False
+    assert _is_valid_base64("AAA") is False  # wrong length
+    assert _is_valid_base64("not-base64!!") is False
+    assert _is_valid_base64(None) is False  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

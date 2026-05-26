@@ -99,7 +99,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [staging, dev, alpha-dev]
+        # Main-merge only migrates staging. Dev + alpha-dev (and the other
+        # sub-envs) migrate on-demand via PR `deploy-to-<env>` labels through
+        # dev-build-deploy.yml — they should not auto-refresh on every main
+        # merge, since the dev cluster is shared infra and unrelated work in
+        # those envs gets clobbered.
+        environment: [staging]
     environment:
       name: ${{ matrix.environment }}
       url: ${{ vars.MDB_ENV_URL }}
@@ -137,7 +142,8 @@ jobs:
     needs: [build, migrate]
     strategy:
       matrix:
-        environment: [staging, dev, alpha-dev]
+        # Main-merge only deploys staging — see comment on the `migrate` matrix.
+        environment: [staging]
     environment:
       name: ${{ matrix.environment }}
       url: ${{ vars.MDB_ENV_URL }}
@@ -193,7 +199,7 @@ jobs:
     needs: [ deploy ]
     strategy:
       matrix:
-        deploy-env: [staging, dev, alpha-dev]
+        deploy-env: [staging]
     uses: ./.github/workflows/tests-integration.yml
     with:
       deploy-env: ${{ matrix.deploy-env }}
