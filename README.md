@@ -11,6 +11,7 @@ The Minds backend — a FastAPI service serving MindsHub's data + LLM endpoints 
 
 Exposes OpenAI-compatible `/chat/completions` and `/responses` (streaming + non-streaming), the `/minds` CRUD that wraps MindsDB-side agents, `/datasources` connection management, `/conversations` history, `/memory`, `/tree`, and `/limits` quota visibility. Built on FastAPI, SQLModel, Postgres 16, the MindsDB Python SDK, Statsig (feature-flag gates + per-user usage caps via dynamic config), and Langfuse for tracing.
 
+
 ## How it fits in the MindsHub system
 
 The browser (via the [mindshub_frontend](../mindshub_frontend/README.md) SPA) and the agent runtimes ([anton](https://github.com/mindsdb/anton) running on `cowork` and on [mindshub_services](../mindshub_services/README.md)-provisioned Lightsail instances) call this service for all data + LLM operations. Every request is authenticated by the [auth](../auth/README.md) service via `/v1/authenticate`, which returns identity headers (`X-User-Id`, `X-Organization-Id`, `X-Billing-Period-Start`, `X-Billing-Period-End`) that this service reads off the inbound request. Outbound work calls MindsDB Cloud / on-prem via the MindsDB Python SDK using the caller's API key. See [System architecture (in mindshub_services)](../mindshub_services/README.md).
