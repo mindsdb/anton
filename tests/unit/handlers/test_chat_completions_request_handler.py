@@ -294,6 +294,44 @@ class TestChatCompletionsRequestHandler:
             assert any(f"🔄[{request_id}] Chat completions request is non-streaming." in call for call in debug_calls)
 
     @pytest.mark.asyncio
+    async def test_chat_completions_request_handler_passes_captured_trace_context_to_factory(
+        self,
+        handler_mod,
+        mock_session,
+        mock_mindsdb_client,
+        sample_streaming_chat_request,
+        mock_context,
+    ):
+        """The handler must capture the @observe trace context and forward it
+        into OpenAIRequestHandler.create so streaming code paths can attach a
+        child generation with token usage after this decorated function exits.
+        """
+        mock_streaming_response = Mock(spec=StreamingResponse)
+        captured_ctx = {"trace_id": "trace-x", "parent_span_id": "obs-y"}
+
+        with (
+            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
+            patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
+            patch.object(handler_mod, "capture_langfuse_generation_context", return_value=captured_ctx),
+            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
+        ):
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.is_passthrough = False
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+            mock_process_streaming.return_value = mock_streaming_response
+
+            await handler_mod.chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                mindsdb_client=mock_mindsdb_client,
+                chat_completions_request=sample_streaming_chat_request,
+            )
+
+            mock_handler_class.create.assert_awaited_once()
+            kwargs = mock_handler_class.create.call_args.kwargs
+            assert kwargs["langfuse_trace_context"] == captured_ctx
+
+    @pytest.mark.asyncio
     async def test_chat_completions_request_handler_parameter_extraction(
         self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
     ):
