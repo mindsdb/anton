@@ -54,20 +54,20 @@ def stub_langfuse_module() -> None:
             self.id = "mock-trace-id"
 
     class _MockObservation:
-        def end(self, **kwargs):  # noqa: ARG002
+        def end(self, **kwargs):
             return self
 
-        def update(self, **kwargs):  # noqa: ARG002
+        def update(self, **kwargs):
             return self
 
     class _MockLangfuseClient:
-        def trace(self, **kwargs):  # noqa: ARG002
+        def trace(self, **kwargs):
             return _MockTrace()
 
-        def update_current_trace(self, **kwargs):  # noqa: ARG002
+        def update_current_trace(self, **kwargs):
             return None
 
-        def update_current_generation(self, **kwargs):  # noqa: ARG002
+        def update_current_generation(self, **kwargs):
             return None
 
         def get_current_trace_id(self):
@@ -76,7 +76,7 @@ def stub_langfuse_module() -> None:
         def get_current_observation_id(self):
             return "mock-observation-id"
 
-        def start_observation(self, **kwargs):  # noqa: ARG002
+        def start_observation(self, **kwargs):
             return _MockObservation()
 
     def _get_client_stub():
