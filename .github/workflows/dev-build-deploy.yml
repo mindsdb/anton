@@ -38,10 +38,27 @@ jobs:
       - id: get-labels
         uses: ./github-actions/get-deploy-labels
 
+  filter-deploy-envs:
+    needs: [get-deploy-labels]
+    runs-on: mdb-dev
+    outputs:
+      deploy-envs: ${{ steps.filter.outputs.deploy-envs }}
+    steps:
+      - name: Drop prod + staging from PR-label matrix
+        id: filter
+        env:
+          RAW_ENVS: ${{ needs.get-deploy-labels.outputs.deploy-envs }}
+        run: |
+          set -euo pipefail
+          # prod ships from release.published; staging ships from push:main.
+          # Labels for those envs should be no-ops on PRs to avoid clobbering shared infra.
+          FILTERED="$(printf '%s' "$RAW_ENVS" | jq -c '[ .[] | select(. != "prod" and . != "staging") ]')"
+          echo "deploy-envs=${FILTERED}" >> "$GITHUB_OUTPUT"
+
   build:
     runs-on: mdb-dev
-    needs: [get-deploy-labels, run-unit-tests]
-    if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
+    needs: [run-unit-tests, linter, filter-deploy-envs] 
+    if: needs.filter-deploy-envs.outputs.deploy-envs != '[]'
     outputs:
       image: ${{ steps.build.outputs.image }}
     env:
@@ -63,8 +80,8 @@ jobs:
 
   build-anton-scratchpad:
     runs-on: mdb-dev
-    needs: [get-deploy-labels, run-unit-tests]
-    if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
+    needs: [run-unit-tests, linter, filter-deploy-envs]
+    if: needs.filter-deploy-envs.outputs.deploy-envs != '[]'
     outputs:
       image: ${{ steps.build.outputs.image }}
     env:
@@ -110,11 +127,11 @@ jobs:
 
   migrate:
     runs-on: mdb-dev
-    needs: [ get-deploy-labels, build ]
+    needs: [ filter-deploy-envs, build ]
     strategy:
       fail-fast: false
       matrix:
-        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+        deploy-env: ${{fromJson(needs.filter-deploy-envs.outputs.deploy-envs)}}
     environment:
       name: ${{ matrix.deploy-env }}
       url: ${{ vars.MDB_ENV_URL }}
@@ -149,10 +166,10 @@ jobs:
 
   deploy:
     runs-on: mdb-dev
-    needs: [ get-deploy-labels, migrate, build ]
+    needs: [ filter-deploy-envs, migrate, build ]
     strategy:
       matrix:
-        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+        deploy-env: ${{fromJson(needs.filter-deploy-envs.outputs.deploy-envs)}}
     environment:
       name: ${{ matrix.deploy-env }}
       url: ${{ vars.MDB_ENV_URL }}
@@ -209,59 +226,11 @@ jobs:
           update-message-id: ${{ steps.slack.outputs.ts }}
 
   integration-tests:
-    needs: [ get-deploy-labels, deploy ]
+    needs: [ filter-deploy-envs, deploy ]
     strategy:
       matrix:
-        deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
+        deploy-env: ${{fromJson(needs.filter-deploy-envs.outputs.deploy-envs)}}
     uses: ./.github/workflows/tests-integration.yml
     with:
       deploy-env: ${{ matrix.deploy-env }}
     secrets: inherit
-
-  # run-evals:
-  #   runs-on: mdb-dev
-  #   needs: [ get-deploy-labels, deploy, integration-tests ]
-  #   strategy:
-  #     matrix:
-  #       deploy-env: ${{fromJson(needs.get-deploy-labels.outputs.deploy-envs)}}
-  #   environment:
-  #     name: ${{ matrix.deploy-env }}
-  #     url: ${{ vars.MDB_ENV_URL }}
-  #   # We want other deployments to wait while we test
-  #   # Don't cancel in progress jobs because it may be for a different PR
-  #   concurrency:
-  #     group: deploy-${{ matrix.deploy-env }}
-  #     cancel-in-progress: false
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Run evals
-  #       run: |
-  #         export NAMESPACE=${{matrix.deploy-env}}
-  #         export MINDS_BASE_URL=${{vars.MINDS_V3_ENV_URL}}
-  #         export PR_NUMBER=${{github.event.pull_request.number}}
-
-  #         kubectl -n $NAMESPACE delete job --ignore-not-found minds-langfuse-benchmarks
-  #         envsubst '${PR_NUMBER} ${NAMESPACE} ${MINDS_BASE_URL}' < deployment/eval-job.yaml | kubectl apply -f -
-
-  #         echo "Waiting for eval job to start..."
-  #         kubectl -n $NAMESPACE wait --for=condition=Ready --timeout=10m pod -l job-name=minds-langfuse-benchmarks
-  #         kubectl -n $NAMESPACE logs -f job/minds-langfuse-benchmarks || true
-
-  #         # Pod should already be complete but just in case
-  #         kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=1m "job/minds-langfuse-benchmarks"
-
-  #         # Read completion state
-  #         IS_COMPLETE=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Complete")]}{.status}{end}')
-  #         IS_FAILED=$(kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o jsonpath='{range .status.conditions[?(@.type=="Failed")]}{.status}{end}')
-
-  #         if [[ "$IS_COMPLETE" == "True" ]]; then
-  #           echo "Job completed successfully."
-  #           exit 0
-  #         elif [[ "$IS_FAILED" == "True" ]]; then
-  #           echo "Job failed."
-  #           exit 1
-  #         else
-  #           echo "Job neither reported Complete nor Failed (likely timeout)."
-  #           kubectl -n "$NAMESPACE" get job minds-langfuse-benchmarks -o yaml || true
-  #           exit 1
-  #         fi
