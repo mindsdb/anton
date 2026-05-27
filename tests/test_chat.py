@@ -39,6 +39,31 @@ class TestChatSession:
         assert reply == "Hey! How can I help?"
         assert len(session.history) == 2  # user + assistant
 
+    async def test_turn_installs_trace_context_and_resets(self):
+        """Non-streaming turn() groups its LLM calls under one per-turn
+        trace id and clears the context afterward (parity with turn_stream)."""
+        from anton.core.llm.tracing import get_trace_context
+
+        captured: list = []
+
+        async def _capture(*args, **kwargs):
+            captured.append(get_trace_context())
+            return _text_response("done")
+
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(side_effect=_capture)
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
+        await session.turn("trace me", turn_id=7)
+
+        assert captured and captured[0] is not None
+        ctx = captured[0]
+        assert len(ctx.trace_id) == 32  # uuid4().hex
+        assert ctx.trace_input == "trace me"
+        assert ctx.turn_id == 7
+        # Context is reset once the turn finishes.
+        assert get_trace_context() is None
+
     async def test_history_grows_across_turns(self):
         """Multiple turns accumulate in history."""
         mock_llm = make_mock_llm()

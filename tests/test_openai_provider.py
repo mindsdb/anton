@@ -604,3 +604,98 @@ class TestOpenAICompatibleFlavorResolution:
             )
             client = LLMClient.from_settings(settings)
             assert client._planning_provider._flavor == OpenAIProvider.FLAVOR_OPENAI
+
+
+class TestTraceHeaders:
+    """Per-turn trace grouping: `Langfuse-Trace-Id`/`Langfuse-Trace-Input`
+    on every passthrough call, dropped under `detached_trace()`."""
+
+    def _provider(self):
+        from anton.core.llm.openai import OpenAIProvider
+
+        p = OpenAIProvider.__new__(OpenAIProvider)
+        p._emit_trace_headers = True
+        return p
+
+    def test_emits_trace_id_and_input(self):
+        from anton.core.llm.tracing import (
+            TraceContext,
+            reset_trace_context,
+            set_trace_context,
+        )
+
+        p = self._provider()
+        tok = set_trace_context(
+            TraceContext(
+                session_id="s",
+                turn_id=1,
+                harness="cowork",
+                trace_id="a" * 32,
+                trace_input="what is the weather?",
+            )
+        )
+        try:
+            headers = p._build_trace_headers()
+        finally:
+            reset_trace_context(tok)
+        assert headers["Langfuse-Trace-Id"] == "a" * 32
+        assert headers["Langfuse-Trace-Input"] == "what is the weather?"
+        assert headers["Langfuse-Session-Id"] == "s"
+
+    def test_detached_trace_drops_trace_id_keeps_session(self):
+        from anton.core.llm.tracing import (
+            TraceContext,
+            detached_trace,
+            reset_trace_context,
+            set_trace_context,
+        )
+
+        p = self._provider()
+        tok = set_trace_context(
+            TraceContext(
+                session_id="s", trace_id="b" * 32, trace_input="hi"
+            )
+        )
+        try:
+            with detached_trace():
+                headers = p._build_trace_headers()
+        finally:
+            reset_trace_context(tok)
+        assert "Langfuse-Trace-Id" not in headers
+        assert "Langfuse-Trace-Input" not in headers
+        assert headers["Langfuse-Session-Id"] == "s"
+
+    def test_trace_input_is_header_safe(self):
+        from anton.core.llm.tracing import (
+            TraceContext,
+            reset_trace_context,
+            set_trace_context,
+        )
+
+        p = self._provider()
+        tok = set_trace_context(
+            TraceContext(trace_id="c" * 32, trace_input="line1\nline2 🚀 中文 " + "x" * 5000)
+        )
+        try:
+            value = p._build_trace_headers()["Langfuse-Trace-Input"]
+        finally:
+            reset_trace_context(tok)
+        # No control chars, latin-1-encodable, truncated — never raises.
+        assert "\n" not in value
+        value.encode("latin-1")
+        assert len(value) <= 4000
+
+    def test_no_headers_when_emission_disabled(self):
+        from anton.core.llm.tracing import (
+            TraceContext,
+            reset_trace_context,
+            set_trace_context,
+        )
+
+        p = self._provider()
+        p._emit_trace_headers = False
+        tok = set_trace_context(TraceContext(trace_id="d" * 32, trace_input="hi"))
+        try:
+            assert p._build_trace_headers() is None
+        finally:
+            reset_trace_context(tok)
