@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import sys
 import zipfile
 from pathlib import Path
 
@@ -203,6 +204,7 @@ def publish(
         payload_dict["artifact_type"] = artifact.type
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
+        payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
         if missing:
             payload_dict["missing_datasources"] = missing
     else:
