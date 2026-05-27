@@ -25,6 +25,7 @@ from minds.common.constants import (
     HEADER_LANGFUSE_SESSION_ID,
     HEADER_LANGFUSE_TAGS,
     HEADER_LANGFUSE_TRACE_ID,
+    HEADER_LANGFUSE_TRACE_INPUT,
     HEADER_ORGANIZATION_ID,
     HEADER_USER_EMAIL,
     HEADER_USER_ID,
@@ -172,6 +173,26 @@ class TestExtractTracePropagationHeaders:
         )
         assert ctx.langfuse_trace_id is None
         assert ctx.langfuse_parent_observation_id is None
+
+    def test_trace_input_kept_with_valid_trace_id(self):
+        ctx = extract_context_from_request(
+            _request_with_headers(
+                {
+                    HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID,
+                    HEADER_LANGFUSE_TRACE_INPUT: "what were Q3 sales?",
+                }
+            )
+        )
+        assert ctx.langfuse_trace_input == "what were Q3 sales?"
+
+    def test_trace_input_dropped_without_trace_id(self):
+        # Trace-level input is meaningless on a request that owns its own trace.
+        ctx = extract_context_from_request(_request_with_headers({HEADER_LANGFUSE_TRACE_INPUT: "orphan input"}))
+        assert ctx.langfuse_trace_input is None
+
+    def test_trace_input_absent_is_none(self):
+        ctx = extract_context_from_request(_request_with_headers({HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID}))
+        assert ctx.langfuse_trace_input is None
 
 
 # ---------------------------------------------------------------------------

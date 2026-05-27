@@ -450,6 +450,66 @@ class TestUpdateGenerationUsage:
         assert client.start_observation.call_args.kwargs["metadata"] == meta
 
     @patch("minds.requests.langfuse_tracing.get_client")
+    def test_stamps_trace_io_in_scope(self, mock_get_client):
+        """Whole-turn evals: in-scope mode sets trace input/output on the current trace."""
+        client = MagicMock()
+        mock_get_client.return_value = client
+
+        update_generation_usage(
+            (1, 2),
+            model="m",
+            trace_input="what were Q3 sales?",
+            trace_output={"role": "assistant", "content": "Up 12%."},
+        )
+
+        client.update_current_trace.assert_called_once_with(
+            input="what were Q3 sales?",
+            output={"role": "assistant", "content": "Up 12%."},
+        )
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_stamps_trace_io_detached_via_same_observation(self, mock_get_client):
+        """Detached mode reuses the usage observation to carry trace I/O — no extra span."""
+        client = MagicMock()
+        observation = MagicMock()
+        client.start_observation.return_value = observation
+        mock_get_client.return_value = client
+
+        update_generation_usage(
+            (1, 2),
+            model="m",
+            trace_context={"trace_id": "t", "parent_span_id": "p"},
+            trace_input="ask",
+            trace_output="answer",
+        )
+
+        # Trace I/O is stamped on the same observation, then it's ended.
+        observation.update_trace.assert_called_once_with(input="ask", output="answer")
+        observation.end.assert_called_once()
+        # No second span was created just to carry trace attributes.
+        client.start_observation.assert_called_once()
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_skips_trace_io_when_not_provided(self, mock_get_client):
+        """Requests that own their trace (no trace_input/trace_output) leave trace I/O untouched."""
+        client = MagicMock()
+        mock_get_client.return_value = client
+
+        update_generation_usage((1, 2), model="m")
+
+        client.update_current_trace.assert_not_called()
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_stamps_only_provided_trace_field(self, mock_get_client):
+        """Only the supplied trace field is written (input here, no output key)."""
+        client = MagicMock()
+        mock_get_client.return_value = client
+
+        update_generation_usage((1, 2), model="m", trace_input="just input")
+
+        client.update_current_trace.assert_called_once_with(input="just input")
+
+    @patch("minds.requests.langfuse_tracing.get_client")
     def test_handles_zero_token_counts(self, mock_get_client):
         """Zero counts still produce a well-formed usage_details payload."""
         client = MagicMock()
