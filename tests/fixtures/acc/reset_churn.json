@@ -1,0 +1,8 @@
+[
+  {"kind": "scratchpad_call",  "severity": 1, "detail": {"name": "dash", "code_len": 320},  "round_idx": 2},
+  {"kind": "scratchpad_result","severity": 5, "detail": {"name": "dash", "success": false, "error": "ValueError: shape mismatch"}, "round_idx": 2},
+  {"kind": "scratchpad_reset", "severity": 5, "detail": {"name": "dash", "reason": "manual_clear"}, "round_idx": 4},
+  {"kind": "scratchpad_call",  "severity": 1, "detail": {"name": "dash", "code_len": 280},  "round_idx": 5},
+  {"kind": "scratchpad_result","severity": 5, "detail": {"name": "dash", "success": false, "error": "ImportError: pandas"}, "round_idx": 5},
+  {"kind": "scratchpad_reset", "severity": 5, "detail": {"name": "dash", "reason": "manual_clear"}, "round_idx": 7}
+]

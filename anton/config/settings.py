@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import PrivateAttr, field_validator
-from pydantic_settings import BaseSettings
+from pydantic import PrivateAttr, ValidationInfo, field_validator, model_validator
 
 from anton.core.settings import CoreSettings
 
@@ -39,11 +38,19 @@ class AntonSettings(CoreSettings):
     openai_api_version: str | None = None  # Azure api-version query param
 
     memory_enabled: bool = True
+    # TODO: Calling this memory_dir is a bit misleading, because there are other directories that live here
     memory_dir: str = ".anton"
 
     context_dir: str = ".anton/context"
 
-    output_dir: str = ".anton/output"
+    # Project-visible directory where user-facing artifacts (HTML
+    # apps, docs, datasets, etc.) live. One subfolder per artifact,
+    # each carrying a `metadata.json` and a `README.md` rendered
+    # from it. Replaces the legacy `output_dir = ".anton/output"`
+    # setting — anton-core no longer auto-migrates; users move
+    # their old `.anton/output/` files manually if they want them
+    # tracked under the new model.
+    artifacts_dir: str = "artifacts"
 
     memory_mode: str = "autopilot"  # autopilot | copilot | off
 
@@ -73,6 +80,15 @@ class AntonSettings(CoreSettings):
 
     # Publish service
     publish_url: str = "https://4nton.ai"
+
+    backend: str = "local"  # local | remote
+
+    @field_validator("backend", mode="after")
+    @classmethod
+    def _validate_backend(cls, v: str, info: ValidationInfo) -> str:
+        if v == "remote" and (not info.data.get("minds_url") or not info.data.get("minds_api_key")):
+            raise ValueError("Minds URL and API key are required for remote backend")
+        return v
 
     @field_validator("minds_ssl_verify", mode="before")
     @classmethod
@@ -112,8 +128,12 @@ class AntonSettings(CoreSettings):
 
         # Convert relative paths to absolute under base
         if not Path(self.memory_dir).is_absolute():
-            self.memory_dir = str(base / self.memory_dir)
+            memory_root = base / self.memory_dir
+            self.memory_dir = str(memory_root)
+        else:
+            memory_root = Path(self.memory_dir)
+
         if not Path(self.context_dir).is_absolute():
             self.context_dir = str(base / self.context_dir)
-        if not Path(self.output_dir).is_absolute():
-            self.output_dir = str(base / self.output_dir)
+        if not Path(self.artifacts_dir).is_absolute():
+            self.artifacts_dir = str(memory_root / self.artifacts_dir)

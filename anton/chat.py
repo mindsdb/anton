@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.error
+from urllib.parse import quote
 import sys
 import time
 from pathlib import Path
@@ -11,10 +12,12 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from anton.clipboard import (
+    PastedImageRegistry,
     cleanup_old_uploads,
     grab_clipboard,
     is_clipboard_supported,
     parse_dropped_paths as _parse_dropped_paths,
+    replace_at_image_paths,
     save_clipboard_image,
 )
 from anton.core.session import ChatSession, ChatSessionConfig
@@ -39,10 +42,15 @@ from anton.commands.ui import handle_explain, handle_theme, print_slash_help, ma
 from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, SHARE_COMMANDS, COMMANDS
 
 from anton.utils.clipboard import (
+    ImageRefLexer,
+    ImageTooLargeError,
+    attach_image_path_detector,
+    build_image_ref_message,
     ensure_clipboard,
     format_clipboard_image_message,
     format_file_message,
     human_size,
+    make_image_paste_bindings,
 )
 from anton.chat_session import build_runtime_context, rebuild_session
 from anton.commands.session import handle_resume
@@ -82,9 +90,11 @@ from anton.core.datasources.datasource_registry import (
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
+from anton.commands.goal import parse_goal_args, run_goal_loop
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -331,6 +341,63 @@ def _extract_html_title(path, re_module) -> str:
         return ""
 
 
+async def _handle_remote(
+    console: Console,
+    settings,
+) -> None:
+    """Handle /remote command — provision or check status of remote scratchpad."""
+    console.print()
+
+    from pathlib import Path as _P
+    from anton.workspace import Workspace as _W
+    _global_ws = _W(_P.home())
+
+    # Ensure minds API key — same flow as /publish
+    if not settings.minds_api_key:
+        import webbrowser
+        from anton.utils.prompt import prompt_or_cancel
+
+        console.print("  [anton.muted]To use remote scratchpad you need a free Minds account.[/]")
+        console.print()
+        has_key = await prompt_or_cancel(
+            "  Do you have an mdb.ai API key?",
+            choices=["y", "n"],
+            choices_display="y/n",
+            default="y",
+        )
+        if has_key is None:
+            console.print()
+            return
+        if has_key.lower() == "n":
+            # Strip /api/v1 suffix if present.
+            base_url = settings.minds_url.rstrip("/").removesuffix("/api/v1")
+            webbrowser.open(
+                f"{base_url}/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "?client_id=public-client&response_type=code&scope=openid"
+                f"&redirect_uri={quote(base_url, safe='')}"
+            )
+            console.print()
+
+        api_key_input = await prompt_or_cancel("  API key", password=True)
+        if api_key_input is None or not api_key_input.strip():
+            console.print()
+            return
+        api_key_input = api_key_input.strip()
+        settings.minds_api_key = api_key_input
+
+        _global_ws.set_secret("ANTON_MINDS_API_KEY", api_key_input)
+        console.print()
+
+    # If an API key is provided, set the backend to remote backend
+    if settings.minds_api_key:
+        _global_ws.set_secret("ANTON_BACKEND", "remote")
+
+    # Save and confirm
+    console.print(f"  [anton.success]Remote scratchpad ready![/]")
+    console.print(f"  [link={settings.minds_url}]{settings.minds_url}[/link]")
+    console.print()
+
+
 async def _handle_publish(
     console: Console,
     settings,
@@ -361,9 +428,9 @@ async def _handle_publish(
             return
         if has_key.lower() == "n":
             webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "https://auth.mindshub.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+                "&redirect_uri=https%3A%2F%2Fconsole.mindshub.ai"
             )
             console.print()
 
@@ -375,24 +442,32 @@ async def _handle_publish(
         settings.minds_api_key = api_key
         # Key is not persisted yet — wait until publish succeeds to avoid
         # locking the user out with a bad key on every subsequent /publish call.
+        from pathlib import Path as _P
+        from anton.workspace import Workspace as _W
+        _W(_P.home()).set_secret("ANTON_MINDS_API_KEY", api_key)
         console.print()
 
     # 2. Find the HTML file to publish
     import re
 
-    output_dir = Path(settings.workspace_path) / ".anton" / "output"
+    # Search the new artifacts/<slug>/ tree (recursive — each artifact
+    # owns its own subfolder). The legacy `.anton/output/` flat
+    # directory is no longer scanned; users move old files into a
+    # proper artifact subfolder if they still want them publishable.
+    artifacts_root = Path(settings.artifacts_dir)
+    publish_index_dir = artifacts_root  # `.published.json` lives at the root
 
     if file_arg:
         target = Path(file_arg)
         if not target.is_absolute():
             target = Path(settings.workspace_path) / file_arg
     else:
-        # List HTML files sorted by modification time (most recent first)
+        # Recursively list HTML files under any artifact, sorted by mtime.
         html_files = sorted(
-            output_dir.glob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
-        ) if output_dir.is_dir() else []
+            artifacts_root.rglob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
+        ) if artifacts_root.is_dir() else []
         if not html_files:
-            console.print("  [anton.warning]No HTML files found in .anton/output/[/]")
+            console.print(f"  [anton.warning]No HTML files found under {artifacts_root}/[/]")
             console.print()
             return
 
@@ -441,7 +516,7 @@ async def _handle_publish(
         return
 
     # 3. Check if this file was previously published
-    published_json = output_dir / ".published.json"
+    published_json = publish_index_dir / ".published.json"
     published_map = {}
     try:
         if published_json.is_file():
@@ -742,16 +817,28 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
 
     # Read the script and patch for scratchpad execution.
     # 1. __file__ doesn't exist inside exec() — set it so os.path.dirname works
-    # 2. Override OUTPUT_PATH to write to .anton/output/ instead of demo_data/
+    # 2. Override OUTPUT_PATH so the dashboard lands in the right artifact
+    #    folder. The demo creates a dedicated artifact directly via the
+    #    `ArtifactStore` so the dashboard appears in the Live Artifacts view
+    #    end-to-end with proper metadata + README, just like an LLM-driven
+    #    artifact would.
+    from anton.core.artifacts import ArtifactStore as _ArtifactStore
+    _store = _ArtifactStore(Path(settings.artifacts_dir))
+    _demo_artifact = _store.create(
+        name="NVDA BTC Dashboard",
+        description="Demo dashboard comparing NVDA stock and BTC prices over time.",
+        type="html-app",
+    )
     code = script_path.read_text()
-    output_dir = str(Path(settings.workspace_path) / ".anton" / "output")
-    output_html = str(Path(output_dir) / "nvda_btc_dashboard.html")
+    output_dir = str(_store.folder_for(_demo_artifact.slug))
+    output_html = str(Path(output_dir) / "dashboard.html")
     code = (
         f"import os as _os; _os.makedirs({output_dir!r}, exist_ok=True)\n"
         f"__file__ = {str(script_path)!r}\n"
         + code
     )
-    # Replace the OUTPUT_PATH line so the dashboard goes to .anton/output/
+    # Replace the OUTPUT_PATH line so the dashboard goes into the
+    # claimed artifact folder.
     code = code.replace(
         'OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvda_btc_dashboard.html")',
         f'OUTPUT_PATH = {output_html!r}',
@@ -972,6 +1059,8 @@ def _desktop_greeting(console: Console, settings) -> None:
     _persist_first_run_done(settings)
 
 
+
+
 def run_chat(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
@@ -1052,15 +1141,26 @@ async def _chat_loop(
     # Build runtime context so the LLM knows what it's running on
     runtime_context = build_runtime_context(settings)
 
-    output_path = f"{settings.output_dir.rstrip('/')}/"
+    artifacts_path = f"{settings.artifacts_dir.rstrip('/')}/"
+    from anton.chat_session import get_runtime_factory
+
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
+        runtime_factory=get_runtime_factory(settings),
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=runtime_context,
-            output_context=f"Save output to `{output_path}` (create it if needed).",
+            # See `chat_session.create_session` for the full version
+            # of this prompt fragment — both call sites use the same
+            # artifact-flow guidance.
+            output_context=(
+                f"User-facing artifacts live under `{artifacts_path}`. "
+                "Before producing one, call `create_artifact(name, description, type)`; "
+                "the tool returns the absolute folder path you should write into. "
+                "To modify an existing artifact, use `list_artifacts` then `open_artifact(slug)`."
+            ),
         ),
         workspace=workspace,
         console=console,
@@ -1138,8 +1238,19 @@ async def _chat_loop(
     pt_style = PTStyle.from_dict(
         {
             "bottom-toolbar": "noreverse nounderline bg:default",
+            "completion-menu": "bg:#08131c #7aa3b8",
+            "completion-menu.completion": "bg:#08131c #9cc5d9",
+            "completion-menu.completion.current": "bg:#0a3340 #32d9ff bold",
+            "completion-menu.meta.completion": "bg:#08131c #5b7d8f",
+            "completion-menu.meta.completion.current": "bg:#0a3340 #9adff0",
+            "scrollbar.background": "bg:#08131c",
+            "scrollbar.button": "bg:#11404c",
+            "image-ref": "fg:#32d9ff bold",
         }
     )
+
+    image_registry = PastedImageRegistry()
+    image_paste_bindings = make_image_paste_bindings(image_registry, console)
 
     prompt_session: PromptSession[str] = PromptSession(
         mouse_support=False,
@@ -1147,7 +1258,12 @@ async def _chat_loop(
         style=pt_style,
         completer=make_completer([THEME_COMMANDS, SKILLS_COMMANDS, SHARE_COMMANDS, COMMANDS, MEMORY_COMMANDS]),
         complete_while_typing=True,
+        complete_style=CompleteStyle.COLUMN,
+        reserve_space_for_menu=8,
+        key_bindings=image_paste_bindings,
+        lexer=ImageRefLexer(),
     )
+    attach_image_path_detector(prompt_session.default_buffer, image_registry)
 
     memory_manage = MemoryManage(console, settings, cortex, episodic=episodic, history_store=history_store)
     try:
@@ -1207,8 +1323,30 @@ async def _chat_loop(
             # list[dict] (multimodal content blocks for images).
             message_content: str | list[dict] | None = None
 
+            # Resolve manual @<path> image references → [Image #N] tokens so
+            # they go through the same base64/multimodal pipeline as
+            # drag-and-drop pastes.
+            user_input, _ = replace_at_image_paths(user_input, image_registry)
+
+            # Expand any [Image #N] placeholders into multimodal blocks. After
+            # this, the registry only keeps entries that were actually sent.
+            try:
+                expanded, ref_ids = build_image_ref_message(user_input, image_registry)
+            except ImageTooLargeError as exc:
+                console.print(
+                    f"[anton.warning]Image is too large ({human_size(exc.size_bytes)}), "
+                    f"max ~3.7 MB raw (5 MB base64 limit). "
+                    f"Please resize and re-attach.[/]"
+                )
+                image_registry.prune_unused(set())
+                continue
+            if isinstance(expanded, list):
+                message_content = expanded
+                stripped = ""
+            image_registry.prune_unused(ref_ids)
+
             # Empty input → check clipboard for an image
-            if not stripped:
+            if not stripped and message_content is None:
                 if is_clipboard_supported():
                     clip = grab_clipboard()
                     if clip.image:
@@ -1218,7 +1356,15 @@ async def _chat_loop(
                             f"({uploaded.width}x{uploaded.height}, "
                             f"{human_size(uploaded.size_bytes)})[/]"
                         )
-                        message_content = format_clipboard_image_message(uploaded)
+                        try:
+                            message_content = format_clipboard_image_message(uploaded)
+                        except ImageTooLargeError as exc:
+                            console.print(
+                                f"[anton.warning]Image is too large ({human_size(exc.size_bytes)}), "
+                                f"max ~3.7 MB raw (5 MB base64 limit). "
+                                f"Please resize and re-attach.[/]"
+                            )
+                            continue
                     elif clip.file_paths:
                         stripped = format_file_message("", clip.file_paths, console)
                 if not stripped and message_content is None:
@@ -1408,6 +1554,21 @@ async def _chat_loop(
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     handle_theme(console, arg)
                     continue
+                elif cmd == "/remote":
+                    await _handle_remote(console, settings)
+                    # Rebuild session so scratchpad uses remote/local factory
+                    session = rebuild_session(
+                        settings=settings,
+                        state=state,
+                        self_awareness=self_awareness,
+                        cortex=cortex,
+                        workspace=workspace,
+                        console=console,
+                        episodic=episodic,
+                        history_store=history_store,
+                        session_id=current_session_id,
+                    )
+                    continue
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     await _handle_publish(console, settings, workspace, arg)
@@ -1417,6 +1578,19 @@ async def _chat_loop(
                     continue
                 elif cmd == "/explain":
                     handle_explain(console, settings.workspace_path)
+                    continue
+                elif cmd == "/goal":
+                    _raw_goal_arg = parts[1] if len(parts) > 1 else ""
+                    if not _raw_goal_arg.strip():
+                        console.print("[anton.warning]Usage: /goal \"objective\" [--turns N][/]")
+                        console.print()
+                        continue
+                    goal_objective, goal_max_turns = parse_goal_args(_raw_goal_arg)
+                    if not goal_objective:
+                        console.print("[anton.warning]Usage: /goal \"objective\" [--turns N][/]")
+                        console.print()
+                        continue
+                    await run_goal_loop(console, session, display, goal_objective, goal_max_turns)
                     continue
                 elif cmd == "/help":
                     print_slash_help(console)
@@ -1433,9 +1607,17 @@ async def _chat_loop(
                             f"{human_size(uploaded.size_bytes)})[/]"
                         )
                         user_text = parts[1] if len(parts) > 1 else ""
-                        message_content = format_clipboard_image_message(
-                            uploaded, user_text
-                        )
+                        try:
+                            message_content = format_clipboard_image_message(
+                                uploaded, user_text
+                            )
+                        except ImageTooLargeError as exc:
+                            console.print(
+                                f"[anton.warning]Image is too large ({human_size(exc.size_bytes)}), "
+                                f"max ~3.7 MB raw (5 MB base64 limit). "
+                                f"Please resize and re-attach.[/]"
+                            )
+                            continue
                         # Fall through to turn_stream (don't continue)
                     else:
                         console.print("[anton.warning]No image found on clipboard.[/]")

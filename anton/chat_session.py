@@ -53,6 +53,26 @@ def build_runtime_context(settings: AntonSettings) -> str:
     return ctx
 
 
+def get_runtime_factory(settings: AntonSettings):
+    """Return the appropriate scratchpad runtime factory based on settings.
+
+    If backend is set to "remote" (and minds_api_key available),
+    returns a remote factory. Otherwise returns the local factory.
+    """
+    if settings.backend == "remote":
+        from functools import partial
+        from anton.core.backends.remote import remote_scratchpad_runtime_factory
+
+        return partial(
+            remote_scratchpad_runtime_factory,
+            endpoint_url=settings.minds_url,
+            api_key=settings.minds_api_key,
+        )
+
+    from anton.core.backends.local import local_scratchpad_runtime_factory
+    return local_scratchpad_runtime_factory
+
+
 def rebuild_session(
     *,
     settings: AntonSettings,
@@ -81,15 +101,25 @@ def rebuild_session(
     refresh_knowledge(settings, cortex)
 
     runtime_context = build_runtime_context(settings)
-    output_path = f"{settings.output_dir.rstrip('/')}/"
+    artifacts_path = f"{settings.artifacts_dir.rstrip('/')}/"
     return ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
+        runtime_factory=get_runtime_factory(settings),
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=runtime_context,
-            output_context=f"Save output to `{output_path}` (create it if needed).",
+            # Tell the agent where artifacts live + how to claim a folder.
+            # `create_artifact` returns the actual path to write into;
+            # `<artifacts_path>` here is just so the LLM has the
+            # workspace anchor in mind when picking names.
+            output_context=(
+                f"User-facing artifacts live under `{artifacts_path}`. "
+                "Before producing one, call `create_artifact(name, description, type)`; "
+                "the tool returns the absolute folder path you should write into. "
+                "To modify an existing artifact, use `list_artifacts` then `open_artifact(slug)`."
+            ),
         ),
         workspace=workspace,
         console=console,

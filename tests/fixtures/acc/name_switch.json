@@ -1,0 +1,7 @@
+[
+  {"kind": "scratchpad_call",   "severity": 1, "detail": {"name": "build_pres", "code_len": 480}, "round_idx": 3},
+  {"kind": "scratchpad_result", "severity": 1, "detail": {"name": "build_pres", "success": true,  "stdout_len": 64},  "round_idx": 3},
+  {"kind": "scratchpad_call",   "severity": 1, "detail": {"name": "write_html", "code_len": 612}, "round_idx": 7},
+  {"kind": "scratchpad_result", "severity": 5, "detail": {"name": "write_html", "success": false, "error": "NameError: name 'data' is not defined"}, "round_idx": 7},
+  {"kind": "scratchpad_call",   "severity": 1, "detail": {"name": "pres1",      "code_len": 320}, "round_idx": 9}
+]

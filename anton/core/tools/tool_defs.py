@@ -1,7 +1,12 @@
 from anton.core.tools.tool_handlers import (
-    handle_scratchpad,
+    handle_create_artifact,
+    handle_list_artifacts,
     handle_memorize,
+    handle_open_artifact,
+    handle_read_image,
     handle_recall,
+    handle_scratchpad,
+    handle_set_artifact_primary,
 )
 
 from dataclasses import dataclass
@@ -139,6 +144,135 @@ MEMORIZE_TOOL = ToolDef(
 )
 
 
+CREATE_ARTIFACT_TOOL = ToolDef(
+    name="create_artifact",
+    description=(
+        "Claim a folder for a user-facing output (HTML dashboard, document, "
+        "dataset, image, fullstack app, etc.). Call this BEFORE writing the "
+        "files — the tool returns the absolute folder path you should write "
+        "into. Each artifact gets its own subfolder under `<workspace>/artifacts/`, "
+        "with a `metadata.json` + `README.md` written automatically.\n\n"
+        "Pick `type` from the closed enum:\n"
+        "- html-app: a single self-contained HTML page (charts, dashboards, demos)\n"
+        "- document: a doc, report, or markdown file the user reads\n"
+        "- dataset: data files (CSV, JSON, parquet) the user downloads or feeds elsewhere\n"
+        "- image: a generated image (PNG, SVG, etc.)\n"
+        "- mixed: multi-modal output that doesn't fit the above\n"
+        "- fullstack-stateless-app: HTML + JS + CSS that runs without a server\n"
+        "- fullstack-stateful-app: needs a backend process to serve\n\n"
+        "Pass `primary` (optional) when you already know the entry-point "
+        "filename you'll write — e.g. `\"dashboard.html\"` for an html-app, "
+        "`\"index.html\"` for a fullstack app, `\"report.pdf\"` for a "
+        "document. The renderer uses it to decide what to open by default. "
+        "Skip when you don't know yet — the renderer falls back to a "
+        "heuristic, and you can set it later via `set_artifact_primary`.\n\n"
+        "To MODIFY an existing artifact instead of creating a new one, call "
+        "`list_artifacts` first to find it, then `open_artifact(slug)` to get "
+        "the path."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Human-readable artifact name. The folder slug is derived from this.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Short description of what the artifact is. Shown in the UI and in the README.",
+            },
+            "type": {
+                "type": "string",
+                "enum": [
+                    "html-app",
+                    "document",
+                    "dataset",
+                    "image",
+                    "mixed",
+                    "fullstack-stateless-app",
+                    "fullstack-stateful-app",
+                ],
+            },
+            "primary": {
+                "type": "string",
+                "description": "Relative path of the entry-point file you'll write (e.g. \"dashboard.html\"). Optional — skip if you don't know yet.",
+            },
+        },
+        "required": ["name", "description", "type"],
+    },
+    handler=handle_create_artifact,
+)
+
+
+SET_ARTIFACT_PRIMARY_TOOL = ToolDef(
+    name="set_artifact_primary",
+    description=(
+        "Update the primary-file pointer on an existing artifact. Call this "
+        "when you created the artifact without a `primary` and now know what "
+        "it should be, or when the entry-point file's name changed. Pass an "
+        "empty string or omit `primary` to clear (the renderer reverts to "
+        "its heuristic — `index.html` → newest `.html` → newest non-"
+        "housekeeping file)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Folder slug of the artifact to update.",
+            },
+            "primary": {
+                "type": "string",
+                "description": "Relative path of the new entry-point file. Empty string to clear.",
+            },
+        },
+        "required": ["slug"],
+    },
+    handler=handle_set_artifact_primary,
+)
+
+
+LIST_ARTIFACTS_TOOL = ToolDef(
+    name="list_artifacts",
+    description=(
+        "List every artifact in the current workspace (newest first). "
+        "Use this to find an existing artifact you want to modify — paired "
+        "with `open_artifact(slug)` for the actual edit. Each entry includes "
+        "the slug, human name, type, description, file count, and last-update "
+        "timestamp. Returns an empty list when no artifacts exist yet."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {},
+    },
+    handler=handle_list_artifacts,
+)
+
+
+OPEN_ARTIFACT_TOOL = ToolDef(
+    name="open_artifact",
+    description=(
+        "Load an existing artifact by slug. Returns the folder path plus the "
+        "list of files so you can decide what to edit. Combine with the "
+        "scratchpad to read existing files (`open(path).read()`) or write "
+        "updates back into the folder. Provenance is updated automatically — "
+        "every turn that modifies a file in the folder is appended to the "
+        "artifact's metadata.json."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Folder slug (returned by `list_artifacts` or the previous `create_artifact`).",
+            },
+        },
+        "required": ["slug"],
+    },
+    handler=handle_open_artifact,
+)
+
+
 RECALL_TOOL = ToolDef(
     name="recall",
     description=(
@@ -169,4 +303,29 @@ RECALL_TOOL = ToolDef(
         "required": ["query"],
     },
     handler=handle_recall,
+)
+
+
+READ_IMAGE_TOOL = ToolDef(
+    name="read_image",
+    description=(
+        "Read an image file from disk so you can see its contents. Use this "
+        "whenever the user references a path to an image file (PNG, JPG, "
+        "JPEG, GIF, WEBP, BMP) and you need to actually view the picture to "
+        "answer. Pass `file_path` as an absolute path or a path relative to "
+        "the current working directory. The image will appear in your next "
+        "turn as a vision input — do not call this tool again for the same "
+        "path within one turn."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Absolute or relative path to the image file.",
+            },
+        },
+        "required": ["file_path"],
+    },
+    handler=handle_read_image,
 )

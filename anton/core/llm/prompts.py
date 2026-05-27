@@ -247,6 +247,26 @@ BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single se
 Do NOT reference external local files (like data.js) — browsers block local file:// cross-references \
 for security reasons and the dashboard will silently fail to load data.
 
+  REROUND DISCIPLINE (critical — most "round-cap exhaustion" failures we've \
+seen on real dashboards come from drifting off one or more of these):
+  1. ONE scratchpad, ONE name. Pick a name on the first cell (e.g. `dash`) \
+and reuse it for the entire build. Switching names (`build_pres` → `write_html` \
+→ `pres1` …) creates *separate isolated environments* — variables in one don't \
+exist in another — and burns rounds on recovery.
+  2. WRITE TO DISK INCREMENTALLY. Open the output `.html` once in 'w' mode, \
+then `open(path, 'a')` to append head → body skeleton → each chart section → \
+nav/JS → closing tags. Each cell appends a small chunk you can sanity-check. \
+Do NOT build a single 20KB+ HTML string in memory and write it at the end.
+  3. CAP STRING SIZE PER CELL at ~5KB. Large-string scratchpad calls are the \
+single biggest cause of silent failures (the tool occasionally drops the \
+`code` payload on oversized inputs and returns "No code provided", which still \
+counts against the round cap). If a section is too big, split it.
+  4. NEVER re-emit the full HTML mid-build. Append deltas, don't re-print \
+the world. Assembly is a one-line concat at the end, not a re-render of \
+everything you've written so far.
+  5. KEEP READS SMALL. To verify what landed, `os.path.getsize(path)` or \
+`open(path).read(2000)` — never `open(path).read()` on a multi-KB HTML.
+
   SECURITY (critical): Dashboards may be published to the web. NEVER embed API keys, tokens, \
 passwords, connection strings, or any credentials in the HTML, JS, or inline data. Fetch data \
 in scratchpad cells using credentials from environment variables, then serialize only the \
@@ -353,7 +373,23 @@ between them so nothing feels cramped.
 - Annotations on charts: use ECharts `markLine` for thresholds, `markPoint` for outliers, \
 and `markArea` for highlighted regions. A chart without annotations is a missed opportunity.
 - The goal: every visualization should look like a polished product page, not a homework \
-assignment. Think dark-mode dashboard, not Jupyter default.\
+assignment. Think dark-mode dashboard, not Jupyter default.
+
+Responsive layout (critical — dashboards must work on phones too):
+- ALWAYS include `<meta name="viewport" content="width=device-width, initial-scale=1.0">` \
+in `<head>`. Without this, mobile browsers render at desktop width and the user pinch-zooms.
+- Multi-card sections use `grid-template-columns: repeat(auto-fit, minmax(360px, 1fr))` \
+(or 300px on dense layouts). This lets the browser reflow to single-column on narrow \
+viewports without a media query — cards stack vertically instead of getting squashed into \
+unreadable columns.
+- Chart containers use `width: 100%` and `height: min(420px, 60vh)` (NOT fixed pixel widths). \
+For each ECharts instance, register a window resize hook so it refits: \
+`window.addEventListener('resize', () => myChart.resize());` — without this, rotating a \
+phone or resizing the window leaves charts the wrong size.
+- Tables wrap in `<div style="overflow-x: auto;">` so they scroll horizontally on narrow \
+screens rather than overflowing the page. Do NOT set fixed table widths.
+- Default to one column on narrow viewports unless the user explicitly asks for a fixed \
+multi-column layout (e.g. for a printable PDF).\
 """
 
 

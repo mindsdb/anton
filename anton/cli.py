@@ -13,6 +13,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.live import Live
+from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.spinner import Spinner
 from rich.table import Table
@@ -24,6 +25,7 @@ from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
 
 from anton.chat import ChatSession
+from anton.chat_session import get_runtime_factory
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.client import LLMClient
 from anton.core.backends.manager import ScratchpadManager
@@ -35,6 +37,22 @@ from anton.commands.datasource import (
     handle_test_datasource
 )
 from anton.minds_client import test_llm
+
+
+def _build_scratchpad_manager(
+    settings,
+    llm_client: LLMClient | None = None,
+) -> ScratchpadManager:
+    llm_client = llm_client or LLMClient.from_settings(settings)
+    coding_conn = llm_client.coding_provider.export_connection_info()
+    return ScratchpadManager(
+        runtime_factory=get_runtime_factory(settings),
+        coding_provider=coding_conn.provider,
+        coding_model=llm_client.coding_model,
+        coding_api_key=coding_conn.api_key or "",
+        coding_base_url=coding_conn.base_url or "",
+        workspace_path=settings.workspace_path,
+    )
 
 
 
@@ -175,9 +193,26 @@ def _ensure_dependencies(console: Console) -> None:
         raise typer.Exit(1)
 
 
-def _ensure_terms_consent(console: Console, settings) -> None:
-    """Show terms acceptance screen on first run and persist the choice."""
-    # Clear screen
+_TERMS_SUMMARY = (
+    "[bold]What you should know[/]\n\n"
+    "  • Anton runs on your machine. Your code, files, and queries\n"
+    "    stay local unless you explicitly ask Anton to send them.\n\n"
+    "  • Anton sends anonymous usage events (e.g. session started)\n"
+    "    to MindsDB to help us improve. No code or query content is\n"
+    "    included. Disable with [anton.cyan]ANTON_ANALYTICS_ENABLED=false[/].\n\n"
+    "  • When Anton uses an LLM provider you configure (OpenAI,\n"
+    "    Anthropic, Minds, etc.), the prompts you send go to that\n"
+    "    provider and are governed by their own terms.\n\n"
+    "  • You're responsible for what Anton does on your behalf —\n"
+    "    review proposed actions before authorizing them.\n\n"
+    "[bold]Full text[/]\n\n"
+    "  Terms:    [link=https://mindsdb.com/terms]https://mindsdb.com/terms[/]\n"
+    "  Privacy:  [link=https://mindsdb.com/privacy-policy]https://mindsdb.com/privacy-policy[/]\n"
+)
+
+
+def _render_terms_screen(console: Console) -> None:
+    """Render the welcome banner + policy summary panel."""
     os.system("cls" if sys.platform == "win32" else "clear")
 
     logo = "A N T O N"
@@ -192,21 +227,55 @@ def _ensure_terms_consent(console: Console, settings) -> None:
         "  and accept our Anton policies."
     )
     console.print()
-
-    if Confirm.ask(
-        "  Would you like to read the policies?", default=True, console=console
-    ):
-        webbrowser.open("https://mindsdb.com/terms")
-        webbrowser.open("https://mindsdb.com/privacy-policy")
-        console.print()
-        console.print("  [anton.muted]Policies opened in your browser.[/]")
-        console.print()
-
-    accepted = Confirm.ask(
-        "  Do you accept the Terms and Privacy Policy?",
-        default=True,
-        console=console,
+    console.print(
+        Panel(
+            _TERMS_SUMMARY,
+            title="Anton — Terms & Privacy",
+            title_align="left",
+            border_style="anton.cyan",
+            padding=(1, 2),
+        )
     )
+    console.print()
+
+
+def _show_full_policies(console: Console) -> None:
+    """Render the full Terms + Privacy Policy through the system pager."""
+    from rich.markdown import Markdown
+    from rich.rule import Rule
+
+    from anton.policies import PRIVACY_POLICY_MD, TERMS_OF_USE_MD
+
+    with console.pager(styles=True):
+        console.print(Markdown(TERMS_OF_USE_MD))
+        console.print()
+        console.print(Rule(style="anton.cyan"))
+        console.print()
+        console.print(Markdown(PRIVACY_POLICY_MD))
+
+
+def _ensure_terms_consent(console: Console, settings) -> None:
+    """Show terms acceptance screen on first run and persist the choice."""
+    from rich.prompt import Prompt
+
+    accepted: bool | None = None
+    while accepted is None:
+        _render_terms_screen(console)
+        choice = Prompt.ask(
+            "  Accept Terms and Privacy Policy? "
+            "[bold]y[/]es / [bold]n[/]o / [bold]s[/]how full text",
+            choices=["y", "n", "s"],
+            default="y",
+            show_choices=False,
+            console=console,
+        ).lower()
+
+        if choice == "y":
+            accepted = True
+        elif choice == "n":
+            accepted = False
+        elif choice == "s":
+            _show_full_policies(console)
 
     if not accepted:
         console.print()
@@ -648,7 +717,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
         )
         if not has_key:
             webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations?client_id=public-client&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fmdb.ai"
+                "https://auth.mindshub.ai/auth/realms/mindsdb/protocol/openid-connect/registrations?client_id=public-client&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fconsole.mindshub.ai"
             )
             console.print()
 
@@ -1210,16 +1279,7 @@ def connect_data_source(
     _ensure_api_key(settings)
 
     llm_client = LLMClient.from_settings(settings)
-    scratchpads = ScratchpadManager(
-        coding_provider=settings.coding_provider,
-        coding_model=settings.coding_model,
-        coding_api_key=(
-            settings.anthropic_api_key
-            if settings.coding_provider == "anthropic"
-            else settings.openai_api_key
-        )
-        or "",
-    )
+    scratchpads = _build_scratchpad_manager(settings, llm_client)
     session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
@@ -1254,16 +1314,7 @@ def edit_data_source(
     _ensure_api_key(settings)
 
     llm_client = LLMClient.from_settings(settings)
-    scratchpads = ScratchpadManager(
-        coding_provider=settings.coding_provider,
-        coding_model=settings.coding_model,
-        coding_api_key=(
-            settings.anthropic_api_key
-            if settings.coding_provider == "anthropic"
-            else settings.openai_api_key
-        )
-        or "",
-    )
+    scratchpads = _build_scratchpad_manager(settings, llm_client)
     session = ChatSession(ChatSessionConfig(llm_client=llm_client))
 
     async def _run() -> None:
@@ -1302,16 +1353,7 @@ def test_data_source(
     _ensure_workspace(settings)
     _ensure_api_key(settings)
 
-    scratchpads = ScratchpadManager(
-        coding_provider=settings.coding_provider,
-        coding_model=settings.coding_model,
-        coding_api_key=(
-            settings.anthropic_api_key
-            if settings.coding_provider == "anthropic"
-            else settings.openai_api_key
-        )
-        or "",
-    )
+    scratchpads = _build_scratchpad_manager(settings)
 
     async def _run() -> None:
         await _handle_test_datasource(console, scratchpads, name)

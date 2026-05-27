@@ -51,6 +51,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             cells=cells,
             workspace_path=workspace_path,
         )
+        # `_workspace_path` on the base class falls back to
+        # `~/.anton` when no path was passed. We need the explicit
+        # arg (None when omitted) to decide whether to pin the
+        # subprocess cwd to a real project root vs. inheriting the
+        # parent's cwd. Don't conflate the two — the base attribute
+        # is a "where to put scratchpad venvs" hint; the explicit
+        # arg is "the agent's project, when known".
+        self._explicit_workspace_path: Path | None = workspace_path
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -349,6 +357,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 os.pathsep + python_path if python_path else ""
             )
 
+        # Pin the subprocess cwd to the workspace root so bare-relative
+        # paths in scratchpad code (`open("data.csv")`, `os.listdir(".")`,
+        # `subprocess.run(["git", "status"])`) operate on the project,
+        # not whatever directory the parent server happened to launch
+        # from. Falls back to inheriting the parent's cwd when no
+        # workspace is bound (older CLI flows + tests that pass
+        # `workspace_path=None`) — we use the EXPLICIT constructor
+        # arg here, not `_workspace_path`, because the latter has a
+        # `~/.anton` fallback that we never want to cd into. Env
+        # vars and absolute-path APIs (data vault, get_llm,
+        # create_artifact-returned paths) are cwd-independent, so
+        # this only changes the relative-IO surface.
+        proc_cwd = (
+            str(self._explicit_workspace_path)
+            if self._explicit_workspace_path is not None
+            else None
+        )
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 self._venv_python,
@@ -357,6 +382,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=proc_cwd,
                 start_new_session=(sys.platform != "win32"),
             )
         except (FileNotFoundError, PermissionError, OSError) as exc:

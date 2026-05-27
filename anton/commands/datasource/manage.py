@@ -38,12 +38,12 @@ def handle_list_data_sources(console: "Console", vault: DataVault | None = None)
         source = engine_def.display_name if engine_def else c["engine"]
         fields = vault.load(c["engine"], c["name"]) or {}
 
-        if not fields:
-            status = "[yellow]incomplete[/]"
-        elif engine_def and engine_def.auth_method != "choice":
+        if engine_def and engine_def.auth_method != "choice":
             required = [f.name for f in engine_def.fields if f.required]
             missing = [name for name in required if name not in fields]
             status = "[yellow]incomplete[/]" if missing else "[green]saved[/]"
+        elif not fields:
+            status = "[yellow]incomplete[/]"
         else:
             status = "[green]saved[/]"
 

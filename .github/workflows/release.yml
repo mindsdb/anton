@@ -1,0 +1,68 @@
+name: Auto-release on version bump
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'anton/__init__.py'
+  workflow_dispatch:
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  auto-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      created: ${{ steps.tag_check.outputs.exists == 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read __version__ from anton/__init__.py
+        id: version
+        run: |
+          PKG_VERSION=$(grep -oE '__version__\s*=\s*"[^"]+"' anton/__init__.py | grep -oE '"[^"]+"' | tr -d '"')
+          if [ -z "${PKG_VERSION}" ]; then
+            echo "::error::Could not parse __version__ from anton/__init__.py"
+            exit 1
+          fi
+          echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists; nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag ${TAG} does not exist; will create release."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag and GitHub release
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "${TAG}" \
+            --target "${GITHUB_SHA}" \
+            --title "${TAG}" \
+            --generate-notes
+
+  e2e:
+    needs: auto-release
+    if: needs.auto-release.outputs.created == 'true'
+    uses: ./.github/workflows/tests_e2e_release.yml
+    with:
+      tag: ${{ needs.auto-release.outputs.tag }}
+    secrets: inherit

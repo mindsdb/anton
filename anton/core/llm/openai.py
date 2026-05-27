@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 
 import openai
 from openai import AsyncAzureOpenAI
 
+from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
     LLMProvider,
@@ -52,7 +54,7 @@ def _translate_tool_choice(tool_choice: dict) -> dict | str:
     return "auto"
 
 
-def _translate_messages(system: str, messages: list[dict], supports_vision: bool = True) -> list[dict]:
+def _translate_messages(system: str, messages: list[dict], supports_vision: bool = True, vision_format: str = "openai") -> list[dict]:
     """Convert Anthropic-style messages to OpenAI chat format.
 
     Handles:
@@ -79,7 +81,7 @@ def _translate_messages(system: str, messages: list[dict], supports_vision: bool
             if role == "assistant":
                 result.extend(_translate_assistant_blocks(content))
             elif role == "user":
-                result.extend(_translate_user_blocks(content, supports_vision=supports_vision))
+                result.extend(_translate_user_blocks(content, supports_vision=supports_vision, vision_format=vision_format))
             else:
                 # Fallback: join text blocks
                 text = " ".join(
@@ -122,10 +124,17 @@ def _translate_assistant_blocks(blocks: list[dict]) -> list[dict]:
     return [msg]
 
 
-def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True) -> list[dict]:
-    """Convert user content blocks (including tool_result and image) to OpenAI messages."""
+def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vision_format: str = "openai") -> list[dict]:
+    """Convert user content blocks (including tool_result and image) to OpenAI messages.
+
+    vision_format controls how image blocks are serialised:
+    - "openai"     → {"type": "image_url", "image_url": {"url": "data:..."}}
+    - "anthropic"  → kept as-is {"type": "image", "source": {...}}  (for
+                     endpoints like MDB.AI that speak Anthropic content format
+                     over an OpenAI-compatible HTTP envelope)
+    """
     result: list[dict] = []
-    content_parts: list[dict] = []  # Accumulates text + image_url blocks
+    content_parts: list[dict] = []  # Accumulates text + image blocks
 
     for block in blocks:
         if block.get("type") == "tool_result":
@@ -133,33 +142,104 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True) -> 
             if content_parts:
                 result.append({"role": "user", "content": content_parts})
                 content_parts = []
-            # tool_result -> role:tool message
-            content = block.get("content", "")
-            if isinstance(content, list):
-                content = "\n".join(
-                    b.get("text", "") for b in content if b.get("type") == "text"
-                )
+            # tool_result -> role:tool message. The Chat Completions API only
+            # accepts a string in `tool` messages, so when the tool returned
+            # multimodal blocks (image + text), we split them: text → tool
+            # message, image → a follow-up role:user message right after.
+            raw = block.get("content", "")
+            extra_images: list[dict] = []
+            if isinstance(raw, list):
+                text_parts_for_tool: list[str] = []
+                for b in raw:
+                    if b.get("type") == "text":
+                        text_parts_for_tool.append(b.get("text", ""))
+                    elif b.get("type") == "image" and supports_vision:
+                        extra_images.append(b)
+                if text_parts_for_tool:
+                    tool_text = "\n".join(text_parts_for_tool)
+                elif extra_images:
+                    tool_text = "Image attached in next user message."
+                else:
+                    tool_text = ""
+            else:
+                tool_text = str(raw)
+
             result.append(
                 {
                     "role": "tool",
                     "tool_call_id": block["tool_use_id"],
-                    "content": str(content),
+                    "content": tool_text,
                 }
             )
+
+            if extra_images:
+                img_parts: list[dict] = [
+                    {
+                        "type": "text",
+                        "text": "Image(s) returned by previous tool call:",
+                    }
+                ]
+                for img in extra_images:
+                    if vision_format == "anthropic":
+                        img_parts.append(img)
+                        continue
+                    source = img.get("source", {})
+                    if source.get("type") == "base64":
+                        media_type = source.get("media_type", "image/png")
+                        data = source.get("data", "")
+                        img_parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{data}"
+                                },
+                            }
+                        )
+                result.append({"role": "user", "content": img_parts})
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
         elif block.get("type") == "image" and supports_vision:
-            # Anthropic image block -> OpenAI image_url block
-            source = block.get("source", {})
-            if source.get("type") == "base64":
-                media_type = source.get("media_type", "image/png")
-                data = source.get("data", "")
+            if vision_format == "anthropic":
+                # Keep Anthropic-format image block as-is — endpoints like
+                # MDB.AI pass content through to Claude and expect this format.
+                content_parts.append(block)
+            else:
+                # Anthropic image block -> OpenAI image_url block
+                source = block.get("source", {})
+                if source.get("type") == "base64":
+                    media_type = source.get("media_type", "image/png")
+                    data = source.get("data", "")
+                    content_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{media_type};base64,{data}"},
+                        }
+                    )
+        elif block.get("type") == "image_url" and supports_vision:
+            # Inbound OpenAI-format image (e.g. scratchpad code that built the
+            # message in OpenAI shape). Translate to the configured outbound
+            # format so it actually reaches the model.
+            url = (block.get("image_url") or {}).get("url", "")
+            if vision_format == "anthropic" and url.startswith("data:"):
+                # data:<media_type>;base64,<data>  ->  Anthropic image block
+                try:
+                    header, data = url.split(",", 1)
+                    media_type = header[len("data:") : header.index(";")]
+                except (ValueError, IndexError):
+                    media_type, data = "image/png", ""
                 content_parts.append(
                     {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        },
                     }
                 )
+            else:
+                # Already OpenAI format — pass through.
+                content_parts.append(block)
 
     if content_parts:
         # If only text parts, flatten to a simple string for compatibility
@@ -215,12 +295,32 @@ class OpenAIProvider(LLMProvider):
         ssl_verify: bool = True,
         api_version: str | None = None,
         supports_vision: bool = True,
+        vision_format: str = "openai",
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url
         self._ssl_verify = ssl_verify
         self._api_version = api_version
         self._supports_vision = supports_vision
+        self._vision_format = vision_format
+        # Whether to attach langfuse-style headers (Langfuse-Session-Id,
+        # Langfuse-Tags, Langfuse-Metadata) to outbound requests. Default-on
+        # only for the MindsHub-backed deployment, which is the curated
+        # langfuse-aware router we ship against. For every other openai-
+        # compatible endpoint (raw OpenAI, Azure, Gemini, self-hosted
+        # vLLM/ollama/LM Studio) we skip by default so the cowork session
+        # identity doesn't leak into third-party logs.
+        #
+        # Power-user opt-in: set `ANTON_LANGFUSE_HEADERS=1` to force-emit
+        # the headers regardless of base URL — useful when the user has
+        # pointed `base_url` at their own langfuse-instrumented proxy.
+        self._emit_trace_headers = bool(base_url) and (
+            "mindshub.ai" in base_url or "mdb.ai" in base_url
+        )
+        if os.environ.get("ANTON_LANGFUSE_HEADERS", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            self._emit_trace_headers = True
 
         import httpx
 
@@ -254,6 +354,35 @@ class OpenAIProvider(LLMProvider):
             api_version=self._api_version,
         )
 
+    def _build_trace_headers(self) -> dict[str, str] | None:
+        """Return langfuse-style headers for the active trace, or None.
+
+        Returns None unless trace-header emission is enabled for this
+        provider instance (default-on for MindsHub, opt-in for any other
+        openai-compatible endpoint via `ANTON_LANGFUSE_HEADERS=1`) AND a
+        `TraceContext` has been installed by `ChatSession.turn_stream`.
+        """
+        if not self._emit_trace_headers:
+            return None
+        from .tracing import get_trace_context
+
+        ctx = get_trace_context()
+        if ctx is None:
+            return None
+        headers: dict[str, str] = {}
+        if ctx.session_id:
+            headers["Langfuse-Session-Id"] = ctx.session_id
+        if ctx.harness:
+            headers["Langfuse-Tags"] = ctx.harness
+        extra: dict[str, object] = {}
+        if ctx.turn_id is not None:
+            extra["turn_id"] = ctx.turn_id
+        if ctx.harness:
+            extra["harness"] = ctx.harness
+        if extra:
+            headers["Langfuse-Metadata"] = json.dumps(extra)
+        return headers or None
+
     async def complete(
         self,
         *,
@@ -264,7 +393,7 @@ class OpenAIProvider(LLMProvider):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -275,6 +404,9 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = _translate_tools(tools)
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice(tool_choice)
+        trace_headers = self._build_trace_headers()
+        if trace_headers:
+            kwargs["extra_headers"] = trace_headers
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -310,13 +442,18 @@ class OpenAIProvider(LLMProvider):
 
         if message.tool_calls:
             for tc in message.tool_calls:
+                # safe_parse_tool_input returns (parsed_dict,
+                # parse_error). parse_error is forwarded to the
+                # session dispatcher so the tool_use/tool_result
+                # protocol can carry the recovery — see the streaming
+                # path in this file for the same pattern.
+                parsed_input, parse_error = safe_parse_tool_input(tc.function.arguments or "")
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
-                        input=json.loads(tc.function.arguments)
-                        if tc.function.arguments
-                        else {},
+                        input=parsed_input,
+                        parse_error=parse_error,
                     )
                 )
 
@@ -342,7 +479,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
     ) -> AsyncIterator[StreamEvent]:
-        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision)
+        oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -352,6 +489,9 @@ class OpenAIProvider(LLMProvider):
         )
         if tools:
             kwargs["tools"] = _translate_tools(tools)
+        trace_headers = self._build_trace_headers()
+        if trace_headers:
+            kwargs["extra_headers"] = trace_headers
 
         content_text = ""
         tool_calls: list[ToolCall] = []
@@ -441,12 +581,20 @@ class OpenAIProvider(LLMProvider):
                 "Could not reach the LLM server — check your connection or try again in a moment."
             ) from exc
 
-        # Finalize tool calls
+        # Finalize tool calls. Same safe-parse protection as the
+        # non-streaming path — a model cut off mid-JSON-arguments
+        # would otherwise crash the whole turn here with an opaque
+        # JSONDecodeError. parse_error rides along on the ToolCall so
+        # the session dispatcher can short-circuit with a structured
+        # recovery tool_result.
         for idx in sorted(tc_state):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
-            parsed = json.loads(raw_json) if raw_json else {}
-            tool_calls.append(ToolCall(id=info["id"], name=info["name"], input=parsed))
+            parsed, parse_error = safe_parse_tool_input(raw_json)
+            tool_calls.append(ToolCall(
+                id=info["id"], name=info["name"], input=parsed,
+                parse_error=parse_error,
+            ))
             yield StreamToolUseEnd(id=info["id"])
 
         yield StreamComplete(

@@ -1,0 +1,8 @@
+[
+  {"kind": "scratchpad_call",       "severity": 1, "detail": {"name": "dash", "code_len": 320},  "round_idx": 2},
+  {"kind": "scratchpad_result",     "severity": 1, "detail": {"name": "dash", "success": true,  "stdout_len": 16}, "round_idx": 2},
+  {"kind": "scratchpad_call",       "severity": 1, "detail": {"name": "dash", "code_len": 18200}, "round_idx": 4},
+  {"kind": "scratchpad_empty_code", "severity": 7, "detail": {"name": "dash"}, "round_idx": 4},
+  {"kind": "scratchpad_call",       "severity": 1, "detail": {"name": "dash", "code_len": 19500}, "round_idx": 5},
+  {"kind": "scratchpad_empty_code", "severity": 7, "detail": {"name": "dash"}, "round_idx": 5}
+]
