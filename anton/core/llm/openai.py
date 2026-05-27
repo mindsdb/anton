@@ -266,6 +266,24 @@ def _is_azure_endpoint(url: str | None) -> bool:
     return host.endswith(".openai.azure.com") or host.endswith(".cognitiveservices.azure.com")
 
 
+def _header_safe(value: str, *, max_len: int = 4000) -> str:
+    """Coerce an arbitrary string into a safe HTTP header value.
+
+    Header values can't contain CR/LF or other control chars, and httpx
+    encodes header strings as latin-1 — so a prompt with newlines or
+    non-latin-1 chars (CJK, emoji) would raise and break the request. We
+    collapse control chars to spaces, truncate to stay under header-size
+    limits, and drop chars that aren't latin-1-encodable. This is lossy for
+    non-Latin input by design: it only feeds the trace's eval-display input,
+    so degrading it beats crashing the turn.
+    """
+    cleaned = "".join(" " if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in value)
+    # Drop non-latin-1 chars before collapsing whitespace so removed chars
+    # (e.g. emoji) don't leave stray double spaces.
+    cleaned = cleaned.encode("latin-1", "ignore").decode("latin-1")
+    return " ".join(cleaned.split())[:max_len]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Responses API translation
 #
@@ -614,6 +632,13 @@ class OpenAIProvider(LLMProvider):
             extra["harness"] = ctx.harness
         if extra:
             headers["Langfuse-Metadata"] = json.dumps(extra)
+        # Per-turn trace grouping: the same trace id on every passthrough call
+        # in a turn makes the gateway nest them under one trace, with the
+        # user's request as the trace input for whole-turn evals.
+        if ctx.trace_id:
+            headers["Langfuse-Trace-Id"] = ctx.trace_id
+        if ctx.trace_input:
+            headers["Langfuse-Trace-Input"] = _header_safe(ctx.trace_input)
         return headers or None
 
     async def complete(

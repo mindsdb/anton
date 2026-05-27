@@ -6,6 +6,15 @@ MindsHub and attaches langfuse-style headers so every LLM call (and
 any nested tool/scratchpad LLM call made within the same asyncio
 task) is attributed to the same session + turn server-side.
 
+The per-turn `trace_id` (a 32-char hex id) is sent as `Langfuse-Trace-Id`
+on every passthrough call so the gateway *groups and nests* a whole turn's
+calls under one trace, and `trace_input` (the user's request) is sent as
+`Langfuse-Trace-Input` so the trace has clean input → output for evals. The
+gateway takes a trace's output from the last call to finish, so post-answer
+bookkeeping calls (completion verification, memory consolidation) must run
+inside `detached_trace()` — which drops the trace id so they neither group
+under nor clobber the turn trace.
+
 A `ContextVar` is used so that nested calls — `_stream_and_handle_tools`,
 `generate_object` (structured output), the cerebellum's diff call,
 and the scratchpad's `coding_provider` calls — all inherit the same
@@ -18,8 +27,9 @@ Gemini) ignore the context entirely.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -29,6 +39,11 @@ class TraceContext:
     session_id: str | None = None
     turn_id: int | None = None
     harness: str | None = None
+    # Per-turn trace id (32-char hex). Groups every passthrough call in a turn
+    # under one server-side trace. None = ungrouped (each call its own trace).
+    trace_id: str | None = None
+    # The user's request for this turn; surfaced as the trace's input for evals.
+    trace_input: str | None = None
 
 
 _trace_ctx: ContextVar[TraceContext | None] = ContextVar(
@@ -49,3 +64,27 @@ def set_trace_context(ctx: TraceContext | None) -> Token:
 def reset_trace_context(token: Token) -> None:
     """Restore the previous trace context. Pass the token returned by `set_trace_context`."""
     _trace_ctx.reset(token)
+
+
+@contextmanager
+def detached_trace():
+    """Run a block off the current turn's eval trace.
+
+    Drops `trace_id`/`trace_input` for the duration so bookkeeping or
+    post-answer calls (completion verification, memory consolidation) don't
+    group under — or clobber the output of — the turn trace, while keeping
+    session/turn/harness attribution intact. No-op when no context is active.
+
+    Because `asyncio.create_task` snapshots the current context at creation,
+    wrapping a `create_task(...)` call in this manager detaches the spawned
+    task too.
+    """
+    ctx = get_trace_context()
+    if ctx is None:
+        yield
+        return
+    token = set_trace_context(replace(ctx, trace_id=None, trace_input=None))
+    try:
+        yield
+    finally:
+        reset_trace_context(token)

@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 import json
 import os
+import uuid
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
@@ -29,6 +30,7 @@ from anton.core.llm.provider import (
 )
 from anton.core.llm.tracing import (
     TraceContext,
+    detached_trace,
     reset_trace_context,
     set_trace_context,
 )
@@ -1211,7 +1213,8 @@ class ChatSession:
             # Cerebellum learning is best-effort, so just drop the buffer.
             cb.reset()
 
-    async def turn(self, user_input: str | list[dict]) -> str:
+    async def turn(self, user_input: str | list[dict], *, turn_id: int | None = None) -> str:
+        self._current_turn_id = turn_id
         self._append_history({"role": "user", "content": user_input})
 
         user_msg_str = (
@@ -1219,113 +1222,31 @@ class ChatSession:
             if isinstance(user_input, str)
             else next((b["text"] for b in user_input if b.get("type") == "text"), "")
         )
-        tools = self._build_tools()
-        system = await self._build_system_prompt(user_msg_str)
-        self._compacted_this_turn = False
 
-        response = await self.plan_with_recovery(system=system, tools=tools)
+        # Per-turn trace identity — same contract as `turn_stream`, so any
+        # use of Anton (not just streaming hosts) gets grouped langfuse
+        # traces. `turn_trace_id` is minted once so every passthrough call in
+        # this turn carries the same `Langfuse-Trace-Id` and the gateway
+        # nests them under one trace, with `user_msg_str` as the input.
+        turn_trace_id = uuid.uuid4().hex
+        _trace_token = set_trace_context(
+            TraceContext(
+                session_id=self._session_id,
+                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+                harness=self._harness,
+                trace_id=turn_trace_id,
+                trace_input=user_msg_str,
+            )
+        )
+        try:
+            tools = self._build_tools()
+            system = await self._build_system_prompt(user_msg_str)
+            self._compacted_this_turn = False
 
-        # Proactive compaction — gated so we never double-summarize within
-        # a single turn (the recovery helper may already have compacted).
-        if (
-            not self._compacted_this_turn
-            and response.usage.context_pressure > self._context_pressure_threshold
-        ):
-            await self._summarize_history()
-            self._compact_scratchpads()
-            self._compacted_this_turn = True
-
-        # Handle tool calls
-        tool_round = 0
-        error_streak: dict[str, int] = {}
-        resilience_nudged: set[str] = set()
-
-        while response.tool_calls:
-            tool_round += 1
-            if tool_round > self._max_tool_rounds:
-                self._append_history(
-                    {"role": "assistant", "content": response.content or ""}
-                )
-                self._append_history(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"SYSTEM: You have used {self._max_tool_rounds} tool-call rounds on this turn. "
-                            "Pause here. Summarize what you have accomplished so far and what remains. "
-                            "If you believe you are on a good track and can finish the task with more steps, "
-                            "tell the user and ask if they'd like you to continue. "
-                            "Do NOT retry automatically — wait for the user's response."
-                        ),
-                    }
-                )
-                response = await self.plan_with_recovery(system=system)
-                break
-
-            # Build assistant message with content blocks
-            assistant_content: list[dict] = []
-            if response.content:
-                assistant_content.append({"type": "text", "text": response.content})
-            for tc in response.tool_calls:
-                assistant_content.append(
-                    {
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    }
-                )
-            self._append_history({"role": "assistant", "content": assistant_content})
-
-            # Process each tool call via registry
-            tool_results: list[dict] = []
-            for tc in response.tool_calls:
-                try:
-                    result = await self.tool_registry.dispatch_tool(
-                        self, tc.name, tc.input
-                    )
-                except Exception as exc:
-                    result = f"Tool '{tc.name}' failed: {exc}"
-
-                if isinstance(result, list):
-                    # Multimodal tool result — scrub credentials from text
-                    # blocks; image-block payloads are raw bytes and have
-                    # nothing to scrub. A list result signals success, so
-                    # mirror the success branch of `_apply_error_tracking`
-                    # and reset the streak instead of running the full
-                    # string-only nudge logic.
-                    content: "str | list[dict]" = [
-                        {**b, "text": scrub_credentials(b.get("text", ""))}
-                        if b.get("type") == "text"
-                        else b
-                        for b in result
-                    ]
-                    error_streak[tc.name] = 0
-                    resilience_nudged.discard(tc.name)
-                else:
-                    result = scrub_credentials(result)
-                    result = self._apply_error_tracking(
-                        result,
-                        tc.name,
-                        error_streak,
-                        resilience_nudged,
-                    )
-                    content = result
-
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": content,
-                    }
-                )
-
-            self._append_history({"role": "user", "content": tool_results})
-
-            # Get follow-up from LLM
             response = await self.plan_with_recovery(system=system, tools=tools)
 
-            # Proactive compaction during tool loop — gated to at most
-            # once per turn.
+            # Proactive compaction — gated so we never double-summarize within
+            # a single turn (the recovery helper may already have compacted).
             if (
                 not self._compacted_this_turn
                 and response.usage.context_pressure > self._context_pressure_threshold
@@ -1334,10 +1255,114 @@ class ChatSession:
                 self._compact_scratchpads()
                 self._compacted_this_turn = True
 
-        # Text-only response
-        reply = response.content or ""
-        self._append_history({"role": "assistant", "content": reply})
+            # Handle tool calls
+            tool_round = 0
+            error_streak: dict[str, int] = {}
+            resilience_nudged: set[str] = set()
 
+            while response.tool_calls:
+                tool_round += 1
+                if tool_round > self._max_tool_rounds:
+                    self._append_history(
+                        {"role": "assistant", "content": response.content or ""}
+                    )
+                    self._append_history(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"SYSTEM: You have used {self._max_tool_rounds} tool-call rounds on this turn. "
+                                "Pause here. Summarize what you have accomplished so far and what remains. "
+                                "If you believe you are on a good track and can finish the task with more steps, "
+                                "tell the user and ask if they'd like you to continue. "
+                                "Do NOT retry automatically — wait for the user's response."
+                            ),
+                        }
+                    )
+                    response = await self.plan_with_recovery(system=system)
+                    break
+
+                # Build assistant message with content blocks
+                assistant_content: list[dict] = []
+                if response.content:
+                    assistant_content.append({"type": "text", "text": response.content})
+                for tc in response.tool_calls:
+                    assistant_content.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.input,
+                        }
+                    )
+                self._append_history({"role": "assistant", "content": assistant_content})
+
+                # Process each tool call via registry
+                tool_results: list[dict] = []
+                for tc in response.tool_calls:
+                    try:
+                        result = await self.tool_registry.dispatch_tool(
+                            self, tc.name, tc.input
+                        )
+                    except Exception as exc:
+                        result = f"Tool '{tc.name}' failed: {exc}"
+
+                    if isinstance(result, list):
+                        # Multimodal tool result — scrub credentials from text
+                        # blocks; image-block payloads are raw bytes and have
+                        # nothing to scrub. A list result signals success, so
+                        # mirror the success branch of `_apply_error_tracking`
+                        # and reset the streak instead of running the full
+                        # string-only nudge logic.
+                        content: "str | list[dict]" = [
+                            {**b, "text": scrub_credentials(b.get("text", ""))}
+                            if b.get("type") == "text"
+                            else b
+                            for b in result
+                        ]
+                        error_streak[tc.name] = 0
+                        resilience_nudged.discard(tc.name)
+                    else:
+                        result = scrub_credentials(result)
+                        result = self._apply_error_tracking(
+                            result,
+                            tc.name,
+                            error_streak,
+                            resilience_nudged,
+                        )
+                        content = result
+
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": content,
+                        }
+                    )
+
+                self._append_history({"role": "user", "content": tool_results})
+
+                # Get follow-up from LLM
+                response = await self.plan_with_recovery(system=system, tools=tools)
+
+                # Proactive compaction during tool loop — gated to at most
+                # once per turn.
+                if (
+                    not self._compacted_this_turn
+                    and response.usage.context_pressure > self._context_pressure_threshold
+                ):
+                    await self._summarize_history()
+                    self._compact_scratchpads()
+                    self._compacted_this_turn = True
+
+            # Text-only response
+            reply = response.content or ""
+            self._append_history({"role": "assistant", "content": reply})
+        finally:
+            reset_trace_context(_trace_token)
+
+        # Background memory work runs after the trace is reset — same as
+        # turn_stream — so these post-answer calls stay off the turn trace
+        # and never clobber its output.
         # Periodic memory vacuum (Systems Consolidation)
         if self._cortex is not None and self._cortex.mode != "off":
             self._cortex.maybe_vacuum()
@@ -1396,11 +1421,21 @@ class ChatSession:
         # ContextVar propagation also covers `asyncio.create_task` spawns
         # — the cerebellum flush + identity extraction tasks scheduled
         # below inherit a copy of this context.
+        #
+        # `turn_trace_id` is minted once, before the retry loop, so every
+        # passthrough call in this turn (including auto-retries) carries the
+        # same `Langfuse-Trace-Id` and the gateway groups them under one
+        # trace, with `user_msg_str` as its input. Post-answer bookkeeping
+        # calls run under `detached_trace()` so they don't clobber the
+        # trace's output (see the verifier + consolidation sites below).
+        turn_trace_id = uuid.uuid4().hex
         _trace_token = set_trace_context(
             TraceContext(
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                trace_id=turn_trace_id,
+                trace_input=user_msg_str,
             )
         )
 
@@ -2017,11 +2052,16 @@ class ChatSession:
                 "that is INCOMPLETE, not COMPLETE. But if the user asked a question "
                 "and the assistant answered it, that is COMPLETE even without tool use."
             )
-            verification = await self.plan_with_recovery(
-                system=verifier_system,
-                max_tokens=256,
-                messages_factory=build_verify_messages,
-            )
+            # Detached: this verifier runs *after* the answer and emits
+            # "STATUS: COMPLETE — …". If it shared the turn trace id it would
+            # be the last call and the gateway would take it as the trace's
+            # output instead of the user-facing answer.
+            with detached_trace():
+                verification = await self.plan_with_recovery(
+                    system=verifier_system,
+                    max_tokens=256,
+                    messages_factory=build_verify_messages,
+                )
 
             status_text = (verification.content or "").strip().upper()
             if "STATUS: COMPLETE" in status_text:
@@ -2086,9 +2126,13 @@ class ChatSession:
             reply = llm_response.content or ""
             self._append_history({"role": "assistant", "content": reply})
 
-        # Consolidation: replay scratchpad sessions to extract lessons
+        # Consolidation: replay scratchpad sessions to extract lessons.
+        # Detached so the background `create_task` it spawns snapshots a
+        # context without the turn trace id — its post-answer LLM call must
+        # not clobber the trace's output.
         if self._cortex is not None and self._cortex.mode != "off":
-            self._maybe_consolidate_scratchpads()
+            with detached_trace():
+                self._maybe_consolidate_scratchpads()
 
     def _maybe_consolidate_scratchpads(self) -> None:
         """Check if any scratchpad sessions warrant consolidation and fire it off."""
