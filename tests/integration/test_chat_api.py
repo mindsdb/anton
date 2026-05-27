@@ -5,9 +5,9 @@ import pytest
 from .conftest import MINDS_API_BASE_URL
 
 
+@pytest.mark.skip(reason="Skipping streaming test temporarily for the behavior unstable.")
 @pytest.mark.happy_path
 class TestChatAPI:
-    @pytest.mark.skip(reason="Skipping streaming test temporarily for the behavior unstable.")
     def test_chat_with_data_aware_mind_no_stream(self, api_client, temporary_mind):
         """
         Tests a non-streaming chat completion with a data-aware mind.
@@ -51,7 +51,6 @@ class TestChatAPI:
 
         logging.info("PASSED: Chat (no stream) returned the correct assistant response.")
 
-    @pytest.mark.skip(reason="Skipping streaming test temporarily for the behavior unstable.")
     def test_chat_with_data_aware_mind_streaming(self, api_client, temporary_mind):
         """
         Tests a streaming chat completion with a data-aware mind.
