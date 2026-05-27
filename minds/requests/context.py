@@ -19,6 +19,7 @@ from minds.common.constants import (
     HEADER_LANGFUSE_SESSION_ID,
     HEADER_LANGFUSE_TAGS,
     HEADER_LANGFUSE_TRACE_ID,
+    HEADER_LANGFUSE_TRACE_INPUT,
     HEADER_ORGANIZATION_ID,
     HEADER_USER_EMAIL,
     HEADER_USER_ID,
@@ -78,6 +79,10 @@ class Context(BaseModel):
         default=None,
         description="Validated 16-hex Langfuse observation id from Langfuse-Parent-Observation-Id to nest under.",
     )
+    langfuse_trace_input: str | None = Field(
+        default=None,
+        description="Turn input from Langfuse-Trace-Input; set as the adopted trace's input for whole-turn evals.",
+    )
 
 
 def extract_context_from_request(request: Request) -> Context:
@@ -125,7 +130,9 @@ def extract_context_from_request(request: Request) -> Context:
     request_id = uuid.uuid4()
 
     langfuse_session_id, langfuse_tags, langfuse_metadata = _extract_langfuse_headers(request)
-    langfuse_trace_id, langfuse_parent_observation_id = _extract_langfuse_trace_propagation(request)
+    langfuse_trace_id, langfuse_parent_observation_id, langfuse_trace_input = _extract_langfuse_trace_propagation(
+        request
+    )
 
     logger.debug(
         f"Extracted context from request: request_id={request_id}, user_id={user_id}, "
@@ -134,7 +141,8 @@ def extract_context_from_request(request: Request) -> Context:
         f"langfuse_session_id={langfuse_session_id}, langfuse_tags={langfuse_tags}, "
         f"langfuse_metadata_keys={list(langfuse_metadata.keys())}, "
         f"langfuse_trace_id={langfuse_trace_id}, "
-        f"langfuse_parent_observation_id={langfuse_parent_observation_id}"
+        f"langfuse_parent_observation_id={langfuse_parent_observation_id}, "
+        f"langfuse_trace_input_set={langfuse_trace_input is not None}"
     )
 
     return Context(
@@ -150,6 +158,7 @@ def extract_context_from_request(request: Request) -> Context:
         langfuse_metadata=langfuse_metadata,
         langfuse_trace_id=langfuse_trace_id,
         langfuse_parent_observation_id=langfuse_parent_observation_id,
+        langfuse_trace_input=langfuse_trace_input,
     )
 
 
@@ -195,17 +204,20 @@ _LANGFUSE_TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _LANGFUSE_OBSERVATION_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
-def _extract_langfuse_trace_propagation(request: Request) -> tuple[str | None, str | None]:
+def _extract_langfuse_trace_propagation(request: Request) -> tuple[str | None, str | None, str | None]:
     """Parse + validate the distributed-trace propagation headers.
 
-    Returns ``(trace_id, parent_observation_id)``:
+    Returns ``(trace_id, parent_observation_id, trace_input)``:
     - ``Langfuse-Trace-Id`` absent/malformed → ``None`` (request starts its own
       trace, i.e. today's behaviour).
     - ``Langfuse-Parent-Observation-Id`` absent/malformed → ``None``. A parent
       id without a valid trace id is meaningless (you can't nest into a trace we
       don't know), so it is dropped in that case.
+    - ``Langfuse-Trace-Input`` → the turn's logical input, used as the adopted
+      trace's ``input`` for whole-turn evals. Only honoured alongside a valid
+      trace id, since trace-level I/O is only meaningful on an adopted trace.
 
-    Values are lowercased before validation so a caller emitting upper-case hex
+    Ids are lowercased before validation so a caller emitting upper-case hex
     still propagates. Malformed values are logged at warning level and ignored
     so a typo upstream degrades to a fresh trace instead of breaking the request.
     """
@@ -234,7 +246,20 @@ def _extract_langfuse_trace_propagation(request: Request) -> tuple[str | None, s
         else:
             parent_observation_id = candidate
 
-    return trace_id, parent_observation_id
+    # Trace input only makes sense on an adopted trace — a request that owns its
+    # own trace already has its input captured per-generation, and setting a
+    # caller-supplied turn input on it would be misleading.
+    trace_input: str | None = None
+    raw_trace_input = request.headers.get(HEADER_LANGFUSE_TRACE_INPUT)
+    if isinstance(raw_trace_input, str) and raw_trace_input.strip():
+        if trace_id is not None:
+            trace_input = raw_trace_input
+        else:
+            logger.warning(
+                f"{HEADER_LANGFUSE_TRACE_INPUT} provided without a valid {HEADER_LANGFUSE_TRACE_ID}; ignoring"
+            )
+
+    return trace_id, parent_observation_id, trace_input
 
 
 class LangfuseContextMetadata(Context):

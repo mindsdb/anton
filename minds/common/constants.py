@@ -33,6 +33,14 @@ HEADER_LANGFUSE_METADATA = "Langfuse-Metadata"
 HEADER_LANGFUSE_TRACE_ID = "Langfuse-Trace-Id"
 HEADER_LANGFUSE_PARENT_OBSERVATION_ID = "Langfuse-Parent-Observation-Id"
 
+# Whole-turn eval support. A caller that groups many calls onto one trace (via
+# Langfuse-Trace-Id) can pass the turn's logical input here so the *trace* gets
+# a meaningful ``input`` for input→output evals. The trace ``output`` is filled
+# in automatically from each call's response (last call of the turn wins), so
+# there is no companion output header. Free-form string; only honoured when a
+# valid Langfuse-Trace-Id is also present.
+HEADER_LANGFUSE_TRACE_INPUT = "Langfuse-Trace-Input"
+
 # =============================================================================
 # Dynamic Configs
 # =============================================================================

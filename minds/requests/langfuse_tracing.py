@@ -17,6 +17,9 @@ class _NoOpObservation:
     def update(self, **kwargs):
         return self
 
+    def update_trace(self, **kwargs):
+        return self
+
 
 logger = get_logger(__name__)
 
@@ -224,6 +227,8 @@ def update_generation_usage(
     input: Any = None,
     output: Any = None,
     metadata: dict | None = None,
+    trace_input: Any = None,
+    trace_output: Any = None,
 ) -> None:
     """
     Record LLM token usage on a Langfuse generation.
@@ -259,6 +264,16 @@ def update_generation_usage(
             passthrough flows to record alias / provider / reasoning_effort
             so downstream analytics can slice by alias surface separately
             from the concrete upstream model.
+        trace_input: Optional turn-level input to stamp on the *trace* (not the
+            generation). Used for whole-turn input→output evals when many calls
+            share one adopted trace: pass the turn's logical input (idempotent
+            across calls). ``None`` leaves the trace input untouched.
+        trace_output: Optional turn-level output to stamp on the *trace*. Set it
+            to each call's output; with many calls on one trace the last call to
+            finish wins, leaving the turn's final answer as the trace output.
+            ``None`` leaves the trace output untouched. Both trace fields are
+            written on the same observation we already create/update here, so
+            there is no extra Langfuse call beyond a single attribute write.
     """
     if usage is None:
         logger.debug("update_generation_usage: usage is None, skipping")
@@ -273,6 +288,11 @@ def update_generation_usage(
         "total": in_t + out_t,
     }
 
+    # Only the fields the caller actually supplied — passing None would not
+    # clobber (Langfuse drops None) but building the dict keeps the calls clean
+    # and lets us skip the trace write entirely when there's nothing to set.
+    trace_io_kwargs = {k: v for k, v in (("input", trace_input), ("output", trace_output)) if v is not None}
+
     try:
         langfuse_client = get_client()
         if trace_context is None:
@@ -283,9 +303,11 @@ def update_generation_usage(
                 output=output,
                 metadata=metadata,
             )
+            if trace_io_kwargs:
+                langfuse_client.update_current_trace(**trace_io_kwargs)
             logger.debug(
                 f"Updated current Langfuse generation with usage_details={usage_details} "
-                f"model={model} metadata={metadata}"
+                f"model={model} metadata={metadata} trace_io={list(trace_io_kwargs)}"
             )
         else:
             obs = langfuse_client.start_observation(
@@ -298,6 +320,11 @@ def update_generation_usage(
                 output=output,
                 metadata=metadata,
             )
+            # Stamp turn-level I/O on the trace via this same observation, so we
+            # don't create an extra span just to carry trace attributes.
+            if trace_io_kwargs:
+                with contextlib.suppress(Exception):
+                    obs.update_trace(**trace_io_kwargs)
             # Defensive: ending may fail on stub clients; this is non-fatal.
             with contextlib.suppress(Exception):
                 obs.end()
@@ -305,7 +332,7 @@ def update_generation_usage(
                 "Attached child Langfuse generation "
                 f"trace_id={trace_context.get('trace_id')} "
                 f"parent_span_id={trace_context.get('parent_span_id')} "
-                f"usage_details={usage_details} model={model} metadata={metadata}"
+                f"usage_details={usage_details} model={model} metadata={metadata} trace_io={list(trace_io_kwargs)}"
             )
     except Exception as e:
         logger.error(f"Error updating Langfuse generation usage: {e}")
