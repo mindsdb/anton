@@ -104,9 +104,7 @@ async def responses(
             if context.langfuse_trace_id:
                 trace_propagation_kwargs["langfuse_trace_id"] = context.langfuse_trace_id
                 if context.langfuse_parent_observation_id:
-                    trace_propagation_kwargs["langfuse_parent_observation_id"] = (
-                        context.langfuse_parent_observation_id
-                    )
+                    trace_propagation_kwargs["langfuse_parent_observation_id"] = context.langfuse_parent_observation_id
 
         response = await handler(
             context=context,
