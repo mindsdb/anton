@@ -28,6 +28,7 @@ def get_and_verify_mind(api_client, mind_name, expected_status=200):
 
 # --- Test Class ---
 
+
 @pytest.mark.skip(reason="Skipping streaming test temporarily for the behavior unstable.")
 @pytest.mark.happy_path
 class TestMindsAPI:
