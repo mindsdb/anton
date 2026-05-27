@@ -21,6 +21,18 @@ HEADER_LANGFUSE_SESSION_ID = "Langfuse-Session-Id"
 HEADER_LANGFUSE_TAGS = "Langfuse-Tags"
 HEADER_LANGFUSE_METADATA = "Langfuse-Metadata"
 
+# Distributed-trace propagation headers. When an upstream caller (e.g. the
+# Anton harness) has already opened a Langfuse trace in the *same* Langfuse
+# project, it can pass its trace id here so this service's observations nest
+# onto that trace instead of starting a fresh one — letting task-success evals
+# run against the whole multi-service trace. Both are optional:
+# - ``Langfuse-Trace-Id``: 32 lowercase hex chars (W3C/OTel trace id). Alone,
+#   it co-locates this request's spans on the caller's trace.
+# - ``Langfuse-Parent-Observation-Id``: 16 lowercase hex chars. Optional; when
+#   present the request's root span nests under that specific upstream span.
+HEADER_LANGFUSE_TRACE_ID = "Langfuse-Trace-Id"
+HEADER_LANGFUSE_PARENT_OBSERVATION_ID = "Langfuse-Parent-Observation-Id"
+
 # =============================================================================
 # Dynamic Configs
 # =============================================================================

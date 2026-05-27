@@ -58,10 +58,11 @@ def lazy_observe(**observe_kwargs):
 
     def decorator(fn):
         _wrapped = None
+        _langfuse_available = True
 
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
-            nonlocal _wrapped
+            nonlocal _wrapped, _langfuse_available
             if _wrapped is None:
                 try:
                     from langfuse import observe
@@ -69,6 +70,14 @@ def lazy_observe(**observe_kwargs):
                     _wrapped = observe(**observe_kwargs)(fn)
                 except ImportError:
                     _wrapped = fn
+                    _langfuse_available = False
+            if not _langfuse_available:
+                # langfuse's observe wrapper pops these reserved call-time
+                # kwargs; without it the raw function would receive them and
+                # raise TypeError. Strip them so trace propagation degrades to
+                # a no-op when langfuse isn't installed.
+                for reserved in ("langfuse_trace_id", "langfuse_parent_observation_id", "langfuse_public_key"):
+                    kwargs.pop(reserved, None)
             return await _wrapped(*args, **kwargs)
 
         return wrapper
@@ -118,7 +127,11 @@ def setup_langfuse_observation(context: Context):
         }
         if current_langfuse_context.session_id:
             update_kwargs["session_id"] = current_langfuse_context.session_id
-        if current_langfuse_context.trace_name:
+        # When we've adopted an upstream trace (Langfuse-Trace-Id present) the
+        # trace name belongs to the caller (e.g. Anton's root). Renaming it to
+        # our "harness:turn-N" would clobber the owner's trace name, so only set
+        # the display name when this request owns the trace.
+        if current_langfuse_context.trace_name and not context.langfuse_trace_id:
             update_kwargs["name"] = current_langfuse_context.trace_name
 
         # update_current_trace is unaware of the harness convention; pass the

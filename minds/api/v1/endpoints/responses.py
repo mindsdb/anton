@@ -90,12 +90,23 @@ async def responses(
     try:
         logger.debug(f"🔄 [{context.request_id}] Starting Responses API v1")
 
+        # Distributed-trace propagation kwargs are only understood by the
+        # @observe-wrapped handler (langfuse strips them before calling the
+        # function). The unwrapped handler used when Langfuse is disabled would
+        # raise TypeError if handed them, so only attach them in that branch.
+        trace_propagation_kwargs: dict = {}
         if not langfuse_enabled:
             handler = responses_request_handler.__wrapped__
             instrument = False
         else:
             handler = responses_request_handler
             instrument = True
+            if context.langfuse_trace_id:
+                trace_propagation_kwargs["langfuse_trace_id"] = context.langfuse_trace_id
+                if context.langfuse_parent_observation_id:
+                    trace_propagation_kwargs["langfuse_parent_observation_id"] = (
+                        context.langfuse_parent_observation_id
+                    )
 
         response = await handler(
             context=context,
@@ -105,6 +116,7 @@ async def responses(
             conversation_service=conversations_service,
             instrument=instrument,
             limits_service=limits_service,
+            **trace_propagation_kwargs,
         )
 
         return response
