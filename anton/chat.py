@@ -39,7 +39,7 @@ from anton.commands.setup import (
     handle_setup_models,
 )
 from anton.commands.ui import handle_explain, handle_theme, print_slash_help, make_completer
-from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, COMMANDS
+from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, SHARE_COMMANDS, COMMANDS
 
 from anton.utils.clipboard import (
     ImageRefLexer,
@@ -66,6 +66,7 @@ from anton.commands.skills import (
     handle_skill_show,
     handle_skills_list,
 )
+from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
 from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
 from anton.utils.prompt import (
     prompt_or_cancel,
@@ -1199,11 +1200,19 @@ async def _chat_loop(
     global_memory_dir = Path.home() / ".anton" / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
 
+    from anton.core.memory.episodes import EpisodicMemory
+
+    episodes_dir = settings.workspace_path / ".anton" / "episodes"
+    episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
+    if episodic.enabled:
+        episodic.start_session()
+
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
         project_hc=Hippocampus(project_memory_dir),
         mode=settings.memory_mode,
         llm_client=state["llm_client"],
+        episodic=episodic if episodic.enabled else None,
     )
 
     # Reconsolidation: migrate legacy memory formats on first run
@@ -1218,13 +1227,6 @@ async def _chat_loop(
     # Background compaction if needed
     if cortex.needs_compaction():
         asyncio.create_task(cortex.compact_all())
-
-    from anton.core.memory.episodes import EpisodicMemory
-
-    episodes_dir = settings.workspace_path / ".anton" / "episodes"
-    episodic = EpisodicMemory(episodes_dir, enabled=settings.episodic_memory)
-    if episodic.enabled:
-        episodic.start_session()
 
     from anton.memory.history_store import HistoryStore
 
@@ -1344,7 +1346,7 @@ async def _chat_loop(
         mouse_support=False,
         bottom_toolbar=_bottom_toolbar,
         style=pt_style,
-        completer=make_completer([THEME_COMMANDS, SKILLS_COMMANDS, COMMANDS, MEMORY_COMMANDS]),
+        completer=make_completer([THEME_COMMANDS, SKILLS_COMMANDS, SHARE_COMMANDS, COMMANDS, MEMORY_COMMANDS]),
         complete_while_typing=True,
         complete_style=CompleteStyle.COLUMN,
         reserve_space_for_menu=8,
@@ -1353,7 +1355,7 @@ async def _chat_loop(
     )
     attach_image_path_detector(prompt_session.default_buffer, image_registry)
 
-    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic)
+    memory_manage = MemoryManage(console, settings, cortex, episodic=episodic, history_store=history_store)
     try:
         while True:
             # Memory confirmation UX — show pending lessons before prompt
@@ -1464,7 +1466,7 @@ async def _chat_loop(
             # Detect dragged file paths early — a dragged absolute path like
             # "/Users/foo/bar.txt" starts with "/" and would otherwise be
             # mistaken for a slash command.
-            if message_content is None and stripped.startswith("/"):
+            if message_content is None and stripped.startswith("/") and not stripped.startswith("/share"):
                 dropped_early = _parse_dropped_paths(stripped)
                 if dropped_early:
                     stripped = format_file_message(stripped, dropped_early, console)
@@ -1515,7 +1517,7 @@ async def _chat_loop(
                     )
                     continue
                 elif cmd == "/memory":
-                    await memory_manage.handle(cmd=stripped)
+                    await memory_manage.handle(cmd=stripped, session=session)
                     continue
                 elif cmd == "/connect":
                     arg = parts[1].strip() if len(parts) > 1 else ""
@@ -1582,6 +1584,46 @@ async def _chat_loop(
                     continue
                 elif cmd == "/skills":
                     handle_skills_list(console)
+                    continue
+                elif cmd == "/share":
+                    sub_parts = parts[1].strip().split(maxsplit=1) if len(parts) > 1 else []
+                    sub = sub_parts[0] if sub_parts else ""
+                    rest = sub_parts[1] if len(sub_parts) > 1 else ""
+                    if sub == "export":
+                        await handle_share_export(
+                            console,
+                            session,
+                            workspace,
+                            state["llm_client"],
+                            episodic if episodic.enabled else None,
+                            summary_only="--summary" in rest,
+                        )
+                    elif sub == "import":
+                        if not rest:
+                            console.print("[anton.warning]Usage: /share import <file>[/]")
+                            console.print()
+                        else:
+                            session = await handle_share_import(
+                                console,
+                                session,
+                                workspace,
+                                settings,
+                                state,
+                                self_awareness,
+                                cortex,
+                                episodic if episodic.enabled else None,
+                                history_store,
+                                filepath=rest,
+                            )
+                            current_session_id = session._session_id
+                    elif sub == "status":
+                        handle_share_status(console, session, workspace)
+                    elif sub == "history":
+                        handle_share_history(console, workspace)
+                    else:
+                        usage = " | ".join(c.command for c in SHARE_COMMANDS)
+                        console.print(f"[anton.warning]Usage: {usage}[/]")
+                        console.print()
                     continue
                 elif cmd == "/resume":
                     session, resumed_id = await handle_resume(

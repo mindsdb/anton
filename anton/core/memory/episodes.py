@@ -24,9 +24,6 @@ class Episode:
     meta: dict = field(default_factory=dict)
 
 
-_MAX_TOOL_INPUT = 2000
-_MAX_TOOL_RESULT = 2000
-
 
 class EpisodicMemory:
     """Append-only conversation archive stored as per-session JSONL files."""
@@ -50,13 +47,16 @@ class EpisodicMemory:
     def enabled(self, value: bool) -> None:
         self._enabled = value
 
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
     def start_session(self) -> str:
         """Create a new JSONL file for this session and return the session ID."""
         now = datetime.now(timezone.utc)
         self._session_id = now.strftime("%Y%m%d_%H%M%S")
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / f"{self._session_id}.jsonl"
-        self._file.touch()
         return self._session_id
 
     def resume_session(self, session_id: str) -> str:
@@ -64,8 +64,6 @@ class EpisodicMemory:
         self._session_id = session_id
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / f"{self._session_id}.jsonl"
-        if not self._file.exists():
-            self._file.touch()
         return self._session_id
 
     def log(self, episode: Episode) -> None:
@@ -98,12 +96,6 @@ class EpisodicMemory:
         """Convenience wrapper around log()."""
         if not self._enabled or self._session_id is None:
             return
-        # Truncate tool content
-        if role == "tool_call":
-            content = content[:_MAX_TOOL_INPUT]
-        elif role == "tool_result":
-            content = content[:_MAX_TOOL_RESULT]
-
         self.log(
             Episode(
                 ts=datetime.now(timezone.utc).isoformat(),
@@ -161,13 +153,16 @@ class EpisodicMemory:
             except Exception:
                 continue
 
-            # Parse all episodes in this file for context lookups
+            # Parse all episodes in this file for context lookups.
+            # memory_read/memory_write are system events, not conversation turns.
             all_episodes: list[Episode] = []
             for line in lines:
                 if not line.strip():
                     continue
                 try:
-                    all_episodes.append(Episode(**json.loads(line)))
+                    ep = Episode(**json.loads(line))
+                    if ep.role not in ("memory_read", "memory_write"):
+                        all_episodes.append(ep)
                 except Exception:
                     continue
 
@@ -209,25 +204,33 @@ class EpisodicMemory:
 
         return matches
 
-    def get_episodes(self) -> list[Episode]:
-        """Return all episodes across all sessions, newest-first."""
-        if not self._dir.is_dir():
-            return []
-        result = []
-        for path in sorted(self._dir.glob("*.jsonl"), reverse=True):
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        result.append(Episode(**json.loads(line)))
-            except Exception:
-                continue
-        return result
+    def get_conversation(self) -> list[Episode]:
+        """Yield conversation episodes for the current session (excludes memory entries)."""
+        for ep in self.get_items():
+            if ep.role not in ["memory_write", "memory_read"]:
+                yield ep
 
-    def del_episode(self, session_id: str) -> bool:
-        path = self._dir / f"{session_id}.jsonl"
-        if not path.is_file():
+    def del_episode_entry(self, turn: int) -> bool:
+        """Remove all episode lines for *turn* from the current session file."""
+        if self._file is None or not self._file.is_file():
             return False
-        path.unlink()
+        kept = []
+        removed = 0
+        for line in self._file.read_text(encoding="utf-8").splitlines(keepends=True):
+            if not line.strip():
+                kept.append(line)
+                continue
+            try:
+                ep = Episode(**json.loads(line))
+                if ep.turn == turn:
+                    removed += 1
+                    continue
+            except Exception:
+                pass
+            kept.append(line)
+        if removed == 0:
+            return False
+        self._file.write_text("".join(kept), encoding="utf-8")
         return True
 
     def recall_formatted(
@@ -241,12 +244,54 @@ class EpisodicMemory:
             return f"No episodes found matching '{query}'."
         lines: list[str] = []
         for ep in episodes:
-            # Show more content for assistant/scratchpad responses
             max_len = (
-                2000 if ep.role in ("assistant", "scratchpad", "tool_result") else 500
+                2000 if ep.role in ("assistant", "scratchpad", "tool_result", "tool_call") else 500
             )
             lines.append(f"[{ep.ts}] ({ep.role}) {ep.content[:max_len]}")
         return "\n".join(lines)
+
+    def get_items(
+        self,
+    ) -> list[Episode]:
+        """Return episodes for a session filtered by role, deduplicated by content.
+
+        Used by /share export to collect the memory payload for a session.
+        """
+        if not self._dir.is_dir():
+            return []
+        path = self._dir / f"{self._session_id}.jsonl"
+        if not path.is_file():
+            return []
+        result: list[Episode] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    result.append(Episode(**json.loads(line)))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return result
+
+    def get_memory_usage(
+        self,
+    ) -> list[Episode]:
+        """Return episodes for a session filtered by role, deduplicated by content.
+
+        Used by /share export to collect the memory payload for a session.
+        """
+        seen: set[str] = set()
+        result: list[Episode] = []
+        for ep in self.get_items():
+            if ep.role not in ["memory_write", "memory_read"]:
+                continue
+            if ep.content in seen:
+                continue
+            seen.add(ep.content)
+            result.append(ep)
+        return result
 
     def session_count(self) -> int:
         """Count the number of session files."""

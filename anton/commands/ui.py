@@ -42,6 +42,7 @@ COMMANDS = [
     Command("/goal",      "Run a goal autonomously until complete (/goal \"objective\" [--turns N])"),
     Command("/paste",     "Attach an image from your clipboard"),
     Command("/resume",    "Continue a previous session"),
+    Command("/share",     "Share sessions: export / import / status / history"),
     Command("/remote",    "Set up or manage remote scratchpad"),
     Command("/publish",   "Publish an HTML report to the web"),
     Command("/unpublish", "Remove a published report"),
@@ -62,6 +63,14 @@ SKILLS_COMMANDS = [
     Command("/skill list"),
     Command("/skill show <label>"),
     Command("/skill remove <label>")
+]
+
+SHARE_COMMANDS = [
+    Command("/share export"),
+    Command("/share export --summary"),
+    Command("/share import"),
+    Command("/share status"),
+    Command("/share history"),
 ]
 
 

@@ -64,8 +64,9 @@ async def handle_resume(
     console.print()
 
     choices = [str(i) for i in range(1, len(sessions) + 1)] + ["q"]
+    choices_display = f"1-{len(sessions)}/q" if len(sessions) > 1 else "1/q"
     choice = await prompt_or_cancel(
-        "(anton) Select session (or q to cancel)", choices=choices, default="q"
+        "(anton) Select session (or q to cancel)", choices=choices, choices_display=choices_display, default="q"
     )
     if choice is None or choice == "q":
         console.print()
@@ -74,6 +75,24 @@ async def handle_resume(
     idx = int(choice) - 1
     selected = sessions[idx]
     sid = selected["session_id"]
+    return await restore_session(
+        sid, console, settings, state, self_awareness, cortex, workspace,
+        session, episodic, history_store
+    )
+
+
+async def restore_session(
+    sid: str,
+    console: Console,
+    settings: AntonSettings,
+    state: dict,
+    self_awareness,
+    cortex: "Cortex | None",
+    workspace: "Workspace | None",
+    session: "ChatSession",
+    episodic: "EpisodicMemory | None" = None,
+    history_store: "HistoryStore | None" = None,
+):
 
     history = history_store.load(sid)
     if history is None:
@@ -106,7 +125,7 @@ async def handle_resume(
 
     console.print()
     console.print(
-        f"[anton.success]Resumed session from {selected['date']} ({selected['turns']} turns)[/]"
+        f"[anton.success]Resumed session from {sid} ({new_session._turn_count} turns)[/]"
     )
     console.print()
 

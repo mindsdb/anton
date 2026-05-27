@@ -4,8 +4,9 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 import json
+import re
+from typing import TYPE_CHECKING, List
 import os
-from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -26,6 +27,7 @@ from anton.core.llm.provider import (
     StreamTextDelta,
     StreamToolResult,
     TokenLimitExceeded,
+    ToolCall,
 )
 from anton.core.llm.tracing import (
     TraceContext,
@@ -67,6 +69,19 @@ if TYPE_CHECKING:
     from anton.memory.history_store import HistoryStore
     from anton.workspace import Workspace
 
+
+def _extract_datasources(tool_call: ToolCall) -> List[str]:
+    """Return unique datasource slugs referenced in scratchpad code via DS_*__ env vars."""
+    if tool_call.name != "scratchpad":
+        return []
+    code = tool_call.input.get("code", "") if isinstance(tool_call.input, dict) else ""
+    if not code:
+        return []
+    seen = set()
+
+    for m in re.compile(r"\bDS_([A-Z0-9_]+?)__").finditer(code):
+        seen.add(m.group(1).lower())
+    return list(seen)
 
 @dataclass
 class ChatSessionConfig:
@@ -1482,7 +1497,17 @@ class ChatSession:
         self._persist_history()
         if self._cortex is not None and self._cortex.mode != "off":
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
-                asyncio.create_task(self._cortex.maybe_update_identity(user_input))
+                if self._episodic:
+                    user_messages =[
+                        ep.content
+                        for ep in self._episodic.get_conversation()
+                        if ep.role == "user"
+                    ]
+                    messages_str = "\n\n".join(user_messages[-5:])
+                else:
+                    messages_str = user_input
+
+                asyncio.create_task(self._cortex.maybe_update_identity(messages_str))
             # Periodic memory vacuum (Systems Consolidation)
             self._cortex.maybe_vacuum()
 
@@ -1633,8 +1658,9 @@ class ChatSession:
                         self._episodic.log_turn(
                             self._turn_count + 1,
                             "tool_call",
-                            str(tc.input)[:2000],
+                            str(tc.input),
                             tool=tc.name,
+                            datasources=_extract_datasources(tc)
                         )
 
                     # If the streamed tool-call arguments couldn't be
@@ -1731,7 +1757,7 @@ class ChatSession:
                                     self._episodic.log_turn(
                                         self._turn_count + 1,
                                         "scratchpad",
-                                        (cell.stdout or "")[:2000],
+                                        (cell.stdout or ""),
                                         description=description,
                                     )
                         elif tc.name == "connect_new_datasource" or (
@@ -1823,7 +1849,7 @@ class ChatSession:
                         self._episodic.log_turn(
                             self._turn_count + 1,
                             "tool_result",
-                            result_text[:2000],
+                            result_text,
                             tool=tc.name,
                         )
                     result_text = scrub_credentials(result_text)
