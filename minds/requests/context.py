@@ -266,7 +266,6 @@ class LangfuseContext(BaseModel):
     user_id: UUID = UUID("00000000-0000-0000-0000-000000000000")
     metadata: LangfuseContextMetadata = LangfuseContextMetadata()
     tags: list[Any] = []
-    trace_id: str | None = None
     session_id: str | None = None
     trace_name: str | None = None
     extra_metadata: dict[str, Any] = {}

@@ -66,7 +66,8 @@ async def chat_completions_request_handler(
 
     # Set up Langfuse observation
     setup_langfuse_observation(context=context)
-    request_id = get_langfuse_trace_id() or str(context.request_id)
+    langfuse_trace_id = get_langfuse_trace_id()
+    request_id = langfuse_trace_id or str(context.request_id)
 
     # Capture the @observe trace context so the handler can attach a child
     # generation carrying token usage from streaming code paths that run
@@ -105,7 +106,7 @@ async def chat_completions_request_handler(
         metadata=metadata,
         instrument=instrument,
         request_id=request_id,
-        langfuse_trace_id=get_langfuse_trace_id(),
+        langfuse_trace_id=langfuse_trace_id,
         langfuse_trace_context=langfuse_trace_context,
         tools=tools,
         tool_choice=tool_choice,

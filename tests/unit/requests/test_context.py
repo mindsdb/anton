@@ -450,7 +450,6 @@ class TestLangfuseContext:
         assert langfuse_context.metadata.user_id == UUID("00000000-0000-0000-0000-000000000000")
         assert langfuse_context.metadata.organization_id == UUID("00000000-0000-0000-0000-000000000000")
         assert langfuse_context.tags == []
-        assert langfuse_context.trace_id is None
 
     def test_langfuse_context_with_values(self):
         """Test LangfuseContext initialization with values."""
@@ -465,13 +464,11 @@ class TestLangfuseContext:
             user_id=UUID("00000000-0000-0000-0000-000000000001"),
             metadata=metadata,
             tags=["tag1", "tag2"],
-            trace_id="trace-123",
         )
 
         assert langfuse_context.user_id == UUID("00000000-0000-0000-0000-000000000001")
         assert langfuse_context.metadata == metadata
         assert langfuse_context.tags == ["tag1", "tag2"]
-        assert langfuse_context.trace_id == "trace-123"
 
 
 class TestCreateLangfuseContext:
@@ -500,7 +497,6 @@ class TestCreateLangfuseContext:
             f"request_id:{context.request_id}",
             "user@example.com",
         ]
-        assert langfuse_context.trace_id is None
 
     def test_create_langfuse_context_with_empty_context(self):
         """Test creating LangfuseContext from empty Context."""
