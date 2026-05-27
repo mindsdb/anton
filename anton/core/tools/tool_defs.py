@@ -1,5 +1,6 @@
 from anton.core.tools.tool_handlers import (
     handle_create_artifact,
+    handle_generate_artifact,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -348,6 +349,187 @@ LAUNCH_BACKEND_TOOL = ToolDef(
         "required": ["slug"],
     },
     handler=handle_launch_backend,
+)
+
+
+GENERATE_ARTIFACT_TOOL = ToolDef(
+    name="generate_artifact",
+    description=(
+        "Populate an already-registered artifact's folder via a dedicated "
+        "sub-generator. Use INSTEAD OF writing files yourself in the "
+        "scratchpad. Reads `type` from the artifact's metadata (must be "
+        "`html-app`, `fullstack-stateless-app`, or `fullstack-stateful-app`).\n\n"
+        "Inputs:\n"
+        "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
+        "- `context`: a markdown brief with these four sections:\n"
+        "  ## User request — the user's literal ask\n"
+        "  ## Conversation context — relevant decisions/history from this chat\n"
+        "  ## Functional Requirements Specification — what the system does from "
+        "the user's point of view: what the user sees on screen, how they "
+        "interact with it, and what result they get. MUST be technology-agnostic — "
+        "do NOT mention frameworks, libraries, endpoints, HTTP methods, env vars, "
+        "database engines, file paths, CSS colours, fonts, or any implementation "
+        "detail. Describe behaviour and user-visible outcomes, not how to build them. "
+        "For simple tasks a short plain-language description is enough.\n"
+        "  ## Data — describe ONLY the user-facing data: the source (what it is, "
+        "where it lives conceptually — e.g. \"PostgreSQL `integration` table\", "
+        "\"CoinGecko `/coins/markets` endpoint\"), the schema/columns with their "
+        "types, row counts, and any stable contextual facts that help frame the "
+        "data. Include only what is needed and only what is already known. "
+        "Include a `### Sample` subsection with a small sample of real rows "
+        "(2–5 rows, or a representative excerpt for non-tabular data) — but "
+        "ONLY if you have actually observed the sample earlier (queried the "
+        "DB, fetched the API, loaded the file). Do NOT fabricate a sample, "
+        "and do NOT include the subsection at all when no sample exists yet. "
+        "Overlap with `data_refs` is intentional — the inline sample makes the "
+        "brief self-contained and human-readable; `data_refs` separately gives "
+        "the generator a raw pickle. DO NOT include env var names, connection "
+        "strings, credentials, API endpoint paths the generator must implement, "
+        "backend file layout, or any other implementation detail — those "
+        "belong in the generator's own planning step, not in this brief.\n"
+        "- `data_refs`: scratchpad variables that hold the actual data "
+        "(DataFrame, list, dict, fetched JSON, etc.) as "
+        "`[{\"scratchpad\": \"<name>\", \"variable\": \"<py_identifier>\"}]`. "
+        "Each variable is dill-pickled into a sidecar file the generator can "
+        "load at write time, AND a short type-aware summary (shape, dtypes, "
+        "head(5) for DataFrames; key list for dicts; first items for lists) is "
+        "embedded into the generator's prompt automatically. REQUIRED whenever "
+        "you have inspected the user's data in a scratchpad (queried the DB, "
+        "fetched an API sample, loaded a file): pass the variable holding the "
+        "sample/dataframe so the generator sees the real shape instead of just "
+        "your textual description. Only pass `[]` when no concrete data has "
+        "been observed yet.\n\n"
+        "Returns `{slug, path, files_written, rounds_used, summary}` on success "
+        "or a plain error string on failure. The tool DOES NOT call "
+        "`launch_backend` — for `fullstack-stateful-app`, you still call it "
+        "yourself after this returns."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Slug of an already-registered artifact.",
+            },
+            "context": {
+                "type": "string",
+                "description": (
+                    "Markdown brief with sections `## User request`, "
+                    "`## Conversation context`, "
+                    "`## Functional Requirements Specification`, `## Data`. "
+                    "The FRS section MUST describe behaviour from the user's "
+                    "point of view (what they see, how they interact, what "
+                    "result they get) and MUST NOT mention technologies, "
+                    "frameworks, endpoints, env vars, file paths, colours, "
+                    "or any implementation detail. "
+                    "The `## Data` section MUST contain only user-data info "
+                    "(source, schema, types, row counts) — NO env var names, "
+                    "connection details, API endpoint paths, or backend layout. "
+                    "Include a `### Sample` subsection with 2–5 real rows ONLY "
+                    "if you have actually observed the sample earlier; omit the "
+                    "subsection entirely otherwise (never fabricate it). "
+                    "Passed verbatim to the sub-generator."
+                ),
+            },
+            "data_refs": {
+                "type": "array",
+                "description": (
+                    "Scratchpad variables holding observed data (samples, "
+                    "dataframes, fetched JSON, etc.) for the generator to "
+                    "consume. Each item: {scratchpad: <pad name>, variable: "
+                    "<python identifier>}. REQUIRED whenever you have inspected "
+                    "the user's data in a scratchpad — pass the variable so the "
+                    "generator sees real shape, not just your description. Pass "
+                    "`[]` only when no concrete data has been observed."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "scratchpad": {"type": "string"},
+                        "variable": {"type": "string"},
+                    },
+                    "required": ["scratchpad", "variable"],
+                },
+            },
+        },
+        "required": ["slug", "context"],
+    },
+    handler=handle_generate_artifact,
+    prompt=(
+        "ARTIFACT GENERATION GATE (experimental):\n"
+        "You have access to `generate_artifact`, which produces every file "
+        "for an already-registered artifact in a single tool call (it runs "
+        "a dedicated sub-generator internally). ONLY use this tool when the "
+        "user's latest message contains the literal marker string `XTESTX`. "
+        "In that case:\n"
+        "  1. Call `create_artifact` as usual to register the slug and pick "
+        "the type (one of html-app, fullstack-stateless-app, "
+        "fullstack-stateful-app).\n"
+        "  2. Instead of writing files yourself in the scratchpad, call\n"
+        "     `generate_artifact(slug=<slug>, context=<markdown brief>, "
+        "data_refs=[...])`.\n"
+        "     - `context` MUST be a markdown document with these four sections:\n"
+        "         ## User request\n"
+        "         ## Conversation context\n"
+        "         ## Functional Requirements Specification\n"
+        "         ## Data\n"
+        "       For `## Functional Requirements Specification`: describe ONLY "
+        "user-facing behaviour:\n"
+        "         • what the user sees on screen (content, structure, states),\n"
+        "         • how the user interacts with it (clicks, inputs, navigation),\n"
+        "         • what result the user gets in response (output, feedback, "
+        "error states).\n"
+        "       DO NOT mention any of the following in this section:\n"
+        "         • technologies, frameworks, or libraries (FastAPI, ECharts, "
+        "psycopg2, React, etc.),\n"
+        "         • system architecture, file layout, or module boundaries,\n"
+        "         • API endpoints, HTTP methods, request/response shapes, "
+        "or status codes,\n"
+        "         • database engines, table/column names, SQL, ORM details,\n"
+        "         • environment variables, secrets, config keys,\n"
+        "         • CSS colours, fonts, exact pixel sizes, or other styling "
+        "internals (general phrases like \"dark theme\" or \"responsive\" are fine),\n"
+        "         • any other implementation detail or technical constraint.\n"
+        "       Use plain language a non-technical user would understand. Names "
+        "of real-world entities the user knows about (e.g. \"companies\", "
+        "\"integrations\") are fine; internal column names and engine slugs "
+        "belong in `## Data`, not here. For simple tasks a short plain "
+        "description is enough.\n"
+        "       For `## Data`: describe ONLY the user-facing data — the source "
+        "(what it is conceptually, e.g. \"PostgreSQL `integration` table\"), the "
+        "schema/columns with types, row counts, and stable contextual facts. "
+        "Include only what is needed and only what is already known. Add a "
+        "`### Sample` subsection with 2–5 real rows (or a representative "
+        "excerpt for non-tabular data) ONLY if you have actually observed the "
+        "sample earlier (queried the DB, fetched the API, loaded the file). "
+        "Never fabricate a sample, and omit the subsection entirely when no "
+        "sample exists yet. Overlap with `data_refs` is intentional — the "
+        "inline sample keeps the brief self-contained and human-readable; "
+        "`data_refs` separately gives the generator the raw pickle. DO NOT "
+        "mention in this section:\n"
+        "         • env var names (DS_POSTGRES_*, API_KEY, etc.) or any "
+        "credentials/connection strings,\n"
+        "         • API endpoint paths the generator must implement "
+        "(`GET /api/...`),\n"
+        "         • backend file layout, modules, or implementation details.\n"
+        "       Those are the generator's job to design — not yours to dictate.\n"
+        "     - `data_refs` lists scratchpad variables the generator should "
+        "consume, e.g.\n"
+        "         [{\"scratchpad\": \"prices\", \"variable\": \"btc_df\"}]\n"
+        "       If you have inspected the user's data in a scratchpad to learn "
+        "the schema or get a sample (queried the DB, fetched an API, loaded a "
+        "file), you MUST pass the variable holding that sample/dataframe here. "
+        "The generator dill-loads it AND receives an auto-built textual "
+        "summary (shape, dtypes, head(5) for DataFrames; key list for dicts; "
+        "first items for lists) in its prompt — far more reliable than your "
+        "textual recap. Pass `[]` only when no concrete data has been observed "
+        "yet.\n"
+        "  3. For `fullstack-stateful-app`, after `generate_artifact` returns "
+        "you MUST still call `launch_backend(slug=...)` exactly as today.\n"
+        "When the user's latest message does NOT contain `XTESTX`, IGNORE this "
+        "tool entirely and build artifacts the conventional way (register, "
+        "then write files via the scratchpad)."
+    ),
 )
 
 

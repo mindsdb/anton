@@ -252,6 +252,84 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     )
 
 
+async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> str:
+    """Generate every file for an already-registered artifact via a sub-LLM.
+
+    Stage 1 (XTESTX-gated): the outer agent calls this only when the user's
+    message contains the literal marker `XTESTX`. The handler:
+      1. Loads artifact metadata to read its `type` (rejects types outside
+         the {html-app, fullstack-stateless-app, fullstack-stateful-app}).
+      2. Validates input shape (context required, data_refs are
+         {scratchpad, variable} dicts).
+      3. Hands off to `anton.core.tools.generate_artifact.generate`, which
+         runs an inner tool-call loop against `session._llm.code` and writes
+         files into the artifact folder.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        return "Error: `slug` is required."
+    artifact = store.open(slug)
+    if artifact is None:
+        return f"Error: no artifact found for slug `{slug}`."
+
+    supported = {"html-app", "fullstack-stateless-app", "fullstack-stateful-app"}
+    if artifact.type not in supported:
+        return (
+            "Error: generate_artifact only supports html-app / "
+            "fullstack-stateless-app / fullstack-stateful-app. "
+            f"Got: {artifact.type}."
+        )
+
+    context = tc_input.get("context")
+    if not isinstance(context, str) or not context.strip():
+        return "Error: `context` is required (markdown brief)."
+
+    raw_refs = tc_input.get("data_refs") or []
+    if not isinstance(raw_refs, list):
+        return "Error: `data_refs` must be a list."
+    refs: list[dict] = []
+    for item in raw_refs:
+        if not isinstance(item, dict):
+            return "Error: each data_ref must be {scratchpad: str, variable: str}."
+        scratchpad = item.get("scratchpad")
+        variable = item.get("variable")
+        if not isinstance(scratchpad, str) or not isinstance(variable, str):
+            return "Error: each data_ref must have string `scratchpad` and `variable`."
+        scratchpad = scratchpad.strip()
+        variable = variable.strip()
+        if not scratchpad or not variable:
+            return "Error: each data_ref must have non-empty `scratchpad` and `variable`."
+        refs.append({"scratchpad": scratchpad, "variable": variable})
+
+    folder = store.folder_for(slug)
+    from anton.core.tools.generate_artifact import generate
+
+    try:
+        result = await generate(
+            session=session,
+            artifact_type=artifact.type,
+            artifact_path=folder,
+            context=context,
+            data_refs=refs,
+        )
+    except Exception as exc:  # last-resort: never escalate to the dispatcher
+        return f"Error: generator failed: {exc}"
+
+    if isinstance(result, str):
+        return result
+
+    return json.dumps(
+        {"slug": slug, "path": str(folder), **result},
+        indent=2,
+    )
+
+
 async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
     """List every artifact in the workspace, newest first.
 
