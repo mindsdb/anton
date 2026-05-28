@@ -21,8 +21,11 @@ from fastapi import Request
 
 from minds.common.constants import (
     HEADER_LANGFUSE_METADATA,
+    HEADER_LANGFUSE_PARENT_OBSERVATION_ID,
     HEADER_LANGFUSE_SESSION_ID,
     HEADER_LANGFUSE_TAGS,
+    HEADER_LANGFUSE_TRACE_ID,
+    HEADER_LANGFUSE_TRACE_INPUT,
     HEADER_ORGANIZATION_ID,
     HEADER_USER_EMAIL,
     HEADER_USER_ID,
@@ -97,6 +100,99 @@ class TestExtractLangfuseHeaders:
     def test_session_id_whitespace_only_is_none(self):
         ctx = extract_context_from_request(_request_with_headers({HEADER_LANGFUSE_SESSION_ID: "   "}))
         assert ctx.langfuse_session_id is None
+
+
+# ---------------------------------------------------------------------------
+# Distributed-trace propagation headers (Langfuse-Trace-Id /
+# Langfuse-Parent-Observation-Id). These adopt an upstream caller's trace so
+# this service's spans co-locate on it. Validation is strict (Langfuse only
+# accepts 32/16 lowercase-hex ids) and degrades to "start a fresh trace" on
+# anything malformed.
+# ---------------------------------------------------------------------------
+
+_VALID_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"  # 32 hex
+_VALID_OBS_ID = "b7ad6b7169203331"  # 16 hex
+
+
+class TestExtractTracePropagationHeaders:
+    def test_absent_headers_default_to_none(self):
+        ctx = extract_context_from_request(_request_with_headers({}))
+        assert ctx.langfuse_trace_id is None
+        assert ctx.langfuse_parent_observation_id is None
+
+    def test_valid_trace_id_and_parent(self):
+        ctx = extract_context_from_request(
+            _request_with_headers(
+                {
+                    HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID,
+                    HEADER_LANGFUSE_PARENT_OBSERVATION_ID: _VALID_OBS_ID,
+                }
+            )
+        )
+        assert ctx.langfuse_trace_id == _VALID_TRACE_ID
+        assert ctx.langfuse_parent_observation_id == _VALID_OBS_ID
+
+    def test_trace_id_alone_is_kept(self):
+        ctx = extract_context_from_request(_request_with_headers({HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID}))
+        assert ctx.langfuse_trace_id == _VALID_TRACE_ID
+        assert ctx.langfuse_parent_observation_id is None
+
+    def test_uppercase_hex_is_lowercased(self):
+        ctx = extract_context_from_request(
+            _request_with_headers(
+                {
+                    HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID.upper(),
+                    HEADER_LANGFUSE_PARENT_OBSERVATION_ID: _VALID_OBS_ID.upper(),
+                }
+            )
+        )
+        assert ctx.langfuse_trace_id == _VALID_TRACE_ID
+        assert ctx.langfuse_parent_observation_id == _VALID_OBS_ID
+
+    def test_malformed_trace_id_is_ignored(self):
+        # Wrong length / non-hex → dropped, request starts its own trace.
+        ctx = extract_context_from_request(_request_with_headers({HEADER_LANGFUSE_TRACE_ID: "not-a-trace-id"}))
+        assert ctx.langfuse_trace_id is None
+
+    def test_malformed_parent_is_ignored_but_trace_kept(self):
+        ctx = extract_context_from_request(
+            _request_with_headers(
+                {
+                    HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID,
+                    HEADER_LANGFUSE_PARENT_OBSERVATION_ID: "xyz",
+                }
+            )
+        )
+        assert ctx.langfuse_trace_id == _VALID_TRACE_ID
+        assert ctx.langfuse_parent_observation_id is None
+
+    def test_parent_without_valid_trace_is_dropped(self):
+        # Can't nest into a trace we don't know about.
+        ctx = extract_context_from_request(
+            _request_with_headers({HEADER_LANGFUSE_PARENT_OBSERVATION_ID: _VALID_OBS_ID})
+        )
+        assert ctx.langfuse_trace_id is None
+        assert ctx.langfuse_parent_observation_id is None
+
+    def test_trace_input_kept_with_valid_trace_id(self):
+        ctx = extract_context_from_request(
+            _request_with_headers(
+                {
+                    HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID,
+                    HEADER_LANGFUSE_TRACE_INPUT: "what were Q3 sales?",
+                }
+            )
+        )
+        assert ctx.langfuse_trace_input == "what were Q3 sales?"
+
+    def test_trace_input_dropped_without_trace_id(self):
+        # Trace-level input is meaningless on a request that owns its own trace.
+        ctx = extract_context_from_request(_request_with_headers({HEADER_LANGFUSE_TRACE_INPUT: "orphan input"}))
+        assert ctx.langfuse_trace_input is None
+
+    def test_trace_input_absent_is_none(self):
+        ctx = extract_context_from_request(_request_with_headers({HEADER_LANGFUSE_TRACE_ID: _VALID_TRACE_ID}))
+        assert ctx.langfuse_trace_input is None
 
 
 # ---------------------------------------------------------------------------

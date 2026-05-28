@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
@@ -6,9 +7,12 @@ import pytest
 from minds.requests.context import Context, LangfuseContext, LangfuseContextMetadata
 from minds.requests.langfuse_tracing import (
     capture_langfuse_generation_context,
+    lazy_observe,
     setup_langfuse_observation,
     update_generation_usage,
 )
+
+_VALID_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
 
 
 @pytest.fixture()
@@ -249,6 +253,74 @@ class TestSetupLangfuseObservation:
         mock_logger.error.assert_called_once_with("Failed to retrieve trace ID from Langfuse context.")
 
 
+class TestSetupLangfuseObservationTraceAdoption:
+    """The trace display name must only be set when this request owns the
+    trace — when we've adopted an upstream caller's trace (Langfuse-Trace-Id
+    present) renaming it would clobber the owner's trace name."""
+
+    def _client_capturing_trace_update(self, captured: dict):
+        client = type("MockClient", (), {})()
+        client.update_current_trace = lambda **kwargs: captured.update(kwargs)
+        client.get_current_trace_id = lambda: "trace-id"
+        return client
+
+    @patch("minds.requests.langfuse_tracing.create_langfuse_context")
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_name_set_when_request_owns_trace(self, mock_get_client, mock_create_langfuse_context, context):
+        captured: dict = {}
+        mock_create_langfuse_context.return_value = LangfuseContext(trace_name="cowork:turn-1")
+        mock_get_client.return_value = self._client_capturing_trace_update(captured)
+
+        # context fixture has no langfuse_trace_id → this request owns the trace.
+        setup_langfuse_observation(context)
+
+        assert captured.get("name") == "cowork:turn-1"
+
+    @patch("minds.requests.langfuse_tracing.create_langfuse_context")
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_name_suppressed_when_adopting_upstream_trace(self, mock_get_client, mock_create_langfuse_context):
+        captured: dict = {}
+        mock_create_langfuse_context.return_value = LangfuseContext(trace_name="cowork:turn-1")
+        mock_get_client.return_value = self._client_capturing_trace_update(captured)
+
+        adopting_context = Context(
+            user_id=UUID("00000000-0000-0000-0000-000000000001"),
+            organization_id=UUID("00000000-0000-0000-0000-000000000002"),
+            langfuse_trace_id=_VALID_TRACE_ID,
+        )
+        setup_langfuse_observation(adopting_context)
+
+        assert "name" not in captured
+
+
+class TestLazyObserveTracePropagation:
+    """The reserved langfuse call-time kwargs must not leak to the wrapped
+    function when langfuse isn't installed (only langfuse's own observe
+    wrapper pops them)."""
+
+    async def test_strips_reserved_kwargs_when_langfuse_unavailable(self):
+        received: dict = {}
+
+        @lazy_observe(name="x", as_type="generation")
+        async def fn(value, **kwargs):
+            received.update(kwargs)
+            return value
+
+        # Forcing ``langfuse`` to None makes ``from langfuse import observe``
+        # raise ImportError, exercising the no-op fallback path.
+        with patch.dict(sys.modules, {"langfuse": None}):
+            result = await fn(
+                42,
+                langfuse_trace_id="t",
+                langfuse_parent_observation_id="p",
+                langfuse_public_key="k",
+                keep="me",
+            )
+
+        assert result == 42
+        assert received == {"keep": "me"}
+
+
 class TestUpdateGenerationUsage:
     """Test cases for update_generation_usage helper."""
 
@@ -376,6 +448,66 @@ class TestUpdateGenerationUsage:
         )
 
         assert client.start_observation.call_args.kwargs["metadata"] == meta
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_stamps_trace_io_in_scope(self, mock_get_client):
+        """Whole-turn evals: in-scope mode sets trace input/output on the current trace."""
+        client = MagicMock()
+        mock_get_client.return_value = client
+
+        update_generation_usage(
+            (1, 2),
+            model="m",
+            trace_input="what were Q3 sales?",
+            trace_output={"role": "assistant", "content": "Up 12%."},
+        )
+
+        client.update_current_trace.assert_called_once_with(
+            input="what were Q3 sales?",
+            output={"role": "assistant", "content": "Up 12%."},
+        )
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_stamps_trace_io_detached_via_same_observation(self, mock_get_client):
+        """Detached mode reuses the usage observation to carry trace I/O — no extra span."""
+        client = MagicMock()
+        observation = MagicMock()
+        client.start_observation.return_value = observation
+        mock_get_client.return_value = client
+
+        update_generation_usage(
+            (1, 2),
+            model="m",
+            trace_context={"trace_id": "t", "parent_span_id": "p"},
+            trace_input="ask",
+            trace_output="answer",
+        )
+
+        # Trace I/O is stamped on the same observation, then it's ended.
+        observation.update_trace.assert_called_once_with(input="ask", output="answer")
+        observation.end.assert_called_once()
+        # No second span was created just to carry trace attributes.
+        client.start_observation.assert_called_once()
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_skips_trace_io_when_not_provided(self, mock_get_client):
+        """Requests that own their trace (no trace_input/trace_output) leave trace I/O untouched."""
+        client = MagicMock()
+        mock_get_client.return_value = client
+
+        update_generation_usage((1, 2), model="m")
+
+        client.update_current_trace.assert_not_called()
+
+    @patch("minds.requests.langfuse_tracing.get_client")
+    def test_stamps_only_provided_trace_field(self, mock_get_client):
+        """Only the supplied trace field is written (input here, no output key)."""
+        client = MagicMock()
+        mock_get_client.return_value = client
+
+        update_generation_usage((1, 2), model="m", trace_input="just input")
+
+        client.update_current_trace.assert_called_once_with(input="just input")
 
     @patch("minds.requests.langfuse_tracing.get_client")
     def test_handles_zero_token_counts(self, mock_get_client):

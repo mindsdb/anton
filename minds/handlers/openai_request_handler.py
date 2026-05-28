@@ -17,7 +17,6 @@ from minds.model.mind_datasource import DataCatalogStatus
 from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
 from minds.requests.context import Context
 from minds.requests.langfuse_tracing import (
-    capture_langfuse_generation_context,
     record_tool_call_spans,
     update_generation_usage,
 )
@@ -261,6 +260,16 @@ class OpenAIRequestHandler:
         if extra_metadata:
             metadata = {**(metadata or {}), **extra_metadata}
 
+        # Whole-turn eval support: only when the caller adopted an upstream trace
+        # (Langfuse-Trace-Id present) do we stamp trace-level I/O. The trace input
+        # is the caller-supplied turn input (idempotent across the turn's calls);
+        # the trace output is this call's output (last call of the turn wins, so
+        # the final answer ends up as the trace output). For requests that own
+        # their trace we leave trace I/O untouched (unchanged behaviour).
+        adopting_upstream_trace = bool(self.context.langfuse_trace_id)
+        trace_input = self.context.langfuse_trace_input if adopting_upstream_trace else None
+        trace_output = output_payload if adopting_upstream_trace else None
+
         update_generation_usage(
             usage=usage,
             model=model_for_langfuse,
@@ -268,6 +277,8 @@ class OpenAIRequestHandler:
             metadata=metadata,
             input=input_payload,
             output=output_payload,
+            trace_input=trace_input,
+            trace_output=trace_output,
         )
 
         if tool_calls_for_spans:
@@ -333,11 +344,12 @@ class OpenAIRequestHandler:
             # Wrap the streaming body to save usage after the last chunk.
             original_body = response.body_iterator
 
-            # Capture the @observe trace context NOW, while we are still
-            # synchronously inside chat_completions_request_handler. The body
-            # iterator below runs from the ASGI server *after* this method
-            # returns, by which point the @observe span has closed.
-            captured_ctx = self.langfuse_trace_context or capture_langfuse_generation_context()
+            # The trace context was already captured at the top of
+            # chat_completions_request_handler (the only caller of this method)
+            # while inside the @observe scope, and threaded in here. The body
+            # iterator below runs from the ASGI server *after* that scope has
+            # closed, so it relies on this captured value.
+            captured_ctx = self.langfuse_trace_context
 
             async def _wrapped_body():
                 async for chunk in original_body:
@@ -468,11 +480,17 @@ class OpenAIRequestHandler:
         # path. Streaming runs from the producer task — outside the @observe
         # scope — so we pass the captured trace context. Non-streaming uses
         # in-scope mode (None) and updates the current generation directly.
+        # When the caller adopted an upstream trace, also stamp trace-level I/O
+        # for whole-turn evals (see _save_usage for the rationale).
+        adopting_upstream_trace = bool(self.context.langfuse_trace_id)
+        answer = response.answer if response is not None else None
         update_generation_usage(
             usage=usage,
             model=self.model,
             trace_context=self.langfuse_trace_context if self.stream else None,
-            output=response.answer if response is not None else None,
+            output=answer,
+            trace_input=self.context.langfuse_trace_input if adopting_upstream_trace else None,
+            trace_output=answer if adopting_upstream_trace else None,
         )
 
 
