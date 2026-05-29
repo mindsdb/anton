@@ -9,6 +9,29 @@ if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
 
 
+def _resolve_openai_compatible_flavor(settings: AntonSettings) -> str:
+    """Distinguish mdb.ai passthrough from a generic openai-compatible endpoint.
+
+    The "Minds-Enterprise-Cloud" setup path writes ``openai_base_url =
+    f"{minds_url.rstrip('/')}/api/v1"`` and ``openai_api_key = minds_api_key``
+    (see ``AntonSettings.model_post_init``). When that exact pairing matches
+    the user's current settings, the OpenAI provider is talking to mdb.ai and
+    can therefore use the chat.completions native web tool passthrough. Any
+    other base URL is a generic third-party endpoint that needs the
+    handler-dispatched fallback at the session layer.
+
+    No new env var is introduced — we infer flavor purely from the existing
+    config the setup flow already produces.
+    """
+    from .openai import OpenAIProvider
+
+    base = (getattr(settings, "openai_base_url", None) or "").rstrip("/").lower()
+    minds = (getattr(settings, "minds_url", None) or "").rstrip("/").lower()
+    if minds and (base == minds or base == f"{minds}/api/v1"):
+        return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+    return OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
+
+
 class LLMClient:
     def __init__(
         self,
@@ -32,6 +55,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         return await self._planning_provider.complete(
             model=self._planning_model,
@@ -39,6 +63,7 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            native_web_tools=native_web_tools,
         )
 
     async def plan_stream(
@@ -48,6 +73,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         async for event in self._planning_provider.stream(
             model=self._planning_model,
@@ -55,8 +81,14 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            native_web_tools=native_web_tools,
         ):
             yield event
+
+    @property
+    def planning_provider(self) -> LLMProvider:
+        """The LLM provider used for planning / the user-facing turn loop."""
+        return self._planning_provider
 
     @property
     def coding_provider(self) -> LLMProvider:
@@ -75,6 +107,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         return await self._coding_provider.complete(
             model=self._coding_model,
@@ -82,6 +115,7 @@ class LLMClient:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
+            native_web_tools=native_web_tools,
         )
 
     async def _generate_object_with(
@@ -219,6 +253,7 @@ class LLMClient:
         from .openai import OpenAIProvider
 
         api_version = getattr(settings, "openai_api_version", None)
+        compatible_flavor = _resolve_openai_compatible_flavor(settings)
         providers = {
             "anthropic": lambda: AnthropicProvider(api_key=settings.anthropic_api_key),
             "openai": lambda: OpenAIProvider(
@@ -226,6 +261,7 @@ class LLMClient:
                 base_url=settings.openai_base_url,
                 ssl_verify=settings.minds_ssl_verify,
                 api_version=api_version,
+                flavor=OpenAIProvider.FLAVOR_OPENAI,
             ),
             "openai-compatible": lambda: OpenAIProvider(
                 api_key=settings.openai_api_key,
@@ -234,6 +270,7 @@ class LLMClient:
                 api_version=api_version,
                 supports_vision=True,
                 vision_format="anthropic",
+                flavor=compatible_flavor,
             ),
         }
 

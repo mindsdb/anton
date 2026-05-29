@@ -1147,6 +1147,7 @@ async def _chat_loop(
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
         runtime_factory=get_runtime_factory(settings),
+        settings=settings,
         self_awareness=self_awareness,
         cortex=cortex,
         episodic=episodic,
@@ -1168,6 +1169,8 @@ async def _chat_loop(
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,
         tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
+        web_search_enabled=settings.web_search_enabled,
+        web_fetch_enabled=settings.web_fetch_enabled,
     ))
 
     # Handle --resume flag at startup
