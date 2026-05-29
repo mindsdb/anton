@@ -319,3 +319,288 @@ class TestAzureOpenAIProvider:
             assert result.usage.input_tokens == 8
             assert result.usage.output_tokens == 12
             mock_azure_client.chat.completions.create.assert_awaited_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Flavor split — minds-passthrough native tools, Responses API for BYOK OpenAI
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestNativeWebToolsByFlavor:
+    def test_generic_flavor_advertises_no_native_tools(self):
+        with patch("anton.core.llm.openai.openai"):
+            provider = OpenAIProvider(
+                api_key="k",
+                flavor=OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC,
+            )
+        assert provider.native_web_tools() == set()
+
+    def test_minds_passthrough_advertises_search_and_fetch(self):
+        with patch("anton.core.llm.openai.openai"):
+            provider = OpenAIProvider(
+                api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+            )
+        assert provider.native_web_tools() == {"web_search", "web_fetch"}
+
+    def test_openai_flavor_advertises_search_and_fetch(self):
+        with patch("anton.core.llm.openai.openai"):
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+        assert provider.native_web_tools() == {"web_search", "web_fetch"}
+
+
+class TestMindsPassthroughTools:
+    """The mdb.ai passthrough must accept ``{"type": "web_search"}`` /
+    ``{"type": "fetch"}`` raw — they cannot be routed through
+    ``_translate_tools`` because they have no ``name``/``input_schema`` keys.
+    """
+
+    async def test_appends_web_search_raw(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_make_mock_response()
+            )
+
+            provider = OpenAIProvider(
+                api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+            )
+            await provider.complete(
+                model="_reason_",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[{"name": "scratchpad", "description": "x", "input_schema": {}}],
+                native_web_tools={"web_search"},
+            )
+
+            kwargs = mock_client.chat.completions.create.call_args.kwargs
+            tools = kwargs["tools"]
+            # Existing function tool was translated to chat.completions shape
+            assert any(
+                t.get("type") == "function" and t["function"]["name"] == "scratchpad"
+                for t in tools
+            )
+            # Native server-tool entry is appended raw — exact shape mdb.ai expects.
+            assert {"type": "web_search"} in tools
+
+    async def test_appends_fetch_raw(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_make_mock_response()
+            )
+
+            provider = OpenAIProvider(
+                api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+            )
+            await provider.complete(
+                model="_reason_",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                native_web_tools={"web_fetch"},
+            )
+
+            kwargs = mock_client.chat.completions.create.call_args.kwargs
+            assert {"type": "fetch"} in kwargs["tools"]
+
+    async def test_generic_flavor_does_not_inject_native_tools(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_make_mock_response()
+            )
+
+            provider = OpenAIProvider(
+                api_key="k",
+                flavor=OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC,
+            )
+            await provider.complete(
+                model="some-model",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                native_web_tools={"web_search", "web_fetch"},
+            )
+
+            kwargs = mock_client.chat.completions.create.call_args.kwargs
+            # Generic flavor never appends native entries — even when the caller
+            # passed them. The session is responsible for falling back to
+            # handler-dispatched ToolDefs in that case.
+            assert "tools" not in kwargs
+
+
+class TestOpenAIBYOKResponsesAPIPath:
+    """``flavor="openai"`` routes every call through ``client.responses.create``
+    rather than ``chat.completions.create``."""
+
+    async def test_complete_uses_responses_create(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+
+            # Build a response object that mimics Responses API output.
+            response = MagicMock()
+            content_block = MagicMock()
+            content_block.type = "output_text"
+            content_block.text = "Hello from Responses API"
+            message_item = MagicMock()
+            message_item.type = "message"
+            message_item.content = [content_block]
+            response.output = [message_item]
+            response.status = "completed"
+            response.usage = MagicMock(input_tokens=42, output_tokens=18)
+            mock_client.responses.create = AsyncMock(return_value=response)
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+            result = await provider.complete(
+                model="gpt-5",
+                system="be helpful",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+            mock_client.responses.create.assert_awaited_once()
+            # chat.completions must NOT have been touched
+            mock_client.chat.completions.create.assert_not_called()
+            assert result.content == "Hello from Responses API"
+            assert result.usage.input_tokens == 42
+            assert result.usage.output_tokens == 18
+
+    async def test_complete_passes_instructions_and_input_shape(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+
+            response = MagicMock()
+            response.output = []
+            response.status = "completed"
+            response.usage = MagicMock(input_tokens=1, output_tokens=1)
+            mock_client.responses.create = AsyncMock(return_value=response)
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+            await provider.complete(
+                model="gpt-5",
+                system="custom system",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+            kwargs = mock_client.responses.create.call_args.kwargs
+            # System prompt goes via instructions, not as a message item.
+            assert kwargs["instructions"] == "custom system"
+            assert kwargs["model"] == "gpt-5"
+            # Input items are message-shaped
+            assert kwargs["input"] == [
+                {"role": "user", "content": "hello", "type": "message"}
+            ]
+            # max_output_tokens is the Responses API field name
+            assert "max_output_tokens" in kwargs
+
+    async def test_complete_appends_web_search_native_tool(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+
+            response = MagicMock()
+            response.output = []
+            response.status = "completed"
+            response.usage = MagicMock(input_tokens=1, output_tokens=1)
+            mock_client.responses.create = AsyncMock(return_value=response)
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+            await provider.complete(
+                model="gpt-5",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[{"name": "scratchpad", "description": "x", "input_schema": {}}],
+                native_web_tools={"web_search"},
+            )
+
+            kwargs = mock_client.responses.create.call_args.kwargs
+            tools = kwargs["tools"]
+            # Function tools use the FLAT Responses API shape — not nested under
+            # a "function" key like chat.completions.
+            assert any(
+                t.get("type") == "function" and t.get("name") == "scratchpad"
+                for t in tools
+            )
+            assert {"type": "web_search"} in tools
+
+    async def test_complete_translates_function_call_output(self):
+        """Responses API returns function calls as output items with call_id."""
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+
+            fc_item = MagicMock()
+            fc_item.type = "function_call"
+            fc_item.call_id = "call_xyz"
+            fc_item.name = "do_thing"
+            fc_item.arguments = json.dumps({"foo": 42})
+
+            response = MagicMock()
+            response.output = [fc_item]
+            response.status = "completed"
+            response.usage = MagicMock(input_tokens=1, output_tokens=1)
+            mock_client.responses.create = AsyncMock(return_value=response)
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+            result = await provider.complete(
+                model="gpt-5",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[{"name": "do_thing", "description": "x", "input_schema": {}}],
+            )
+
+            assert len(result.tool_calls) == 1
+            assert result.tool_calls[0].id == "call_xyz"
+            assert result.tool_calls[0].name == "do_thing"
+            assert result.tool_calls[0].input == {"foo": 42}
+
+
+class TestOpenAICompatibleFlavorResolution:
+    """``LLMClient.from_settings`` resolves openai-compatible into either
+    minds-passthrough or generic based on the ``openai_base_url`` matching
+    the user's configured ``minds_url``."""
+
+    def test_resolves_to_minds_passthrough_when_base_url_matches(self):
+        with patch("anton.core.llm.openai.openai"):
+            settings = AntonSettings(
+                planning_provider="openai-compatible",
+                coding_provider="openai-compatible",
+                planning_model="_reason_",
+                coding_model="_code_",
+                openai_api_key="mdb-key",
+                openai_base_url="https://mdb.ai/api/v1",
+                minds_url="https://mdb.ai",
+                _env_file=None,
+            )
+            client = LLMClient.from_settings(settings)
+            assert client._planning_provider._flavor == OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+
+    def test_resolves_to_generic_when_base_url_is_third_party(self):
+        with patch("anton.core.llm.openai.openai"):
+            settings = AntonSettings(
+                planning_provider="openai-compatible",
+                coding_provider="openai-compatible",
+                planning_model="my-model",
+                coding_model="my-model",
+                openai_api_key="k",
+                openai_base_url="https://api.openrouter.ai/v1",
+                minds_url="https://mdb.ai",
+                _env_file=None,
+            )
+            client = LLMClient.from_settings(settings)
+            assert client._planning_provider._flavor == OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
+
+    def test_byok_openai_uses_openai_flavor(self):
+        with patch("anton.core.llm.openai.openai"):
+            settings = AntonSettings(
+                planning_provider="openai",
+                coding_provider="openai",
+                planning_model="gpt-5",
+                coding_model="gpt-5",
+                openai_api_key="sk-test",
+                _env_file=None,
+            )
+            client = LLMClient.from_settings(settings)
+            assert client._planning_provider._flavor == OpenAIProvider.FLAVOR_OPENAI

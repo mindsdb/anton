@@ -322,6 +322,22 @@ class LLMProvider(ABC):
     # Human-readable provider id (e.g. "anthropic", "openai-compatible").
     name: str = ""
 
+    def native_web_tools(self) -> set[str]:
+        """Subset of {"web_search", "web_fetch"} this provider executes server-side.
+
+        When a tool is declared here, the provider is responsible for translating
+        the capability into its own native tool spec (e.g. Anthropic's
+        ``web_search_*`` server-tool, OpenAI's Responses API ``web_search``,
+        mdb.ai's ``{"type": "web_search"}`` passthrough). Server-side execution
+        means the model's response already incorporates the search/fetch
+        results — Anton's tool-dispatch loop never sees a ``tool_use`` for
+        these names.
+
+        Providers without native support return an empty set, and the session
+        falls back to handler-dispatched ``ToolDef``s for any enabled web tools.
+        """
+        return set()
+
     @abstractmethod
     async def complete(
         self,
@@ -332,6 +348,7 @@ class LLMProvider(ABC):
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
+        native_web_tools: set[str] | None = None,
     ) -> LLMResponse: ...
 
     def export_connection_info(self) -> ProviderConnectionInfo:
@@ -350,6 +367,7 @@ class LLMProvider(ABC):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
+        native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream LLM responses. Default falls back to complete()."""
         response = await self.complete(
@@ -358,6 +376,7 @@ class LLMProvider(ABC):
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
+            native_web_tools=native_web_tools,
         )
         if response.content:
             yield StreamTextDelta(text=response.content)

@@ -114,6 +114,12 @@ class ChatSessionConfig:
     proactive_dashboards: bool = False
     tools: list[ToolDef] = field(default_factory=list)
     output_dir: str = ".anton/output"
+    # Web tools — on by default. Each is independently resolved at session
+    # construction into either a native provider capability (passed to the LLM
+    # via ``native_web_tools``) or a handler-dispatched fallback ToolDef
+    # (registered on the tool registry). See ChatSession.__init__.
+    web_search_enabled: bool = True
+    web_fetch_enabled: bool = True
 
 
 class ChatSession:
@@ -121,6 +127,11 @@ class ChatSession:
 
     def __init__(self, config: ChatSessionConfig) -> None:
         s = config.settings or CoreSettings()
+        # Stash the full settings object (may be AntonSettings, CoreSettings,
+        # or None). Tool handlers read host-only fields like
+        # ``external_search_provider`` / ``exa_api_key`` via getattr so the
+        # session stays decoupled from the host's settings shape.
+        self._settings = config.settings
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._context_pressure_threshold = s.context_pressure_threshold
@@ -247,6 +258,20 @@ class ChatSession:
         # plus its port. Reaped in close() so backend processes don't
         # outlive the chat session.
         self._tracked_backends: dict[str, dict] = {}
+
+        # Resolve web tool routing once per session. ``_native_web_tools`` is
+        # the set the planning provider will execute server-side (passed
+        # through every ``plan*`` call); ``_fallback_web_tools`` is the set
+        # we run ourselves via handler-dispatched ToolDefs (registered in
+        # ``_build_core_tools``). The two sets are disjoint by construction.
+        desired_web: set[str] = set()
+        if config.web_search_enabled:
+            desired_web.add("web_search")
+        if config.web_fetch_enabled:
+            desired_web.add("web_fetch")
+        provider_native = self._llm.planning_provider.native_web_tools()
+        self._native_web_tools: set[str] = desired_web & provider_native
+        self._fallback_web_tools: set[str] = desired_web - provider_native
 
     @property
     def history(self) -> list[dict]:
@@ -641,6 +666,19 @@ class ChatSession:
         # Procedural memory retrieval — always available, no-op if no skills.
         self.tool_registry.register_tool(RECALL_SKILL_TOOL)
 
+        # Handler-dispatched web tools — registered only when the LLM provider
+        # does NOT execute them natively. On Anthropic / OpenAI BYOK / mdb.ai
+        # passthrough, ``_fallback_web_tools`` is empty and these tools never
+        # appear in the registry; the model uses the provider's server-side
+        # web tools instead and Anton's dispatch loop never sees a ``tool_use``
+        # for them. See ``anton/core/tools/web_tools.py`` for the handlers.
+        if "web_search" in self._fallback_web_tools:
+            from anton.core.tools.web_tools import WEB_SEARCH_FALLBACK_TOOL
+            self.tool_registry.register_tool(WEB_SEARCH_FALLBACK_TOOL)
+        if "web_fetch" in self._fallback_web_tools:
+            from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL
+            self.tool_registry.register_tool(WEB_FETCH_FALLBACK_TOOL)
+
         # Artifacts — only register when a workspace is bound to the
         # session. Bare-cwd CLI sessions without `resolve_workspace`
         # have nowhere to write artifacts to, and the tool handlers
@@ -981,6 +1019,10 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        # Native web tools are a per-session capability — forward to every
+        # planning call automatically so callers don't have to remember.
+        if self._native_web_tools:
+            kwargs["native_web_tools"] = self._native_web_tools
 
         try:
             return await self._llm.plan(messages=factory_validated(), **kwargs)
@@ -1026,6 +1068,8 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if self._native_web_tools:
+            kwargs["native_web_tools"] = self._native_web_tools
 
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):

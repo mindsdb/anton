@@ -128,6 +128,10 @@ Pydantic models. Define a class with BaseModel, and the LLM fills it. Supports l
 tool-call loop inside scratchpad code. The LLM reasons and calls your tools iteratively. \
 handle_tool(name, inputs) is a plain sync function returning a string result. Use this for \
 multi-step AI workflows like classification, extraction, or analysis with structured outputs.
+- web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
+the configured LLM's native web search and returns the model's narrative answer with source \
+links as a string. Use it for current/real-time information from within scratchpad code. The \
+call is synchronous.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE_NAME>__<FIELD> \

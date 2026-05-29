@@ -201,6 +201,11 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# personal AI agents
+CLAUDE.md
+.claude/*
+AGENTS.md
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
