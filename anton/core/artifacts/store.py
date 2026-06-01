@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from anton.core.artifacts.models import (
+    METADATA_SCHEMA_VERSION,
     Artifact,
     ArtifactType,
     DatasourceRef,
@@ -160,6 +161,7 @@ class ArtifactStore:
         slug = self._unique_slug(slug_base)
         now = _utc_now()
         artifact = Artifact(
+            schemaVersion=METADATA_SCHEMA_VERSION,
             id=_new_id(),
             slug=slug,
             createdAt=now,
