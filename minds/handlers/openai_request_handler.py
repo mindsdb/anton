@@ -8,10 +8,11 @@ from starlette.responses import JSONResponse, StreamingResponse
 from minds.agents.agent_controller import AgentController
 from minds.agents.base import AgentRunContext
 from minds.agents.helpers import get_agent
-from minds.agents.passthrough_agent.agent import PassthroughAgent
 from minds.common.logger import get_logger
-from minds.common.passthrough_config import is_passthrough_model, resolve_passthrough_model
+from minds.common.passthrough_config import is_passthrough_model
 from minds.common.settings.app_settings import get_app_settings
+from minds.inference.model_resolver import ModelResolver
+from minds.inference.service import InferenceResult, InferenceService
 from minds.model.chat_completion import ChatCompletion
 from minds.model.mind_datasource import DataCatalogStatus
 from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
@@ -90,6 +91,7 @@ class OpenAIRequestHandler:
         self.mind_ready = True
         self.agent = None
         self.is_passthrough = False
+        self.inference_service: InferenceService | None = None
 
     @classmethod
     async def create(
@@ -152,11 +154,12 @@ class OpenAIRequestHandler:
 
         # Passthrough models bypass Mind lookup entirely
         if is_passthrough_model(model):
-            config = resolve_passthrough_model(model)
-            handler.agent = PassthroughAgent(config=config, instrument=instrument)
+            handler.inference_service = InferenceService(
+                model_resolver=ModelResolver(get_app_settings())
+            )
             handler.is_passthrough = True
             logger.debug(
-                f"[{request_id}] Passthrough model {model!r} → {config.label or config.api_kind}:{config.model_name}"
+                f"[{request_id}] Passthrough model {model!r}"
             )
             return handler
 
@@ -198,6 +201,7 @@ class OpenAIRequestHandler:
         output_payload: Any = None,
         extra_metadata: dict | None = None,
         tool_calls_for_spans: list[dict] | None = None,
+        result: InferenceResult | None = None,
     ) -> None:
         """Persist token usage to the database AND record it on the Langfuse generation.
 
@@ -245,8 +249,8 @@ class OpenAIRequestHandler:
 
         model_for_langfuse = self.model
         metadata: dict | None = None
-        if self.is_passthrough and isinstance(self.agent, PassthroughAgent):
-            cfg = self.agent.config
+        if self.is_passthrough and result:
+            cfg = result.config
             model_for_langfuse = cfg.model_name
             # Typed Pydantic metadata model — typos surface at construction,
             # ``exclude_none`` drops reasoning_effort for aliases that have
@@ -325,12 +329,12 @@ class OpenAIRequestHandler:
 
     async def proxy_chat_completions(self) -> StreamingResponse | JSONResponse:
         """Passthrough proxy — returns the upstream response directly."""
-        agent: PassthroughAgent = self.agent
         # Snapshot the request shape now so it can be attached to the
         # Langfuse generation as ``input`` regardless of streaming mode.
         input_payload = self._build_passthrough_input_payload()
 
-        response = await agent.proxy(
+        response, result = await self.inference_service.inference(
+            model_name=self.model,
             messages=self.messages,
             stream=self.stream,
             request_id=self.request_id or "",
@@ -355,10 +359,10 @@ class OpenAIRequestHandler:
                 async for chunk in original_body:
                     yield chunk
                 # After stream completes, save usage AND the assistant
-                # message + server artifacts the converter accumulated.
-                usage = await agent.get_last_run_usage()
-                output_payload = agent.get_last_run_output()
-                server_artifacts = agent.get_last_run_server_artifacts()
+                # message + server artifacts the inference result captured.
+                usage = result.usage
+                output_payload = result.output
+                server_artifacts = result.artifacts
                 self._save_usage(
                     usage,
                     langfuse_trace_context=captured_ctx,
@@ -370,6 +374,7 @@ class OpenAIRequestHandler:
                         else None
                     ),
                     tool_calls_for_spans=output_payload.get("tool_calls") if isinstance(output_payload, dict) else None,
+                    result=result,
                 )
 
             return StreamingResponse(
@@ -379,11 +384,11 @@ class OpenAIRequestHandler:
 
         # Non-streaming branch. ``response`` may be a successful 200
         # JSONResponse (whose ``content`` we want as the Langfuse output)
-        # or an upstream-error JSONResponse the provider proxy synthesized
+        # or an upstream-error JSONResponse the provider synthesized
         # (5xx/4xx with an ``error`` blob) — in that case we still want a
         # Langfuse generation, just one whose output is the error and whose
         # usage is zero, so failed requests don't disappear from traces.
-        usage = await agent.get_last_run_usage()
+        usage = result.usage
         is_error = getattr(response, "status_code", 200) >= 400
         if is_error:
             output_payload = _extract_jsonresponse_content(response)
@@ -394,11 +399,12 @@ class OpenAIRequestHandler:
                 input_payload=input_payload,
                 output_payload=output_payload,
                 extra_metadata=extra,
+                result=result,
             )
             return response
 
-        output_payload = agent.get_last_run_output()
-        server_artifacts = agent.get_last_run_server_artifacts()
+        output_payload = result.output
+        server_artifacts = result.artifacts
         self._save_usage(
             usage,
             langfuse_trace_context=None,
@@ -410,6 +416,7 @@ class OpenAIRequestHandler:
                 else None
             ),
             tool_calls_for_spans=output_payload.get("tool_calls") if isinstance(output_payload, dict) else None,
+            result=result,
         )
         return response
 

@@ -222,10 +222,9 @@ async def test_create_factory_threads_langfuse_trace_context(
     """OpenAIRequestHandler.create accepts and stores langfuse_trace_context."""
     with (
         patch("minds.handlers.openai_request_handler.is_passthrough_model", return_value=True),
-        patch("minds.handlers.openai_request_handler.resolve_passthrough_model"),
-        patch("minds.handlers.openai_request_handler.PassthroughAgent") as mock_passthrough,
+        patch("minds.handlers.openai_request_handler.InferenceService") as mock_inference,
     ):
-        mock_passthrough.return_value = Mock()
+        mock_inference.return_value = Mock()
 
         ctx = {"trace_id": "t", "parent_span_id": "p"}
         handler = await OpenAIRequestHandler.create(
