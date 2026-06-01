@@ -154,13 +154,9 @@ class OpenAIRequestHandler:
 
         # Passthrough models bypass Mind lookup entirely
         if is_passthrough_model(model):
-            handler.inference_service = InferenceService(
-                model_resolver=ModelResolver(get_app_settings())
-            )
+            handler.inference_service = InferenceService(model_resolver=ModelResolver(get_app_settings()))
             handler.is_passthrough = True
-            logger.debug(
-                f"[{request_id}] Passthrough model {model!r}"
-            )
+            logger.debug(f"[{request_id}] Passthrough model {model!r}")
             return handler
 
         minds_service = MindsService(
@@ -358,11 +354,19 @@ class OpenAIRequestHandler:
             async def _wrapped_body():
                 async for chunk in original_body:
                     yield chunk
-                # After stream completes, save usage AND the assistant
-                # message + server artifacts the inference result captured.
-                usage = result.usage
-                output_payload = result.output
-                server_artifacts = result.artifacts
+                # After stream completes, the usage_box has been populated.
+                # Check it for updated values (streaming may not be available in
+                # the frozen result that was captured before streaming).
+                usage_box = result.usage_box
+                if usage_box is not None:
+                    usage = usage_box.value
+                    output_payload = usage_box.output_payload
+                    server_artifacts = list(usage_box.server_artifacts)
+                else:
+                    # Fallback to stale result if no usage_box (non-passthrough)
+                    usage = result.usage
+                    output_payload = result.output
+                    server_artifacts = result.artifacts
                 self._save_usage(
                     usage,
                     langfuse_trace_context=captured_ctx,

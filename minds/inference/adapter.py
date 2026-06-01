@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 if TYPE_CHECKING:
     from minds.common.passthrough_config import PassthroughModelConfig
+    from minds.inference.types import UsageBox
     from minds.schemas.chat import Message
 
 
@@ -104,5 +105,18 @@ class ProviderAdapter(ABC):
         Returns:
             List of dicts (possibly empty), never None.
             For streaming responses, only available after stream completes.
+        """
+        pass
+
+    @abstractmethod
+    def get_usage_box(self) -> UsageBox | None:
+        """Return the UsageBox from the most recent complete() call.
+
+        For streaming responses, the box is populated as the stream is drained.
+        Handlers should check this after streaming completes to access updated
+        usage, output, and artifacts.
+
+        Returns:
+            The UsageBox or None if no request has been made.
         """
         pass
