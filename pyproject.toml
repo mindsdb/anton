@@ -6,7 +6,18 @@ build-backend = "hatchling.build"
 name = "anton"
 dynamic = ["version"]
 description = "Autonomous coding copilot"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "MindsDB Inc", email = "admin@mindsdb.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "anthropic>=0.42.0",
     "openai>=1.0",
@@ -29,6 +40,11 @@ dev = [
 clipboard = [
     "Pillow>=12.2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mindsdb/anton"
+Repository = "https://github.com/mindsdb/anton"
+Issues = "https://github.com/mindsdb/anton/issues"
 
 [project.scripts]
 anton = "anton.cli:app"
