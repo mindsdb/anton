@@ -490,6 +490,20 @@ async def _handle_publish(
                 return (artifact.name or slug, path, "fullstack", f"{slug}/")
             return None
         if path.is_file() and path.suffix.lower() in {".html", ".htm"}:
+            # If the file lives inside a fullstack artifact (e.g.
+            # `my-app/static/index.html`), publish the whole artifact folder
+            # rather than the orphaned frontend — the `.py`-based heuristic in
+            # `_is_publishable_html` can't see `backend.py` one level up.
+            try:
+                rel = path.relative_to(artifacts_root)
+                owner_slug = rel.parts[0] if len(rel.parts) > 1 else None
+            except ValueError:
+                owner_slug = None
+            if owner_slug:
+                owner = store.open(owner_slug)
+                if owner and owner.type in FULLSTACK_ARTIFACT_TYPES:
+                    folder = artifacts_root / owner_slug
+                    return (owner.name or owner_slug, folder, "fullstack", f"{owner_slug}/")
             if not _is_publishable_html(path, artifacts_root):
                 return None
             title = _extract_html_title(path, re)
