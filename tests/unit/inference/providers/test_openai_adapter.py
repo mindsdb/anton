@@ -1,14 +1,13 @@
 """Tests for OpenAIAdapter implementation."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
-from minds.common.passthrough_config import PassthroughModelConfig, ApiKind
-from minds.inference.providers.openai_adapter import OpenAIAdapter
-from minds.inference.types import UsageBox
-from minds.schemas.chat import Message, Role
 from starlette.responses import JSONResponse, StreamingResponse
+
+from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
+from minds.inference.providers.openai_adapter import OpenAIAdapter
+from minds.schemas.chat import Message, Role
 
 
 @pytest.fixture
@@ -71,6 +70,7 @@ async def test_openai_adapter_captures_usage():
     messages = [Message(role=Role.user, content="test")]
 
     with patch("minds.inference.providers.openai_adapter.openai_module.proxy_openai") as mock_proxy:
+
         def set_usage_box(**kwargs):
             usage_box = kwargs.get("usage_box")
             if usage_box:
@@ -141,6 +141,7 @@ async def test_openai_adapter_captures_artifacts():
     artifacts = [{"type": "web_search", "query": "test query"}]
 
     with patch("minds.inference.providers.openai_adapter.openai_module.proxy_openai") as mock_proxy:
+
         def set_artifacts(**kwargs):
             usage_box = kwargs.get("usage_box")
             if usage_box:

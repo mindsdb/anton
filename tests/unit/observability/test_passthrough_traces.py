@@ -210,7 +210,7 @@ def _stream_text_then_tool_use():
 
 
 def _patch_anthropic(*, create_return_value=None, create_side_effect=None):
-    """Patch ``AsyncAnthropic`` at the agent module so each construction returns a fake.
+    """Patch the Anthropic client creation in the provider module.
 
     ``side_effect`` lets each construction build a fresh client object so
     a streaming + non-streaming call within the same test don't interfere.
@@ -226,16 +226,22 @@ def _patch_anthropic(*, create_return_value=None, create_side_effect=None):
         return client
 
     return patch(
-        "minds.agents.passthrough_agent.agent.AsyncAnthropic",
-        side_effect=_factory,
+        "minds.inference.providers.anthropic._get_anthropic_client",
+        side_effect=lambda config: _factory(),
     )
 
 
 def _patch_alias_resolution(config: PassthroughModelConfig):
-    """Patch the alias resolver so the test doesn't depend on env-var API keys."""
+    """Patch the ModelResolver so the test doesn't depend on env-var API keys."""
+
+    def _resolver_factory(*args, **kwargs):
+        resolver = Mock()
+        resolver.resolve = Mock(return_value=config)
+        return resolver
+
     return patch(
-        "minds.handlers.openai_request_handler.resolve_passthrough_model",
-        return_value=config,
+        "minds.handlers.openai_request_handler.ModelResolver",
+        side_effect=_resolver_factory,
     )
 
 

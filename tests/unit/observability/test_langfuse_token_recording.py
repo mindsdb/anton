@@ -113,11 +113,21 @@ async def test_passthrough_non_streaming_records_usage_on_parent_generation(
 ):
     """Non-streaming path: the @observe-created generation itself carries
     the token usage attached via update_current_generation."""
+    from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
+    from minds.inference.service import InferenceResult
 
     handler = _build_handler(mock_session, mock_context, sample_messages, stream=False, is_passthrough=True)
-    handler.agent = Mock()
-    handler.agent.proxy = AsyncMock(return_value=Mock(spec=JSONResponse))
-    handler.agent.get_last_run_usage = AsyncMock(return_value=(11, 7))
+    handler.inference_service = Mock()
+    config = PassthroughModelConfig(
+        api_kind=ApiKind.OPENAI_RESPONSES,
+        model_name="gpt-4o-mini",
+        api_key="test-key",
+        web_search_mode="openai_native",
+        label="openai",
+        alias="gpt-mini",
+    )
+    result = InferenceResult(config=config, usage=(11, 7), output=None, artifacts=[])
+    handler.inference_service.inference = AsyncMock(return_value=(Mock(spec=JSONResponse), result))
 
     @_real_observe(name="Chat Completions Handler v1", as_type="generation")
     async def run_through():
@@ -151,14 +161,11 @@ async def test_passthrough_records_alias_and_concrete_model_metadata(
     + provider + reasoning_effort as ``metadata`` so analytics can slice by the
     alias surface separately from the model."""
     from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
+    from minds.inference.service import InferenceResult
 
     handler = _build_handler(
         mock_session, mock_context, sample_messages, stream=False, model="latest:sonnet", is_passthrough=True
     )
-    # Real PassthroughAgent instance carrying a resolved config — the handler
-    # reads cfg.model_name / cfg.alias / cfg.label / cfg.api_kind / cfg.reasoning_effort.
-    from minds.agents.passthrough_agent.agent import PassthroughAgent
-
     cfg = PassthroughModelConfig(
         api_kind=ApiKind.ANTHROPIC_MESSAGES,
         model_name="claude-sonnet-4-6",
@@ -168,9 +175,9 @@ async def test_passthrough_records_alias_and_concrete_model_metadata(
         alias="sonnet",
         reasoning_effort=None,
     )
-    handler.agent = PassthroughAgent(config=cfg)
-    handler.agent.proxy = AsyncMock(return_value=Mock(spec=JSONResponse))
-    handler.agent.get_last_run_usage = AsyncMock(return_value=(11, 7))
+    result = InferenceResult(config=cfg, usage=(11, 7), output=None, artifacts=[])
+    handler.inference_service = Mock()
+    handler.inference_service.inference = AsyncMock(return_value=(Mock(spec=JSONResponse), result))
 
     @_real_observe(name="Chat Completions Handler v1", as_type="generation")
     async def run_through():
@@ -207,6 +214,8 @@ async def test_passthrough_streaming_attaches_child_generation_with_usage(
     (the body iterator drains after the route handler returns). Verify a real
     child generation observation, attached to the SAME trace via TraceContext,
     carries the usage_details and the right model name."""
+    from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
+    from minds.inference.service import InferenceResult
 
     async def _upstream_body():
         yield b"chunk-1"
@@ -215,9 +224,17 @@ async def test_passthrough_streaming_attaches_child_generation_with_usage(
     upstream_response = StreamingResponse(_upstream_body(), media_type="text/event-stream")
 
     handler = _build_handler(mock_session, mock_context, sample_messages, stream=True, is_passthrough=True)
-    handler.agent = Mock()
-    handler.agent.proxy = AsyncMock(return_value=upstream_response)
-    handler.agent.get_last_run_usage = AsyncMock(return_value=(7, 11))
+    config = PassthroughModelConfig(
+        api_kind=ApiKind.OPENAI_RESPONSES,
+        model_name="gpt-4o-mini",
+        api_key="test-key",
+        web_search_mode="openai_native",
+        label="openai",
+        alias="gpt-mini",
+    )
+    result = InferenceResult(config=config, usage=(7, 11), output=None, artifacts=[])
+    handler.inference_service = Mock()
+    handler.inference_service.inference = AsyncMock(return_value=(upstream_response, result))
 
     @_real_observe(name="Chat Completions Handler v1", as_type="generation")
     async def run_through():

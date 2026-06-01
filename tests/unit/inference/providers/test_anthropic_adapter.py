@@ -3,11 +3,11 @@
 from unittest.mock import patch
 
 import pytest
+from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import PassthroughModelConfig, ApiKind
+from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
 from minds.inference.providers.anthropic_adapter import AnthropicAdapter
 from minds.schemas.chat import Message, Role
-from starlette.responses import JSONResponse, StreamingResponse
 
 
 @pytest.mark.asyncio
@@ -52,6 +52,7 @@ async def test_anthropic_adapter_captures_usage():
     messages = [Message(role=Role.user, content="test")]
 
     with patch("minds.inference.providers.anthropic_adapter.anthropic_module.proxy_anthropic") as mock_proxy:
+
         def set_usage_box(**kwargs):
             usage_box = kwargs.get("usage_box")
             if usage_box:
@@ -122,6 +123,7 @@ async def test_anthropic_adapter_captures_artifacts():
     artifacts = [{"type": "web_search_tool_result", "tool_use_id": "test-id"}]
 
     with patch("minds.inference.providers.anthropic_adapter.anthropic_module.proxy_anthropic") as mock_proxy:
+
         def set_artifacts(**kwargs):
             usage_box = kwargs.get("usage_box")
             if usage_box:

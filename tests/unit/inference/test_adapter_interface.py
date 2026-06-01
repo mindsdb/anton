@@ -79,5 +79,8 @@ def test_provider_adapter_full_interface():
         def get_last_artifacts(self):
             return []
 
+        def get_usage_box(self):
+            return None
+
     adapter = ConcreteAdapter()
     assert adapter is not None

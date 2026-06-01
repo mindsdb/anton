@@ -6,12 +6,12 @@ import pytest
 from fastapi import HTTPException
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
+from minds.common.passthrough_config import ApiKind
 from minds.inference.model_resolver import ModelResolver
-from minds.inference.service import InferenceResult, InferenceService
 from minds.inference.providers.anthropic_adapter import AnthropicAdapter
 from minds.inference.providers.gemini_adapter import GeminiAdapter
 from minds.inference.providers.openai_adapter import OpenAIAdapter
+from minds.inference.service import InferenceResult, InferenceService
 from minds.schemas.chat import Message, Role
 
 
@@ -73,13 +73,9 @@ class TestInferenceServiceResolveModel:
     @pytest.mark.asyncio
     async def test_inference_resolves_model_alias(self, inference_service, test_messages):
         """Resolve latest:sonnet to correct config."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = AsyncMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage.return_value = None
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []
@@ -96,9 +92,7 @@ class TestInferenceServiceResolveModel:
             assert result.config.model_name == "claude-3-5-sonnet-20241022"
 
     @pytest.mark.asyncio
-    async def test_inference_model_resolver_error_propagates(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_model_resolver_error_propagates(self, inference_service, test_messages):
         """HTTPException from resolver is propagated."""
         with pytest.raises(HTTPException) as exc_info:
             await inference_service.inference(
@@ -116,17 +110,11 @@ class TestInferenceServiceAdapterSelection:
     """Test adapter selection based on api_kind."""
 
     @pytest.mark.asyncio
-    async def test_inference_calls_correct_adapter_openai(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_calls_correct_adapter_openai(self, inference_service, test_messages):
         """OPENAI_RESPONSES routes to OpenAI adapter."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = AsyncMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage.return_value = (100, 50)
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []
@@ -143,17 +131,11 @@ class TestInferenceServiceAdapterSelection:
             mock_adapter.complete.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_inference_calls_correct_adapter_anthropic(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_calls_correct_adapter_anthropic(self, inference_service, test_messages):
         """ANTHROPIC_MESSAGES routes to Anthropic adapter."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = AsyncMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage.return_value = (50, 25)
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []
@@ -169,17 +151,11 @@ class TestInferenceServiceAdapterSelection:
             mock_create_adapter.assert_called_once_with(ApiKind.ANTHROPIC_MESSAGES)
 
     @pytest.mark.asyncio
-    async def test_inference_calls_correct_adapter_gemini(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_calls_correct_adapter_gemini(self, inference_service, test_messages):
         """GEMINI_NATIVE routes to Gemini adapter."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = AsyncMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage.return_value = (75, 35)
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []
@@ -199,13 +175,9 @@ class TestInferenceServiceResultCapture:
     """Test result creation and state capture."""
 
     @pytest.mark.asyncio
-    async def test_inference_returns_response_and_result(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_returns_response_and_result(self, inference_service, test_messages):
         """Return value is tuple of (response, InferenceResult)."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = AsyncMock()
             expected_response = JSONResponse(content={"test": "data"})
             mock_adapter.complete = AsyncMock(return_value=expected_response)
@@ -228,13 +200,9 @@ class TestInferenceServiceResultCapture:
     @pytest.mark.asyncio
     async def test_inference_captures_usage(self, inference_service, test_messages):
         """Result captures usage from adapter."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = MagicMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage = MagicMock(return_value=(100, 50))
             mock_adapter.get_last_output = MagicMock(return_value=None)
             mock_adapter.get_last_artifacts = MagicMock(return_value=[])
@@ -252,14 +220,10 @@ class TestInferenceServiceResultCapture:
     @pytest.mark.asyncio
     async def test_inference_captures_output(self, inference_service, test_messages):
         """Result captures output message from adapter."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             expected_output = {"role": "assistant", "content": "Hello!"}
             mock_adapter = MagicMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage = MagicMock(return_value=None)
             mock_adapter.get_last_output = MagicMock(return_value=expected_output)
             mock_adapter.get_last_artifacts = MagicMock(return_value=[])
@@ -275,18 +239,12 @@ class TestInferenceServiceResultCapture:
             assert result.output == expected_output
 
     @pytest.mark.asyncio
-    async def test_inference_captures_artifacts(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_captures_artifacts(self, inference_service, test_messages):
         """Result captures artifacts from adapter."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             artifacts = [{"type": "search_result", "query": "test"}]
             mock_adapter = MagicMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage = MagicMock(return_value=None)
             mock_adapter.get_last_output = MagicMock(return_value=None)
             mock_adapter.get_last_artifacts = MagicMock(return_value=artifacts)
@@ -306,20 +264,15 @@ class TestInferenceServiceStreaming:
     """Test streaming response handling."""
 
     @pytest.mark.asyncio
-    async def test_inference_streaming_response(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_streaming_response(self, inference_service, test_messages):
         """Returns StreamingResponse when stream=True."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
+
             async def mock_stream():
                 yield "data: {}\n\n"
 
             mock_adapter = AsyncMock()
-            expected_response = StreamingResponse(
-                mock_stream(), media_type="text/event-stream"
-            )
+            expected_response = StreamingResponse(mock_stream(), media_type="text/event-stream")
             mock_adapter.complete = AsyncMock(return_value=expected_response)
             mock_adapter.get_last_usage.return_value = None
             mock_adapter.get_last_output.return_value = None
@@ -336,13 +289,9 @@ class TestInferenceServiceStreaming:
             assert isinstance(response, StreamingResponse)
 
     @pytest.mark.asyncio
-    async def test_inference_non_streaming_response(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_non_streaming_response(self, inference_service, test_messages):
         """Returns JSONResponse when stream=False."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = AsyncMock()
             expected_response = JSONResponse(content={"test": "data"})
             mock_adapter.complete = AsyncMock(return_value=expected_response)
@@ -365,17 +314,11 @@ class TestInferenceServiceParameters:
     """Test parameter passing to adapters."""
 
     @pytest.mark.asyncio
-    async def test_inference_passes_all_parameters(
-        self, inference_service, test_messages
-    ):
+    async def test_inference_passes_all_parameters(self, inference_service, test_messages):
         """All inference parameters are passed to adapter.complete()."""
-        with patch.object(
-            inference_service, "_create_adapter"
-        ) as mock_create_adapter:
+        with patch.object(inference_service, "_create_adapter") as mock_create_adapter:
             mock_adapter = AsyncMock()
-            mock_adapter.complete = AsyncMock(
-                return_value=JSONResponse(content={})
-            )
+            mock_adapter.complete = AsyncMock(return_value=JSONResponse(content={}))
             mock_adapter.get_last_usage.return_value = None
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []

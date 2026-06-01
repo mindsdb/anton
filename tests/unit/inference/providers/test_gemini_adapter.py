@@ -3,11 +3,11 @@
 from unittest.mock import patch
 
 import pytest
+from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import PassthroughModelConfig, ApiKind
+from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
 from minds.inference.providers.gemini_adapter import GeminiAdapter
 from minds.schemas.chat import Message, Role
-from starlette.responses import JSONResponse, StreamingResponse
 
 
 @pytest.mark.asyncio
@@ -52,6 +52,7 @@ async def test_gemini_adapter_captures_usage():
     messages = [Message(role=Role.user, content="test")]
 
     with patch("minds.inference.providers.gemini_adapter.gemini_module.proxy_gemini") as mock_proxy:
+
         def set_usage_box(**kwargs):
             usage_box = kwargs.get("usage_box")
             if usage_box:
@@ -122,6 +123,7 @@ async def test_gemini_adapter_captures_artifacts():
     artifacts = [{"type": "search_result", "query": "test"}]
 
     with patch("minds.inference.providers.gemini_adapter.gemini_module.proxy_gemini") as mock_proxy:
+
         def set_artifacts(**kwargs):
             usage_box = kwargs.get("usage_box")
             if usage_box:
