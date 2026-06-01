@@ -17,6 +17,7 @@ from minds.inference.model_resolver import ModelResolver
 from minds.inference.providers.anthropic_adapter import AnthropicAdapter
 from minds.inference.providers.gemini_adapter import GeminiAdapter
 from minds.inference.providers.openai_adapter import OpenAIAdapter
+from minds.inference.types import UsageBox
 
 if TYPE_CHECKING:
     from typing import Any
@@ -31,12 +32,17 @@ class InferenceResult:
 
     Contains the resolved configuration (for observability), token usage,
     the assistant's message, and any server artifacts from the provider.
+
+    For streaming responses, usage, output, and artifacts may be empty when
+    this result is created. The handler should check again after the stream
+    is fully drained via the usage_box reference.
     """
 
     config: PassthroughModelConfig
     usage: tuple[int, int] | None
     output: dict[str, Any] | None
     artifacts: list[dict[str, Any]]
+    usage_box: UsageBox | None = None
 
 
 class InferenceService:
@@ -110,6 +116,7 @@ class InferenceService:
         usage = adapter.get_last_usage()
         output = adapter.get_last_output()
         artifacts = adapter.get_last_artifacts()
+        usage_box = adapter.get_usage_box()
 
         # Step 5: Create result
         result = InferenceResult(
@@ -117,6 +124,7 @@ class InferenceService:
             usage=usage,
             output=output,
             artifacts=artifacts,
+            usage_box=usage_box,
         )
 
         # Step 6: Return response and result

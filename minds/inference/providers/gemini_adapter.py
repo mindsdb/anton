@@ -21,6 +21,7 @@ class GeminiAdapter(ProviderAdapter):
         self._last_usage: tuple[int, int] | None = None
         self._last_output: dict[str, Any] | None = None
         self._last_artifacts: list[dict[str, Any]] = []
+        self._usage_box: UsageBox | None = None
 
     async def complete(
         self,
@@ -70,6 +71,7 @@ class GeminiAdapter(ProviderAdapter):
         self._last_usage = usage_box.value
         self._last_output = usage_box.output_payload
         self._last_artifacts = list(usage_box.server_artifacts)
+        self._usage_box = usage_box
 
         return response
 
@@ -84,3 +86,7 @@ class GeminiAdapter(ProviderAdapter):
     def get_last_artifacts(self) -> list[dict[str, Any]]:
         """Return server artifacts from the most recent call."""
         return list(self._last_artifacts)
+
+    def get_usage_box(self) -> UsageBox | None:
+        """Return the UsageBox from the most recent complete() call."""
+        return self._usage_box

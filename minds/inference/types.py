@@ -46,6 +46,7 @@ __all__ = [
 
 logger = setup_logging()
 
+
 @dataclass
 class UsageBox:
     """Mutable container for request-scoped state tracking.
