@@ -1,4 +1,4 @@
-"""Anthropic-side translation and proxy for the passthrough agent.
+"""Anthropic-side translation and proxy for the inference service.
 
 Same module serves direct Anthropic and Fireworks-via-Anthropic-SDK (the
 Fireworks Anthropic-compatible endpoint), dispatched by ``config.base_url``.
@@ -6,8 +6,8 @@ Fireworks Anthropic-compatible endpoint), dispatched by ``config.base_url``.
 Module-name note: this file is intentionally named ``anthropic.py`` to mirror
 its provider; Python 3 uses absolute imports by default, so ``from anthropic
 import ...`` below resolves to the top-level Anthropic SDK package, not this
-module. Callers reach this module via ``from minds.agents.passthrough_agent
-import anthropic as ...`` or relative imports.
+module. Callers reach this module via inference adapters in
+``minds.inference.providers.anthropic_adapter``.
 """
 
 from __future__ import annotations

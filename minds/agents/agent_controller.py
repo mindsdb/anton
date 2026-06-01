@@ -65,9 +65,6 @@ class AgentController:
                     continue
                 if not agent_dir.name.endswith("_agent"):
                     continue
-                # passthrough_agent is not a standard BaseAgent — skip it
-                if agent_name == "passthrough_agent":
-                    continue
 
                 agent_module = importlib.import_module(f"minds.agents.{agent_name}.agent")
                 agent_class = self._find_agent_class(agent_module)
