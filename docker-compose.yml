@@ -130,7 +130,6 @@ services:
       "
     restart: "no"
 
-
   langfuse-web:
     image: langfuse/langfuse:3.101.0
     <<: *autoRestartOnFailure
@@ -152,33 +151,26 @@ services:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: "postgresql://langfuse:langfuse@postgres/langfuse"
-      NEXTAUTH_SECRET: Reosi8Qn7obpoXoiSHIK975ZzffH/1OvZaVk4a+moUA= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      SALT: plNYAdUp/lOpdYvt61d+us/elglz5WGedKTU65+coB4= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      ENCRYPTION_KEY: a77962b28ceb28f58ce4b247ff7c97685e072d99052f9de0a398f3539b767f2f # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
+      NEXTAUTH_SECRET: Reosi8Qn7obpoXoiSHIK975ZzffH/1OvZaVk4a+moUA=
+      SALT: plNYAdUp/lOpdYvt61d+us/elglz5WGedKTU65+coB4=
+      ENCRYPTION_KEY: a77962b28ceb28f58ce4b247ff7c97685e072d99052f9de0a398f3539b767f2f
       NEXTAUTH_URL: http://localhost:13000
-      LANGFUSE_INIT_ORG_ID: mindsdb # Organization ID
-      LANGFUSE_INIT_ORG_NAME: MindsDB # Organization name
-      LANGFUSE_INIT_PROJECT_ID: 23152f1d-9604-4629-a69d-27790d47b7fa # Project ID (UUID)
-      LANGFUSE_INIT_PROJECT_NAME: MindsDB # Project name
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: redacted # Project public key
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: redacted # Project secret key
-      LANGFUSE_INIT_USER_EMAIL: admin@langfuse.com # User email
-      LANGFUSE_INIT_USER_NAME: User # User name
-      LANGFUSE_INIT_USER_PASSWORD: password # User password
-
+      LANGFUSE_INIT_ORG_ID: mindsdb
+      LANGFUSE_INIT_ORG_NAME: MindsDB
+      LANGFUSE_INIT_PROJECT_ID: 23152f1d-9604-4629-a69d-27790d47b7fa
+      LANGFUSE_INIT_PROJECT_NAME: MindsDB
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: redacted
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: redacted
+      LANGFUSE_INIT_USER_EMAIL: admin@langfuse.com
+      LANGFUSE_INIT_USER_NAME: User
+      LANGFUSE_INIT_USER_PASSWORD: password
       LANGFUSE_LOG_LEVEL: info
-
-      # Clickhouse
       CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: clickhouse
       CLICKHOUSE_CLUSTER_ENABLED: false
-
-      # Redis
       REDIS_CONNECTION_STRING: redis://redis:6379
-
-      # Minio
       LANGFUSE_S3_EVENT_UPLOAD_ENABLED: true
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
@@ -187,7 +179,6 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: miniosecret
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
       LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: false
-
       AWS_ACCESS_KEY_ID: minio
       AWS_SECRET_ACCESS_KEY: miniosecret
       AWS_REGION: us-east-1
@@ -216,33 +207,26 @@ services:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: "postgresql://langfuse:langfuse@postgres/langfuse"
-      NEXTAUTH_SECRET: Reosi8Qn7obpoXoiSHIK975ZzffH/1OvZaVk4a+moUA= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      SALT: plNYAdUp/lOpdYvt61d+us/elglz5WGedKTU65+coB4= # generate secret with at least 256 entropy using `openssl rand -base64 32`.
-      ENCRYPTION_KEY: a77962b28ceb28f58ce4b247ff7c97685e072d99052f9de0a398f3539b767f2f # generate secret with at least 256 bits and 64 characters in hex format using `openssl rand -hex 32`.
+      NEXTAUTH_SECRET: Reosi8Qn7obpoXoiSHIK975ZzffH/1OvZaVk4a+moUA=
+      SALT: plNYAdUp/lOpdYvt61d+us/elglz5WGedKTU65+coB4=
+      ENCRYPTION_KEY: a77962b28ceb28f58ce4b247ff7c97685e072d99052f9de0a398f3539b767f2f
       NEXTAUTH_URL: http://localhost:13000
-      LANGFUSE_INIT_ORG_ID: mindsdb # Organization ID
-      LANGFUSE_INIT_ORG_NAME: MindsDB # Organization name
-      LANGFUSE_INIT_PROJECT_ID: 23152f1d-9604-4629-a69d-27790d47b7fa # Project ID (UUID)
-      LANGFUSE_INIT_PROJECT_NAME: MindsDB # Project name
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: redacted # Project public key
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: redacted # Project secret key
-      LANGFUSE_INIT_USER_EMAIL: admin@langfuse.com # User email
-      LANGFUSE_INIT_USER_NAME: User # User name
-      LANGFUSE_INIT_USER_PASSWORD: password # User password
-
+      LANGFUSE_INIT_ORG_ID: mindsdb
+      LANGFUSE_INIT_ORG_NAME: MindsDB
+      LANGFUSE_INIT_PROJECT_ID: 23152f1d-9604-4629-a69d-27790d47b7fa
+      LANGFUSE_INIT_PROJECT_NAME: MindsDB
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: redacted
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: redacted
+      LANGFUSE_INIT_USER_EMAIL: admin@langfuse.com
+      LANGFUSE_INIT_USER_NAME: User
+      LANGFUSE_INIT_USER_PASSWORD: password
       LANGFUSE_LOG_LEVEL: info
-
-      # Clickhouse
       CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: clickhouse
       CLICKHOUSE_CLUSTER_ENABLED: false
-
-      # Redis
       REDIS_CONNECTION_STRING: redis://redis:6379
-
-      # Minio
       LANGFUSE_S3_EVENT_UPLOAD_ENABLED: true
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
@@ -251,7 +235,6 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_SECRET_KEY: miniosecret
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
       LANGFUSE_AUTO_CLICKHOUSE_MIGRATION_DISABLED: false
-
       AWS_ACCESS_KEY_ID: minio
       AWS_SECRET_ACCESS_KEY: miniosecret
       AWS_REGION: us-east-1
@@ -260,88 +243,6 @@ services:
       interval: 30s
       timeout: 29s
       retries: 10
-
-  prefect-server:
-    image: prefecthq/prefect:3.4.19-python3.13
-    <<: *autoRestartOnFailure
-    restart: unless-stopped
-    command: prefect server start --no-services
-    depends_on:
-      autoheal:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      pg-init:
-        condition: service_completed_successfully
-    environment:
-      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres/prefect
-      PREFECT_SERVER_API_HOST: 0.0.0.0
-      PREFECT_UI_API_URL: http://localhost:4200/api
-      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
-      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
-      PREFECT_REDIS_MESSAGING_HOST: redis
-      PREFECT_REDIS_MESSAGING_PORT: 6379
-      PREFECT_REDIS_MESSAGING_DB: 0
-    ports:
-      - "4200:4200"
-
-  prefect-services:
-    image: prefecthq/prefect:3.4.19-python3.13
-    <<: *autoRestartOnFailure
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      pg-init:
-        condition: service_completed_successfully
-    environment:
-      PREFECT_API_URL: http://prefect-server:4200/api   # points to server from inside Docker
-      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres/prefect
-      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
-      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
-      PREFECT_REDIS_MESSAGING_HOST: redis
-      PREFECT_REDIS_MESSAGING_PORT: 6379
-      PREFECT_REDIS_MESSAGING_DB: 0
-    command: prefect server services start
-
-  prefect-worker:
-    image: prefecthq/prefect:3.4.19-python3.13
-    <<: *autoRestartOnFailure
-    depends_on:
-      prefect-server:
-        condition: service_started
-      prefect-services:
-        condition: service_started
-    volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      PREFECT_API_URL: http://prefect-server:4200/api
-    command: prefect worker start --pool standard-worker-pool --type docker --install-policy always
-
-
-  mindsdb:
-    build:
-      context: ../mindsdb
-      dockerfile: docker/mindsdb.Dockerfile
-    <<: *autoRestartOnFailure
-    restart: unless-stopped
-    ports:
-      - "47334:47334"
-      - "47335:47335"
-    volumes:
-      - mindsdb_data:/opt/mindsdb
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:47334/api/status || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    depends_on:
-      autoheal:
-        condition: service_healthy
 
   migrate:
     build:
@@ -356,60 +257,6 @@ services:
     restart: "no"
     volumes:
       - .:/minds
-
-  minds-flows:
-    build:
-      context: .
-    image: minds:latest
-    <<: *autoRestartOnFailure
-    command: ["make", "prefect/docker/deploy/full"]
-    restart: "no"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      prefect-server:
-        condition: service_started
-      prefect-services:
-        condition: service_started
-      prefect-worker:
-        condition: service_started
-    volumes:
-      - .:/minds
-    environment:
-      ENV: local
-      LOG_LEVEL: DEBUG
-
-      IMAGE_TAG: latest
-
-      DATABASE__URI: postgresql://minds:minds@postgres/minds
-
-      # MindsDB configuration
-      MINDSDB__URL: "http://mindsdb:47334"
-
-      OPENAI__API_URL: "${OPENAI_API_URL}"
-      OPENAI__API_KEY: "${OPENAI_API_KEY}"
-
-      ANTHROPIC__API_KEY: "${ANTHROPIC_API_KEY}"
-      # Native web-tool versions (required, no defaults — see app_settings.AnthropicSettings).
-      ANTHROPIC__WEB_SEARCH_TOOL_TYPE: "${ANTHROPIC_WEB_SEARCH_TOOL_TYPE}"
-      ANTHROPIC__WEB_FETCH_TOOL_TYPE: "${ANTHROPIC_WEB_FETCH_TOOL_TYPE}"
-      ANTHROPIC__WEB_FETCH_BETA_HEADER: "${ANTHROPIC_WEB_FETCH_BETA_HEADER}"
-
-      LANGFUSE_PUBLIC_KEY: "redacted"
-      LANGFUSE_SECRET_KEY: "redacted"
-      LANGFUSE_HOST: "http://langfuse:3000"
-      LANGFUSE_ENABLED: "${LANGFUSE_ENABLED}"
-
-      # Auth
-      AUTH__DISABLE: "true" # Disable auth for local development
-
-      # Data Catalog
-      DATA_CATALOG__EXECUTION_MODE: asynchronous
-
-      # Prefect
-      PREFECT_API_URL: http://host.docker.internal:4200/api
-    env_file:
-      - .env
 
   minds:
     build:
@@ -426,14 +273,6 @@ services:
         condition: service_healthy
       langfuse-worker:
         condition: service_healthy
-      mindsdb:
-        condition: service_healthy
-      prefect-server:
-        condition: service_started
-      prefect-services:
-        condition: service_started
-      prefect-worker:
-        condition: service_started
     ports:
       - "9010:9010"
     healthcheck:
@@ -447,32 +286,19 @@ services:
 
       DATABASE__URI: postgresql://minds:minds@postgres/minds
 
-      # MindsDB configuration
-      MINDSDB__URL: "http://mindsdb:47334"
-      MINDSDB__LOGIN: "${MINDSDB_LOGIN}"
-      MINDSDB__PASSWORD: "${MINDSDB_PASSWORD}"
-
       OPENAI__API_URL: "${OPENAI_API_URL}"
       OPENAI__API_KEY: "${OPENAI_API_KEY}"
 
       ANTHROPIC__API_KEY: "${ANTHROPIC_API_KEY}"
-      # Native web-tool versions (required, no defaults — see app_settings.AnthropicSettings).
       ANTHROPIC__WEB_SEARCH_TOOL_TYPE: "${ANTHROPIC_WEB_SEARCH_TOOL_TYPE}"
       ANTHROPIC__WEB_FETCH_TOOL_TYPE: "${ANTHROPIC_WEB_FETCH_TOOL_TYPE}"
       ANTHROPIC__WEB_FETCH_BETA_HEADER: "${ANTHROPIC_WEB_FETCH_BETA_HEADER}"
 
-      # Auth
-      AUTH__DISABLE: "true" # Disable auth for local development
-
-      # Data Catalog
-      DATA_CATALOG__EXECUTION_MODE: asynchronous
-
-      # Prefect
-      PREFECT_API_URL: http://prefect-server:4200/api
+      AUTH__DISABLE: "true"
 
       LANGFUSE_PUBLIC_KEY: "redacted"
       LANGFUSE_SECRET_KEY: "redacted"
-      LANGFUSE_HOST: "http://langfuse:3000"
+      LANGFUSE_HOST: "http://langfuse-web:3000"
       LANGFUSE_ENABLED: "${LANGFUSE_ENABLED}"
     env_file:
       - .env
@@ -484,7 +310,6 @@ volumes:
   ch_data:
   ch_logs:
   minio_data:
-  mindsdb_data:
 
 networks:
   default:

@@ -10,11 +10,6 @@ class DeploymentMode(str, Enum):
     CLOUD = "cloud"
 
 
-class Agent(str, Enum):
-    ANTON = "anton_agent"
-    TEXT_TO_SQL = "candidate_sql_agent"
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -200,24 +195,6 @@ class MindsDBSettings(Settings):
     password: str = Field(default="", description="The MindsDB password")  # MINDSDB__PASSWORD
 
 
-class DataCatalogSettings(Settings):
-    execution_mode: str = Field(
-        default="asynchronous", description="The execution mode for data catalog operations"
-    )  # DATA_CATALOG__EXECUTION_MODE
-    job_name: str = Field(
-        default="load-data-catalog", description="The name of the data catalog job"
-    )  # DATA_CATALOG__JOB_NAME
-    job_deployment_name: str = Field(
-        default="local--data-catalog-loader", description="The deployment name for the data catalog job"
-    )  # DATA_CATALOG__JOB_DEPLOYMENT_NAME
-    cache_type: str = Field(
-        default="in_memory", description="The type of cache to use for data catalog"
-    )  # DATA_CATALOG__CACHE_TYPE
-    cache_max_size: int = Field(
-        default=100, description="The maximum size of the data catalog cache"
-    )  # DATA_CATALOG__CACHE_MAX_SIZE
-
-
 class DefaultModelsSettings(Settings):
     default_provider: str = Field(
         default="anthropic", description="The default provider"
@@ -255,27 +232,6 @@ class MindsSettings(Settings):
     enable_model_selection: bool = Field(
         default=False, description="Whether to enable model selection"
     )  # MINDS__ENABLE_MODEL_SELECTION
-
-
-class ChartCompilerSettings(Settings):
-    max_rows_to_process: int = Field(
-        default=1000, description="Maximum number of rows to process for chart generation"
-    )  # CHART_COMPILER__MAX_ROWS_TO_PROCESS
-    max_series: int = Field(
-        default=12, description="Maximum number of series to render in a chart"
-    )  # CHART_COMPILER__MAX_SERIES
-
-
-class ChartRendererSettings(Settings):
-    image_width: int = Field(
-        default=1600, ge=1, description="Default PNG width in pixels for server-rendered charts"
-    )  # CHART_RENDERER__IMAGE_WIDTH
-    image_height: int = Field(
-        default=800, ge=1, description="Default PNG height in pixels for server-rendered charts"
-    )  # CHART_RENDERER__IMAGE_HEIGHT
-    image_dpi: int = Field(
-        default=100, ge=1, description="DPI for Matplotlib figure when rendering chart PNGs"
-    )  # CHART_RENDERER__IMAGE_DPI
 
 
 class MindCastleSettings(Settings):
@@ -328,14 +284,9 @@ class AppSettings(Settings):
     fireworks: FireworksSettings = Field(default_factory=FireworksSettings)  # FIREWORKS__*
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)  # GEMINI__*
     mindsdb: MindsDBSettings = Field(default_factory=MindsDBSettings)  # MINDSDB__*
-    data_catalog: DataCatalogSettings = Field(default_factory=DataCatalogSettings)  # DATA_CATALOG__*
     default_models: DefaultModelsSettings = Field(default_factory=DefaultModelsSettings)  # DEFAULT_MODELS__*
-    minds: MindsSettings = Field(default_factory=MindsSettings)  # MINDS__*
     mind_castle: MindCastleSettings = Field(default_factory=MindCastleSettings)  # MIND_CASTLE__*
     redis: RedisSettings = Field(default_factory=RedisSettings)  # REDIS__*
-    agents: AgentsSettings = Field(default_factory=AgentsSettings)  # AGENTS__*
-    chart_compiler: ChartCompilerSettings = Field(default_factory=ChartCompilerSettings)  # CHART_COMPILER__*
-    chart_renderer: ChartRendererSettings = Field(default_factory=ChartRendererSettings)  # CHART_RENDERER__*
 
     statsig: StatsigSettings = Field(default_factory=StatsigSettings)  # STATSIG__*
 

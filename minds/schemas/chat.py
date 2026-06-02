@@ -13,24 +13,6 @@ class Role(str, Enum):
     function = "function"
     tool = "tool"
 
-    # Roles for thought rendering
-    thought_planning = "thought.planning"
-    thought_execution = "thought.execution"
-    thought_execution_step = "thought.execution.step"
-    thought_execution_step_start = "thought.execution.step.start"
-    thought_execution_step_sql = "thought.execution.step.sql"
-    thought_execution_step_end = "thought.execution.step.end"
-
-    # Anton agent thought roles
-    thought_scratchpad_start = "thought.scratchpad.start"
-    thought_scratchpad_end = "thought.scratchpad.end"
-    thought_scratchpad_result = "thought.scratchpad.result"
-    thought_memorize_start = "thought.memorize.start"
-    thought_memorize_end = "thought.memorize.end"
-    thought_recall_start = "thought.recall.start"
-    thought_recall_end = "thought.recall.end"
-    thought_context_compacted = "thought.context.compacted"
-
 
 class Message(BaseModel):
     role: Role
