@@ -113,15 +113,17 @@ class AnthropicSettings(Settings):
 
     # Native web-tool versions used by the passthrough agent. These are
     # Anthropic-versioned API contracts (e.g. "web_search_20250305") that
-    # change in a regular cadence. No defaults — operators must set them
-    # explicitly so version bumps are a conscious config change.
+    # change in a regular cadence.
     web_search_tool_type: str = Field(
+        default="web_search_20250305",
         description="Anthropic native web_search tool type (versioned). Example: 'web_search_20250305'.",
     )  # ANTHROPIC__WEB_SEARCH_TOOL_TYPE
     web_fetch_tool_type: str = Field(
+        default="web_fetch_20250910",
         description="Anthropic native web_fetch tool type (versioned). Example: 'web_fetch_20250910'.",
     )  # ANTHROPIC__WEB_FETCH_TOOL_TYPE
     web_fetch_beta_header: str = Field(
+        default="web-fetch-2025-09-10",
         description="Value for the 'anthropic-beta' header required by the "
         "web_fetch tool. Example: 'web-fetch-2025-09-10'.",
     )  # ANTHROPIC__WEB_FETCH_BETA_HEADER
