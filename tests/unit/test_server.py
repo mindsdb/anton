@@ -62,20 +62,7 @@ def server_app(monkeypatch: pytest.MonkeyPatch):
         raising=False,
     )
 
-    # Mock MindsDB client creation
-    class MockMindsDBClient:
-        pass
-
-    def _fake_create_mindsdb_client(request, context=None, **kwargs):
-        return MockMindsDBClient()
-
-    monkeypatch.setattr(
-        "minds.client.mindsdb.create_mindsdb_client_from_request",
-        _fake_create_mindsdb_client,
-        raising=False,
-    )
-
-    # 5) Mock the chat completions endpoint dependencies BEFORE importing
+    # Mock the chat completions endpoint dependencies BEFORE importing
     async def _fake_chat_completions_handler(
         session, context, mindsdb_client, chat_completions_request, instrument=True, limits_service=None
     ):
