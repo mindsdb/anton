@@ -64,6 +64,7 @@ jobs:
     needs: auto-release
     if: needs.auto-release.outputs.created == 'true'
     runs-on: ubuntu-latest
+    environment: pypi
     permissions:
       id-token: write  # required for trusted publisher (OIDC)
     steps:
