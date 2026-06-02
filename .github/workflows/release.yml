@@ -59,6 +59,32 @@ jobs:
             --title "${TAG}" \
             --generate-notes
 
+  publish:
+    name: Publish to PyPI
+    needs: auto-release
+    if: needs.auto-release.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for trusted publisher (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.auto-release.outputs.tag }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses trusted publisher (OIDC) — no API token needed.
+        # Configure at: https://pypi.org/manage/project/anton/settings/publishing/
+
   e2e:
     needs: auto-release
     if: needs.auto-release.outputs.created == 'true'
