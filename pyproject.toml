@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "anton-agent"
+name = "anton"
 dynamic = ["version"]
 description = "Autonomous coding copilot"
 readme = "README.md"
