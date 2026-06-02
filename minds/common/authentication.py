@@ -1,9 +1,11 @@
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
 
-from minds.requests.context import Context
+if TYPE_CHECKING:
+    from minds.requests.context import Context
 
 
 class AuthHeaders(BaseModel):
@@ -99,7 +101,7 @@ def get_api_key_from_headers(headers: dict) -> str:
     return get_authorization_bearer_token(headers)
 
 
-def get_headers_for_mindsdb_client(context: Context) -> dict:
+def get_headers_for_mindsdb_client(context: "Context") -> dict:
     """
     Get the headers for MindsDB client from the context.
 
