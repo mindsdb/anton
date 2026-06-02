@@ -59,3 +59,6 @@ pythonpath = ["."]
 markers = [
     "stub_only: test requires stub server (skipped when --live is passed)",
 ]
+
+[tool.setuptools.packages.find]
+where = ["anton"]
