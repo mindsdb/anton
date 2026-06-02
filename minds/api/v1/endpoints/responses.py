@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 from starlette.responses import JSONResponse
 
-from minds.api.v1.deps import get_conversations_service, get_limits_service, get_mindsdb_client
+from minds.api.v1.deps import get_conversations_service, get_limits_service
 from minds.common.guards import ResourceType, require_usage_available
 from minds.common.logger import get_logger
 from minds.common.statsig import is_langfuse_enabled
@@ -50,7 +50,6 @@ async def options_handler():
 async def responses(
     responses_request: ResponsesRequest,
     request: Request,
-    mindsdb_client=Depends(get_mindsdb_client),
     session: Session = Depends(get_session),
     conversations_service: ConversationsService = Depends(get_conversations_service),
     limits_service: LimitsService = Depends(get_limits_service),
@@ -59,15 +58,14 @@ async def responses(
     Handle Responses API requests (API v1).
 
     This endpoint provides OpenAI-compatible Responses API with support for
-    both streaming and non-streaming responses. It integrates with MindsDB for
-    AI model management and includes comprehensive observability.
+    both streaming and non-streaming responses and includes comprehensive observability.
 
     Args:
         responses_request (ResponsesRequest): The request containing chat messages and other parameters.
         request (Request): The FastAPI request object to extract context.
-        mindsdb_client (Server): The MindsDB client for MindsDB operations.
         session (Session): The SQLAlchemy session for database operations.
         conversations_service (ConversationsService): The conversation service for database operations.
+        limits_service (LimitsService): The limits service for usage enforcement.
 
     Returns:
         StreamingResponse | JSONResponse: A streaming response if stream=True,
@@ -109,7 +107,6 @@ async def responses(
         response = await handler(
             context=context,
             session=session,
-            mindsdb_client=mindsdb_client,
             responses_request=responses_request,
             conversation_service=conversations_service,
             instrument=instrument,
