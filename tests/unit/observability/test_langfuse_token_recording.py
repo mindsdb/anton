@@ -90,7 +90,6 @@ def _build_handler(
     handler = OpenAIRequestHandler(
         session=mock_session,
         context=mock_context,
-        mindsdb_client=Mock(),
         messages=sample_messages,
         model=model,
         stream=stream,

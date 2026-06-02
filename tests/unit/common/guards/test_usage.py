@@ -83,12 +83,10 @@ class TestResourceType:
     """Ensure the enum covers all expected resource types."""
 
     def test_values(self):
-        assert ResourceType.MINDS.value == "minds"
-        assert ResourceType.DATASOURCES.value == "datasources"
         assert ResourceType.TOKENS.value == "tokens"
 
     def test_is_str_enum(self):
-        assert isinstance(ResourceType.MINDS, str)
+        assert isinstance(ResourceType.TOKENS, str)
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +98,9 @@ class TestUsageLimitExceededError:
     """Tests for the custom HTTP exception."""
 
     def test_default_detail(self):
-        err = UsageLimitExceededError(ResourceType.MINDS)
+        err = UsageLimitExceededError(ResourceType.TOKENS)
         assert err.status_code == 429
-        assert "minds" in err.detail
+        assert "tokens" in err.detail
 
     def test_custom_detail(self):
         err = UsageLimitExceededError(ResourceType.TOKENS, detail="custom msg")
@@ -122,7 +120,7 @@ class TestRequireUsageAvailableAllowed:
     async def test_unlimited_always_passes(self):
         """Both lifetime and monthly unlimited -> no error."""
         limits = MindLimitsConfig(
-            minds=_resource_config(
+            tokens=_resource_config(
                 lifetime_limit=UNLIMITED,
                 monthly_limit=UNLIMITED,
                 lifetime_usage=9999,
@@ -130,13 +128,13 @@ class TestRequireUsageAvailableAllowed:
             ),
         )
         service = _make_limits_service(limits)
-        await require_usage_available(service, ResourceType.MINDS)
+        await require_usage_available(service, ResourceType.TOKENS)
         service.get_mind_limits.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_under_both_limits(self):
         limits = MindLimitsConfig(
-            datasources=_resource_config(
+            tokens=_resource_config(
                 lifetime_limit=100,
                 monthly_limit=50,
                 lifetime_usage=10,
@@ -144,7 +142,7 @@ class TestRequireUsageAvailableAllowed:
             ),
         )
         service = _make_limits_service(limits)
-        await require_usage_available(service, ResourceType.DATASOURCES)
+        await require_usage_available(service, ResourceType.TOKENS)
 
     @pytest.mark.asyncio
     async def test_lifetime_unlimited_monthly_under(self):
@@ -171,7 +169,7 @@ class TestRequireUsageAvailableRejected:
     @pytest.mark.asyncio
     async def test_lifetime_limit_exceeded(self):
         limits = MindLimitsConfig(
-            minds=_resource_config(
+            tokens=_resource_config(
                 lifetime_limit=10,
                 monthly_limit=UNLIMITED,
                 lifetime_usage=10,
@@ -180,15 +178,15 @@ class TestRequireUsageAvailableRejected:
         )
         service = _make_limits_service(limits)
         with pytest.raises(UsageLimitExceededError) as exc_info:
-            await require_usage_available(service, ResourceType.MINDS)
+            await require_usage_available(service, ResourceType.TOKENS)
         assert exc_info.value.status_code == 429
-        assert "minds" in exc_info.value.detail
+        assert "tokens" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_both_limits_exceeded_monthly_reported_first(self):
         """When both limits exceeded, the monthly check fires first."""
         limits = MindLimitsConfig(
-            datasources=_resource_config(
+            tokens=_resource_config(
                 lifetime_limit=10,
                 monthly_limit=5,
                 lifetime_usage=15,
@@ -197,7 +195,7 @@ class TestRequireUsageAvailableRejected:
         )
         service = _make_limits_service(limits)
         with pytest.raises(UsageLimitExceededError) as exc_info:
-            await require_usage_available(service, ResourceType.DATASOURCES)
+            await require_usage_available(service, ResourceType.TOKENS)
         assert "Monthly" in exc_info.value.detail
 
     @pytest.mark.asyncio
