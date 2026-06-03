@@ -256,19 +256,6 @@ class StatsigSettings(Settings):
     )  # STATSIG__DISABLE_ALL_LOGGING
 
 
-class AgentsSettings(Settings):
-    default_agent: Agent = Field(
-        default=Agent.TEXT_TO_SQL, description="The default agent to use"
-    )  # AGENTS__DEFAULT_AGENT
-
-    @field_validator("default_agent", mode="before")
-    @classmethod
-    def validate_default_agent(cls, v: Agent | str) -> Agent:
-        if isinstance(v, str):
-            v = Agent(v)
-        return v
-
-
 class AppSettings(Settings):
     env: str = Field(default="local", description="The environment (local, dev, prod, etc.)")  # ENV
 

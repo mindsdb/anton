@@ -24,10 +24,6 @@ def is_model_selection_enabled(context: Context, settings: AppSettings | None = 
     settings = settings or get_app_settings()
     gate = settings.feature_flag_enable_model_selection
 
-    if settings.minds.enable_model_selection:
-        logger.debug("Model selection is enabled by default for all users")
-        return True
-
     logger.debug(
         f"Checking if model selection is enabled for user '{context.user_id}' "
         f"in organization '{context.organization_id}'"
