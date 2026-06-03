@@ -9,11 +9,11 @@ deployment:
   # What group we're in in gitlab and what namespace we deploy to in kubernetes
   image:
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
-    command: ["python", "-m", "uvicorn", "minds.server:create_app"]
+    command: ["python", "-m", "uvicorn", "minds.server:app"]
     # Async FastAPI: the event loop handles concurrency per worker. Scale via
     # replicas (and HPA) rather than worker count to avoid duplicating ~300 MiB
     # of imports per process and to keep startup CPU under the limit.
-    args: ["--factory", "--workers", "6", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
+    args: ["--workers", "6", "--host", "0.0.0.0", "--port", "9010", "--forwarded-allow-ips", "*"]
 
 
   # Liveness restarts the pod if it fails. Kept tolerant (failureThreshold * periodSeconds = 60s)
@@ -121,12 +121,6 @@ deployment:
     - name: REDIS__CACHE_TTL
       value: "3600"
 
-    # ====================================
-    # PREFECT SETTINGS (for ETL flows)
-    # ====================================
-    - name: PREFECT_API_URL
-      value: "http://prefect-server.infrastructure.svc.cluster.local:4200/api"
-
     # DB settings for sqlalchemy
     - name: DATABASE__URI
       valueFrom:
@@ -170,9 +164,6 @@ deployment:
         secretKeyRef:
           name: mindsdb-secrets
           key: GEMINI_API_KEY
-
-    - name: MINDSDB__URL
-      value: "http://mindsdb:80"
 
     # ====================================
     # STATSIG SETTINGS
