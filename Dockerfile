@@ -1,11 +1,6 @@
 # Builder image with tools for building pip packages
 FROM python:3.13 AS builder
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    freetds-dev \
-    && apt-get clean
-
 COPY requirements/requirements.txt .
 
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -24,10 +19,8 @@ RUN --mount=target=/var/lib/apt,type=cache,sharing=locked \
     --mount=target=/var/cache/apt,type=cache,sharing=locked \
     apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    freetds-dev \
     make \
-    unixodbc-dev \
-    curl libexpat1 \
+    curl \
     && apt-get clean
 
 COPY . .
