@@ -1,10 +1,5 @@
-from typing import TYPE_CHECKING
-
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
-
-if TYPE_CHECKING:
-    from minds.requests.context import Context
 
 
 class AuthHeaders(BaseModel):
