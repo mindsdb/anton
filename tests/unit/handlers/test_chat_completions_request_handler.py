@@ -56,11 +56,12 @@ class TestChatCompletionsRequestHandler:
             }
         )
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
-            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
-        ), patch(
-            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
-        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
@@ -79,11 +80,12 @@ class TestChatCompletionsRequestHandler:
         """Test that model is passed correctly to OpenAIRequestHandler."""
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
-            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
-        ), patch(
-            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
-        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
@@ -103,11 +105,12 @@ class TestChatCompletionsRequestHandler:
         """Test that messages are passed correctly to OpenAIRequestHandler."""
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
-            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
-        ), patch(
-            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
-        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
@@ -132,11 +135,12 @@ class TestChatCompletionsRequestHandler:
 
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
-            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
-        ), patch(
-            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
-        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
@@ -163,11 +167,12 @@ class TestChatCompletionsRequestHandler:
 
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
-            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
-        ), patch(
-            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
-        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
@@ -195,11 +200,12 @@ class TestChatCompletionsRequestHandler:
 
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
-            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
-        ), patch(
-            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
-        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
@@ -225,11 +231,12 @@ class TestChatCompletionsRequestHandler:
             }
         )
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
-            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
-        ), patch(
-            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
-        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=expected_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
