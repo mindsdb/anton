@@ -79,45 +79,47 @@ class TestChatCompletionsRequestHandler:
         """Test that model is passed correctly to OpenAIRequestHandler."""
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class:
+        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
+            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
+        ), patch(
+            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
+        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
 
-            with patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"):
-                with patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None):
-                    with patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
-                        await chat_completions_request_handler(
-                            session=mock_session,
-                            context=mock_context,
-                            chat_completions_request=chat_completions_request,
-                        )
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=chat_completions_request,
+            )
 
-                        # Verify the handler was created with the correct model
-                        call_kwargs = mock_handler_class.create.call_args[1]
-                        assert call_kwargs["model"] == "latest:sonnet"
+            # Verify the handler was created with the correct model
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["model"] == "latest:sonnet"
 
     @pytest.mark.asyncio
     async def test_handler_passes_messages_to_handler(self, mock_session, mock_context, chat_completions_request):
         """Test that messages are passed correctly to OpenAIRequestHandler."""
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class:
+        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
+            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
+        ), patch(
+            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
+        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
 
-            with patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"):
-                with patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None):
-                    with patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
-                        await chat_completions_request_handler(
-                            session=mock_session,
-                            context=mock_context,
-                            chat_completions_request=chat_completions_request,
-                        )
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=chat_completions_request,
+            )
 
-                        call_kwargs = mock_handler_class.create.call_args[1]
-                        assert call_kwargs["messages"] == chat_completions_request.messages
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["messages"] == chat_completions_request.messages
 
     @pytest.mark.asyncio
     async def test_handler_passes_streaming_flag(self, mock_session, mock_context):
@@ -130,22 +132,23 @@ class TestChatCompletionsRequestHandler:
 
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class:
+        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
+            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
+        ), patch(
+            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
+        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
 
-            with patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"):
-                with patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None):
-                    with patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
-                        await chat_completions_request_handler(
-                            session=mock_session,
-                            context=mock_context,
-                            chat_completions_request=streaming_request,
-                        )
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=streaming_request,
+            )
 
-                        call_kwargs = mock_handler_class.create.call_args[1]
-                        assert call_kwargs["stream"] is True
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["stream"] is True
 
     @pytest.mark.asyncio
     async def test_handler_passes_tools_and_tool_choice(self, mock_session, mock_context):
@@ -160,23 +163,24 @@ class TestChatCompletionsRequestHandler:
 
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class:
+        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
+            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
+        ), patch(
+            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
+        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
 
-            with patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"):
-                with patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None):
-                    with patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
-                        await chat_completions_request_handler(
-                            session=mock_session,
-                            context=mock_context,
-                            chat_completions_request=request_with_tools,
-                        )
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=request_with_tools,
+            )
 
-                        call_kwargs = mock_handler_class.create.call_args[1]
-                        assert call_kwargs["tools"] is not None
-                        assert call_kwargs["tool_choice"] == "auto"
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["tools"] is not None
+            assert call_kwargs["tool_choice"] == "auto"
 
     @pytest.mark.asyncio
     async def test_handler_passes_temperature_and_max_tokens(self, mock_session, mock_context):
@@ -191,23 +195,24 @@ class TestChatCompletionsRequestHandler:
 
         mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class:
+        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
+            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
+        ), patch(
+            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
+        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
 
-            with patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"):
-                with patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None):
-                    with patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
-                        await chat_completions_request_handler(
-                            session=mock_session,
-                            context=mock_context,
-                            chat_completions_request=request_with_params,
-                        )
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=request_with_params,
+            )
 
-                        call_kwargs = mock_handler_class.create.call_args[1]
-                        assert call_kwargs["temperature"] == 0.8
-                        assert call_kwargs["max_tokens"] == 500
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["temperature"] == 0.8
+            assert call_kwargs["max_tokens"] == 500
 
     @pytest.mark.asyncio
     async def test_handler_returns_handler_response(self, mock_session, mock_context, chat_completions_request):
@@ -220,18 +225,19 @@ class TestChatCompletionsRequestHandler:
             }
         )
 
-        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class:
+        with patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class, patch(
+            "minds.handlers.chat_completions_request_handler.setup_langfuse_observation"
+        ), patch(
+            "minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None
+        ), patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
             mock_handler_instance = AsyncMock()
             mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=expected_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
 
-            with patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"):
-                with patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None):
-                    with patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"):
-                        response = await chat_completions_request_handler(
-                            session=mock_session,
-                            context=mock_context,
-                            chat_completions_request=chat_completions_request,
-                        )
+            response = await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=chat_completions_request,
+            )
 
-                        assert response == expected_response
+            assert response == expected_response

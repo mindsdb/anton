@@ -448,9 +448,10 @@ class TestOpenAIRequestHandlerErrorHandling:
             mock_inference_service.inference = AsyncMock(return_value=(mock_response, mock_inference_result))
 
             # DB error during save_usage should propagate
-            with patch.object(handler, "_save_usage", side_effect=Exception("Database connection lost")):
-                with pytest.raises(Exception, match="Database connection lost"):
-                    await handler.proxy_chat_completions()
+            with patch.object(
+                handler, "_save_usage", side_effect=Exception("Database connection lost")
+            ), pytest.raises(Exception, match="Database connection lost"):
+                await handler.proxy_chat_completions()
 
 
 class TestBuildPassthroughInputPayload:
