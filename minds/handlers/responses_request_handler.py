@@ -158,6 +158,7 @@ async def responses_request_handler(
         # Use the responses method from the handler which manages the conversation state
         class SimpleStreamer(MessageStreamer):
             """Simple streamer for responses API (not used, kept for interface compatibility)."""
+
             async def push(self, role: Role, content: str):
                 pass
 

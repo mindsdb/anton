@@ -109,9 +109,7 @@ class ConversationsService:
         messages = self.session.exec(stmt).all()
         return [await self._message_to_response(m) for m in messages]
 
-    async def create_conversation_message(
-        self, conversation_id: UUID, role: Role, content: str
-    ) -> MessageResponse:
+    async def create_conversation_message(self, conversation_id: UUID, role: Role, content: str) -> MessageResponse:
         """Create a message in a conversation."""
         await self._get_conversation(conversation_id)  # Verify access
         message = Message(

@@ -1,13 +1,15 @@
 """Tests for Gemini provider adapter."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
+from google.genai import types as genai_types
 
+from minds.common.passthrough_config import PassthroughModelConfig
 from minds.inference.providers.gemini import (
     _chat_messages_to_gemini,
     _gemini_finish_reason_to_openai,
     _gemini_response_to_openai,
+    _get_gemini_client,
     _translate_tools_for_gemini,
 )
 
@@ -54,7 +56,11 @@ class TestMessageConversion:
     def test_tool_result_message_conversion(self):
         """Test tool result message conversion."""
         messages = [
-            {"role": "assistant", "content": "I'll search", "tool_calls": [{"id": "call_1", "function": {"name": "search"}}]},
+            {
+                "role": "assistant",
+                "content": "I'll search",
+                "tool_calls": [{"id": "call_1", "function": {"name": "search"}}],
+            },
             {"role": "tool", "content": '{"result": "found"}', "tool_call_id": "call_1"},
         ]
         _, contents = _chat_messages_to_gemini(messages)
@@ -96,23 +102,23 @@ class TestFinishReasonConversion:
 
     def test_finish_reason_stop(self):
         """Test stop finish reason conversion."""
-        result = _gemini_finish_reason_to_openai("STOP")
+        result = _gemini_finish_reason_to_openai(None, has_tool_calls=False)
         assert result == "stop"
 
     def test_finish_reason_max_tokens(self):
-        """Test max tokens finish reason conversion."""
-        result = _gemini_finish_reason_to_openai("MAX_TOKENS")
+        """Test max tokens finish reason conversion with has_tool_calls."""
+        result = _gemini_finish_reason_to_openai(genai_types.FinishReason.MAX_TOKENS, has_tool_calls=False)
         assert result == "length"
 
     def test_finish_reason_tool_calls(self):
         """Test tool calls finish reason conversion."""
-        result = _gemini_finish_reason_to_openai("TOOL_CALLS")
+        result = _gemini_finish_reason_to_openai(None, has_tool_calls=True)
         assert result == "tool_calls"
 
-    def test_unknown_finish_reason(self):
-        """Test unknown finish reason defaults to stop."""
-        result = _gemini_finish_reason_to_openai("UNKNOWN")
-        assert result == "stop"
+    def test_finish_reason_tool_calls_takes_precedence(self):
+        """Test that has_tool_calls takes precedence over finish_reason."""
+        result = _gemini_finish_reason_to_openai(genai_types.FinishReason.MAX_TOKENS, has_tool_calls=True)
+        assert result == "tool_calls"
 
 
 class TestResponseConversion:
@@ -120,22 +126,35 @@ class TestResponseConversion:
 
     def test_gemini_text_response_conversion(self):
         """Test converting Gemini text response to OpenAI format."""
-        # Mock Gemini response
+        # Mock Gemini response with text
+        mock_part = MagicMock()
+        mock_part.text = "Hello, world!"
+        mock_part.function_call = None
+
         mock_content = MagicMock()
-        mock_content.text = "Hello, world!"
+        mock_content.parts = [mock_part]
 
         mock_candidate = MagicMock()
         mock_candidate.content = mock_content
-        mock_candidate.finish_reason = "STOP"
+        mock_candidate.finish_reason = genai_types.FinishReason.STOP
 
-        result = _gemini_response_to_openai(mock_candidate)
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+        mock_response.usage_metadata = MagicMock()
+        mock_response.usage_metadata.prompt_token_count = 10
+        mock_response.usage_metadata.candidates_token_count = 5
+
+        result = _gemini_response_to_openai(mock_response, "gemini-2.0-flash")
         assert result is not None
-        assert "content" in result or result.get("content") is not None
+        assert result["object"] == "chat.completion"
+        assert result["model"] == "gemini-2.0-flash"
+        assert result["choices"][0]["message"]["content"] == "Hello, world!"
 
     def test_gemini_tool_call_response_conversion(self):
         """Test converting Gemini tool call response to OpenAI format."""
         # Mock tool call part
         mock_part = MagicMock()
+        mock_part.text = None
         mock_part.function_call = MagicMock()
         mock_part.function_call.name = "search"
         mock_part.function_call.args = {"query": "test"}
@@ -145,10 +164,18 @@ class TestResponseConversion:
 
         mock_candidate = MagicMock()
         mock_candidate.content = mock_content
-        mock_candidate.finish_reason = "TOOL_CALLS"
+        mock_candidate.finish_reason = None
 
-        result = _gemini_response_to_openai(mock_candidate)
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+        mock_response.usage_metadata = MagicMock()
+        mock_response.usage_metadata.prompt_token_count = 10
+        mock_response.usage_metadata.candidates_token_count = 5
+
+        result = _gemini_response_to_openai(mock_response, "gemini-2.0-flash")
         assert result is not None
+        assert "tool_calls" in result["choices"][0]["message"]
+        assert result["choices"][0]["finish_reason"] == "tool_calls"
 
 
 class TestClientInitialization:
@@ -157,19 +184,16 @@ class TestClientInitialization:
     @patch("minds.inference.providers.gemini.genai.Client")
     def test_get_gemini_client(self, mock_client_class):
         """Test Gemini client is initialized with API key."""
-        from minds.inference.providers.gemini import _get_gemini_client
-        from minds.common.passthrough_config import PassthroughModelConfig, ApiKind
-
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
         config = PassthroughModelConfig(
-            api_kind=ApiKind.GEMINI,
-            model_name="gemini-pro",
+            api_kind="gemini",
+            model_name="gemini-2.0-flash",
             api_key="test-key",
         )
 
         client = _get_gemini_client(config)
         assert client is not None
         # Verify client was created with API key
-        mock_client_class.assert_called()
+        mock_client_class.assert_called_once_with(api_key="test-key")

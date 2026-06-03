@@ -54,9 +54,7 @@ class LimitsService:
 
             # Token counts (the only resource we track)
             tokens_lifetime = await self.usage_service.count_tokens()
-            tokens_cycle = await self.usage_service.count_tokens(
-                since=billing_cycle_start, until=billing_cycle_end
-            )
+            tokens_cycle = await self.usage_service.count_tokens(since=billing_cycle_start, until=billing_cycle_end)
 
             # Populate token usage
             limits.tokens.usage = UsageConfig(lifetime=tokens_lifetime, billing_cycle=tokens_cycle)

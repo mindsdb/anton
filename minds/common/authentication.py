@@ -79,5 +79,3 @@ def get_api_key_from_headers(headers: dict) -> str:
         str: The API key
     """
     return get_authorization_bearer_token(headers)
-
-

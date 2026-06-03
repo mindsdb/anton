@@ -54,9 +54,10 @@ class TestCreateApp:
     @pytest.mark.asyncio
     async def test_lifespan_startup_shutdown(self):
         """Test that lifespan startup and shutdown work correctly."""
-        with patch("minds.server.init_statsig") as mock_init_statsig, patch(
-            "minds.server.shutdown_statsig"
-        ) as mock_shutdown_statsig:
+        with (
+            patch("minds.server.init_statsig") as mock_init_statsig,
+            patch("minds.server.shutdown_statsig") as mock_shutdown_statsig,
+        ):
             mock_statsig_instance = MagicMock()
             mock_init_statsig.return_value = mock_statsig_instance
 
