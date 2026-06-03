@@ -12,7 +12,9 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from minds.model.mind_datasource import DataCatalogStatus
+
+# DataCatalogStatus enum values (from deleted minds.model.mind_datasource)
+DATA_CATALOG_STATUS_VALUES = ["PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"]
 
 # revision identifiers, used by Alembic.
 revision: str = "002_add_data_catalog_tables"
@@ -276,14 +278,14 @@ def upgrade() -> None:
     op.add_column("datasources", sa.Column("engine_info", sa.Text(), nullable=True))
 
     # Add a column to the mind_datasources table to track the status of data catalog loading.
-    status_enum = postgresql.ENUM(*[e.value for e in DataCatalogStatus], name="data_catalog_status")
+    status_enum = postgresql.ENUM(*DATA_CATALOG_STATUS_VALUES, name="data_catalog_status")
     status_enum.create(op.get_bind())
     op.add_column(
         "mind_datasources",
         sa.Column(
             "status",
             status_enum,
-            server_default=DataCatalogStatus.PENDING,
+            server_default="PENDING",
             nullable=False,
         ),
     )
