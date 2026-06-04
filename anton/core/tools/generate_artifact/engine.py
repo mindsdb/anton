@@ -2,7 +2,7 @@
 
 For html-app: single loop.
 For fullstack-stateless-app and fullstack-stateful-app:
-  1. One-shot planning call → OpenAPI specification (JSON, saved to _api_spec.json).
+  1. One-shot planning call → OpenAPI specification (JSON, kept in memory).
   2. asyncio.gather → backend loop + frontend loop in parallel.
 
 The caller is responsible for providing real data context: a `### Sample`
@@ -80,7 +80,6 @@ async def generate(
     if api_spec_or_err.startswith("Error:"):
         return api_spec_or_err
     api_spec = api_spec_or_err
-    (artifact_path / "_api_spec.json").write_text(api_spec, encoding="utf-8")
 
     stateless = artifact_type == "fullstack-stateless-app"
 
