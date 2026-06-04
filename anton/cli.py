@@ -691,19 +691,21 @@ def _setup_prompt(
     return result
 
 
-def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") -> None:
+def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshub.ai") -> None:
     """Set up Minds as the LLM provider (cloud or enterprise)."""
     console.print()
 
-    is_cloud = default_url == "https://mdb.ai"
+    is_cloud = default_url and default_url.endswith(("mindshub.ai", "mdb.ai"))
 
     if is_cloud:
-        minds_url = "https://mdb.ai"
+        minds_url = default_url
     else:
         minds_url = _setup_prompt("Server URL", default=default_url).strip()
-        if not minds_url.startswith("http://") and not minds_url.startswith("https://"):
+        if not minds_url.startswith(("http://", "https://")):
             minds_url = "https://" + minds_url
-        minds_url = minds_url.rstrip("/")
+
+    # Normalize: ensure no trailing slash
+    minds_url = minds_url.rstrip("/")
 
     if is_cloud:
         console.print(
@@ -771,7 +773,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
         settings.planning_model = "_reason_"
         settings.coding_model = "_code_"
         settings.minds_ssl_verify = ssl_verify
-        derived_base_url = f"{minds_url.rstrip('/')}/api/v1"
+        derived_base_url = f"{minds_url}/v1"
         settings.openai_api_key = api_key
         settings.openai_base_url = derived_base_url
         ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
