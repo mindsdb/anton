@@ -1,6 +1,0 @@
-dependencies:
-- alias: job
-  repository: file://./charts/job
-  name: job
-  version: 1.0.0
-
