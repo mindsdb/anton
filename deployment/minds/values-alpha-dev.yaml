@@ -25,7 +25,7 @@ deployment:
     name: minds-legacy
     annotations:
       nginx.ingress.kubernetes.io/enable-cors: "true"
-      
+
       # Forward auth configuration using your gateway service
       nginx.ingress.kubernetes.io/auth-url: "http://auth.alpha-dev.svc.cluster.local:80/v1/authenticate/"
     hosts:
