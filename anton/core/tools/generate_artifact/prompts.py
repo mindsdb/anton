@@ -259,26 +259,17 @@ Given requirements (which may include a `### Sample` of real data under the
 specification that both a backend developer and a frontend developer can
 implement from independently and in parallel.
 
-Format (markdown):
-
-# API Specification
-
-## METHOD /api/<path>
-**Description:** one line
-**Path / query params:** (if any)
-**Request body:** (if POST/PUT — JSON schema or example)
-**Response `200`:**
-```json
-{example response derived from the data the brief describes}
-```
-**Errors:** non-200 codes callers must handle
+Output an OpenAPI 3.1 specification as a single JSON document.
 
 Rules:
-- Cover ALL endpoints needed to fulfill the requirements.
-- Derive response shapes and example payloads from the data the brief
-  describes (the `### Sample` subsection and any pre-fetched data summaries).
+- Cover ALL endpoints needed to fulfill the requirements, under `/api/...`.
+- For every operation include a one-line `summary`, path/query `parameters`,
+  a `requestBody` schema for POST/PUT, and `responses` for `200` plus any
+  non-200 codes callers must handle.
+- Provide response `examples` derived from the data the brief describes
+  (the `### Sample` subsection and any pre-fetched data summaries).
 - Be precise — frontend and backend are generated in parallel from this spec.
-- Output ONLY the markdown specification — no preamble.\
+- Output ONLY the raw JSON document — no markdown fences, no preamble.\
 """
 
 
@@ -296,7 +287,7 @@ def build_api_spec_prompt(
                 f"{d['summary']}"
             )
 
-    parts.append("Write the API specification now.")
+    parts.append("Write the OpenAPI JSON specification now.")
     return _API_SPEC_SYSTEM, "\n\n".join(parts)
 
 

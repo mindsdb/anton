@@ -2,7 +2,7 @@
 
 For html-app: single loop.
 For fullstack-stateless-app and fullstack-stateful-app:
-  1. One-shot planning call → REST API specification (saved to _api_spec.md).
+  1. One-shot planning call → OpenAPI specification (JSON, saved to _api_spec.json).
   2. asyncio.gather → backend loop + frontend loop in parallel.
 
 The caller is responsible for providing real data context: a `### Sample`
@@ -16,6 +16,7 @@ providers Anton ships (AnthropicProvider, OpenAIProvider) accept on input.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -79,7 +80,7 @@ async def generate(
     if api_spec_or_err.startswith("Error:"):
         return api_spec_or_err
     api_spec = api_spec_or_err
-    (artifact_path / "_api_spec.md").write_text(api_spec, encoding="utf-8")
+    (artifact_path / "_api_spec.json").write_text(api_spec, encoding="utf-8")
 
     stateless = artifact_type == "fullstack-stateless-app"
 
@@ -137,16 +138,39 @@ async def _generate_api_spec(
     context: str,
     data_summaries: list[dict],
 ) -> str:
-    """One-shot planning call → REST API specification markdown."""
+    """One-shot planning call → OpenAPI specification (JSON).
+
+    The model is asked for an OpenAPI document as JSON. We validate the
+    response by parsing it with ``json.loads``; if parsing succeeds the spec
+    is considered valid and the (normalized) JSON string is returned.
+    """
     system, user = build_api_spec_prompt(context, data_summaries)
     response = await session._llm.plan(
         system=system,
         messages=[{"role": "user", "content": user}],
     )
-    spec = (response.content or "").strip()
+    spec = _strip_code_fence((response.content or "").strip())
     if not spec:
         return "Error: API spec generation returned empty response."
-    return spec
+    try:
+        parsed = json.loads(spec)
+    except json.JSONDecodeError as exc:
+        return f"Error: API spec is not valid JSON: {exc}"
+    return json.dumps(parsed, indent=2, ensure_ascii=False)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strip a leading/trailing markdown code fence if present.
+
+    Models often wrap JSON in ```json ... ``` despite being asked for raw JSON.
+    """
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    lines = lines[1:]  # drop opening ```json / ``` line
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------
