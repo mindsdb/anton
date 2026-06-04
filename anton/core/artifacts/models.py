@@ -2,13 +2,18 @@
 
 Schema split:
   Server-managed (deterministic):
-    id, slug, createdAt, updatedAt, files[], provenance[]
-  Agent-supplied (validated at create_artifact time):
-    name, description, type
+    schemaVersion, id, slug, createdAt, updatedAt, files[], provenance[]
+  Agent-supplied (validated at create_artifact / update_artifact time):
+    name, description, type, primary, port, datasources[]
 
 The `Artifact` model is the on-disk source of truth — the README
 that sits alongside it is rendered FROM the metadata, not the other
 way around.
+
+`schemaVersion` tags the on-disk layout so future format changes can
+be migrated deterministically. Bump `METADATA_SCHEMA_VERSION` whenever
+the shape changes incompatibly; records written before this field
+existed load as version 1 (the field default).
 """
 
 from __future__ import annotations
@@ -16,6 +21,11 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+# On-disk metadata.json layout version. Bump on incompatible changes
+# and add a migration keyed off the loaded `schemaVersion`.
+METADATA_SCHEMA_VERSION = 1
 
 
 # Closed enum of artifact shapes. The renderer uses this to pick
@@ -74,16 +84,27 @@ class DatasourceRef(BaseModel):
 
     Declared by the agent at backend-build time so the metadata can
     record which vault connections a fullstack artifact depends on.
-    Values are derived from the connection slug — `engine` and `name`
-    match a `~/.anton/data_vault/<engine>-<name>` record; `env_prefix`
-    is the `DS_<ENGINE>_<NAME>` token used to namespace the field-level
-    env vars handed to the backend subprocess.
+    `engine` and `name` match a `~/.anton/data_vault/<engine>-<name>`
+    record and are the only stored fields. `slug` and `env_prefix`
+    are derived on access (not persisted): `slug` is `<engine>-<name>`;
+    `env_prefix` is the `DS_<ENGINE>_<NAME>` token used to namespace the
+    field-level env vars handed to the backend subprocess.
     """
 
-    slug: str  # e.g. "postgres-prod_db"
     engine: str  # e.g. "postgres"
     name: str  # e.g. "prod_db"
-    env_prefix: str  # e.g. "DS_POSTGRES_PROD_DB"
+
+    @property
+    def slug(self) -> str:
+        """`<engine>-<name>` — the vault connection identifier."""
+        return f"{self.engine}-{self.name}"
+
+    @property
+    def env_prefix(self) -> str:
+        """`DS_<ENGINE>_<NAME>` env-var namespace (special chars sanitized)."""
+        from anton.core.datasources.data_vault import _slug_env_prefix
+
+        return _slug_env_prefix(self.engine, self.name)
 
 
 class ProvenanceEntry(BaseModel):
@@ -107,6 +128,10 @@ class Artifact(BaseModel):
     """
 
     # ── Server-managed identity / timestamps ─────────────────────
+    # On-disk layout version. Records predating this field load as 1
+    # (the default); `create()` stamps the current
+    # `METADATA_SCHEMA_VERSION` on fresh artifacts.
+    schemaVersion: int = 1
     id: str  # short hex (uuid4().hex[:8]) — stable across folder renames
     slug: str  # matches folder name; sanitized from `name` with collision suffix
     createdAt: str

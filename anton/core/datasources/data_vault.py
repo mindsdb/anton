@@ -305,6 +305,31 @@ class LocalDataVault:
                 continue
         return results
 
+    def env_for(self, engine: str, name: str, *, flat: bool = False) -> dict[str, str] | None:
+        """Build the DS_* env mapping for a connection WITHOUT mutating os.environ.
+
+        Default (flat=False): namespaced vars, e.g. DS_POSTGRES_PROD_DB__HOST.
+        flat=True: legacy flat vars, e.g. DS_HOST — use only during
+        single-connection test_snippet execution.
+
+        Returns the {var: value} mapping, or None if connection not found.
+        Use this when the env should reach only a specific subprocess (pass
+        the result as an explicit `env`); use `inject_env` when the variables
+        must be visible in the current process.
+        """
+        fields = self.load(engine, name)
+        if fields is None:
+            return None
+        env: dict[str, str] = {}
+        if flat:
+            for key, value in fields.items():
+                env[f"DS_{key.upper()}"] = value
+        else:
+            prefix = _slug_env_prefix(engine, name)
+            for key, value in fields.items():
+                env[f"{prefix}__{key.upper()}"] = value if isinstance(value, str) else str(value)
+        return env
+
     def inject_env(self, engine: str, name: str, *, flat: bool = False) -> list[str] | None:
         """Load credentials and set DS_* environment variables.
 
@@ -314,22 +339,11 @@ class LocalDataVault:
 
         Returns the list of env var names set, or None if connection not found.
         """
-        fields = self.load(engine, name)
-        if fields is None:
+        env = self.env_for(engine, name, flat=flat)
+        if env is None:
             return None
-        var_names: list[str] = []
-        if flat:
-            for key, value in fields.items():
-                var = f"DS_{key.upper()}"
-                os.environ[var] = value
-                var_names.append(var)
-        else:
-            prefix = _slug_env_prefix(engine, name)
-            for key, value in fields.items():
-                var = f"{prefix}__{key.upper()}"
-                os.environ[var] = value if isinstance(value, str) else str(value)
-                var_names.append(var)
-        return var_names
+        os.environ.update(env)
+        return list(env)
 
     def clear_ds_env(self) -> None:
         """Remove all DS_* variables from os.environ."""

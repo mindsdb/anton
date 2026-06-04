@@ -30,6 +30,8 @@ def _make_session(vault_dir):
         return_value=ProviderConnectionInfo(provider="anthropic", api_key="test")
     )
     mock_llm.coding_model = "claude-sonnet-4-6"
+    mock_llm.planning_provider = MagicMock()
+    mock_llm.planning_provider.native_web_tools = MagicMock(return_value=set())
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
     session._console = MagicMock()
     session._scratchpads = AsyncMock()

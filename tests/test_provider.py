@@ -141,3 +141,120 @@ class TestAnthropicProvider:
             mock_anthropic.AsyncAnthropic.return_value = AsyncMock()
             provider = AnthropicProvider()
             mock_anthropic.AsyncAnthropic.assert_called_once_with()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Native server-side web tools (web_search / web_fetch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _stub_text_response(text: str = "ok"):
+    """Build a MagicMock response that looks like a plain text Anthropic reply."""
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    response = MagicMock()
+    response.content = [block]
+    response.usage.input_tokens = 1
+    response.usage.output_tokens = 1
+    response.stop_reason = "end_turn"
+    return response
+
+
+class TestAnthropicNativeWebTools:
+    def test_native_web_tools_advertises_search_and_fetch(self):
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_anthropic.AsyncAnthropic.return_value = AsyncMock()
+            provider = AnthropicProvider(api_key="k")
+        assert provider.native_web_tools() == {"web_search", "web_fetch"}
+
+    async def test_complete_appends_web_search_server_tool(self):
+        from anton.core.llm.anthropic import ANTHROPIC_WEB_SEARCH_TOOL_TYPE
+
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+            mock_client.messages.create = AsyncMock(return_value=_stub_text_response())
+
+            provider = AnthropicProvider(api_key="k")
+            await provider.complete(
+                model="claude-sonnet-4-6",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[{"name": "scratchpad", "description": "x", "input_schema": {}}],
+                native_web_tools={"web_search"},
+            )
+
+            kwargs = mock_client.messages.create.call_args[1]
+            tools = kwargs["tools"]
+            # Existing function tool is preserved
+            assert any(t.get("name") == "scratchpad" for t in tools)
+            # Server tool entry is appended in the right shape
+            assert {"type": ANTHROPIC_WEB_SEARCH_TOOL_TYPE, "name": "web_search"} in tools
+            # web_search is GA — no beta header should be set
+            assert "extra_headers" not in kwargs
+
+    async def test_complete_appends_web_fetch_with_beta_header(self):
+        from anton.core.llm.anthropic import (
+            ANTHROPIC_WEB_FETCH_BETA_HEADER,
+            ANTHROPIC_WEB_FETCH_TOOL_TYPE,
+        )
+
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+            mock_client.messages.create = AsyncMock(return_value=_stub_text_response())
+
+            provider = AnthropicProvider(api_key="k")
+            await provider.complete(
+                model="claude-sonnet-4-6",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                native_web_tools={"web_fetch"},
+            )
+
+            kwargs = mock_client.messages.create.call_args[1]
+            assert {"type": ANTHROPIC_WEB_FETCH_TOOL_TYPE, "name": "web_fetch"} in kwargs["tools"]
+            # web_fetch is beta — header must be present
+            assert kwargs["extra_headers"] == {
+                "anthropic-beta": ANTHROPIC_WEB_FETCH_BETA_HEADER
+            }
+
+    async def test_complete_appends_both_server_tools(self):
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+            mock_client.messages.create = AsyncMock(return_value=_stub_text_response())
+
+            provider = AnthropicProvider(api_key="k")
+            await provider.complete(
+                model="claude-sonnet-4-6",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                native_web_tools={"web_search", "web_fetch"},
+            )
+
+            kwargs = mock_client.messages.create.call_args[1]
+            names = [t.get("name") for t in kwargs["tools"]]
+            assert "web_search" in names and "web_fetch" in names
+            # web_fetch always brings the beta header along
+            assert "anthropic-beta" in kwargs["extra_headers"]
+
+    async def test_complete_omits_web_tools_when_set_is_empty(self):
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+            mock_client.messages.create = AsyncMock(return_value=_stub_text_response())
+
+            provider = AnthropicProvider(api_key="k")
+            await provider.complete(
+                model="claude-sonnet-4-6",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                native_web_tools=None,
+            )
+
+            kwargs = mock_client.messages.create.call_args[1]
+            # No tools array at all — backward-compatible with the no-tools case
+            assert "tools" not in kwargs
+            assert "extra_headers" not in kwargs

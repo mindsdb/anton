@@ -4,8 +4,9 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 import json
+import re
+from typing import TYPE_CHECKING, List
 import os
-from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -26,6 +27,7 @@ from anton.core.llm.provider import (
     StreamTextDelta,
     StreamToolResult,
     TokenLimitExceeded,
+    ToolCall,
 )
 from anton.core.llm.tracing import (
     TraceContext,
@@ -69,6 +71,19 @@ if TYPE_CHECKING:
     from anton.workspace import Workspace
 
 
+def _extract_datasources(tool_call: ToolCall) -> List[str]:
+    """Return unique datasource slugs referenced in scratchpad code via DS_*__ env vars."""
+    if tool_call.name != "scratchpad":
+        return []
+    code = tool_call.input.get("code", "") if isinstance(tool_call.input, dict) else ""
+    if not code:
+        return []
+    seen = set()
+
+    for m in re.compile(r"\bDS_([A-Z0-9_]+?)__").finditer(code):
+        seen.add(m.group(1).lower())
+    return list(seen)
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -100,6 +115,12 @@ class ChatSessionConfig:
     proactive_dashboards: bool = False
     tools: list[ToolDef] = field(default_factory=list)
     output_dir: str = ".anton/output"
+    # Web tools — on by default. Each is independently resolved at session
+    # construction into either a native provider capability (passed to the LLM
+    # via ``native_web_tools``) or a handler-dispatched fallback ToolDef
+    # (registered on the tool registry). See ChatSession.__init__.
+    web_search_enabled: bool = True
+    web_fetch_enabled: bool = True
 
 
 class ChatSession:
@@ -107,6 +128,11 @@ class ChatSession:
 
     def __init__(self, config: ChatSessionConfig) -> None:
         s = config.settings or CoreSettings()
+        # Stash the full settings object (may be AntonSettings, CoreSettings,
+        # or None). Tool handlers read host-only fields like
+        # ``external_search_provider`` / ``exa_api_key`` via getattr so the
+        # session stays decoupled from the host's settings shape.
+        self._settings = config.settings
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._context_pressure_threshold = s.context_pressure_threshold
@@ -233,6 +259,20 @@ class ChatSession:
         # plus its port. Reaped in close() so backend processes don't
         # outlive the chat session.
         self._tracked_backends: dict[str, dict] = {}
+
+        # Resolve web tool routing once per session. ``_native_web_tools`` is
+        # the set the planning provider will execute server-side (passed
+        # through every ``plan*`` call); ``_fallback_web_tools`` is the set
+        # we run ourselves via handler-dispatched ToolDefs (registered in
+        # ``_build_core_tools``). The two sets are disjoint by construction.
+        desired_web: set[str] = set()
+        if config.web_search_enabled:
+            desired_web.add("web_search")
+        if config.web_fetch_enabled:
+            desired_web.add("web_fetch")
+        provider_native = self._llm.planning_provider.native_web_tools()
+        self._native_web_tools: set[str] = desired_web & provider_native
+        self._fallback_web_tools: set[str] = desired_web - provider_native
 
     @property
     def history(self) -> list[dict]:
@@ -627,6 +667,19 @@ class ChatSession:
         # Procedural memory retrieval — always available, no-op if no skills.
         self.tool_registry.register_tool(RECALL_SKILL_TOOL)
 
+        # Handler-dispatched web tools — registered only when the LLM provider
+        # does NOT execute them natively. On Anthropic / OpenAI BYOK / mdb.ai
+        # passthrough, ``_fallback_web_tools`` is empty and these tools never
+        # appear in the registry; the model uses the provider's server-side
+        # web tools instead and Anton's dispatch loop never sees a ``tool_use``
+        # for them. See ``anton/core/tools/web_tools.py`` for the handlers.
+        if "web_search" in self._fallback_web_tools:
+            from anton.core.tools.web_tools import WEB_SEARCH_FALLBACK_TOOL
+            self.tool_registry.register_tool(WEB_SEARCH_FALLBACK_TOOL)
+        if "web_fetch" in self._fallback_web_tools:
+            from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL
+            self.tool_registry.register_tool(WEB_FETCH_FALLBACK_TOOL)
+
         # Artifacts — only register when a workspace is bound to the
         # session. Bare-cwd CLI sessions without `resolve_workspace`
         # have nowhere to write artifacts to, and the tool handlers
@@ -968,6 +1021,10 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        # Native web tools are a per-session capability — forward to every
+        # planning call automatically so callers don't have to remember.
+        if self._native_web_tools:
+            kwargs["native_web_tools"] = self._native_web_tools
 
         try:
             return await self._llm.plan(messages=factory_validated(), **kwargs)
@@ -1013,6 +1070,8 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if self._native_web_tools:
+            kwargs["native_web_tools"] = self._native_web_tools
 
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
@@ -1459,8 +1518,8 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
-                        except Exception:
-                            fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
+                        except Exception as e:
+                            fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break
@@ -1484,7 +1543,17 @@ class ChatSession:
         self._persist_history()
         if self._cortex is not None and self._cortex.mode != "off":
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
-                asyncio.create_task(self._cortex.maybe_update_identity(user_input))
+                if self._episodic:
+                    user_messages =[
+                        ep.content
+                        for ep in self._episodic.get_conversation()
+                        if ep.role == "user"
+                    ]
+                    messages_str = "\n\n".join(user_messages[-5:])
+                else:
+                    messages_str = user_input
+
+                asyncio.create_task(self._cortex.maybe_update_identity(messages_str))
             # Periodic memory vacuum (Systems Consolidation)
             self._cortex.maybe_vacuum()
 
@@ -1635,8 +1704,9 @@ class ChatSession:
                         self._episodic.log_turn(
                             self._turn_count + 1,
                             "tool_call",
-                            str(tc.input)[:2000],
+                            str(tc.input),
                             tool=tc.name,
+                            datasources=_extract_datasources(tc)
                         )
 
                     # If the streamed tool-call arguments couldn't be
@@ -1733,7 +1803,7 @@ class ChatSession:
                                     self._episodic.log_turn(
                                         self._turn_count + 1,
                                         "scratchpad",
-                                        (cell.stdout or "")[:2000],
+                                        (cell.stdout or ""),
                                         description=description,
                                     )
                         elif tc.name == "connect_new_datasource" or (
@@ -1825,7 +1895,7 @@ class ChatSession:
                         self._episodic.log_turn(
                             self._turn_count + 1,
                             "tool_result",
-                            result_text[:2000],
+                            result_text,
                             tool=tc.name,
                         )
                     result_text = scrub_credentials(result_text)

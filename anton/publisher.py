@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import base64
 import io
-import json
 import os
 import re
+import sys
+import json
+import base64
+import hashlib
+import secrets
 import zipfile
 from pathlib import Path
 
@@ -33,6 +36,29 @@ _FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.
 
 
 DEFAULT_PUBLISH_URL = "https://4nton.ai"
+
+# Owner-side housekeeping files that must never enter the published
+# bundle. `.published.json` in particular holds the artifact's plaintext
+# access password (for the in-app eye-reveal) and must stay local.
+_BUNDLE_SKIP_NAMES = {".published.json"}
+
+# PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
+# the same verification runs in the anton-services viewer Lambda without
+# a native layer. Format: `pbkdf2_sha256$<iters>$<salt_b64>$<dk_b64>`.
+_PBKDF2_ITERATIONS = 200_000
+
+
+def hash_access_password(password: str) -> str:
+    """One-way hash of an artifact access password for the public bundle.
+
+    The plaintext is kept owner-side (in `.published.json`) for the
+    in-app reveal; only this hash travels to anton-services, where the
+    viewer Lambda recomputes it to verify a visitor's attempt.
+    """
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    b64 = lambda b: base64.b64encode(b).decode("ascii")
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${b64(salt)}${b64(dk)}"
 
 # Patterns that capture relative paths from HTML attributes and CSS url()
 _REF_PATTERNS = [
@@ -96,9 +122,11 @@ def _zip_html(path: Path) -> bytes:
                 arc_name = str(ref.relative_to(parent))
                 _write_scrubbed(zf, ref, arc_name)
         else:
-            # Directory — include all files
+            # Directory — include all files except owner-side housekeeping
+            # (e.g. `.published.json`, which holds the plaintext access
+            # password and must never be published).
             for f in sorted(path.rglob("*")):
-                if f.is_file():
+                if f.is_file() and f.name not in _BUNDLE_SKIP_NAMES:
                     _write_scrubbed(zf, f, str(f.relative_to(path)))
     return buf.getvalue()
 
@@ -177,6 +205,8 @@ def publish(
     report_id: str | None = None,
     publish_url: str = DEFAULT_PUBLISH_URL,
     ssl_verify: bool = True,
+    password: str | None = None,
+    pwd_version: int = 1,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
 
@@ -188,6 +218,12 @@ def publish(
     Args:
         report_id: If provided, updates an existing report (new version).
                    If None, creates a new report.
+        password: If provided, the artifact is published as password-
+                  protected. Only a one-way hash is sent to anton-services
+                  (which gates access in the viewer Lambda); the caller is
+                  responsible for storing the plaintext owner-side.
+        pwd_version: Monotonic version bumped whenever the password
+                  changes, so previously issued access cookies invalidate.
 
     Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
     """
@@ -203,6 +239,7 @@ def publish(
         payload_dict["artifact_type"] = artifact.type
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
+        payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
         if missing:
             payload_dict["missing_datasources"] = missing
     else:
@@ -211,6 +248,18 @@ def publish(
     payload_dict["file_payload"] = base64.b64encode(zipped).decode()
     if report_id:
         payload_dict["report_id"] = report_id
+    # Access control: send the hash (never the plaintext). Omitting the
+    # key entirely on a public publish lets the server clear any prior
+    # protection on re-publish.
+    payload_dict["access"] = (
+        {
+            "requires_password": True,
+            "password_hash": hash_access_password(password),
+            "pwd_version": pwd_version,
+        }
+        if password
+        else {"requires_password": False}
+    )
     payload = json.dumps(payload_dict).encode()
 
     url = f"{publish_url.rstrip('/')}/upload"

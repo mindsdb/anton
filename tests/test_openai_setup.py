@@ -192,3 +192,60 @@ class TestSetupCustomOpenAIAzure:
 
         assert not azure_called
         assert settings.openai_api_version == "2025-01"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Search provider helpers — pure-function corners worth pinning
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCurrentSearchLabel:
+    """Locks in the masked format used by the ``Currently:`` line in
+    ``_setup_search_provider`` — a regression here would silently leak a
+    different number of key characters into the chat output.
+    """
+
+    def test_none_when_unconfigured(self):
+        from anton.cli import _current_search_label
+        from types import SimpleNamespace
+
+        s = SimpleNamespace(external_search_provider=None, exa_api_key=None, brave_api_key=None)
+        assert _current_search_label(s) == "none"
+
+    def test_exa_with_full_key_masks_to_last_four(self):
+        from anton.cli import _current_search_label
+        from types import SimpleNamespace
+
+        s = SimpleNamespace(
+            external_search_provider="exa",
+            exa_api_key="abcd-1234-wxyz",
+            brave_api_key=None,
+        )
+        assert _current_search_label(s) == "Exa.ai (key: ****wxyz)"
+
+    def test_brave_with_full_key_masks_to_last_four(self):
+        from anton.cli import _current_search_label
+        from types import SimpleNamespace
+
+        s = SimpleNamespace(
+            external_search_provider="brave",
+            brave_api_key="brv-key-9876",
+            exa_api_key=None,
+        )
+        assert _current_search_label(s) == "Brave Search (key: ****9876)"
+
+    def test_short_key_omits_the_mask_to_avoid_revealing_length(self):
+        from anton.cli import _current_search_label
+        from types import SimpleNamespace
+
+        s = SimpleNamespace(external_search_provider="exa", exa_api_key="ab", brave_api_key=None)
+        assert _current_search_label(s) == "Exa.ai"
+
+    def test_unknown_provider_falls_back_to_raw_value(self):
+        from anton.cli import _current_search_label
+        from types import SimpleNamespace
+
+        s = SimpleNamespace(
+            external_search_provider="serper", exa_api_key=None, brave_api_key=None
+        )
+        assert _current_search_label(s) == "serper"

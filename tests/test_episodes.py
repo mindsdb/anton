@@ -25,6 +25,7 @@ def em(episodes_dir: Path) -> EpisodicMemory:
 class TestStartSession:
     def test_creates_file(self, em: EpisodicMemory, episodes_dir: Path):
         sid = em.start_session()
+        em.log_turn(1, "user", "hello")
         assert (episodes_dir / f"{sid}.jsonl").exists()
 
     def test_filename_format(self, em: EpisodicMemory):
@@ -119,9 +120,8 @@ class TestLog:
             role="user",
             content="should not appear",
         ))
-        # File should exist but be empty (only created by start_session touch)
         path = episodes_dir / f"{sid}.jsonl"
-        assert path.read_text() == ""
+        assert not path.exists()
 
 class TestLogTurn:
     def test_convenience_method(self, em: EpisodicMemory, episodes_dir: Path):
@@ -141,20 +141,24 @@ class TestLogTurn:
         assert data["meta"]["tool"] == "scratchpad"
 
     def test_tool_call_truncation(self, em: EpisodicMemory, episodes_dir: Path):
-        sid = em.start_session()
+        em.start_session()
         long_content = "x" * 5000
         em.log_turn(1, "tool_call", long_content)
-        path = episodes_dir / f"{sid}.jsonl"
-        data = json.loads(path.read_text().strip())
-        assert len(data["content"]) == 2000
+        result = em.recall_formatted("x" * 10)
+        # full content stored, but recall_formatted truncates to 2000
+        line = result.splitlines()[0]
+        content_part = line.split(") ", 1)[1]
+        assert len(content_part) == 2000
 
     def test_tool_result_truncation(self, em: EpisodicMemory, episodes_dir: Path):
-        sid = em.start_session()
+        em.start_session()
         long_content = "x" * 5000
         em.log_turn(1, "tool_result", long_content)
-        path = episodes_dir / f"{sid}.jsonl"
-        data = json.loads(path.read_text().strip())
-        assert len(data["content"]) == 2000
+        result = em.recall_formatted("x" * 10)
+        line = result.splitlines()[0]
+        content_part = line.split(") ", 1)[1]
+        assert len(content_part) == 2000
+
 
 class TestRecall:
     def _populate(self, em: EpisodicMemory, messages: list[str]) -> str:
@@ -259,6 +263,7 @@ class TestRecallFormatted:
 class TestSessionCount:
     def test_counts_files(self, em: EpisodicMemory):
         em.start_session()
+        em.log_turn(1, "user", "hello")
         # Create additional fake session files
         em._dir.mkdir(parents=True, exist_ok=True)
         (em._dir / "20260101_120000.jsonl").touch()
@@ -275,9 +280,8 @@ class TestDisabled:
         em = EpisodicMemory(episodes_dir, enabled=False)
         em.start_session()
         em.log_turn(1, "user", "should not log")
-        # File should be empty
         path = em._file
-        assert path.read_text() == ""
+        assert not path.exists()
 
     def test_recall_empty(self, episodes_dir: Path):
         em = EpisodicMemory(episodes_dir, enabled=False)

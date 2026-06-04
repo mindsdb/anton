@@ -49,6 +49,7 @@ async def launch_artifact_backend(
     tracked_backends: dict[str, dict],
     path: str = "backend.py",
     extra_args: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
     health_path: str = "/",
     health_timeout: float = 10.0,
 ) -> dict | str:
@@ -64,6 +65,10 @@ async def launch_artifact_backend(
     spawned `asyncio.subprocess.Process` under `slug` and reaps any
     previously-tracked process for the same slug before spawning. The
     caller is responsible for cleaning the dict on shutdown.
+
+    `extra_env` is merged over the inherited `os.environ` for the spawned
+    process only (e.g. datasource `DS_*` secrets) — it never mutates the
+    parent's environment, keeping secrets scoped to the backend subprocess.
     """
     extra_args = list(extra_args or [])
     folder = artifact_folder
@@ -168,7 +173,7 @@ async def launch_artifact_backend(
             stderr=log_fd,
             stdin=asyncio.subprocess.DEVNULL,
             preexec_fn=preexec_fn,
-            env={**os.environ},
+            env={**os.environ, **(extra_env or {})},
         )
     except OSError as exc:
         log_fd.close()
@@ -181,7 +186,7 @@ async def launch_artifact_backend(
 
     # Readiness — try HTTP first, fall back to TCP-connect. HTTP 4xx
     # still counts as "process is alive and answering" → ready.
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + health_timeout
     ready = False
     last_err: str | None = None
@@ -212,9 +217,14 @@ async def launch_artifact_backend(
         except Exception as exc:
             last_err = str(exc)
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                    ready = True
-                    break
+                await loop.run_in_executor(
+                    None,
+                    lambda: socket.create_connection(
+                        ("127.0.0.1", port), timeout=0.5
+                    ).close(),
+                )
+                ready = True
+                break
             except OSError:
                 await asyncio.sleep(0.2)
 

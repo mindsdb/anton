@@ -93,6 +93,26 @@ Anton doesn't wait for someone to build a connector. It writes the integration c
 - **Credential vault** - prevents secrets from being exposed to LLMs.
 - **Isolated code execution** - protected, reproducible "show your work" environment.
 - **Multi-layer memory & continuous learning** - session, semantic and long-term knowledge. Anton remembers what it learned and gets better at your specific workflows over time.
+- **Web search & fetch** - the agent can query the live web and retrieve URL contents. Routed natively through your LLM provider when possible (no extra setup), with a transparent fallback for third-party endpoints. See below.
+
+---
+
+## Web search & fetch
+
+Anton exposes two web tools to the agent — `web_search` and `web_fetch` — both on by default. How they execute depends on your LLM provider:
+
+| Provider | `web_search` | `web_fetch` | Setup |
+| --- | --- | --- | --- |
+| Anthropic BYOK | Anthropic native server tool | Anthropic native server tool | None — billed on your Anthropic key |
+| OpenAI BYOK | OpenAI Responses API native | covered by `web_search` | None — billed on your OpenAI key |
+| Minds-Enterprise-Cloud (mdb.ai) | mdb.ai passthrough | mdb.ai passthrough | None — billed on your Minds key |
+| Generic OpenAI-compatible (Together, Groq, Ollama, vLLM, …) | Exa.ai or Brave (you choose at setup) | stdlib HTTP GET (no key) | Run `anton setup-search` once |
+
+For the first three rows there's nothing to configure — the LLM provider executes the tools server-side and the results are folded directly into its response. For the fourth row, after `anton setup` finishes configuring a custom OpenAI-compatible endpoint Anton will offer to set up Exa or Brave; you can also (re)run that step at any time with `anton setup-search`. The chosen search-provider key is persisted to `~/.anton/.env` so it carries across sessions and workspaces, exactly like your LLM key.
+
+To opt out, set `ANTON_WEB_SEARCH_ENABLED=false` and/or `ANTON_WEB_FETCH_ENABLED=false`.
+
+Caveats: provider rate limits apply; `web_fetch` has a 30-second timeout and strips HTML to plain text (works best on article-style pages); paywalled and JS-heavy SPAs may return little useful content; treat fetched page bodies as untrusted input.
 
 ---
 

@@ -22,9 +22,44 @@ from .provider import (
     compute_context_pressure,
 )
 
+# Native server-side web tool type strings exposed by the Anthropic Messages API.
+# The model invokes these inside the provider — Anton's tool-dispatch loop never
+# sees a tool_use for them; the model's final text content already incorporates
+# the search/fetch results. Bump these constants when newer revisions ship.
+ANTHROPIC_WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
+ANTHROPIC_WEB_FETCH_TOOL_TYPE = "web_fetch_20250910"
+# web_fetch is gated behind a beta header; web_search is GA and needs no header.
+ANTHROPIC_WEB_FETCH_BETA_HEADER = "web-fetch-2025-09-10"
+
+
+def _build_native_web_tools(
+    native_web_tools: set[str] | None,
+) -> tuple[list[dict], list[str]]:
+    """Translate the unified web-tool set into Anthropic server-tool entries.
+
+    Returns ``(tool_entries, beta_headers)`` — entries to append to the
+    Messages API ``tools`` array, and any ``anthropic-beta`` header values that
+    must be set for the call.
+    """
+    if not native_web_tools:
+        return [], []
+    entries: list[dict] = []
+    beta: list[str] = []
+    if "web_search" in native_web_tools:
+        entries.append({"type": ANTHROPIC_WEB_SEARCH_TOOL_TYPE, "name": "web_search"})
+    if "web_fetch" in native_web_tools:
+        entries.append({"type": ANTHROPIC_WEB_FETCH_TOOL_TYPE, "name": "web_fetch"})
+        beta.append(ANTHROPIC_WEB_FETCH_BETA_HEADER)
+    return entries, beta
+
 
 class AnthropicProvider(LLMProvider):
     name: str = "anthropic"
+
+    def native_web_tools(self) -> set[str]:
+        # Anthropic's Messages API ships both server-side web_search and
+        # web_fetch tools; we route both through the provider when enabled.
+        return {"web_search", "web_fetch"}
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
@@ -45,17 +80,24 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
+        native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
+        web_entries, beta_headers = _build_native_web_tools(native_web_tools)
+        merged_tools = list(tools or []) + web_entries
+
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system,
             "messages": messages,
         }
-        if tools:
-            kwargs["tools"] = tools
+        if merged_tools:
+            kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
+        if beta_headers:
+            # Anthropic accepts a comma-separated list of beta features.
+            kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
 
         try:
             response = await self._client.messages.create(**kwargs)
@@ -65,7 +107,10 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if (
+            if exc.status_code == 401:
+                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
+                raise ConnectionError(msg) from exc
+            elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
                 and exc.body.get("detail")
@@ -114,15 +159,21 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
+        native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        web_entries, beta_headers = _build_native_web_tools(native_web_tools)
+        merged_tools = list(tools or []) + web_entries
+
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system,
             "messages": messages,
         }
-        if tools:
-            kwargs["tools"] = tools
+        if merged_tools:
+            kwargs["tools"] = merged_tools
+        if beta_headers:
+            kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
 
         content_text = ""
         tool_calls: list[ToolCall] = []
@@ -201,7 +252,10 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if (
+            if exc.status_code == 401:
+                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
+                raise ConnectionError(msg) from exc
+            elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
                 and exc.body.get("detail")

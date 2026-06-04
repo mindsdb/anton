@@ -11,9 +11,11 @@ def make_mock_llm() -> AsyncMock:
     """Return an AsyncMock LLM client with coding_provider configured for sync use.
 
     ``AsyncMock`` makes all child attributes ``AsyncMock`` too, which means
-    ``coding_provider.export_connection_info()`` would return a coroutine —
-    but ``ChatSession.__init__`` calls it synchronously.  This helper fixes
-    that by explicitly wiring ``coding_provider`` with a plain ``MagicMock``.
+    methods we call synchronously on the provider would otherwise return
+    coroutines.  This helper fixes that for both providers — ``coding_provider``
+    (whose ``export_connection_info()`` is read in ``ChatSession.__init__``) and
+    ``planning_provider`` (whose ``native_web_tools()`` is read in the same
+    constructor to resolve the per-session web tool routing).
     """
     mock = AsyncMock()
     mock.coding_provider = MagicMock()
@@ -21,6 +23,10 @@ def make_mock_llm() -> AsyncMock:
         return_value=ProviderConnectionInfo(provider="anthropic", api_key="test")
     )
     mock.coding_model = "claude-sonnet-4-6"
+    mock.planning_provider = MagicMock()
+    # Default test posture: no native web tools — fallback tools also off
+    # unless a specific test configures otherwise via ChatSessionConfig.
+    mock.planning_provider.native_web_tools = MagicMock(return_value=set())
     return mock
 
 

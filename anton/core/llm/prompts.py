@@ -128,6 +128,10 @@ Pydantic models. Define a class with BaseModel, and the LLM fills it. Supports l
 tool-call loop inside scratchpad code. The LLM reasons and calls your tools iteratively. \
 handle_tool(name, inputs) is a plain sync function returning a string result. Use this for \
 multi-step AI workflows like classification, extraction, or analysis with structured outputs.
+- web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
+the configured LLM's native web search and returns the model's narrative answer with source \
+links as a string. Use it for current/real-time information from within scratchpad code. The \
+call is synchronous.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE_NAME>__<FIELD> \
@@ -227,10 +231,14 @@ WHEN TO REGISTER:
 - Data files the user will download or feed elsewhere (CSV, JSON, parquet) → \
 `type="dataset"`, `primary="data.csv"`.
 - Generated images (PNG, SVG, etc.) → `type="image"`, `primary="chart.png"`.
-- Self-contained HTML + JS + CSS apps that run with no backend → \
+- Fullstack web app (backend + frontend) that keeps NO local state between \
+requests — every request is self-contained and any persistence goes to external \
+data sources (see BACKEND & FULLSTACK section) → \
 `type="fullstack-stateless-app"`, `primary="static/index.html"`. The frontend \
-lives in a `static/` subfolder of the artifact.
-- Web apps that need a backend process (see BACKEND & FULLSTACK section) → \
+lives in a `static/` subfolder of the artifact, served by `backend.py`.
+- Fullstack web app (backend + frontend) that DOES keep local state between \
+requests — e.g. a SQLite DB or other on-disk store the backend reads and writes \
+across requests (see BACKEND & FULLSTACK section) → \
 `type="fullstack-stateful-app"`, `primary="static/index.html"`. The frontend \
 lives in a `static/` subfolder of the artifact, served by `backend.py`.
 
@@ -476,7 +484,11 @@ API-driven system, follow this workflow:
 
 1. REGISTER THE ARTIFACT: Follow the universal artifact contract from the \
 ARTIFACTS section. For backend apps specifically:
-  - `type`: `"fullstack-stateful-app"` (every app built here needs a backend process).
+  - `type`: `"fullstack-stateless-app"` — apps built here keep NO local state \
+between requests (the deployment target is stateless: AWS Lambda with a \
+read-only filesystem, see RULES and DEPLOYMENT NOTES below). All persistence \
+goes through external data sources. (`fullstack-stateful-app` is reserved for \
+a future local-persistence deployment and is not built by this workflow yet.)
   - `primary`: set to `"static/index.html"` — the frontend ALWAYS lives in a \
 `static/` subfolder of the artifact (see steps 4 and 5 below).
   Use the returned `<artifact_path>` for ALL subsequent writes — `backend.py` \
@@ -519,6 +531,7 @@ present at launch.
 
   ```python
   import argparse
+  import os
   from pathlib import Path
   from fastapi import FastAPI
   from fastapi.middleware.cors import CORSMiddleware
@@ -536,9 +549,23 @@ present at launch.
       allow_headers=["*"],
   )
 
+  # === Secrets ===
+  # Keys are the canonical DS_<ENGINE>_<NAME>__<FIELD> env-var names. Locally
+  # each value comes from os.environ (the data vault injected it into Anton's
+  # env, which `launch_backend` inherits). In the cloud, the shared runner
+  # overlays the decrypted values onto this dict before each request. Leave
+  # SECRETS empty if the backend uses none. READ a secret by key AT ITS POINT
+  # OF USE (inside the route) — never copy a SECRETS value into a module-level
+  # variable at import time.
+  SECRETS = {{
+      # "DS_POSTGRES_PROD_DB__PASSWORD": os.environ.get("DS_POSTGRES_PROD_DB__PASSWORD"),
+  }}
+
   # === API routes ===
   @app.get("/api/hello")
   async def hello():
+      # Example secret use (read at point of use, not at import):
+      #   pw = SECRETS["DS_POSTGRES_PROD_DB__PASSWORD"]
       return {{"hello": "world"}}
 
   # Static mount MUST come AFTER all API routes (mount at "/" catches every
@@ -548,8 +575,9 @@ present at launch.
   if STATIC_DIR.exists():
       app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
-  # AWS Lambda entry-point. lifespan="off" is REQUIRED — Lambda has no
-  # long-lived process to run FastAPI's startup/shutdown events on.
+  # CLOUD entry-point. lifespan="off" is REQUIRED — there is no 
+  # long-lived process for FastAPI startup/shutdown.
+  # (Locally, `uvicorn.run(app, ...)` below serves the app directly.)
   handler = Mangum(app, lifespan="off")
 
   if __name__ == "__main__":
@@ -561,11 +589,21 @@ present at launch.
   ```
 
   RULES (critical):
-  - Save the file as `<artifact_path>/backend.py` — the filename and the \
-`handler` attribute name are load-bearing (Lambda config points to \
-`backend.handler`). Do NOT rename either.
+  - Save the file as `<artifact_path>/backend.py` — the filename, the \
+`handler` attribute, and the `SECRETS` dict are load-bearing (the cloud \
+runner overlays secrets onto `backend.SECRETS` and invokes `backend.handler`). \
+Do NOT rename any of them.
   - Keep `Mangum(app, lifespan="off")`. Without `lifespan="off"` Mangum \
 warns and may fail cold start.
+  - SECRETS: expose `SECRETS` as a module-level dict, keyed by the canonical \
+`DS_<ENGINE>_<NAME>__<FIELD>` name, with each entry initialized from \
+`os.environ.get(...)` (the local default). The cloud runner overlays the \
+decrypted values onto this same dict before each request. Read a secret AT \
+ITS POINT OF USE — `SECRETS["DS_..."]` inside the route — and NEVER hoist it \
+into a module-level variable at import time: the import runs before the \
+overlay, so the cloud value would be missed. If a credential-backed resource \
+(DB pool, API client) is needed, build it LAZILY on first request, never at \
+module level.
   - ALL API endpoints MUST live under the `/api/*` path prefix (e.g. \
 `/api/items`, `/api/users/{{user_id}}`, `/api/search`). This is a hard \
 contract between backend and frontend: it separates API traffic from the \
@@ -585,8 +623,13 @@ sync blocking I/O inside an async app stalls the event loop.
 (`USERS = {{}}`, `SESSIONS = []`). In Lambda these globals may or may not \
 survive between invocations — never rely on them. All persistence goes \
 through external data sources.
-  - FILESYSTEM: assume read-only. The only writable path in Lambda is \
-`/tmp` (ephemeral, 512 MB). Do NOT write to `<artifact_path>` at runtime.
+  - FILESYSTEM: do NOT persist files at runtime. Treat the filesystem as \
+read-only and non-persistent — anything written is lost between requests and \
+may fail outright depending on the host (Linux, Windows, or a read-only cloud \
+sandbox). NEVER write to `<artifact_path>` at runtime, and never rely on a \
+file surviving to a later request. All persistence goes through external data \
+sources. If a request genuinely needs scratch space, use the OS temp dir via \
+`tempfile` and treat it as ephemeral (gone the moment the request ends).
   - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go \
 to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
   - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at \
@@ -614,7 +657,10 @@ backend uses no `DS_*` vars at all.
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
-  - Follow the VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT guidelines
+  - Apply the HTML build guidance from the `VISUALIZATIONS` section above \
+(single self-contained HTML file; Apache ECharts via CDN for charts; dark \
+theme #0d1117; responsive layout with a viewport meta tag). If that section \
+is not present in this prompt, follow these same defaults regardless.
   - Save the entry-point to `<artifact_path>/static/index.html` (create the \
 `static/` subfolder if needed). ANY additional frontend assets (separate CSS, \
 JS, images, fonts, large data .js payloads) MUST also live under \
@@ -675,20 +721,17 @@ to browser CORS/file:// restrictions.
 DEPLOYMENT NOTES:
 - Same `backend.py` runs in two modes:
   - LOCAL: `python backend.py --port=NNN` (used by `launch_backend`). \
-uvicorn serves the FastAPI app and the `static/` mount, frontend reachable at `/`.
-  - AWS LAMBDA: Lambda invokes `backend.handler` (Mangum-wrapped ASGI app) \
-per request. Statics are served by an external service (CloudFront/S3), so \
-the `StaticFiles` mount sits unused in Lambda — Lambda only sees `/api/*` \
-traffic via API Gateway / Function URL routing.
+uvicorn serves the FastAPI app and the `static/` mount, frontend reachable at `/`. \
+Secrets come from the `DS_*` env vars in `SECRETS`' defaults.
+  - CLOUD: a shared runner overlays the decrypted secrets onto `backend.SECRETS` \
+and invokes `backend.handler` (the Mangum ASGI app) per request. Statics are \
+served separately (the gateway reads `static/` from object storage), so the \
+`StaticFiles` mount sits unused there — the runner only sees `/api/*` traffic.
+- Secrets ride in the backend module's `SECRETS` dict, not `os.environ` — the \
+shared cloud runner injects them per request without polluting the process env.
 - The local backend process shuts down when the Anton CLI session ends (per MVP constraints).
-- For production deployment to Lambda, the user packages `backend.py` + \
-`requirements.txt` (and any data files) as a zip or container image, \
-configures `Handler = backend.handler`, and exposes it via API Gateway or \
-Function URL. `DS_*` env vars from `datasources` in `metadata.json` must be \
-set on the Lambda function.
 
 PUBLISH OR SHARE:
-- Publishing is disabled for this MVP (per constraints), but preview is fully supported
 - After building, offer to preview the frontend by directing the user to the \
 URL returned by `launch_backend`
 - The backend must be running for the frontend to work
