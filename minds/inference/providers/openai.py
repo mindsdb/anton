@@ -20,14 +20,15 @@ from openai import AsyncOpenAI
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.inference.types import PassthroughModelConfig, WebSearchMode
 from minds.inference.types import (
     ChatCompletionsFunctionTool,
     ChoiceDeltaToolCall,
     ChoiceDeltaToolCallFunction,
     GenericFetchTool,
     GenericWebSearchTool,
+    PassthroughModelConfig,
     UsageBox,
+    WebSearchMode,
     _classify_tool,
     _emit_chunk,
     _only_web_tools,

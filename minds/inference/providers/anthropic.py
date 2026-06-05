@@ -23,7 +23,6 @@ from anthropic import AsyncAnthropic
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.inference.types import PassthroughModelConfig, WebSearchMode
 from minds.common.settings.app_settings import get_app_settings
 from minds.inference.types import (
     AnthropicToolsTranslation,
@@ -32,7 +31,9 @@ from minds.inference.types import (
     ChoiceDeltaToolCallFunction,
     GenericFetchTool,
     GenericWebSearchTool,
+    PassthroughModelConfig,
     UsageBox,
+    WebSearchMode,
     _classify_tool,
     _emit_chunk,
     _only_web_tools,

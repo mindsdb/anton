@@ -6,10 +6,9 @@ from typing import Any
 
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.inference.types import PassthroughModelConfig
 from minds.inference.adapter import ProviderAdapter
 from minds.inference.providers import anthropic as anthropic_module
-from minds.inference.types import UsageBox
+from minds.inference.types import PassthroughModelConfig, UsageBox
 from minds.schemas.chat import Message
 
 

@@ -19,12 +19,13 @@ from google.genai import types as genai_types
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.inference.types import PassthroughModelConfig, WebSearchMode
 from minds.inference.types import (
     ChoiceDeltaToolCall,
     ChoiceDeltaToolCallFunction,
     GenericToolType,
+    PassthroughModelConfig,
     UsageBox,
+    WebSearchMode,
     _emit_chunk,
     _only_web_tools,
 )

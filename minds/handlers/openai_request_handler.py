@@ -60,7 +60,6 @@ class OpenAIRequestHandler:
         self.max_tokens = max_tokens
         self.limits_service = limits_service
 
-        self.is_passthrough = True
         self.inference_service: InferenceService | None = None
 
     @classmethod
@@ -104,7 +103,6 @@ class OpenAIRequestHandler:
 
         # All models are passthrough — resolve via InferenceService
         handler.inference_service = InferenceService(model_resolver=ModelResolver(get_app_settings()))
-        handler.is_passthrough = True
         logger.debug(f"[{request_id}] Passthrough inference for model {model!r}")
         return handler
 
@@ -165,7 +163,7 @@ class OpenAIRequestHandler:
 
         model_for_langfuse = self.model
         metadata: dict | None = None
-        if self.is_passthrough and result:
+        if result:
             cfg = result.config
             model_for_langfuse = cfg.model_name
             # Typed Pydantic metadata model — typos surface at construction,
@@ -173,7 +171,7 @@ class OpenAIRequestHandler:
             # no reasoning-level concept (Anthropic, Gemini, Fireworks).
             metadata = cfg.to_observability_metadata().to_metadata()
             logger.debug(
-                f"[{self.request_id}] Passthrough Langfuse metadata: "
+                f"[{self.request_id}] Langfuse metadata: "
                 f"model={model_for_langfuse} alias={cfg.alias} "
                 f"provider={cfg.label} reasoning_effort={cfg.reasoning_effort}"
             )
@@ -244,16 +242,17 @@ class OpenAIRequestHandler:
             async def _wrapped_body():
                 async for chunk in original_body:
                     yield chunk
-                # After stream completes, the usage_box has been populated.
-                # Check it for updated values (streaming may not be available in
-                # the frozen result that was captured before streaming).
+                # After stream completes, read the usage_box to get final token counts
+                # and full assistant message. usage_box is a mutable reference shared
+                # with the streaming generator — the adapter populates it after the
+                # last chunk is yielded, so we can read the final values here.
                 usage_box = result.usage_box
                 if usage_box is not None:
                     usage = usage_box.value
                     output_payload = usage_box.output_payload
                     server_artifacts = list(usage_box.server_artifacts)
                 else:
-                    # Fallback to stale result if no usage_box (non-passthrough)
+                    # Fallback for non-streaming (should not happen in practice)
                     usage = result.usage
                     output_payload = result.output
                     server_artifacts = result.artifacts
