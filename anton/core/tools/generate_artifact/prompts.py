@@ -309,11 +309,14 @@ def build_backend_system_prompt(artifact_path: Path, *, stateless: bool = False)
     if stateless:
         parts.append(
             "## Stateless constraint\n"
-            "This app has NO persistent storage. All data must be hardcoded or "
-            "computed at request time.\n"
-            "Do NOT introduce any database, file-based storage, or external data "
-            "source. Do NOT import sqlite3, sqlalchemy, psycopg2, redis, or any "
-            "other storage package."
+            "This app MUST NOT persist any state between requests. Each request is "
+            "handled independently with no server-side memory of previous ones.\n"
+            "Do NOT create or write to any local storage: no sqlite, no local files, "
+            "no on-disk caches, no in-process mutable state used as a store.\n"
+            "Connecting to an EXTERNAL database or API to read/write data IS allowed "
+            "(e.g. an external PostgreSQL/MySQL server) — that is not local state. "
+            "Open a fresh connection per request and do not cache results in memory "
+            "across requests."
         )
     parts.append(
         "## Output folder\n"
