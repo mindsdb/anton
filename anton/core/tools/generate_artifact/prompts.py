@@ -191,9 +191,20 @@ def build_subagent_system_prompt(artifact_type: str, artifact_path: Path) -> str
     elif artifact_type == "fullstack-stateless-app":
         parts.append(
             "## Your task\n"
-            "Produce ONE self-contained HTML file at `static/index.html`. "
-            "No backend. Inline all CSS and JS. All data must be embedded."
+            "Produce three files:\n"
+            "1. `backend.py` — FastAPI backend (see rules below).\n"
+            "2. `requirements.txt` — pip dependencies.\n"
+            "3. `static/index.html` — frontend that calls `/api/*` endpoints.\n"
+            "The backend is launched separately after you finish.\n"
+            "\n"
+            "STATELESS means the backend MUST NOT persist any state between "
+            "requests: no local database (e.g. sqlite), no local files written as "
+            "storage, no on-disk caches, and no in-process mutable store carried "
+            "across requests. Connecting to an EXTERNAL database or API to read/"
+            "write data IS allowed — open a fresh connection per request and do "
+            "not cache results in memory across requests."
         )
+        parts.append(_BACKEND_RULES)
         parts.append(_VISUAL_RULES)
         parts.append(_FRONTEND_RULES)
 
@@ -276,6 +287,8 @@ Rules:
 def build_api_spec_prompt(
     context: str,
     data_summaries: list[dict],
+    *,
+    stateless: bool = False,
 ) -> tuple[str, str]:
     parts = ["## Requirements", context.strip()]
 
@@ -286,6 +299,17 @@ def build_api_spec_prompt(
                 f"### `{d['variable']}` (from scratchpad `{d['scratchpad']}`)\n"
                 f"{d['summary']}"
             )
+
+    if stateless:
+        parts.append(
+            "## Stateless constraint\n"
+            "The backend implementing this spec MUST NOT persist any state between "
+            "requests: no local storage (sqlite, local files, on-disk caches) and no "
+            "in-memory store carried across requests. Connecting to an EXTERNAL "
+            "database or API to read/write data IS allowed. Design endpoints "
+            "accordingly — do NOT assume server-side sessions or mutable persisted "
+            "collections."
+        )
 
     parts.append("Write the OpenAPI JSON specification now.")
     return _API_SPEC_SYSTEM, "\n\n".join(parts)

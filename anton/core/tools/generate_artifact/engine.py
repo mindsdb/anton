@@ -76,12 +76,14 @@ async def generate(
     if artifact_type not in ("fullstack-stateless-app", "fullstack-stateful-app"):
         return f"Error: unsupported artifact type: {artifact_type!r}"
 
-    api_spec_or_err = await _generate_api_spec(session, context, resolved)
+    stateless = artifact_type == "fullstack-stateless-app"
+
+    api_spec_or_err = await _generate_api_spec(
+        session, context, resolved, stateless=stateless
+    )
     if api_spec_or_err.startswith("Error:"):
         return api_spec_or_err
     api_spec = api_spec_or_err
-
-    stateless = artifact_type == "fullstack-stateless-app"
 
     backend_result, frontend_result = await asyncio.gather(
         _run_loop(
@@ -136,6 +138,8 @@ async def _generate_api_spec(
     session: "ChatSession",
     context: str,
     data_summaries: list[dict],
+    *,
+    stateless: bool = False,
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
 
@@ -143,7 +147,7 @@ async def _generate_api_spec(
     response by parsing it with ``json.loads``; if parsing succeeds the spec
     is considered valid and the (normalized) JSON string is returned.
     """
-    system, user = build_api_spec_prompt(context, data_summaries)
+    system, user = build_api_spec_prompt(context, data_summaries, stateless=stateless)
     response = await session._llm.plan(
         system=system,
         messages=[{"role": "user", "content": user}],
