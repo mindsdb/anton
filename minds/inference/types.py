@@ -27,6 +27,7 @@ from minds.schemas.chat import Message
 
 __all__ = [
     "AnthropicToolsTranslation",
+    "ApiKind",
     "ChatCompletionsFunctionDef",
     "ChatCompletionsFunctionTool",
     "ChoiceDeltaToolCall",
@@ -35,7 +36,10 @@ __all__ = [
     "GenericToolType",
     "GenericWebSearchTool",
     "ParsedTool",
+    "PassthroughModelConfig",
+    "PassthroughObservabilityMetadata",
     "UsageBox",
+    "WebSearchMode",
     "_classify_tool",
     "_emit_chunk",
     "_is_generic_web_tool",
@@ -45,6 +49,58 @@ __all__ = [
 ]
 
 logger = setup_logging()
+
+
+class ApiKind(StrEnum):
+    """Which upstream transport + translation path the adapter uses."""
+
+    OPENAI_RESPONSES = "openai_responses"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
+    GEMINI_NATIVE = "gemini_native"
+
+
+class WebSearchMode(StrEnum):
+    """How generic ``web_search`` / ``fetch`` tools should be translated."""
+
+    OPENAI_NATIVE = "openai_native"
+    ANTHROPIC_NATIVE = "anthropic_native"
+    GEMINI_GOOGLE_SEARCH = "gemini_google_search"
+    DROP = "drop"
+
+
+@dataclass(frozen=True)
+class PassthroughModelConfig:
+    """Concrete routing for a single resolved alias."""
+
+    api_kind: ApiKind
+    model_name: str
+    api_key: str
+    base_url: str | None = None
+    web_search_mode: WebSearchMode = WebSearchMode.DROP
+    label: str = ""
+    alias: str = ""
+    reasoning_effort: str | None = None
+
+    def to_observability_metadata(self) -> "PassthroughObservabilityMetadata":
+        """Project config into Langfuse metadata."""
+        return PassthroughObservabilityMetadata(
+            passthrough_alias=self.alias,
+            provider=self.label,
+            api_kind=self.api_kind.value,
+            reasoning_effort=self.reasoning_effort,
+        )
+
+
+class PassthroughObservabilityMetadata(BaseModel):
+    """Metadata attached to Langfuse generation for passthrough requests."""
+
+    passthrough_alias: str
+    provider: str
+    api_kind: str
+    reasoning_effort: str | None = None
+
+    def to_metadata(self) -> dict:
+        return self.model_dump(exclude_none=True)
 
 
 @dataclass

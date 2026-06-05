@@ -14,7 +14,8 @@ from fastapi import APIRouter, Depends
 
 from minds.api.v1.deps import get_context
 from minds.common.logger import get_logger
-from minds.common.passthrough_config import list_available_passthrough_models
+from minds.common.settings.app_settings import get_app_settings
+from minds.inference.model_resolver import ModelResolver
 from minds.requests.context import Context
 
 logger = get_logger(__name__)
@@ -33,7 +34,8 @@ async def list_models(context: Context = Depends(get_context)) -> dict:
         deserializes into ``ListObject[Model]``.
     """
     logger.debug(f"List models requested for user {context.user_id}")
-    configs = list_available_passthrough_models()
+    resolver = ModelResolver(get_app_settings())
+    configs = resolver.list_available()
     return {
         "object": "list",
         "data": [

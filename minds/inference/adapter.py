@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.responses import JSONResponse, StreamingResponse
 
 if TYPE_CHECKING:
-    from minds.common.passthrough_config import PassthroughModelConfig
+    from minds.inference.types import PassthroughModelConfig
     from minds.inference.types import UsageBox
     from minds.schemas.chat import Message
 
