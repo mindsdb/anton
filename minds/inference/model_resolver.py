@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
@@ -34,22 +35,42 @@ class AliasMapping:
     reasoning_effort: str | None = None
 
 
+class PassthroughAlias(StrEnum):
+    """Valid passthrough model aliases."""
+
+    SONNET = "sonnet"
+    OPUS = "opus"
+    HAIKU = "haiku"
+    GPT = "gpt"
+    GPT_LOW = "gpt-low"
+    GPT_MEDIUM = "gpt-medium"
+    GPT_HIGH = "gpt-high"
+    GPT_CODEX = "gpt-codex"
+    GPT_MINI = "gpt-mini"
+    GPT_NANO = "gpt-nano"
+    GEMINI = "gemini"
+    GEMINI_FLASH = "gemini-flash"
+    KIMI = "kimi"
+    DEEPSEEK = "deepseek"
+    QWEN = "qwen"
+
+
 _ALIASES: dict[str, AliasMapping] = {
-    "sonnet": AliasMapping("anthropic", "passthrough_sonnet_model"),
-    "opus": AliasMapping("anthropic", "passthrough_opus_model"),
-    "haiku": AliasMapping("anthropic", "passthrough_haiku_model"),
-    "gpt": AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="low"),
-    "gpt-low": AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="low"),
-    "gpt-medium": AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="medium"),
-    "gpt-high": AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="high"),
-    "gpt-codex": AliasMapping("openai", "passthrough_gpt_codex_model"),
-    "gpt-mini": AliasMapping("openai", "passthrough_gpt_mini_model"),
-    "gpt-nano": AliasMapping("openai", "passthrough_gpt_nano_model"),
-    "gemini": AliasMapping("gemini", "passthrough_gemini_model"),
-    "gemini-flash": AliasMapping("gemini", "passthrough_gemini_flash_model"),
-    "kimi": AliasMapping("fireworks", "passthrough_kimi_model"),
-    "deepseek": AliasMapping("fireworks", "passthrough_deepseek_model"),
-    "qwen": AliasMapping("fireworks", "passthrough_qwen_model"),
+    PassthroughAlias.SONNET: AliasMapping("anthropic", "passthrough_sonnet_model"),
+    PassthroughAlias.OPUS: AliasMapping("anthropic", "passthrough_opus_model"),
+    PassthroughAlias.HAIKU: AliasMapping("anthropic", "passthrough_haiku_model"),
+    PassthroughAlias.GPT: AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="low"),
+    PassthroughAlias.GPT_LOW: AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="low"),
+    PassthroughAlias.GPT_MEDIUM: AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="medium"),
+    PassthroughAlias.GPT_HIGH: AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="high"),
+    PassthroughAlias.GPT_CODEX: AliasMapping("openai", "passthrough_gpt_codex_model"),
+    PassthroughAlias.GPT_MINI: AliasMapping("openai", "passthrough_gpt_mini_model"),
+    PassthroughAlias.GPT_NANO: AliasMapping("openai", "passthrough_gpt_nano_model"),
+    PassthroughAlias.GEMINI: AliasMapping("gemini", "passthrough_gemini_model"),
+    PassthroughAlias.GEMINI_FLASH: AliasMapping("gemini", "passthrough_gemini_flash_model"),
+    PassthroughAlias.KIMI: AliasMapping("fireworks", "passthrough_kimi_model"),
+    PassthroughAlias.DEEPSEEK: AliasMapping("fireworks", "passthrough_deepseek_model"),
+    PassthroughAlias.QWEN: AliasMapping("fireworks", "passthrough_qwen_model"),
 }
 
 _PROVIDER_CONFIG = {
