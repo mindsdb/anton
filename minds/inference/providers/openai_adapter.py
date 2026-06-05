@@ -6,7 +6,7 @@ from typing import Any
 
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import PassthroughModelConfig
+from minds.inference.types import PassthroughModelConfig
 from minds.inference.adapter import ProviderAdapter
 from minds.inference.providers import openai as openai_module
 from minds.inference.types import UsageBox

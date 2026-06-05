@@ -20,7 +20,7 @@ from openai import AsyncOpenAI
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.common.passthrough_config import PassthroughModelConfig, WebSearchMode
+from minds.inference.types import PassthroughModelConfig, WebSearchMode
 from minds.inference.types import (
     ChatCompletionsFunctionTool,
     ChoiceDeltaToolCall,

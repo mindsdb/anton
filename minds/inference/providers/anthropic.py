@@ -23,7 +23,7 @@ from anthropic import AsyncAnthropic
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.common.passthrough_config import PassthroughModelConfig, WebSearchMode
+from minds.inference.types import PassthroughModelConfig, WebSearchMode
 from minds.common.settings.app_settings import get_app_settings
 from minds.inference.types import (
     AnthropicToolsTranslation,

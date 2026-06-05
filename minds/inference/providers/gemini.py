@@ -19,7 +19,7 @@ from google.genai import types as genai_types
 from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import setup_logging
-from minds.common.passthrough_config import PassthroughModelConfig, WebSearchMode
+from minds.inference.types import PassthroughModelConfig, WebSearchMode
 from minds.inference.types import (
     ChoiceDeltaToolCall,
     ChoiceDeltaToolCallFunction,

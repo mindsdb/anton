@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import ApiKind
+from minds.inference.types import ApiKind
 from minds.inference.adapter import ProviderAdapter
 from minds.inference.model_resolver import ModelResolver
 from minds.inference.providers.anthropic_adapter import AnthropicAdapter
@@ -22,7 +22,7 @@ from minds.inference.types import UsageBox
 if TYPE_CHECKING:
     from typing import Any
 
-    from minds.common.passthrough_config import PassthroughModelConfig
+    from minds.inference.types import PassthroughModelConfig
     from minds.schemas.chat import Message
 
 
