@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from minds.common.passthrough_config import ApiKind
 from minds.inference.model_resolver import ModelResolver
+from minds.inference.types import ApiKind
 
 
 @pytest.fixture
@@ -370,7 +370,7 @@ class TestModelResolverWebSearchMode:
 
     def test_openai_has_native_web_search(self, mock_settings):
         """OpenAI models should have OPENAI_NATIVE web search mode."""
-        from minds.common.passthrough_config import WebSearchMode
+        from minds.inference.types import WebSearchMode
 
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:gpt")
@@ -379,7 +379,7 @@ class TestModelResolverWebSearchMode:
 
     def test_anthropic_has_native_web_search(self, mock_settings):
         """Anthropic models should have ANTHROPIC_NATIVE web search mode."""
-        from minds.common.passthrough_config import WebSearchMode
+        from minds.inference.types import WebSearchMode
 
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:sonnet")
@@ -388,7 +388,7 @@ class TestModelResolverWebSearchMode:
 
     def test_gemini_has_google_search(self, mock_settings):
         """Gemini models should have GEMINI_GOOGLE_SEARCH web search mode."""
-        from minds.common.passthrough_config import WebSearchMode
+        from minds.inference.types import WebSearchMode
 
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:gemini")
@@ -397,7 +397,7 @@ class TestModelResolverWebSearchMode:
 
     def test_fireworks_drops_web_search(self, mock_settings):
         """Fireworks models should have DROP web search mode."""
-        from minds.common.passthrough_config import WebSearchMode
+        from minds.inference.types import WebSearchMode
 
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:kimi")

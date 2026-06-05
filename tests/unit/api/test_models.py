@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from minds.api.v1.router import api_router
 from minds.common.constants import HEADER_ORGANIZATION_ID, HEADER_USER_ID
-from minds.common.passthrough_config import ApiKind, PassthroughModelConfig, WebSearchMode
+from minds.inference.types import ApiKind, PassthroughModelConfig, WebSearchMode
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ def stub_available_models():
         ),
     ]
     with patch(
-        "minds.api.v1.endpoints.models.list_available_passthrough_models",
+        "minds.inference.model_resolver.ModelResolver.list_available",
         return_value=configs,
     ):
         yield configs
