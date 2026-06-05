@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
+
+from minds.inference.types import (
+    AliasMapping,
+    PassthroughAlias,
+    ProviderConfig,
+)
 
 if TYPE_CHECKING:
     from minds.common.settings.app_settings import AppSettings
@@ -24,35 +28,6 @@ _DEPRECATED_ALIASES: dict[str, str] = {
     "_reason_": "sonnet",
     "_code_": "haiku",
 }
-
-
-@dataclass
-class AliasMapping:
-    """Maps alias to provider and model settings."""
-
-    provider: str
-    model_name_setting: str
-    reasoning_effort: str | None = None
-
-
-class PassthroughAlias(StrEnum):
-    """Valid passthrough model aliases."""
-
-    SONNET = "sonnet"
-    OPUS = "opus"
-    HAIKU = "haiku"
-    GPT = "gpt"
-    GPT_LOW = "gpt-low"
-    GPT_MEDIUM = "gpt-medium"
-    GPT_HIGH = "gpt-high"
-    GPT_CODEX = "gpt-codex"
-    GPT_MINI = "gpt-mini"
-    GPT_NANO = "gpt-nano"
-    GEMINI = "gemini"
-    GEMINI_FLASH = "gemini-flash"
-    KIMI = "kimi"
-    DEEPSEEK = "deepseek"
-    QWEN = "qwen"
 
 
 _ALIASES: dict[str, AliasMapping] = {
@@ -73,33 +48,33 @@ _ALIASES: dict[str, AliasMapping] = {
     PassthroughAlias.QWEN: AliasMapping("fireworks", "passthrough_qwen_model"),
 }
 
-_PROVIDER_CONFIG = {
-    "openai": {
-        "api_kind": "OPENAI_RESPONSES",
-        "web_search_mode": "OPENAI_NATIVE",
-        "label": "openai",
-        "api_key_attr": "api_key",
-        "base_url_attr": "api_url",
-    },
-    "anthropic": {
-        "api_kind": "ANTHROPIC_MESSAGES",
-        "web_search_mode": "ANTHROPIC_NATIVE",
-        "label": "anthropic",
-        "api_key_attr": "api_key",
-    },
-    "gemini": {
-        "api_kind": "GEMINI_NATIVE",
-        "web_search_mode": "GEMINI_GOOGLE_SEARCH",
-        "label": "gemini",
-        "api_key_attr": "api_key",
-    },
-    "fireworks": {
-        "api_kind": "ANTHROPIC_MESSAGES",
-        "web_search_mode": "DROP",
-        "label": "fireworks",
-        "api_key_attr": "api_key",
-        "base_url_attr": "anthropic_base_url",
-    },
+_PROVIDER_CONFIG: dict[str, ProviderConfig] = {
+    "openai": ProviderConfig(
+        api_kind="OPENAI_RESPONSES",
+        web_search_mode="OPENAI_NATIVE",
+        label="openai",
+        api_key_attr="api_key",
+        base_url_attr="api_url",
+    ),
+    "anthropic": ProviderConfig(
+        api_kind="ANTHROPIC_MESSAGES",
+        web_search_mode="ANTHROPIC_NATIVE",
+        label="anthropic",
+        api_key_attr="api_key",
+    ),
+    "gemini": ProviderConfig(
+        api_kind="GEMINI_NATIVE",
+        web_search_mode="GEMINI_GOOGLE_SEARCH",
+        label="gemini",
+        api_key_attr="api_key",
+    ),
+    "fireworks": ProviderConfig(
+        api_kind="ANTHROPIC_MESSAGES",
+        web_search_mode="DROP",
+        label="fireworks",
+        api_key_attr="api_key",
+        base_url_attr="anthropic_base_url",
+    ),
 }
 
 
@@ -166,12 +141,12 @@ class ModelResolver:
 
         provider_config = _PROVIDER_CONFIG[mapping.provider]
 
-        api_kind = getattr(ApiKind, provider_config["api_kind"])
-        web_search_mode = getattr(WebSearchMode, provider_config["web_search_mode"])
+        api_kind = getattr(ApiKind, provider_config.api_kind)
+        web_search_mode = getattr(WebSearchMode, provider_config.web_search_mode)
 
         base_url = None
-        if "base_url_attr" in provider_config:
-            base_url = getattr(provider_settings, provider_config["base_url_attr"], None)
+        if provider_config.base_url_attr:
+            base_url = getattr(provider_settings, provider_config.base_url_attr, None)
 
         return PassthroughModelConfig(
             api_kind=api_kind,
@@ -179,7 +154,7 @@ class ModelResolver:
             api_key=api_key,
             base_url=base_url,
             web_search_mode=web_search_mode,
-            label=provider_config["label"],
+            label=provider_config.label,
             alias=alias,
             reasoning_effort=mapping.reasoning_effort,
         )

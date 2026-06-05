@@ -26,6 +26,7 @@ from minds.common.logger import setup_logging
 from minds.schemas.chat import Message
 
 __all__ = [
+    "AliasMapping",
     "AnthropicToolsTranslation",
     "ApiKind",
     "ChatCompletionsFunctionDef",
@@ -36,8 +37,10 @@ __all__ = [
     "GenericToolType",
     "GenericWebSearchTool",
     "ParsedTool",
+    "PassthroughAlias",
     "PassthroughModelConfig",
     "PassthroughObservabilityMetadata",
+    "ProviderConfig",
     "UsageBox",
     "WebSearchMode",
     "_classify_tool",
@@ -49,6 +52,45 @@ __all__ = [
 ]
 
 logger = setup_logging()
+
+
+class PassthroughAlias(StrEnum):
+    """Valid passthrough model aliases."""
+
+    SONNET = "sonnet"
+    OPUS = "opus"
+    HAIKU = "haiku"
+    GPT = "gpt"
+    GPT_LOW = "gpt-low"
+    GPT_MEDIUM = "gpt-medium"
+    GPT_HIGH = "gpt-high"
+    GPT_CODEX = "gpt-codex"
+    GPT_MINI = "gpt-mini"
+    GPT_NANO = "gpt-nano"
+    GEMINI = "gemini"
+    GEMINI_FLASH = "gemini-flash"
+    KIMI = "kimi"
+    DEEPSEEK = "deepseek"
+    QWEN = "qwen"
+
+
+@dataclass
+class AliasMapping:
+    """Maps alias to provider and model settings."""
+
+    provider: str
+    model_name_setting: str
+    reasoning_effort: str | None = None
+
+
+class ProviderConfig(BaseModel):
+    """Configuration for a provider (api_kind, auth, web search mode)."""
+
+    api_kind: str
+    web_search_mode: str
+    label: str
+    api_key_attr: str
+    base_url_attr: str | None = None
 
 
 class ApiKind(StrEnum):
