@@ -14,13 +14,15 @@ from fastapi import HTTPException
 
 from minds.inference.types import (
     AliasMapping,
+    ApiKind,
     PassthroughAlias,
+    PassthroughModelConfig,
     ProviderConfig,
+    WebSearchMode,
 )
 
 if TYPE_CHECKING:
     from minds.common.settings.app_settings import AppSettings
-    from minds.inference.types import PassthroughModelConfig
 
 _PASSTHROUGH_PATTERN = re.compile(r"^latest:([a-zA-Z0-9\-]+)$")
 
@@ -118,8 +120,6 @@ class ModelResolver:
 
     def _resolve_alias(self, alias: str) -> PassthroughModelConfig:
         """Resolve alias to config, checking provider availability."""
-        from minds.inference.types import ApiKind, PassthroughModelConfig, WebSearchMode
-
         mapping = _ALIASES.get(alias)
         if not mapping:
             raise HTTPException(
