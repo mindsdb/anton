@@ -5,14 +5,15 @@ from unittest.mock import patch
 import pytest
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
 from minds.inference.providers.openai_adapter import OpenAIAdapter
+from minds.inference.types import ApiKind, PassthroughModelConfig
 from minds.schemas.chat import Message, Role
 
 
 @pytest.fixture
 def openai_config():
     """Create a test OpenAI config."""
+
     return PassthroughModelConfig(
         api_kind=ApiKind.OPENAI_RESPONSES,
         model_name="gpt-4",
@@ -44,7 +45,6 @@ async def test_openai_adapter_complete_calls_proxy():
     with patch("minds.inference.providers.openai_adapter.openai_module.proxy_openai") as mock_proxy:
         mock_response = JSONResponse(content={"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
         mock_proxy.return_value = mock_response
-
         response = await adapter.complete(
             config=config,
             messages=messages,
@@ -68,7 +68,6 @@ async def test_openai_adapter_captures_usage():
         alias="gpt-4",
     )
     messages = [Message(role=Role.user, content="test")]
-
     with patch("minds.inference.providers.openai_adapter.openai_module.proxy_openai") as mock_proxy:
 
         def set_usage_box(**kwargs):
@@ -85,7 +84,6 @@ async def test_openai_adapter_captures_usage():
             stream=False,
             request_id="req-123",
         )
-
         usage = adapter.get_last_usage()
         assert usage == (100, 50)
 
@@ -113,7 +111,6 @@ async def test_openai_adapter_captures_output():
             return JSONResponse(content={})
 
         mock_proxy.side_effect = set_output
-
         await adapter.complete(
             config=config,
             messages=messages,
@@ -137,7 +134,6 @@ async def test_openai_adapter_captures_artifacts():
         alias="gpt-4",
     )
     messages = [Message(role=Role.user, content="test")]
-
     artifacts = [{"type": "web_search", "query": "test query"}]
 
     with patch("minds.inference.providers.openai_adapter.openai_module.proxy_openai") as mock_proxy:
@@ -149,7 +145,6 @@ async def test_openai_adapter_captures_artifacts():
             return JSONResponse(content={})
 
         mock_proxy.side_effect = set_artifacts
-
         await adapter.complete(
             config=config,
             messages=messages,
@@ -180,7 +175,6 @@ async def test_openai_adapter_returns_streaming_response():
     with patch("minds.inference.providers.openai_adapter.openai_module.proxy_openai") as mock_proxy:
         mock_response = StreamingResponse(mock_stream_body(), media_type="text/event-stream")
         mock_proxy.return_value = mock_response
-
         response = await adapter.complete(
             config=config,
             messages=messages,

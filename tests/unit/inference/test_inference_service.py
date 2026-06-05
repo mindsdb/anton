@@ -6,18 +6,19 @@ import pytest
 from fastapi import HTTPException
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import ApiKind
 from minds.inference.model_resolver import ModelResolver
 from minds.inference.providers.anthropic_adapter import AnthropicAdapter
 from minds.inference.providers.gemini_adapter import GeminiAdapter
 from minds.inference.providers.openai_adapter import OpenAIAdapter
 from minds.inference.service import InferenceResult, InferenceService
+from minds.inference.types import ApiKind
 from minds.schemas.chat import Message, Role
 
 
 @pytest.fixture
 def mock_settings():
     """Create a mock AppSettings with all providers configured."""
+
     settings = MagicMock()
 
     # Anthropic
@@ -25,7 +26,6 @@ def mock_settings():
     settings.anthropic.passthrough_sonnet_model = "claude-3-5-sonnet-20241022"
     settings.anthropic.passthrough_opus_model = "claude-3-opus-20240229"
     settings.anthropic.passthrough_haiku_model = "claude-3-haiku-20240307"
-
     # OpenAI
     settings.openai.api_key = "test-openai-key"
     settings.openai.api_url = None
@@ -38,7 +38,6 @@ def mock_settings():
     settings.gemini.api_key = "test-gemini-key"
     settings.gemini.passthrough_gemini_model = "gemini-2.0-flash"
     settings.gemini.passthrough_gemini_flash_model = "gemini-2.0-flash"
-
     # Fireworks
     settings.fireworks.api_key = "test-fireworks-key"
     settings.fireworks.anthropic_base_url = "https://api.fireworks.ai/account/v1/completions"
@@ -87,7 +86,6 @@ class TestInferenceServiceResolveModel:
                 stream=False,
                 request_id="req-123",
             )
-
             assert result.config.alias == "sonnet"
             assert result.config.model_name == "claude-3-5-sonnet-20241022"
 
@@ -101,7 +99,6 @@ class TestInferenceServiceResolveModel:
                 stream=False,
                 request_id="req-123",
             )
-
         assert exc_info.value.status_code == 400
         assert "Unknown passthrough alias" in exc_info.value.detail
 
@@ -119,7 +116,6 @@ class TestInferenceServiceAdapterSelection:
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []
             mock_create_adapter.return_value = mock_adapter
-
             await inference_service.inference(
                 model_name="latest:gpt",
                 messages=test_messages,
@@ -147,7 +143,6 @@ class TestInferenceServiceAdapterSelection:
                 stream=False,
                 request_id="req-123",
             )
-
             mock_create_adapter.assert_called_once_with(ApiKind.ANTHROPIC_MESSAGES)
 
     @pytest.mark.asyncio
@@ -160,7 +155,6 @@ class TestInferenceServiceAdapterSelection:
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []
             mock_create_adapter.return_value = mock_adapter
-
             await inference_service.inference(
                 model_name="latest:gemini",
                 messages=test_messages,
@@ -192,7 +186,6 @@ class TestInferenceServiceResultCapture:
                 stream=False,
                 request_id="req-123",
             )
-
             assert response is expected_response
             assert isinstance(result, InferenceResult)
             assert result.config.alias == "sonnet"
@@ -207,7 +200,6 @@ class TestInferenceServiceResultCapture:
             mock_adapter.get_last_output = MagicMock(return_value=None)
             mock_adapter.get_last_artifacts = MagicMock(return_value=[])
             mock_create_adapter.return_value = mock_adapter
-
             response, result = await inference_service.inference(
                 model_name="latest:sonnet",
                 messages=test_messages,
@@ -235,7 +227,6 @@ class TestInferenceServiceResultCapture:
                 stream=False,
                 request_id="req-123",
             )
-
             assert result.output == expected_output
 
     @pytest.mark.asyncio
@@ -249,7 +240,6 @@ class TestInferenceServiceResultCapture:
             mock_adapter.get_last_output = MagicMock(return_value=None)
             mock_adapter.get_last_artifacts = MagicMock(return_value=artifacts)
             mock_create_adapter.return_value = mock_adapter
-
             response, result = await inference_service.inference(
                 model_name="latest:sonnet",
                 messages=test_messages,
@@ -285,7 +275,6 @@ class TestInferenceServiceStreaming:
                 stream=True,
                 request_id="req-123",
             )
-
             assert isinstance(response, StreamingResponse)
 
     @pytest.mark.asyncio
@@ -299,7 +288,6 @@ class TestInferenceServiceStreaming:
             mock_adapter.get_last_output.return_value = None
             mock_adapter.get_last_artifacts.return_value = []
             mock_create_adapter.return_value = mock_adapter
-
             response, result = await inference_service.inference(
                 model_name="latest:sonnet",
                 messages=test_messages,
@@ -328,7 +316,6 @@ class TestInferenceServiceParameters:
             tool_choice = "auto"
             temperature = 0.7
             max_tokens = 1000
-
             await inference_service.inference(
                 model_name="latest:sonnet",
                 messages=test_messages,

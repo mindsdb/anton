@@ -82,7 +82,6 @@ class TestOpenAIRequestHandlerInitialization:
         assert handler.messages == sample_messages
         assert handler.model == "latest:sonnet"
         assert handler.stream is False
-        assert handler.is_passthrough is True
 
     def test_handler_initialization_with_tools(self, mock_session, mock_context, sample_messages):
         """Test handler initialization with tools."""

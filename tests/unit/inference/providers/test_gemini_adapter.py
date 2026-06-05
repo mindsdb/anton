@@ -5,14 +5,15 @@ from unittest.mock import patch
 import pytest
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.common.passthrough_config import ApiKind, PassthroughModelConfig
 from minds.inference.providers.gemini_adapter import GeminiAdapter
+from minds.inference.types import ApiKind, PassthroughModelConfig
 from minds.schemas.chat import Message, Role
 
 
 @pytest.mark.asyncio
 async def test_gemini_adapter_complete_calls_proxy():
     """GeminiAdapter.complete() delegates to proxy_gemini."""
+
     adapter = GeminiAdapter()
     config = PassthroughModelConfig(
         api_kind=ApiKind.GEMINI_NATIVE,
@@ -26,7 +27,6 @@ async def test_gemini_adapter_complete_calls_proxy():
     with patch("minds.inference.providers.gemini_adapter.gemini_module.proxy_gemini") as mock_proxy:
         mock_response = JSONResponse(content={"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
         mock_proxy.return_value = mock_response
-
         response = await adapter.complete(
             config=config,
             messages=messages,
@@ -50,7 +50,6 @@ async def test_gemini_adapter_captures_usage():
         alias="gemini",
     )
     messages = [Message(role=Role.user, content="test")]
-
     with patch("minds.inference.providers.gemini_adapter.gemini_module.proxy_gemini") as mock_proxy:
 
         def set_usage_box(**kwargs):
@@ -67,7 +66,6 @@ async def test_gemini_adapter_captures_usage():
             stream=False,
             request_id="req-123",
         )
-
         usage = adapter.get_last_usage()
         assert usage == (75, 35)
 
@@ -95,7 +93,6 @@ async def test_gemini_adapter_captures_output():
             return JSONResponse(content={})
 
         mock_proxy.side_effect = set_output
-
         await adapter.complete(
             config=config,
             messages=messages,
@@ -119,7 +116,6 @@ async def test_gemini_adapter_captures_artifacts():
         alias="gemini",
     )
     messages = [Message(role=Role.user, content="test")]
-
     artifacts = [{"type": "search_result", "query": "test"}]
 
     with patch("minds.inference.providers.gemini_adapter.gemini_module.proxy_gemini") as mock_proxy:
@@ -131,7 +127,6 @@ async def test_gemini_adapter_captures_artifacts():
             return JSONResponse(content={})
 
         mock_proxy.side_effect = set_artifacts
-
         await adapter.complete(
             config=config,
             messages=messages,
@@ -162,7 +157,6 @@ async def test_gemini_adapter_returns_streaming_response():
     with patch("minds.inference.providers.gemini_adapter.gemini_module.proxy_gemini") as mock_proxy:
         mock_response = StreamingResponse(mock_stream_body(), media_type="text/event-stream")
         mock_proxy.return_value = mock_response
-
         response = await adapter.complete(
             config=config,
             messages=messages,

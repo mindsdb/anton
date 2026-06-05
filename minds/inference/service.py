@@ -11,13 +11,12 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.inference.types import ApiKind
 from minds.inference.adapter import ProviderAdapter
 from minds.inference.model_resolver import ModelResolver
 from minds.inference.providers.anthropic_adapter import AnthropicAdapter
 from minds.inference.providers.gemini_adapter import GeminiAdapter
 from minds.inference.providers.openai_adapter import OpenAIAdapter
-from minds.inference.types import UsageBox
+from minds.inference.types import ApiKind, UsageBox
 
 if TYPE_CHECKING:
     from typing import Any

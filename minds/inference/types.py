@@ -81,7 +81,7 @@ class PassthroughModelConfig:
     alias: str = ""
     reasoning_effort: str | None = None
 
-    def to_observability_metadata(self) -> "PassthroughObservabilityMetadata":
+    def to_observability_metadata(self) -> PassthroughObservabilityMetadata:
         """Project config into Langfuse metadata."""
         return PassthroughObservabilityMetadata(
             passthrough_alias=self.alias,

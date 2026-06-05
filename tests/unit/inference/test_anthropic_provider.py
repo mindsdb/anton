@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from minds.common.passthrough_config import PassthroughModelConfig
 from minds.inference.providers.anthropic import (
     _anthropic_response_to_openai,
     _collect_anthropic_server_artifacts,
@@ -11,6 +10,7 @@ from minds.inference.providers.anthropic import (
     _openai_tool_choice_to_anthropic,
     _translate_tools_for_anthropic,
 )
+from minds.inference.types import PassthroughModelConfig
 
 
 class TestMessageConversion:
@@ -214,7 +214,6 @@ class TestResponseConversion:
         mock_response.usage = MagicMock()
         mock_response.usage.input_tokens = 10
         mock_response.usage.output_tokens = 5
-
         result = _anthropic_response_to_openai(mock_response, "claude-sonnet-4")
 
         assert result is not None
@@ -237,7 +236,6 @@ class TestResponseConversion:
         mock_response.usage = MagicMock()
         mock_response.usage.input_tokens = 10
         mock_response.usage.output_tokens = 5
-
         result = _anthropic_response_to_openai(mock_response, "claude-sonnet-4")
 
         assert result is not None
@@ -255,7 +253,6 @@ class TestResponseConversion:
         mock_tool_use.id = "tool_1"
         mock_tool_use.name = "search"
         mock_tool_use.input = {"query": "test"}
-
         mock_response = MagicMock()
         mock_response.content = [mock_text_block, mock_tool_use]
         mock_response.usage = MagicMock()
@@ -263,7 +260,6 @@ class TestResponseConversion:
         mock_response.usage.output_tokens = 5
 
         result = _anthropic_response_to_openai(mock_response, "claude-sonnet-4")
-
         assert result is not None
         message = result["choices"][0]["message"]
         assert message["content"] is not None
@@ -277,7 +273,6 @@ class TestServerArtifacts:
         """Test collecting artifacts when none are present."""
         mock_response = MagicMock()
         mock_response.content = []
-
         artifacts = _collect_anthropic_server_artifacts(mock_response)
 
         assert artifacts == []
@@ -289,7 +284,6 @@ class TestServerArtifacts:
 
         mock_response = MagicMock()
         mock_response.content = [mock_text]
-
         artifacts = _collect_anthropic_server_artifacts(mock_response)
 
         assert artifacts == []
@@ -309,7 +303,6 @@ class TestClientInitialization:
             model_name="claude-sonnet-4",
             api_key="test-key",
         )
-
         client = _get_anthropic_client(config)
         assert client is not None
         mock_client_class.assert_called_once()
@@ -321,7 +314,6 @@ class TestClientInitialization:
         """Test Anthropic client with custom base_url (Fireworks)."""
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
-
         config = PassthroughModelConfig(
             api_kind="anthropic_messages",
             model_name="claude-sonnet-4",

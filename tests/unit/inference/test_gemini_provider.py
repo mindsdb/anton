@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 from google.genai import types as genai_types
 
-from minds.common.passthrough_config import PassthroughModelConfig
 from minds.inference.providers.gemini import (
     _chat_messages_to_gemini,
     _gemini_finish_reason_to_openai,
@@ -12,6 +11,7 @@ from minds.inference.providers.gemini import (
     _get_gemini_client,
     _translate_tools_for_gemini,
 )
+from minds.inference.types import PassthroughModelConfig
 
 
 class TestMessageConversion:
@@ -133,7 +133,6 @@ class TestResponseConversion:
 
         mock_content = MagicMock()
         mock_content.parts = [mock_part]
-
         mock_candidate = MagicMock()
         mock_candidate.content = mock_content
         mock_candidate.finish_reason = genai_types.FinishReason.STOP
@@ -143,7 +142,6 @@ class TestResponseConversion:
         mock_response.usage_metadata = MagicMock()
         mock_response.usage_metadata.prompt_token_count = 10
         mock_response.usage_metadata.candidates_token_count = 5
-
         result = _gemini_response_to_openai(mock_response, "gemini-2.0-flash")
         assert result is not None
         assert result["object"] == "chat.completion"
@@ -158,14 +156,12 @@ class TestResponseConversion:
         mock_part.function_call = MagicMock()
         mock_part.function_call.name = "search"
         mock_part.function_call.args = {"query": "test"}
-
         mock_content = MagicMock()
         mock_content.parts = [mock_part]
 
         mock_candidate = MagicMock()
         mock_candidate.content = mock_content
         mock_candidate.finish_reason = None
-
         mock_response = MagicMock()
         mock_response.candidates = [mock_candidate]
         mock_response.usage_metadata = MagicMock()
@@ -192,7 +188,6 @@ class TestClientInitialization:
             model_name="gemini-2.0-flash",
             api_key="test-key",
         )
-
         client = _get_gemini_client(config)
         assert client is not None
         # Verify client was created with API key

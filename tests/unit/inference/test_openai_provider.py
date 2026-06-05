@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from minds.common.passthrough_config import PassthroughModelConfig
 from minds.inference.providers.openai import (
     _chat_messages_to_responses_input,
     _chat_tool_choice_to_responses,
@@ -12,6 +11,7 @@ from minds.inference.providers.openai import (
     _responses_response_to_chat_completion,
     _translate_tools_for_openai,
 )
+from minds.inference.types import PassthroughModelConfig
 
 
 class TestMessageConversion:
