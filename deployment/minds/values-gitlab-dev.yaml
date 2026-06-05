@@ -41,9 +41,6 @@ deployment:
           - path: /api/v1/chat
             serviceName: minds
             servicePort: 80
-          - path: /api/v1/minds
-            serviceName: minds
-            servicePort: 80
           - path: /api/v1/models
             serviceName: minds
             servicePort: 80
@@ -67,9 +64,6 @@ deployment:
         enableMultiPath: true
         paths:
           - path: /api/v1/chat
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/minds
             serviceName: minds
             servicePort: 80
           - path: /api/v1/models
