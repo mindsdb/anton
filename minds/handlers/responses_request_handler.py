@@ -18,7 +18,7 @@ from minds.requests.langfuse_tracing import (
     setup_langfuse_observation,
 )
 from minds.requests.responses_request import ResponsesRequest
-from minds.requests.stream import MessageStreamer
+from minds.requests.streamers import SimpleStreamer
 from minds.schemas.chat import Message, Role
 from minds.schemas.conversations import ConversationCreateRequest, ConversationItem, ConversationMetadata
 from minds.services.conversations import ConversationsService
@@ -156,12 +156,6 @@ async def responses_request_handler(
         )
 
         # Use the responses method from the handler which manages the conversation state
-        class SimpleStreamer(MessageStreamer):
-            """Simple streamer for responses API (not used, kept for interface compatibility)."""
-
-            async def push(self, role: Role, content: str):
-                pass
-
         response = await responses_handler.responses(
             streamer=SimpleStreamer(),
             message=message,
