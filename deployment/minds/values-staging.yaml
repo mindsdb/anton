@@ -20,35 +20,6 @@ deployment:
             serviceName: minds
             servicePort: 80
   
-  ingress_secondary:
-    name: minds-legacy
-    annotations:
-      nginx.ingress.kubernetes.io/enable-cors: "true"
-      
-      # Forward auth configuration using your gateway service
-      nginx.ingress.kubernetes.io/auth-url: "http://auth.staging.svc.cluster.local:80/v1/authenticate/"
-
-    hosts:
-      - host: minds.staging.mdb.ai
-        enableMultiPath: true
-        paths:
-          - path: /
-            serviceName: minds
-            servicePort: 80
-      
-      - host: staging.mdb.ai
-        enableMultiPath: true
-        paths:
-          - path: /api/v1/chat
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/models
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/responses
-            serviceName: minds
-            servicePort: 80
-
   extraEnvs:
 
     # ====================================
