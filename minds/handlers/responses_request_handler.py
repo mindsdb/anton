@@ -27,12 +27,6 @@ from minds.services.limits import LimitsService
 logger = get_logger(__name__)
 
 
-class ConversationMindMismatchError(Exception):
-    """Exception for when a conversation is not associated with the current model."""
-
-    pass
-
-
 @lazy_observe(name="Responses Handler v1", as_type="generation")
 async def responses_request_handler(
     session: Session,
@@ -104,12 +98,8 @@ async def responses_request_handler(
 
         # If a conversation is provided, add the input as a new message
         else:
-            # Check if conversation model matches
-            conversation = await conversation_service.get_conversation(conversation_id)
-            if conversation.metadata.model_name != model:
-                raise ConversationMindMismatchError(
-                    f"Conversation {conversation_id} is not associated with model {model}"
-                )
+            # Verify the conversation exists and the caller has access.
+            await conversation_service.get_conversation(conversation_id)
 
             if input_data:
                 if isinstance(input_data, str):

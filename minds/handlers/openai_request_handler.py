@@ -382,10 +382,9 @@ class OpenAIRequestHandler:
                         answer = content
 
                 if answer:
-                    await conversation_service.update_conversation_message_content(
+                    await conversation_service.update_message_content(
                         message=message,
                         content=answer,
-                        sql_query=None,
                         model_name=self.model,
                         request_id=self.request_id,
                         langfuse_trace_id=self.langfuse_trace_id,
@@ -420,10 +419,9 @@ class OpenAIRequestHandler:
 
         usage = result.usage
         if answer:
-            await conversation_service.update_conversation_message_content(
+            await conversation_service.update_message_content(
                 message=message,
                 content=answer,
-                sql_query=None,
                 model_name=self.model,
                 request_id=self.request_id,
                 langfuse_trace_id=self.langfuse_trace_id,

@@ -13,10 +13,6 @@ class Conversation(BaseSQLModel, table=True):
     __tablename__ = "conversations"
 
     user_id: UUID = Field(description="ID of the user who owns this conversation", index=True)
-    mind_id: UUID = Field(
-        description="Model name that this conversation uses for inference",
-        index=True,
-    )
     topic: str = Field(description="Topic of the conversation", max_length=255)
 
     messages: list["Message"] = Relationship()

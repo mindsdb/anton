@@ -14,8 +14,12 @@ from minds.common.logger import get_logger
 from minds.model.conversation import Conversation
 from minds.model.message import Message
 from minds.schemas.chat import Role
-from minds.schemas.conversations import ConversationCreateRequest, ConversationResponse
-from minds.schemas.messages import MessageResponse
+from minds.schemas.conversations import (
+    ConversationCreateRequest,
+    ConversationMetadata,
+    ConversationResponse,
+)
+from minds.schemas.messages import MessageContent, MessageResponse
 
 logger = get_logger(__name__)
 
@@ -73,13 +77,27 @@ class ConversationsService:
         return await self.conversation_to_response(conversation)
 
     async def create_conversation(self, req: ConversationCreateRequest) -> ConversationResponse:
-        """Create a new conversation."""
+        """Create a new conversation, optionally seeded with initial messages."""
         conversation = Conversation(
             user_id=self.user_id,
             organization_id=self.organization_id,
-            name=req.name,
+            topic=req.metadata.topic,
         )
         self.session.add(conversation)
+        self.session.flush()
+
+        if req.items:
+            self.session.add_all(
+                Message(
+                    conversation_id=conversation.id,
+                    user_id=self.user_id,
+                    organization_id=self.organization_id,
+                    role=item.role,
+                    content=item.content,
+                )
+                for item in req.items
+            )
+
         self.session.commit()
         self.session.refresh(conversation)
         logger.debug(f"Created conversation {conversation.id}")
@@ -139,32 +157,50 @@ class ConversationsService:
         self.session.refresh(message)
         return message
 
-    async def update_conversation_message_content(
-        self, conversation_id: UUID, message_id: UUID, content: str
-    ) -> MessageResponse:
-        """Update a message's content."""
-        message = await self._get_message(conversation_id, message_id)
+    async def update_message_content(
+        self,
+        message: Message,
+        content: str,
+        *,
+        model_name: str | None = None,
+        request_id: str | None = None,
+        langfuse_trace_id: str | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> Message:
+        """Write final content + per-message tracing onto a placeholder message.
+
+        Tracing fields enable per-conversation token rollups (chat_completions
+        has no conversation_id, so the message row is the join point).
+        """
         message.content = content
+        message.model_name = model_name
+        message.request_id = request_id
+        message.langfuse_trace_id = langfuse_trace_id
+        message.input_tokens = input_tokens
+        message.output_tokens = output_tokens
         self.session.add(message)
         self.session.commit()
         self.session.refresh(message)
-        logger.debug(f"Updated message {message_id}")
-        return await self._message_to_response(message)
+        logger.debug(f"Updated message {message.id}")
+        return message
 
     async def conversation_to_response(self, conversation: Conversation) -> ConversationResponse:
         """Convert a conversation ORM to a response DTO."""
         return ConversationResponse(
             id=conversation.id,
-            name=conversation.name,
-            created_at=conversation.created_at,
+            metadata=ConversationMetadata(topic=conversation.topic, model_name=""),
+            created_at=str(conversation.created_at) if conversation.created_at else None,
+            modified_at=str(conversation.modified_at) if conversation.modified_at else None,
         )
 
     async def _message_to_response(self, message: Message) -> MessageResponse:
         """Convert a message ORM to a response DTO."""
+        text = message.content if isinstance(message.content, str) else ""
         return MessageResponse(
             id=message.id,
             role=message.role,
-            content=message.content or "",
+            content=MessageContent(text=text),
         )
 
     async def _get_conversation(self, conversation_id: UUID) -> Conversation:

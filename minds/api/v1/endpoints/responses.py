@@ -14,10 +14,7 @@ from minds.common.guards import ResourceType, require_usage_available
 from minds.common.logger import get_logger
 from minds.common.statsig import is_langfuse_enabled
 from minds.db.pg_session import get_session
-from minds.handlers.responses_request_handler import (
-    ConversationMindMismatchError,
-    responses_request_handler,
-)
+from minds.handlers.responses_request_handler import responses_request_handler
 from minds.requests.context import extract_context_from_request
 from minds.requests.responses_request import ResponsesRequest
 from minds.services.conversations import ConversationsService
@@ -115,9 +112,6 @@ async def responses(
         )
 
         return response
-    except ConversationMindMismatchError as e:
-        logger.warning(f"❌ [{context.request_id}] Conversation mind mismatch: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"❌ [{context.request_id}] Error processing Responses API request: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e
