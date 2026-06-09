@@ -36,6 +36,8 @@ _ALIASES: dict[str, AliasMapping] = {
     PassthroughAlias.SONNET: AliasMapping("anthropic", "passthrough_sonnet_model"),
     PassthroughAlias.OPUS: AliasMapping("anthropic", "passthrough_opus_model"),
     PassthroughAlias.HAIKU: AliasMapping("anthropic", "passthrough_haiku_model"),
+    PassthroughAlias.MYTHOS: AliasMapping("anthropic", "passthrough_mythos_model"),
+    PassthroughAlias.FABLE: AliasMapping("anthropic", "passthrough_fable_model"),
     PassthroughAlias.GPT: AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="low"),
     PassthroughAlias.GPT_LOW: AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="low"),
     PassthroughAlias.GPT_MEDIUM: AliasMapping("openai", "passthrough_gpt_model", reasoning_effort="medium"),

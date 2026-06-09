@@ -19,6 +19,8 @@ def mock_settings():
     settings.anthropic.passthrough_sonnet_model = "claude-3-5-sonnet-20241022"
     settings.anthropic.passthrough_opus_model = "claude-3-opus-20240229"
     settings.anthropic.passthrough_haiku_model = "claude-3-haiku-20240307"
+    settings.anthropic.passthrough_mythos_model = "claude-mythos-5"
+    settings.anthropic.passthrough_fable_model = "claude-fable-5"
 
     # OpenAI
     settings.openai.api_key = "test-openai-key"
@@ -305,6 +307,8 @@ class TestModelResolverListAvailable:
             "sonnet",
             "opus",
             "haiku",
+            "mythos",
+            "fable",
             "gpt",
             "gpt-low",
             "gpt-medium",
@@ -361,7 +365,7 @@ class TestModelResolverListAvailable:
         configs = resolver.list_available()
 
         aliases = {config.alias for config in configs}
-        expected = {"sonnet", "opus", "haiku"}
+        expected = {"sonnet", "opus", "haiku", "mythos", "fable"}
         assert aliases == expected
 
 

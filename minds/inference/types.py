@@ -60,6 +60,8 @@ class PassthroughAlias(StrEnum):
     SONNET = "sonnet"
     OPUS = "opus"
     HAIKU = "haiku"
+    MYTHOS = "mythos"
+    FABLE = "fable"
     GPT = "gpt"
     GPT_LOW = "gpt-low"
     GPT_MEDIUM = "gpt-medium"
