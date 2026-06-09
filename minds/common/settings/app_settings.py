@@ -138,10 +138,6 @@ class AnthropicSettings(Settings):
         default="claude-haiku-4-5-20251001",
         description="Anthropic model used for the `latest:haiku` alias.",
     )  # ANTHROPIC__PASSTHROUGH_HAIKU_MODEL
-    passthrough_mythos_model: str = Field(
-        default="claude-mythos-5",
-        description="Anthropic model used for the `latest:mythos` alias.",
-    )  # ANTHROPIC__PASSTHROUGH_MYTHOS_MODEL
     passthrough_fable_model: str = Field(
         default="claude-fable-5",
         description="Anthropic model used for the `latest:fable` alias.",
