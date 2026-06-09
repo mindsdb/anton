@@ -195,8 +195,15 @@ class ConversationsService:
         )
 
     async def _message_to_response(self, message: Message) -> MessageResponse:
-        """Convert a message ORM to a response DTO."""
-        text = message.content if isinstance(message.content, str) else ""
+        """Convert a message ORM to a response DTO.
+
+        ``message.content`` is stored as encrypted JSONB and comes back as a
+        ``MindCastleProxy`` that quacks like ``str`` but isn't an actual ``str``
+        instance — Pydantic strict validation rejects the proxy directly, so
+        coerce with ``str()`` to materialize the underlying value.
+        """
+        raw = message.content
+        text = str(raw) if raw else ""
         return MessageResponse(
             id=message.id,
             role=message.role,
