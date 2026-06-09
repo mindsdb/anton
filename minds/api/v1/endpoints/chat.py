@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session
 from starlette.responses import JSONResponse
 
+from minds.api.v1.deps import get_limits_service
 from minds.common.guards import ResourceType, require_usage_available
 from minds.common.logger import get_logger
 from minds.common.statsig import is_langfuse_enabled
@@ -41,7 +42,7 @@ async def chat_completions(
     chat_completions_request: ChatCompletionsRequest,
     request: Request,
     session: Session = Depends(get_session),
-    limits_service: LimitsService = Depends(lambda: None),
+    limits_service: LimitsService = Depends(get_limits_service),
 ):
     """
     Handle chat completions (passthrough inference).
@@ -59,9 +60,7 @@ async def chat_completions(
     logger.debug(f"Chat completions request for model: {chat_completions_request.model}")
 
     try:
-        # Check token usage limits
-        if limits_service:
-            await require_usage_available(limits_service, ResourceType.TOKENS)
+        await require_usage_available(limits_service, ResourceType.TOKENS)
 
         langfuse_enabled = is_langfuse_enabled(context=context)
         trace_propagation_kwargs: dict = {}
