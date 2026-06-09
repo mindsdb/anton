@@ -58,7 +58,12 @@ deployment:
             servicePort: 80
           - path: /api/v1/limits
             serviceName: minds
-            servicePort: 80
+- path: /api/v1/models
+serviceName: minds
+servicePort: 80
+- path: /api/v1/limits
+serviceName: minds
+servicePort: 80
 
       - host: demo3.mdb.ai
         enableMultiPath: true
