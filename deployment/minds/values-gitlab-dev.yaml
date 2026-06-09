@@ -65,31 +65,6 @@ servicePort: 80
 serviceName: minds
 servicePort: 80
 
-      - host: demo3.mdb.ai
-        enableMultiPath: true
-        paths:
-          - path: /api/v1/chat
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/models
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/datasources
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/tree
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/conversations
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/responses
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/limits
-            serviceName: minds
-            servicePort: 80
-
 
   extraEnvs:
 
