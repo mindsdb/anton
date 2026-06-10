@@ -1,15 +1,11 @@
-```
-        ▐
-   ▄█▀██▀█▄   ♡♡♡♡
- ██  (°ᴗ°) ██
-   ▀█▄██▄█▀      ▄▀█ █▄ █ ▀█▀ █▀█ █▄ █
-    ▐   ▐        █▀█ █ ▀█  █  █▄█ █ ▀█
-    ▐   ▐
-```
 
-# Meet Anton 
+
+# Meet Anton
+
+<img width="760" height="466" alt="anton-promo" src="https://github.com/user-attachments/assets/27cf65eb-1819-4a7e-b410-a17c5478838b" />
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mindsdb/anton)
+
 
 Anton is a self-improving AI agent you can hand off any task to; Create and send reports, clear your inbox, send emails, manage your calendar, CRM,  book flights, etc. An open, powerful alternative to Claude-Cowork that you can run anywhere and use with any model you want — OpenAI, Anthropic, OpenRouter (200+ models), NVIDIA Nemotron, z.ai/GLM, Kimi/Moonshot, MiniMax, or your own endpoint.
 
