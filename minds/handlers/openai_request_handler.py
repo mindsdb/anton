@@ -1,19 +1,14 @@
 import json
 from typing import Any
 
-from mindsdb_sdk.server import Server
 from sqlmodel import Session
 from starlette.responses import JSONResponse, StreamingResponse
 
-from minds.agents.agent_controller import AgentController
-from minds.agents.base import AgentRunContext
-from minds.agents.helpers import get_agent
-from minds.agents.passthrough_agent.agent import PassthroughAgent
 from minds.common.logger import get_logger
-from minds.common.passthrough_config import is_passthrough_model, resolve_passthrough_model
 from minds.common.settings.app_settings import get_app_settings
+from minds.inference.model_resolver import ModelResolver
+from minds.inference.service import InferenceResult, InferenceService
 from minds.model.chat_completion import ChatCompletion
-from minds.model.mind_datasource import DataCatalogStatus
 from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
 from minds.requests.context import Context
 from minds.requests.langfuse_tracing import (
@@ -21,10 +16,9 @@ from minds.requests.langfuse_tracing import (
     update_generation_usage,
 )
 from minds.requests.stream import MessageStreamer
-from minds.schemas.chat import Message, Role
+from minds.schemas.chat import Message
 from minds.services.conversations import ConversationsService
 from minds.services.limits import LimitsService
-from minds.services.minds import MindsService
 
 logger = get_logger(__name__)
 settings = get_app_settings()
@@ -35,7 +29,6 @@ class OpenAIRequestHandler:
         self,
         session: Session,
         context: Context,
-        mindsdb_client: Server,
         messages: list[Message],
         model: str,
         stream: bool,
@@ -50,26 +43,9 @@ class OpenAIRequestHandler:
         max_tokens: int | None = None,
         limits_service: LimitsService | None = None,
     ):
-        """
-        Initialize the ChatCompletionsHandler with a list of messages.
-
-        Args:
-                session (Session): The SQLAlchemy session for database operations.
-                mindsdb_client (Server): The MindsDB client for database operations.
-                messages (List[Message]): List of messages to handle.
-                model (str): The model to use for chat completions.
-                stream (bool): Whether to stream the response.
-                instrument (bool): Whether to instrument the PydanticAIAgent.
-                request_id: The request ID.
-                langfuse_trace_id: The Langfuse trace ID.
-                tools: List of tool definitions for function calling.
-                tool_choice: Controls which tool the model calls.
-                temperature: Sampling temperature.
-                max_tokens: Maximum number of tokens to generate.
-        """
+        """Initialize the chat completions handler for passthrough inference."""
         self.session = session
         self.context = context
-        self.mindsdb_client = mindsdb_client
         self.messages = messages
         self.model = model
         self.stream = stream
@@ -77,9 +53,6 @@ class OpenAIRequestHandler:
         self.instrument = instrument
         self.request_id = request_id
         self.langfuse_trace_id = langfuse_trace_id
-        # Captured @observe trace context, used to attach a child generation
-        # carrying token usage when the surrounding @observe scope has already
-        # closed by the time usage is known (every streaming path).
         self.langfuse_trace_context = langfuse_trace_context
         self.tools = tools
         self.tool_choice = tool_choice
@@ -87,16 +60,13 @@ class OpenAIRequestHandler:
         self.max_tokens = max_tokens
         self.limits_service = limits_service
 
-        self.mind_ready = True
-        self.agent = None
-        self.is_passthrough = False
+        self.inference_service: InferenceService | None = None
 
     @classmethod
     async def create(
         cls,
         session: Session,
         context: Context,
-        mindsdb_client: Server,
         messages: list[Message],
         model: str,
         stream: bool,
@@ -110,31 +80,12 @@ class OpenAIRequestHandler:
         temperature: float | None = None,
         max_tokens: int | None = None,
         limits_service: LimitsService | None = None,
+        **langfuse_kwargs,
     ) -> "OpenAIRequestHandler":
-        """
-        Async factory method to create a OpenAIRequestHandler instance.
-
-        Args:
-            session (Session): The SQLAlchemy session for database operations.
-            context (Context): The context of the request.
-            mindsdb_client (Server): The MindsDB client for database operations.
-            messages (List[Message]): List of messages to handle.
-            model (str): The model to use for chat completions.
-            stream (bool): Whether to stream the response.
-            metadata (ChatCompletionRequestMetadata): The metadata for the chat completion request.
-            instrument (bool): Whether to instrument the PydanticAIAgent.
-            request_id: The request ID.
-            langfuse_trace_id: The Langfuse trace ID.
-            tools: List of tool definitions for function calling.
-            tool_choice: Controls which tool the model calls.
-            temperature: Sampling temperature.
-            max_tokens: Maximum number of tokens to generate.
-            limits_service: The limits service for usage checking.
-        """
+        """Async factory method to create an OpenAIRequestHandler for passthrough inference."""
         handler = cls(
             session=session,
             context=context,
-            mindsdb_client=mindsdb_client,
             messages=messages,
             model=model,
             stream=stream,
@@ -150,43 +101,9 @@ class OpenAIRequestHandler:
             limits_service=limits_service,
         )
 
-        # Passthrough models bypass Mind lookup entirely
-        if is_passthrough_model(model):
-            config = resolve_passthrough_model(model)
-            handler.agent = PassthroughAgent(config=config, instrument=instrument)
-            handler.is_passthrough = True
-            logger.debug(
-                f"[{request_id}] Passthrough model {model!r} → {config.label or config.api_kind}:{config.model_name}"
-            )
-            return handler
-
-        minds_service = MindsService(
-            session=session,
-            mindsdb_client=mindsdb_client,
-            user_id=context.user_id,
-            organization_id=context.organization_id,
-        )
-        mind = await minds_service.get_mind_model(model)
-
-        # If the Mind has datasources that are currently loading, inform the user
-        # and complete the request
-        statuses = []
-        for relationship in mind.mind_datasources:
-            status = await relationship.status
-            statuses.append(status)
-        if any(status in [DataCatalogStatus.LOADING, DataCatalogStatus.PENDING] for status in statuses):
-            handler.mind_ready = False
-
-        agent_controller = AgentController()
-
-        agent = agent_controller.get_agent(
-            agent_name=get_agent(mind).value,
-            mind=mind,
-            mindsdb_client=mindsdb_client,
-            context=context,
-        )
-        handler.agent = agent
-
+        # All models are passthrough — resolve via InferenceService
+        handler.inference_service = InferenceService(model_resolver=ModelResolver(get_app_settings()))
+        logger.debug(f"[{request_id}] Passthrough inference for model {model!r}")
         return handler
 
     def _save_usage(
@@ -198,6 +115,7 @@ class OpenAIRequestHandler:
         output_payload: Any = None,
         extra_metadata: dict | None = None,
         tool_calls_for_spans: list[dict] | None = None,
+        result: InferenceResult | None = None,
     ) -> None:
         """Persist token usage to the database AND record it on the Langfuse generation.
 
@@ -245,15 +163,15 @@ class OpenAIRequestHandler:
 
         model_for_langfuse = self.model
         metadata: dict | None = None
-        if self.is_passthrough and isinstance(self.agent, PassthroughAgent):
-            cfg = self.agent.config
+        if result:
+            cfg = result.config
             model_for_langfuse = cfg.model_name
             # Typed Pydantic metadata model — typos surface at construction,
             # ``exclude_none`` drops reasoning_effort for aliases that have
             # no reasoning-level concept (Anthropic, Gemini, Fireworks).
             metadata = cfg.to_observability_metadata().to_metadata()
             logger.debug(
-                f"[{self.request_id}] Passthrough Langfuse metadata: "
+                f"[{self.request_id}] Langfuse metadata: "
                 f"model={model_for_langfuse} alias={cfg.alias} "
                 f"provider={cfg.label} reasoning_effort={cfg.reasoning_effort}"
             )
@@ -293,44 +211,14 @@ class OpenAIRequestHandler:
                 metadata=metadata,
             )
 
-    async def chat_completions(self, streamer: MessageStreamer):
-        """
-        OpenAI compatible chat completions API handler.
-
-        Args:
-            streamer (MessageStreamer): The streamer to push messages to.
-
-        Returns:
-            None: No return value.
-        """
-        if not self.mind_ready:
-            await streamer.push(role=Role.assistant, content="The Mind is not ready yet. Please try again later.")
-            return
-
-        _ = await self.agent.run(
-            messages=self.messages,
-            streamer=streamer,
-            stream=self.stream,
-            run_context=AgentRunContext(metadata=self.metadata, instrument=self.instrument),
-        )
-
-        usage = await self.agent.get_last_run_usage()
-        # Streaming path runs in a producer task whose lifetime outlives the
-        # @observe-decorated handler — pass the captured trace context so the
-        # Langfuse update attaches a child generation. Non-streaming runs
-        # synchronously inside the @observe scope; in that case the caller
-        # supplies langfuse_trace_context=None and the helper updates the
-        # current generation directly.
-        self._save_usage(usage, langfuse_trace_context=self.langfuse_trace_context if self.stream else None)
-
     async def proxy_chat_completions(self) -> StreamingResponse | JSONResponse:
         """Passthrough proxy — returns the upstream response directly."""
-        agent: PassthroughAgent = self.agent
         # Snapshot the request shape now so it can be attached to the
         # Langfuse generation as ``input`` regardless of streaming mode.
         input_payload = self._build_passthrough_input_payload()
 
-        response = await agent.proxy(
+        response, result = await self.inference_service.inference(
+            model_name=self.model,
             messages=self.messages,
             stream=self.stream,
             request_id=self.request_id or "",
@@ -354,11 +242,20 @@ class OpenAIRequestHandler:
             async def _wrapped_body():
                 async for chunk in original_body:
                     yield chunk
-                # After stream completes, save usage AND the assistant
-                # message + server artifacts the converter accumulated.
-                usage = await agent.get_last_run_usage()
-                output_payload = agent.get_last_run_output()
-                server_artifacts = agent.get_last_run_server_artifacts()
+                # After stream completes, read the usage_box to get final token counts
+                # and full assistant message. usage_box is a mutable reference shared
+                # with the streaming generator — the adapter populates it after the
+                # last chunk is yielded, so we can read the final values here.
+                usage_box = result.usage_box
+                if usage_box is not None:
+                    usage = usage_box.value
+                    output_payload = usage_box.output_payload
+                    server_artifacts = list(usage_box.server_artifacts)
+                else:
+                    # Fallback for non-streaming (should not happen in practice)
+                    usage = result.usage
+                    output_payload = result.output
+                    server_artifacts = result.artifacts
                 self._save_usage(
                     usage,
                     langfuse_trace_context=captured_ctx,
@@ -370,6 +267,7 @@ class OpenAIRequestHandler:
                         else None
                     ),
                     tool_calls_for_spans=output_payload.get("tool_calls") if isinstance(output_payload, dict) else None,
+                    result=result,
                 )
 
             return StreamingResponse(
@@ -379,11 +277,11 @@ class OpenAIRequestHandler:
 
         # Non-streaming branch. ``response`` may be a successful 200
         # JSONResponse (whose ``content`` we want as the Langfuse output)
-        # or an upstream-error JSONResponse the provider proxy synthesized
+        # or an upstream-error JSONResponse the provider synthesized
         # (5xx/4xx with an ``error`` blob) — in that case we still want a
         # Langfuse generation, just one whose output is the error and whose
         # usage is zero, so failed requests don't disappear from traces.
-        usage = await agent.get_last_run_usage()
+        usage = result.usage
         is_error = getattr(response, "status_code", 200) >= 400
         if is_error:
             output_payload = _extract_jsonresponse_content(response)
@@ -394,11 +292,12 @@ class OpenAIRequestHandler:
                 input_payload=input_payload,
                 output_payload=output_payload,
                 extra_metadata=extra,
+                result=result,
             )
             return response
 
-        output_payload = agent.get_last_run_output()
-        server_artifacts = agent.get_last_run_server_artifacts()
+        output_payload = result.output
+        server_artifacts = result.artifacts
         self._save_usage(
             usage,
             langfuse_trace_context=None,
@@ -410,6 +309,7 @@ class OpenAIRequestHandler:
                 else None
             ),
             tool_calls_for_spans=output_payload.get("tool_calls") if isinstance(output_payload, dict) else None,
+            result=result,
         )
         return response
 
@@ -434,64 +334,114 @@ class OpenAIRequestHandler:
 
     async def responses(self, streamer: MessageStreamer, message: Message):
         """
-        OpenAI compatible responses API handler.
+        OpenAI compatible responses API handler — passthrough inference with conversation state.
 
         Args:
             streamer (MessageStreamer): The streamer to push messages to.
             message (Message): The message to update.
         """
-        if not self.mind_ready:
-            await streamer.push(role=Role.assistant, content="The Mind is not ready yet. Please try again later.")
-            return
+        # Snapshot the request shape for Langfuse
+        input_payload = self._build_passthrough_input_payload()
+
+        response, result = await self.inference_service.inference(
+            model_name=self.model,
+            messages=self.messages,
+            stream=self.stream,
+            request_id=self.request_id or "",
+            tools=self.tools,
+            tool_choice=self.tool_choice,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
 
         conversation_service = ConversationsService(
             session=self.session,
-            mindsdb_client=self.mindsdb_client,
             user_id=self.context.user_id,
             organization_id=self.context.organization_id,
         )
 
-        response = await self.agent.run(
-            messages=self.messages,
-            streamer=streamer,
-            stream=self.stream,
-            run_context=AgentRunContext(
-                metadata=self.metadata,
-                instrument=self.instrument,
-                conversation_id=message.conversation_id,
-                message_id=message.id,
-            ),
-        )
+        if isinstance(response, StreamingResponse):
+            # Wrap the streaming body to save message state after the last chunk
+            original_body = response.body_iterator
+            captured_ctx = self.langfuse_trace_context
 
-        usage = await self.agent.get_last_run_usage()
+            async def _wrapped_body():
+                async for chunk in original_body:
+                    yield chunk
+                # After stream completes, extract final output and save message
+                usage_box = result.usage_box
+                output_payload = usage_box.output_payload if usage_box is not None else result.output
 
-        await conversation_service.update_conversation_message_content(
-            message=message,
-            content=response.answer,
-            sql_query=response.sql,
-            model_name=self.model,
-            request_id=self.request_id,
-            langfuse_trace_id=self.langfuse_trace_id,
-            input_tokens=usage[0] if usage else 0,
-            output_tokens=usage[1] if usage else 0,
-        )
+                # Extract assistant response from output
+                answer = None
+                if isinstance(output_payload, dict) and "content" in output_payload:
+                    content = output_payload["content"]
+                    if isinstance(content, list) and content:
+                        answer = content[0].get("text", "")
+                    elif isinstance(content, str):
+                        answer = content
 
-        # Mirror the Langfuse update done by _save_usage on the chat_completions
-        # path. Streaming runs from the producer task — outside the @observe
-        # scope — so we pass the captured trace context. Non-streaming uses
-        # in-scope mode (None) and updates the current generation directly.
-        # When the caller adopted an upstream trace, also stamp trace-level I/O
-        # for whole-turn evals (see _save_usage for the rationale).
+                if answer:
+                    await conversation_service.update_message_content(
+                        message=message,
+                        content=answer,
+                        model_name=self.model,
+                        request_id=self.request_id,
+                        langfuse_trace_id=self.langfuse_trace_id,
+                        input_tokens=usage_box.value[0] if usage_box and usage_box.value else 0,
+                        output_tokens=usage_box.value[1] if usage_box and usage_box.value else 0,
+                    )
+
+                # Record usage on Langfuse
+                usage = usage_box.value if usage_box else result.usage
+                adopting_upstream_trace = bool(self.context.langfuse_trace_id)
+                update_generation_usage(
+                    usage=usage,
+                    model=self.model,
+                    trace_context=captured_ctx,
+                    input=input_payload,
+                    output=output_payload,
+                    trace_input=self.context.langfuse_trace_input if adopting_upstream_trace else None,
+                    trace_output=output_payload if adopting_upstream_trace else None,
+                )
+
+            return StreamingResponse(_wrapped_body(), media_type="text/event-stream")
+
+        # Non-streaming: update message immediately
+        output_payload = result.output
+        answer = None
+        if isinstance(output_payload, dict) and "content" in output_payload:
+            content = output_payload["content"]
+            if isinstance(content, list) and content:
+                answer = content[0].get("text", "")
+            elif isinstance(content, str):
+                answer = content
+
+        usage = result.usage
+        if answer:
+            await conversation_service.update_message_content(
+                message=message,
+                content=answer,
+                model_name=self.model,
+                request_id=self.request_id,
+                langfuse_trace_id=self.langfuse_trace_id,
+                input_tokens=usage[0] if usage else 0,
+                output_tokens=usage[1] if usage else 0,
+            )
+
+        # Record usage on Langfuse
         adopting_upstream_trace = bool(self.context.langfuse_trace_id)
-        answer = response.answer if response is not None else None
         update_generation_usage(
             usage=usage,
             model=self.model,
-            trace_context=self.langfuse_trace_context if self.stream else None,
-            output=answer,
+            trace_context=None,
+            input=input_payload,
+            output=output_payload,
             trace_input=self.context.langfuse_trace_input if adopting_upstream_trace else None,
-            trace_output=answer if adopting_upstream_trace else None,
+            trace_output=output_payload if adopting_upstream_trace else None,
         )
+
+        return response
 
 
 def _extract_jsonresponse_content(response: JSONResponse) -> Any:

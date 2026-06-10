@@ -33,8 +33,6 @@ logger = get_logger(__name__)
 class ResourceType(str, Enum):
     """Identifiers for the resource types tracked by the limits system."""
 
-    MINDS = "minds"
-    DATASOURCES = "datasources"
     TOKENS = "tokens"
 
 

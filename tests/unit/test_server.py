@@ -1,222 +1,125 @@
-import sys
-import types
-from unittest.mock import MagicMock
+"""Tests for minds.server module."""
+
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-
-@pytest.fixture()
-def server_app(monkeypatch: pytest.MonkeyPatch):
-    fake_langfuse = types.ModuleType("langfuse")
-
-    def _observe_stub(f=None, **_):
-        if f is None:
-            return lambda x: x
-        return f
-
-    fake_langfuse.observe = _observe_stub
-
-    # Mock Langfuse client for v3
-    class MockTrace:
-        def __init__(self):
-            self.id = "mock-trace-id"
-
-    class MockLangfuseClient:
-        def trace(self, **kwargs):
-            return MockTrace()
-
-        def update_current_trace(self, **kwargs):
-            pass
-
-        def get_current_trace_id(self):
-            return "mock-trace-id"
-
-    def _get_client_stub():
-        return MockLangfuseClient()
-
-    fake_langfuse.get_client = _get_client_stub
-    fake_langfuse.Langfuse = MockLangfuseClient
-
-    monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse)
-
-    # Avoid real DB session creation
-    from types import SimpleNamespace as _SSN
-
-    monkeypatch.setattr(
-        "minds.db.pg_session.get_session",
-        lambda: _SSN(commit=lambda: None, rollback=lambda: None, close=lambda: None),
-        raising=False,
-    )
-
-    # Mock context extraction
-    from minds.requests.context import Context
-
-    def _fake_extract_context(request):
-        # Context.user_id is a UUID in the application schema
-        return Context(user_id="00000000-0000-0000-0000-000000000001", user_email="test@example.com")
-
-    monkeypatch.setattr(
-        "minds.requests.context.extract_context_from_request",
-        _fake_extract_context,
-        raising=False,
-    )
-
-    # Mock MindsDB client creation
-    class MockMindsDBClient:
-        pass
-
-    def _fake_create_mindsdb_client(request, context=None, **kwargs):
-        return MockMindsDBClient()
-
-    monkeypatch.setattr(
-        "minds.client.mindsdb.create_mindsdb_client_from_request",
-        _fake_create_mindsdb_client,
-        raising=False,
-    )
-
-    # 5) Mock the chat completions endpoint dependencies BEFORE importing
-    async def _fake_chat_completions_handler(
-        session, context, mindsdb_client, chat_completions_request, instrument=True, limits_service=None
-    ):
-        from starlette.responses import JSONResponse
-
-        from minds.schemas.chat import ChatCompletion, Choice, Message, Usage
-
-        response = ChatCompletion(
-            id="test-completion",
-            object="chat.completion",
-            created=1234567890,
-            model="test-model",
-            choices=[Choice(index=0, message=Message(role="assistant", content="Test response"), finish_reason="stop")],
-            usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-        )
-        return JSONResponse(content=response.model_dump())
-
-    monkeypatch.setattr("minds.api.v1.endpoints.chat.chat_completions_request_handler", _fake_chat_completions_handler)
-
-    # Mock Statsig init/shutdown so no real SDK is created
-    mock_statsig_instance = MagicMock()
-
-    # Import server so we can patch on it directly (handles cached modules)
-    import minds.server as server
-
-    monkeypatch.setattr(server, "init_statsig", lambda settings=None: mock_statsig_instance)
-    monkeypatch.setattr(server, "shutdown_statsig", lambda: None)
-
-    # Patch is_langfuse_enabled where it's actually used (bound reference in chat module)
-    import minds.api.v1.endpoints.chat as chat_mod
-
-    monkeypatch.setattr(chat_mod, "is_langfuse_enabled", lambda context, settings=None: True)
-
-    # Mock usage guard so it doesn't try to hit the real database
-    async def _async_noop(*args, **kwargs):
-        pass
-
-    monkeypatch.setattr(chat_mod, "require_usage_available", _async_noop)
-
-    return server.create_app()
+from minds.server import app, create_app
 
 
-@pytest.fixture()
-def headers():
-    return {
-        "Authorization": "Bearer 1234567890",
-        "X-User-Id": "00000000-0000-0000-0000-000000000001",
-        "X-Organization-Id": "00000000-0000-0000-0000-000000000002",
-    }
+class TestCreateApp:
+    """Tests for create_app function."""
+
+    def test_create_app_returns_fastapi_instance(self):
+        """Test that create_app returns a FastAPI instance."""
+        test_app = create_app()
+        assert test_app is not None
+        assert hasattr(test_app, "routes")
+        assert hasattr(test_app, "middleware")
+
+    def test_app_metadata(self):
+        """Test that app has correct metadata."""
+        test_app = create_app()
+        assert test_app.title == "Minds API"
+        assert "OpenAI-compatible" in test_app.description
+        assert test_app.version == "1.9.1"
+
+    def test_cors_middleware_configured(self):
+        """Test that CORS middleware is configured."""
+        test_app = create_app()
+        # Check middleware list contains CORS configuration
+        # FastAPI's user_middleware contains the middleware
+        assert len(test_app.user_middleware) > 0
+        # Verify at least one middleware is added (CORS)
+        middleware_classes = [str(m.cls) for m in test_app.user_middleware]
+        assert any("CORS" in str(m) for m in middleware_classes)
+
+    def test_v1_routes_registered(self):
+        """Test that /v1 routes are registered."""
+        test_app = create_app()
+        route_paths = [route.path for route in test_app.routes]
+        # Check for core endpoints
+        assert any("/v1/health" in path for path in route_paths)
+        assert any("/v1/models" in path for path in route_paths)
+        assert any("/v1/chat" in path for path in route_paths)
+
+    def test_legacy_api_v1_routes_registered(self):
+        """Test that /api/v1 legacy routes are registered."""
+        test_app = create_app()
+        route_paths = [route.path for route in test_app.routes]
+        # Check for legacy endpoint prefixes
+        assert any("/api/v1" in path for path in route_paths)
+
+    @pytest.mark.asyncio
+    async def test_lifespan_startup_shutdown(self):
+        """Test that lifespan startup and shutdown work correctly."""
+        with (
+            patch("minds.server.init_statsig") as mock_init_statsig,
+            patch("minds.server.shutdown_statsig") as mock_shutdown_statsig,
+        ):
+            mock_statsig_instance = MagicMock()
+            mock_init_statsig.return_value = mock_statsig_instance
+
+            test_app = create_app()
+
+            # Simulate the lifespan context manager
+            async with test_app.router.lifespan_context(test_app):
+                # Verify init_statsig was called during startup
+                mock_init_statsig.assert_called_once()
+                # Verify statsig instance is stored in app state
+                assert test_app.state.statsig == mock_statsig_instance
+
+            # Verify shutdown_statsig was called during shutdown
+            mock_shutdown_statsig.assert_called_once()
+
+    def test_health_endpoint_accessible(self):
+        """Test that health endpoint is accessible."""
+        test_app = create_app()
+        client = TestClient(test_app)
+        response = client.get("/v1/health/")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+    def test_legacy_health_endpoint_accessible(self):
+        """Test that legacy /api/v1/health endpoint is accessible."""
+        test_app = create_app()
+        client = TestClient(test_app)
+        response = client.get("/api/v1/health/")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+    def test_models_endpoint_requires_headers(self):
+        """Test that models endpoint requires tenant headers."""
+        test_app = create_app()
+        client = TestClient(test_app)
+        # Without headers should get 401
+        response = client.get("/v1/models/")
+        assert response.status_code == 401
+
+    def test_models_endpoint_with_headers(self):
+        """Test that models endpoint works with proper headers."""
+        test_app = create_app()
+        client = TestClient(test_app)
+        headers = {
+            "X-User-Id": "00000000-0000-0000-0000-000000000001",
+            "X-Organization-Id": "00000000-0000-0000-0000-000000000002",
+        }
+        response = client.get("/v1/models/", headers=headers)
+        assert response.status_code == 200
+        assert "data" in response.json()
 
 
-def test_healthz(server_app):
-    client = TestClient(server_app)
-    r = client.get("/v1/health/")
-    assert r.status_code == 200 and r.json() == {"status": "ok", "version": "v1"}
+class TestModuleLevel:
+    """Tests for module-level app instantiation."""
 
+    def test_app_is_instantiated(self):
+        """Test that module-level app is instantiated."""
+        assert app is not None
+        assert hasattr(app, "routes")
 
-def test_chat_completions(server_app, headers):
-    client = TestClient(server_app)
-    payload = {
-        "model": "test-model",
-        "messages": [{"role": "user", "content": "q"}],
-        "metadata": {"doc_id": "1"},
-    }
-    r = client.post("/v1/chat/completions", json=payload, headers=headers)
-    expected_response = {
-        "id": "test-completion",
-        "object": "chat.completion",
-        "created": 1234567890,
-        "model": "test-model",
-        "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": "Test response"}, "finish_reason": "stop"}
-        ],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-        "system_fingerprint": None,
-    }
-    assert r.status_code == 200 and r.json() == expected_response
-
-
-def test_chat_completions_v1(server_app, headers):
-    client = TestClient(server_app)
-    payload = {
-        "model": "test-model",
-        "messages": [{"role": "user", "content": "q"}],
-        "metadata": {"doc_id": "1"},
-    }
-    r = client.post("/v1/chat/completions", json=payload, headers=headers)
-    expected_response = {
-        "id": "test-completion",
-        "object": "chat.completion",
-        "created": 1234567890,
-        "model": "test-model",
-        "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": "Test response"}, "finish_reason": "stop"}
-        ],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-        "system_fingerprint": None,
-    }
-    assert r.status_code == 200 and r.json() == expected_response
-
-
-class TestStatsigLifecycle:
-    """Test that Statsig is initialized on startup and shut down on shutdown."""
-
-    def test_startup_initializes_statsig(self, monkeypatch):
-        """Verify that Statsig is initialized during app startup."""
-        import minds.server as server
-
-        init_called = {"value": False}
-        mock_statsig = MagicMock()
-
-        def _mock_init(settings=None):
-            init_called["value"] = True
-            return mock_statsig
-
-        # Patch directly on the server module (where the bound reference lives)
-        monkeypatch.setattr(server, "init_statsig", _mock_init)
-        monkeypatch.setattr(server, "shutdown_statsig", lambda: None)
-
-        app = server.create_app()
-
-        with TestClient(app):
-            assert init_called["value"] is True
-
-    def test_shutdown_calls_shutdown_statsig(self, monkeypatch):
-        """Verify that Statsig is shut down during app shutdown."""
-        import minds.server as server
-
-        shutdown_called = {"value": False}
-        mock_statsig = MagicMock()
-
-        def _mock_shutdown():
-            shutdown_called["value"] = True
-
-        # Patch directly on the server module (where the bound reference lives)
-        monkeypatch.setattr(server, "init_statsig", lambda settings=None: mock_statsig)
-        monkeypatch.setattr(server, "shutdown_statsig", _mock_shutdown)
-
-        app = server.create_app()
-
-        with TestClient(app):
-            pass  # startup + shutdown happen
-
-        assert shutdown_called["value"] is True
+    def test_app_has_routes(self):
+        """Test that module-level app has routes."""
+        route_paths = [route.path for route in app.routes]
+        assert len(route_paths) > 0
+        assert any("/v1/health" in path for path in route_paths)

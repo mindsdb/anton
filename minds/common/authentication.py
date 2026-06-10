@@ -1,29 +1,11 @@
-from uuid import UUID
-
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
-
-from minds.requests.context import Context
 
 
 class AuthHeaders(BaseModel):
     """Model for authorization headers."""
 
     authorization: str | None = None
-
-
-class MindsDBHeaders(BaseModel):
-    organization_id: UUID
-    user_id: UUID
-
-    def to_dict(self) -> dict:
-        return {
-            "company-id": str(
-                self.organization_id
-            ),  # Going to rename to organization_id in MindsDB in the future for consistency
-            "user-id": str(self.user_id),
-            "enforce-user-id": "false",
-        }
 
 
 def get_authorization_bearer_token(
@@ -97,16 +79,3 @@ def get_api_key_from_headers(headers: dict) -> str:
         str: The API key
     """
     return get_authorization_bearer_token(headers)
-
-
-def get_headers_for_mindsdb_client(context: Context) -> dict:
-    """
-    Get the headers for MindsDB client from the context.
-
-    Args:
-        context: The request context.
-
-    Returns:
-        dict: The headers for MindsDB client.
-    """
-    return MindsDBHeaders(organization_id=context.organization_id, user_id=context.user_id).to_dict()

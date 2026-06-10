@@ -47,29 +47,6 @@ jobs:
           module-name: ${{ env.CI_REPOSITORY_SLUG }}
           build-for-environment: staging
 
-  build-anton-scratchpad:
-    runs-on: mdb-dev
-    needs: [run-unit-tests, linter]
-    outputs:
-      image: ${{ steps.build.outputs.image }}
-    env:
-      AWS_REGION: us-east-1
-    steps:
-      - name: Checkout tag
-        uses: actions/checkout@v4
-      - name: Pull MindsDB Github Actions
-        uses: actions/checkout@v4
-        with:
-          repository: mindsdb/github-actions
-          path: github-actions
-      - uses: ./github-actions/setup-env
-      - id: build
-        uses: ./github-actions/build-push-ecr
-        with:
-          module-name: minds-anton-scratchpad
-          build-for-environment: staging
-          extra-build-args: -f Dockerfile.scratchpad
-
   scan:
     runs-on: mdb-dev
     needs: [ build ]
@@ -81,18 +58,6 @@ jobs:
           image: ${{ needs.build.outputs.image }}
           snyk-token: ${{ secrets.SNYK_TOKEN }}
           
-  scan-anton-scratchpad:
-    runs-on: mdb-dev
-    needs: [ build-anton-scratchpad ]
-    name: Scan Scratchpad Image
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mindsdb/github-actions/snyk-docker-scan@main
-        with:
-          image: ${{ needs.build-anton-scratchpad.outputs.image }}
-          snyk-token: ${{ secrets.SNYK_TOKEN }}
-          dockerfile: Dockerfile.scratchpad
-
   migrate:
     runs-on: mdb-dev
     needs: [ build ]
@@ -172,10 +137,6 @@ jobs:
           env-name: ${{ matrix.environment }}
           env-url: ${{ vars.MDB_ENV_URL }}
           slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
-      - name: Remove old jobs
-        run: |
-          export NAMESPACE=${{matrix.environment}}
-          kubectl -n $NAMESPACE delete job --ignore-not-found minds-flows
       - uses: DevOps-Nirvana/aws-helm-multi-deploy-nodocker@v6
         with:
           environment-slug: "${{ matrix.environment }}"
@@ -187,7 +148,6 @@ jobs:
         run: |
           export NAMESPACE=${{matrix.environment}}
 
-          kubectl -n $NAMESPACE wait --for=condition=complete --timeout=10m "job/minds-flows"
           kubectl -n $NAMESPACE wait --for=condition=ready --timeout=10m pod -l app=minds
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg

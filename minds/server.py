@@ -66,3 +66,7 @@ def create_app() -> FastAPI:
 
     logger.info("Minds application created successfully")
     return app
+
+
+# Create the FastAPI application instance for ASGI
+app = create_app()

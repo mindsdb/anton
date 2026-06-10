@@ -2,7 +2,6 @@
 Unit tests for is_model_selection_enabled.
 
 Tests:
-- Settings override → returns True when settings.minds.enable_model_selection is True
 - Self-hosted → returns configured default (Statsig never called)
 - Cloud → returns Statsig gate result
 - Cloud + Statsig failure → falls back to configured default
@@ -28,11 +27,9 @@ def _make_context() -> Context:
 def _make_settings(
     deployment_mode: DeploymentMode = DeploymentMode.CLOUD,
     model_selection_default: bool = True,
-    enable_model_selection: bool = False,
 ) -> AppSettings:
     return AppSettings(
         deployment_mode=deployment_mode,
-        minds={"enable_model_selection": enable_model_selection},
         statsig={
             "sdk_key": "test-key",
             "environment": "test",
@@ -44,45 +41,6 @@ def _make_settings(
             "default_value": model_selection_default,
         },
     )
-
-
-class TestSettingsOverride:
-    """When settings.minds.enable_model_selection is True, always returns True."""
-
-    @patch("minds.common.statsig.feature_flags.model_selection_enabled.get_statsig")
-    def test_returns_true_when_setting_enabled_cloud(self, mock_get_statsig):
-        ctx = _make_context()
-        settings = _make_settings(DeploymentMode.CLOUD, model_selection_default=False, enable_model_selection=True)
-
-        result = is_model_selection_enabled(context=ctx, settings=settings)
-
-        assert result is True, f"Should return True when settings override is enabled, got {result}"
-        mock_get_statsig.assert_not_called()
-
-    @patch("minds.common.statsig.feature_flags.model_selection_enabled.get_statsig")
-    def test_returns_true_when_setting_enabled_self_hosted(self, mock_get_statsig):
-        ctx = _make_context()
-        settings = _make_settings(
-            DeploymentMode.SELF_HOSTED, model_selection_default=False, enable_model_selection=True
-        )
-
-        result = is_model_selection_enabled(context=ctx, settings=settings)
-
-        assert result is True, f"Should return True when settings override is enabled (self-hosted), got {result}"
-        mock_get_statsig.assert_not_called()
-
-    @patch("minds.common.statsig.feature_flags.model_selection_enabled.get_statsig")
-    def test_falls_through_when_setting_disabled(self, mock_get_statsig):
-        """When enable_model_selection=False, the function should NOT short-circuit."""
-        ctx = _make_context()
-        settings = _make_settings(DeploymentMode.CLOUD, model_selection_default=False, enable_model_selection=False)
-
-        mock_get_statsig.return_value.check_gate.return_value = False
-
-        result = is_model_selection_enabled(context=ctx, settings=settings)
-
-        assert result is False, f"Should fall through to Statsig when setting is disabled, got {result}"
-        mock_get_statsig.assert_called_once()
 
 
 class TestSelfHostedMode:

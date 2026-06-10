@@ -1,5 +1,5 @@
 """
-Schema package for the Minds API.
+Schema package for the Minds API (inference-only).
 
 This package contains all Pydantic models for request/response validation
 organized by domain.
@@ -11,11 +11,6 @@ from .limits import (
     MindLimitsConfig,
     ResourceUsageConfig,
 )
-from .minds import (
-    MindCreateRequest,
-    MindResponse,
-    MindUpdateRequest,
-)
 
 __all__ = [
     # Chat schemas
@@ -26,10 +21,6 @@ __all__ = [
     "Choice",
     "StreamChoice",
     "Usage",
-    # Mind schemas
-    "MindCreateRequest",
-    "MindUpdateRequest",
-    "MindResponse",
     # Limits schemas
     "LimitsConfig",
     "ResourceUsageConfig",

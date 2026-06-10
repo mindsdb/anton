@@ -10,11 +10,6 @@ class DeploymentMode(str, Enum):
     CLOUD = "cloud"
 
 
-class Agent(str, Enum):
-    ANTON = "anton_agent"
-    TEXT_TO_SQL = "candidate_sql_agent"
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -113,15 +108,17 @@ class AnthropicSettings(Settings):
 
     # Native web-tool versions used by the passthrough agent. These are
     # Anthropic-versioned API contracts (e.g. "web_search_20250305") that
-    # change in a regular cadence. No defaults — operators must set them
-    # explicitly so version bumps are a conscious config change.
+    # change in a regular cadence.
     web_search_tool_type: str = Field(
+        default="web_search_20250305",
         description="Anthropic native web_search tool type (versioned). Example: 'web_search_20250305'.",
     )  # ANTHROPIC__WEB_SEARCH_TOOL_TYPE
     web_fetch_tool_type: str = Field(
+        default="web_fetch_20250910",
         description="Anthropic native web_fetch tool type (versioned). Example: 'web_fetch_20250910'.",
     )  # ANTHROPIC__WEB_FETCH_TOOL_TYPE
     web_fetch_beta_header: str = Field(
+        default="web-fetch-2025-09-10",
         description="Value for the 'anthropic-beta' header required by the "
         "web_fetch tool. Example: 'web-fetch-2025-09-10'.",
     )  # ANTHROPIC__WEB_FETCH_BETA_HEADER
@@ -141,6 +138,10 @@ class AnthropicSettings(Settings):
         default="claude-haiku-4-5-20251001",
         description="Anthropic model used for the `latest:haiku` alias.",
     )  # ANTHROPIC__PASSTHROUGH_HAIKU_MODEL
+    passthrough_fable_model: str = Field(
+        default="claude-fable-5",
+        description="Anthropic model used for the `latest:fable` alias.",
+    )  # ANTHROPIC__PASSTHROUGH_FABLE_MODEL
 
     @field_validator("supported_models", "supported_coding_models", mode="before")
     @classmethod
@@ -198,24 +199,6 @@ class MindsDBSettings(Settings):
     password: str = Field(default="", description="The MindsDB password")  # MINDSDB__PASSWORD
 
 
-class DataCatalogSettings(Settings):
-    execution_mode: str = Field(
-        default="asynchronous", description="The execution mode for data catalog operations"
-    )  # DATA_CATALOG__EXECUTION_MODE
-    job_name: str = Field(
-        default="load-data-catalog", description="The name of the data catalog job"
-    )  # DATA_CATALOG__JOB_NAME
-    job_deployment_name: str = Field(
-        default="local--data-catalog-loader", description="The deployment name for the data catalog job"
-    )  # DATA_CATALOG__JOB_DEPLOYMENT_NAME
-    cache_type: str = Field(
-        default="in_memory", description="The type of cache to use for data catalog"
-    )  # DATA_CATALOG__CACHE_TYPE
-    cache_max_size: int = Field(
-        default=100, description="The maximum size of the data catalog cache"
-    )  # DATA_CATALOG__CACHE_MAX_SIZE
-
-
 class DefaultModelsSettings(Settings):
     default_provider: str = Field(
         default="anthropic", description="The default provider"
@@ -255,27 +238,6 @@ class MindsSettings(Settings):
     )  # MINDS__ENABLE_MODEL_SELECTION
 
 
-class ChartCompilerSettings(Settings):
-    max_rows_to_process: int = Field(
-        default=1000, description="Maximum number of rows to process for chart generation"
-    )  # CHART_COMPILER__MAX_ROWS_TO_PROCESS
-    max_series: int = Field(
-        default=12, description="Maximum number of series to render in a chart"
-    )  # CHART_COMPILER__MAX_SERIES
-
-
-class ChartRendererSettings(Settings):
-    image_width: int = Field(
-        default=1600, ge=1, description="Default PNG width in pixels for server-rendered charts"
-    )  # CHART_RENDERER__IMAGE_WIDTH
-    image_height: int = Field(
-        default=800, ge=1, description="Default PNG height in pixels for server-rendered charts"
-    )  # CHART_RENDERER__IMAGE_HEIGHT
-    image_dpi: int = Field(
-        default=100, ge=1, description="DPI for Matplotlib figure when rendering chart PNGs"
-    )  # CHART_RENDERER__IMAGE_DPI
-
-
 class MindCastleSettings(Settings):
     encryption_type: str = Field(
         default="localencryption", description="The encryption type for MindCastle"
@@ -298,19 +260,6 @@ class StatsigSettings(Settings):
     )  # STATSIG__DISABLE_ALL_LOGGING
 
 
-class AgentsSettings(Settings):
-    default_agent: Agent = Field(
-        default=Agent.TEXT_TO_SQL, description="The default agent to use"
-    )  # AGENTS__DEFAULT_AGENT
-
-    @field_validator("default_agent", mode="before")
-    @classmethod
-    def validate_default_agent(cls, v: Agent | str) -> Agent:
-        if isinstance(v, str):
-            v = Agent(v)
-        return v
-
-
 class AppSettings(Settings):
     env: str = Field(default="local", description="The environment (local, dev, prod, etc.)")  # ENV
 
@@ -326,14 +275,9 @@ class AppSettings(Settings):
     fireworks: FireworksSettings = Field(default_factory=FireworksSettings)  # FIREWORKS__*
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)  # GEMINI__*
     mindsdb: MindsDBSettings = Field(default_factory=MindsDBSettings)  # MINDSDB__*
-    data_catalog: DataCatalogSettings = Field(default_factory=DataCatalogSettings)  # DATA_CATALOG__*
     default_models: DefaultModelsSettings = Field(default_factory=DefaultModelsSettings)  # DEFAULT_MODELS__*
-    minds: MindsSettings = Field(default_factory=MindsSettings)  # MINDS__*
     mind_castle: MindCastleSettings = Field(default_factory=MindCastleSettings)  # MIND_CASTLE__*
     redis: RedisSettings = Field(default_factory=RedisSettings)  # REDIS__*
-    agents: AgentsSettings = Field(default_factory=AgentsSettings)  # AGENTS__*
-    chart_compiler: ChartCompilerSettings = Field(default_factory=ChartCompilerSettings)  # CHART_COMPILER__*
-    chart_renderer: ChartRendererSettings = Field(default_factory=ChartRendererSettings)  # CHART_RENDERER__*
 
     statsig: StatsigSettings = Field(default_factory=StatsigSettings)  # STATSIG__*
 

@@ -1,384 +1,250 @@
-import importlib
-from unittest.mock import AsyncMock, Mock, patch
-from uuid import UUID
+"""Tests for chat completions request handler."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from sqlmodel import Session
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse
 
-from minds.requests.chat_completions_request import (
-    ChatCompletionRequestMetadata,
-    ChatCompletionsRequest,
-)
+from minds.handlers.chat_completions_request_handler import chat_completions_request_handler
+from minds.requests.chat_completions_request import ChatCompletionsRequest
 from minds.requests.context import Context
-from minds.schemas.chat import Message, Role
-
-
-@pytest.fixture()
-def handler_mod(monkeypatch):
-    # Neutralize observe decorator before import
-    import langfuse as dec
-
-    monkeypatch.setattr(
-        dec,
-        "observe",
-        lambda f=None, **_: (lambda *a, **k: f(*a, **k)) if f else (lambda x: x),
-    )
-
-    import minds.handlers.chat_completions_request_handler as mod
-
-    importlib.reload(mod)
-    return mod
+from minds.schemas.chat import Message
 
 
 @pytest.fixture
 def mock_session():
-    """Mock SQLModel session."""
-    return Mock(spec=Session)
-
-
-@pytest.fixture
-def mock_mindsdb_client():
-    """Mock MindsDB client."""
-    return Mock(spec=["connect"])
+    """Create a mock database session."""
+    return MagicMock(spec=Session)
 
 
 @pytest.fixture
 def mock_context():
-    """Mock Context."""
+    """Create a mock request context."""
     return Context(
-        user_id=UUID("00000000-0000-0000-0000-000000000001"),
-        organization_id=UUID("00000000-0000-0000-0000-000000000002"),
+        user_id=uuid4(),
+        organization_id=uuid4(),
+        user_email="test@example.com",
+        user_roles=["user"],
     )
 
 
 @pytest.fixture
-def sample_messages():
-    """Sample messages for testing."""
-    return [
-        Message(role=Role.user, content="Hello, how are you?"),
-        Message(role=Role.assistant, content="I'm doing well, thank you!"),
-    ]
-
-
-@pytest.fixture
-def sample_chat_request(sample_messages):
-    """Sample ChatCompletionsRequest for testing."""
+def chat_completions_request():
+    """Create a sample chat completions request."""
     return ChatCompletionsRequest(
-        model="gpt-3.5-turbo",
-        messages=sample_messages,
+        model="latest:sonnet",
+        messages=[
+            Message(role="user", content="Hello"),
+        ],
         stream=False,
-        metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
-    )
-
-
-@pytest.fixture
-def sample_streaming_chat_request(sample_messages):
-    """Sample streaming ChatCompletionsRequest for testing."""
-    return ChatCompletionsRequest(
-        model="gpt-3.5-turbo",
-        messages=sample_messages,
-        stream=True,
-        metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
     )
 
 
 class TestChatCompletionsRequestHandler:
-    @pytest.mark.asyncio
-    async def test_chat_completions_request_handler_streaming(
-        self,
-        handler_mod,
-        mock_session,
-        mock_mindsdb_client,
-        sample_streaming_chat_request,
-        mock_context,
-    ):
-        """Test streaming chat completions request handling."""
-        mock_streaming_response = Mock(spec=StreamingResponse)
-
-        with (
-            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
-            patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
-            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
-        ):
-            # Setup mocks
-            mock_handler_instance = AsyncMock()
-            mock_handler_instance.is_passthrough = False
-            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
-            mock_process_streaming.return_value = mock_streaming_response
-
-            # Call the handler
-            result = await handler_mod.chat_completions_request_handler(
-                session=mock_session,
-                context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                chat_completions_request=sample_streaming_chat_request,
-            )
-
-            # Verify OpenAIRequestHandler was created with correct parameters
-            mock_handler_class.create.assert_awaited_once()
-            kwargs = mock_handler_class.create.call_args.kwargs
-            assert kwargs["session"] == mock_session
-            assert kwargs["context"] == mock_context
-            assert kwargs["mindsdb_client"] == mock_mindsdb_client
-            assert kwargs["messages"] == sample_streaming_chat_request.messages
-            assert kwargs["model"] == sample_streaming_chat_request.model
-            assert kwargs["stream"] is True
-            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="test-session")
-            assert kwargs["instrument"] is True
-
-            # Verify process_streaming_producer was called
-            mock_process_streaming.assert_called_once()
-            call_args = mock_process_streaming.call_args
-            assert call_args[1]["model"] == sample_streaming_chat_request.model
-
-            # Verify the producer function works
-            producer_func = call_args[1]["producer"]
-            mock_streamer = Mock()
-            producer_func(mock_streamer)
-            mock_handler_instance.chat_completions.assert_called_once_with(streamer=mock_streamer)
-
-            # Verify return value
-            assert result == mock_streaming_response
+    """Tests for the chat completions request handler."""
 
     @pytest.mark.asyncio
-    async def test_chat_completions_request_handler_non_streaming(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request, mock_context
-    ):
-        """Test non-streaming chat completions request handling."""
-        mock_json_response = Mock(spec=JSONResponse)
-
-        with (
-            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
-            patch.object(
-                handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
-            ) as mock_process_non_streaming,
-            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
-        ):
-            # Setup mocks
-            mock_handler_instance = AsyncMock()
-            mock_handler_instance.is_passthrough = False
-            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
-            mock_process_non_streaming.return_value = mock_json_response
-
-            # Call the handler
-            result = await handler_mod.chat_completions_request_handler(
-                session=mock_session,
-                context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                chat_completions_request=sample_chat_request,
-            )
-
-            # Verify OpenAIRequestHandler was created with correct parameters
-            mock_handler_class.create.assert_awaited_once()
-            kwargs = mock_handler_class.create.call_args.kwargs
-            assert kwargs["session"] == mock_session
-            assert kwargs["context"] == mock_context
-            assert kwargs["mindsdb_client"] == mock_mindsdb_client
-            assert kwargs["messages"] == sample_chat_request.messages
-            assert kwargs["model"] == sample_chat_request.model
-            assert kwargs["stream"] is False
-            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="test-session")
-            assert kwargs["instrument"] is True
-
-            # Verify process_non_streaming_producer was called
-            mock_process_non_streaming.assert_called_once()
-            call_args = mock_process_non_streaming.call_args
-            assert call_args[1]["model"] == sample_chat_request.model
-
-            # Verify the producer function works
-            producer_func = call_args[1]["producer"]
-            mock_streamer = Mock()
-            producer_func(mock_streamer)
-            mock_handler_instance.chat_completions.assert_called_once_with(streamer=mock_streamer)
-
-            # Verify return value
-            assert result == mock_json_response
-
-    @pytest.mark.asyncio
-    async def test_chat_completions_request_handler_stream_none(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
-    ):
-        """Test chat completions request when stream parameter is None (should default to False)."""
-        mock_json_response = Mock(spec=JSONResponse)
-
-        # Create request with stream=None
-        chat_request = ChatCompletionsRequest(
-            model="gpt-4o",
-            messages=sample_messages,
-            stream=None,
-            metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="test-session"),
+    async def test_handler_creates_openai_request_handler(self, mock_session, mock_context, chat_completions_request):
+        """Test that handler creates OpenAIRequestHandler correctly."""
+        mock_response = JSONResponse(
+            content={
+                "id": "chatcmpl-123",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "Hi!"}}],
+            }
         )
 
         with (
-            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
-            patch.object(
-                handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
-            ) as mock_process_non_streaming,
-            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
         ):
-            # Setup mocks
             mock_handler_instance = AsyncMock()
-            mock_handler_instance.is_passthrough = False
+            mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
-            mock_process_non_streaming.return_value = mock_json_response
 
-            # Call the handler
-            result = await handler_mod.chat_completions_request_handler(
+            response = await chat_completions_request_handler(
                 session=mock_session,
                 context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                chat_completions_request=chat_request,
+                chat_completions_request=chat_completions_request,
             )
 
-            # Verify OpenAIRequestHandler was created with stream=False (default)
-            mock_handler_class.create.assert_awaited_once()
-            kwargs = mock_handler_class.create.call_args.kwargs
-            assert kwargs["session"] == mock_session
-            assert kwargs["context"] == mock_context
-            assert kwargs["mindsdb_client"] == mock_mindsdb_client
-            assert kwargs["messages"] == chat_request.messages
-            assert kwargs["model"] == chat_request.model
-            assert kwargs["stream"] is False  # Should default to False when None
-            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="test-session")
-            assert kwargs["instrument"] is True
-
-            # Verify non-streaming producer was called (not streaming)
-            mock_process_non_streaming.assert_called_once()
-
-            # Verify return value
-            assert result == mock_json_response
+            assert response is not None
+            assert response.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_chat_completions_request_handler_logging(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_chat_request, mock_context
-    ):
-        """Test that logging calls are made correctly."""
-        request_id = str(mock_context.request_id)
-        mock_json_response = Mock(spec=JSONResponse)
+    async def test_handler_passes_model_to_handler(self, mock_session, mock_context, chat_completions_request):
+        """Test that model is passed correctly to OpenAIRequestHandler."""
+        mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
         with (
-            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
-            patch.object(
-                handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
-            ) as mock_process_non_streaming,
-            patch.object(handler_mod, "get_langfuse_trace_id", return_value=None),
-            patch.object(handler_mod, "logger") as mock_logger,
-            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
         ):
-            # Setup mocks
             mock_handler_instance = AsyncMock()
-            mock_handler_instance.is_passthrough = False
+            mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
-            mock_process_non_streaming.return_value = mock_json_response
 
-            # Call the handler
-            await handler_mod.chat_completions_request_handler(
-                mindsdb_client=mock_mindsdb_client,
+            await chat_completions_request_handler(
                 session=mock_session,
                 context=mock_context,
-                chat_completions_request=sample_chat_request,
+                chat_completions_request=chat_completions_request,
             )
 
-            # Verify logging calls were made
-            assert mock_logger.debug.call_count >= 4  # At least 4 debug calls expected
-
-            # Verify specific log messages
-            debug_calls = [call[0][0] for call in mock_logger.debug.call_args_list]
-
-            # Check that request details are logged
-            assert any(f"🔄[{request_id}] Chat Completion Request:" in call for call in debug_calls)
-            assert any(f"🔄[{request_id}] Stream:" in call for call in debug_calls)
-            assert any(f"🔄[{request_id}] Messages:" in call for call in debug_calls)
-            assert any(f"🔄[{request_id}] Model:" in call for call in debug_calls)
-            assert any(f"🔄[{request_id}] Chat completions request is non-streaming." in call for call in debug_calls)
+            # Verify the handler was created with the correct model
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["model"] == "latest:sonnet"
 
     @pytest.mark.asyncio
-    async def test_chat_completions_request_handler_passes_captured_trace_context_to_factory(
-        self,
-        handler_mod,
-        mock_session,
-        mock_mindsdb_client,
-        sample_streaming_chat_request,
-        mock_context,
-    ):
-        """The handler must capture the @observe trace context and forward it
-        into OpenAIRequestHandler.create so streaming code paths can attach a
-        child generation with token usage after this decorated function exits.
-        """
-        mock_streaming_response = Mock(spec=StreamingResponse)
-        captured_ctx = {"trace_id": "trace-x", "parent_span_id": "obs-y"}
+    async def test_handler_passes_messages_to_handler(self, mock_session, mock_context, chat_completions_request):
+        """Test that messages are passed correctly to OpenAIRequestHandler."""
+        mock_response = JSONResponse(content={"id": "chatcmpl-123"})
 
         with (
-            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
-            patch.object(handler_mod, "process_streaming_producer", new_callable=AsyncMock) as mock_process_streaming,
-            patch.object(handler_mod, "capture_langfuse_generation_context", return_value=captured_ctx),
-            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
         ):
             mock_handler_instance = AsyncMock()
-            mock_handler_instance.is_passthrough = False
+            mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
-            mock_process_streaming.return_value = mock_streaming_response
 
-            await handler_mod.chat_completions_request_handler(
+            await chat_completions_request_handler(
                 session=mock_session,
                 context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                chat_completions_request=sample_streaming_chat_request,
+                chat_completions_request=chat_completions_request,
             )
 
-            mock_handler_class.create.assert_awaited_once()
-            kwargs = mock_handler_class.create.call_args.kwargs
-            assert kwargs["langfuse_trace_context"] == captured_ctx
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["messages"] == chat_completions_request.messages
 
     @pytest.mark.asyncio
-    async def test_chat_completions_request_handler_parameter_extraction(
-        self, handler_mod, mock_session, mock_mindsdb_client, sample_messages, mock_context
-    ):
-        """Test that parameters are correctly extracted from the request."""
-        mock_json_response = Mock(spec=JSONResponse)
+    async def test_handler_passes_streaming_flag(self, mock_session, mock_context):
+        """Test that streaming flag is passed to handler."""
+        streaming_request = ChatCompletionsRequest(
+            model="latest:gpt-4o",
+            messages=[Message(role="user", content="Hello")],
+            stream=True,
+        )
 
-        # Create request with specific parameters
-        chat_request = ChatCompletionsRequest(
-            model="custom-model-v1",
-            messages=sample_messages,
+        mock_response = JSONResponse(content={"id": "chatcmpl-123"})
+
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=streaming_request,
+            )
+
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["stream"] is True
+
+    @pytest.mark.asyncio
+    async def test_handler_passes_tools_and_tool_choice(self, mock_session, mock_context):
+        """Test that tools and tool_choice are passed to handler."""
+        request_with_tools = ChatCompletionsRequest(
+            model="latest:sonnet",
+            messages=[Message(role="user", content="Search for something")],
             stream=False,
-            metadata=ChatCompletionRequestMetadata(mdb_completions_session_id="custom-session"),
+            tools=[{"type": "function", "function": {"name": "search"}}],
+            tool_choice="auto",
+        )
+
+        mock_response = JSONResponse(content={"id": "chatcmpl-123"})
+
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=request_with_tools,
+            )
+
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["tools"] is not None
+            assert call_kwargs["tool_choice"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_handler_passes_temperature_and_max_tokens(self, mock_session, mock_context):
+        """Test that sampling parameters are passed to handler."""
+        request_with_params = ChatCompletionsRequest(
+            model="latest:sonnet",
+            messages=[Message(role="user", content="Hello")],
+            stream=False,
+            temperature=0.8,
+            max_tokens=500,
+        )
+
+        mock_response = JSONResponse(content={"id": "chatcmpl-123"})
+
+        with (
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
+        ):
+            mock_handler_instance = AsyncMock()
+            mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=mock_response)
+            mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
+
+            await chat_completions_request_handler(
+                session=mock_session,
+                context=mock_context,
+                chat_completions_request=request_with_params,
+            )
+
+            call_kwargs = mock_handler_class.create.call_args[1]
+            assert call_kwargs["temperature"] == 0.8
+            assert call_kwargs["max_tokens"] == 500
+
+    @pytest.mark.asyncio
+    async def test_handler_returns_handler_response(self, mock_session, mock_context, chat_completions_request):
+        """Test that handler returns the response from OpenAIRequestHandler."""
+        expected_response = JSONResponse(
+            content={
+                "id": "chatcmpl-123",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "Hello!"}}],
+            }
         )
 
         with (
-            patch.object(handler_mod, "OpenAIRequestHandler") as mock_handler_class,
-            patch.object(
-                handler_mod, "process_non_streaming_producer", new_callable=AsyncMock
-            ) as mock_process_non_streaming,
-            patch("minds.common.passthrough_config.is_passthrough_model", return_value=False),
+            patch("minds.handlers.chat_completions_request_handler.OpenAIRequestHandler") as mock_handler_class,
+            patch("minds.handlers.chat_completions_request_handler.setup_langfuse_observation"),
+            patch("minds.handlers.chat_completions_request_handler.get_langfuse_trace_id", return_value=None),
+            patch("minds.handlers.chat_completions_request_handler.capture_langfuse_generation_context"),
         ):
-            # Setup mocks
             mock_handler_instance = AsyncMock()
-            mock_handler_instance.is_passthrough = False
+            mock_handler_instance.proxy_chat_completions = AsyncMock(return_value=expected_response)
             mock_handler_class.create = AsyncMock(return_value=mock_handler_instance)
-            mock_process_non_streaming.return_value = mock_json_response
 
-            # Call the handler
-            await handler_mod.chat_completions_request_handler(
+            response = await chat_completions_request_handler(
                 session=mock_session,
                 context=mock_context,
-                mindsdb_client=mock_mindsdb_client,
-                chat_completions_request=chat_request,
+                chat_completions_request=chat_completions_request,
             )
 
-            # Verify parameters were extracted and passed correctly
-            mock_handler_class.create.assert_awaited_once()
-            kwargs = mock_handler_class.create.call_args.kwargs
-            assert kwargs["session"] == mock_session
-            assert kwargs["context"] == mock_context
-            assert kwargs["mindsdb_client"] == mock_mindsdb_client
-            assert kwargs["messages"] == sample_messages  # Original messages
-            assert kwargs["model"] == "custom-model-v1"  # Custom model
-            assert kwargs["stream"] is False  # Explicit stream value
-            assert kwargs["metadata"] == ChatCompletionRequestMetadata(mdb_completions_session_id="custom-session")
-            assert kwargs["instrument"] is True
-
-            # Verify process_non_streaming_producer received correct parameters
-            call_args = mock_process_non_streaming.call_args
-            assert call_args[1]["model"] == "custom-model-v1"
+            assert response == expected_response

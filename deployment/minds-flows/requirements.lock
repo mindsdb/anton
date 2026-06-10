@@ -1,6 +1,0 @@
-dependencies:
-- name: job
-  repository: file://./charts/job
-  version: 1.0.0
-digest: sha256:fb785289b0462f351ad4038af19407893a40df4ba849cf3ca9ecb3a24ecc31b9
-generated: "2025-09-16T18:33:40.733585-07:00"

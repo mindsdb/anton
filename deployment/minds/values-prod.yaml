@@ -20,51 +20,6 @@ deployment:
             serviceName: minds
             servicePort: 80
   
-  ingress_secondary:
-    name: minds-legacy
-    annotations:
-      nginx.ingress.kubernetes.io/enable-cors: "true"
-      
-      # Forward auth configuration using your gateway service
-      nginx.ingress.kubernetes.io/auth-url: "http://auth.prod.svc.cluster.local:80/v1/authenticate/"
-
-    hosts:
-      - host: minds.mdb.ai
-        enableMultiPath: true
-        paths:
-          - path: /
-            serviceName: minds
-            servicePort: 80
-      
-      - host: mdb.ai
-        enableMultiPath: true
-        paths:
-          - path: /api/v1/chat
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/minds
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/models
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/datasources
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/tree
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/conversations
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/responses
-            serviceName: minds
-            servicePort: 80
-          - path: /api/v1/limits
-            serviceName: minds
-            servicePort: 80
-
-
   extraEnvs:
 
     # ====================================
@@ -87,13 +42,6 @@ deployment:
 
     - name: LANGFUSE_TRACING_ENVIRONMENT
       value: "prod"
-
-    # ====================================
-    # DATA CATALOG SETTINGS
-    # ====================================
-
-    - name: DATA_CATALOG__JOB_DEPLOYMENT_NAME
-      value: "prod--data-catalog-loader"
 
     # ====================================
     # MIND CASTLE SETTINGS
