@@ -93,3 +93,18 @@
   justify-content: center;
   flex-wrap: wrap;
 }
+
+.anton-hero-demo {
+  max-width: 760px;
+  margin: 2.5rem auto 0;
+}
+
+.anton-hero-demo img {
+  width: 100%;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(14, 70, 81, 0.25);
+}
+
+[data-theme='dark'] .anton-hero-demo img {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
