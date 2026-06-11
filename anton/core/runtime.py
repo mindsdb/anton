@@ -62,7 +62,6 @@ async def build_chat_session(
     model: Optional[str] = None,
     extra_tools: Optional[Sequence[Any]] = None,
     system_prompt_suffix: Optional[str] = None,
-    output_context: Optional[str] = None,
 ):
     """Build a ChatSession scoped to one workspace.
 
@@ -83,9 +82,6 @@ async def build_chat_session(
     system_prompt_suffix
         Free-form text appended to the system prompt. Hosts use this to nudge tone or
         describe their UI affordances. None → no suffix.
-    output_context
-        Override for the per-session output-folder hint. None → use the default template
-        pointing at `settings.artifacts_dir`.
 
     Returns
     -------
@@ -144,11 +140,6 @@ async def build_chat_session(
     history_store = HistoryStore(episodes_dir)
     initial_history = history_store.load(session_id)
 
-    resolved_output_context = output_context or (
-        f"Save generated files and dashboards to `{output_dir}`. "
-        "When you create a user-facing HTML dashboard or report, save it there."
-    )
-
     data_vault = LocalDataVault() if LocalDataVault is not None else None
     google_drive_oauth_connected = False
     if data_vault is not None:
@@ -186,8 +177,8 @@ async def build_chat_session(
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
             suffix=final_suffix,
-            output_context=resolved_output_context,
         ),
+        output_dir=str(output_dir),
         workspace=workspace,
         data_vault=data_vault,
         initial_history=initial_history,
