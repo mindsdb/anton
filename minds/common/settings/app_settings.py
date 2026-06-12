@@ -175,6 +175,29 @@ class FireworksSettings(Settings):
     )  # FIREWORKS__PASSTHROUGH_QWEN_MODEL
 
 
+class SearchSettings(Settings):
+    """Web-search tool config for providers without native provider search.
+
+    Drives the server-side search loop used by Fireworks-hosted passthrough
+    models. ``provider`` selects the backend (see
+    ``minds.common.search.registry``); the caps bound a single chat's search
+    fan-out so an agentic loop can't run unbounded searches or tokens.
+    """
+
+    provider: str = Field(default="exa", description="Search provider name (e.g. 'exa')")  # SEARCH__PROVIDER
+    exa_api_key: str = Field(default="", description="The Exa.ai API key")  # SEARCH__EXA_API_KEY
+    max_results: int = Field(default=5, ge=1, description="Max results per search query")  # SEARCH__MAX_RESULTS
+    max_iterations: int = Field(
+        default=4, ge=1, description="Max model<->search round-trips before forcing a final answer"
+    )  # SEARCH__MAX_ITERATIONS
+    per_turn_max_tokens: int = Field(
+        default=4096, ge=1, description="max_tokens for each model turn inside the search loop"
+    )  # SEARCH__PER_TURN_MAX_TOKENS
+    fetch_char_limit: int = Field(
+        default=20000, ge=1, description="Max characters of fetched page text fed back to the model"
+    )  # SEARCH__FETCH_CHAR_LIMIT
+
+
 class GeminiSettings(Settings):
     api_key: str = Field(default="", description="The Google Gemini API key")  # GEMINI__API_KEY
 
@@ -274,6 +297,7 @@ class AppSettings(Settings):
     anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)  # ANTHROPIC__*
     fireworks: FireworksSettings = Field(default_factory=FireworksSettings)  # FIREWORKS__*
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)  # GEMINI__*
+    search: SearchSettings = Field(default_factory=SearchSettings)  # SEARCH__*
     mindsdb: MindsDBSettings = Field(default_factory=MindsDBSettings)  # MINDSDB__*
     default_models: DefaultModelsSettings = Field(default_factory=DefaultModelsSettings)  # DEFAULT_MODELS__*
     mind_castle: MindCastleSettings = Field(default_factory=MindCastleSettings)  # MIND_CASTLE__*

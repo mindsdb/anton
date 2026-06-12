@@ -100,6 +100,10 @@ class ApiKind(StrEnum):
     OPENAI_RESPONSES = "openai_responses"
     ANTHROPIC_MESSAGES = "anthropic_messages"
     GEMINI_NATIVE = "gemini_native"
+    # Fireworks shares the Anthropic transport shape but has no hosted search
+    # index, so it gets its own adapter that drives a server-side external
+    # search loop (see ``minds.inference.providers.fireworks``).
+    FIREWORKS = "fireworks"
 
 
 class WebSearchMode(StrEnum):
@@ -108,6 +112,7 @@ class WebSearchMode(StrEnum):
     OPENAI_NATIVE = "openai_native"
     ANTHROPIC_NATIVE = "anthropic_native"
     GEMINI_GOOGLE_SEARCH = "gemini_google_search"
+    EXTERNAL_TOOL = "external_tool"  # run search ourselves via a SearchProvider (Fireworks)
     DROP = "drop"
 
 

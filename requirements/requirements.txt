@@ -15,6 +15,7 @@ psycopg2-binary==2.9.10
 sqlglot==27.2.0
 anthropic==0.91.0
 google-genai==1.75.0
+exa-py==2.13.0
 async-property==0.2.2
 pydantic-settings==2.10.1
 mind-castle==0.5.0

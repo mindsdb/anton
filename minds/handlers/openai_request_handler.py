@@ -12,6 +12,7 @@ from minds.model.chat_completion import ChatCompletion
 from minds.requests.chat_completions_request import ChatCompletionRequestMetadata
 from minds.requests.context import Context
 from minds.requests.langfuse_tracing import (
+    record_search_tool_spans,
     record_tool_call_spans,
     update_generation_usage,
 )
@@ -178,6 +179,26 @@ class OpenAIRequestHandler:
         if extra_metadata:
             metadata = {**(metadata or {}), **extra_metadata}
 
+        # Split server artifacts: searches/fetches WE executed server-side
+        # (Fireworks external-tool loop, ``type="external_search"``) become
+        # cost-free nested tool spans below; native provider intermediates
+        # (Anthropic web_search/fetch, OpenAI reasoning) stay in the
+        # generation metadata blob. Pulling the external-search entries out of
+        # ``metadata`` keeps Exa's per-request cost from folding into the
+        # model's per-token cost on the generation.
+        search_artifacts: list[dict] = []
+        if metadata and isinstance(metadata.get("server_artifacts"), list):
+            native_artifacts: list[dict] = []
+            for artifact in metadata["server_artifacts"]:
+                if isinstance(artifact, dict) and artifact.get("type") == "external_search":
+                    search_artifacts.append(artifact)
+                else:
+                    native_artifacts.append(artifact)
+            if native_artifacts:
+                metadata["server_artifacts"] = native_artifacts
+            else:
+                metadata.pop("server_artifacts", None)
+
         # Whole-turn eval support: only when the caller adopted an upstream trace
         # (Langfuse-Trace-Id present) do we stamp trace-level I/O. The trace input
         # is the caller-supplied turn input (idempotent across the turn's calls);
@@ -207,6 +228,16 @@ class OpenAIRequestHandler:
             # query is one filter away.
             record_tool_call_spans(
                 tool_calls=tool_calls_for_spans,
+                trace_context=langfuse_trace_context,
+                metadata=metadata,
+            )
+
+        if search_artifacts:
+            # Server-side searches WE ran (Fireworks external-tool loop):
+            # nested tool spans carrying input + results but NO token usage, so
+            # Exa's per-request cost never folds into the model's token cost.
+            record_search_tool_spans(
+                artifacts=search_artifacts,
                 trace_context=langfuse_trace_context,
                 metadata=metadata,
             )

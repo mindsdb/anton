@@ -418,3 +418,70 @@ def record_tool_call_spans(
                 obs.end()
         except Exception as exc:
             logger.warning(f"Failed to record tool-call span for {name!r}: {exc}")
+
+
+def record_search_tool_spans(
+    *,
+    artifacts: list[dict] | None,
+    trace_context: dict | None,
+    metadata: dict | None = None,
+) -> None:
+    """Emit one Langfuse child span per server-side search/fetch we executed.
+
+    Unlike :func:`record_tool_call_spans` — which traces tool calls the
+    *client* is expected to run on its next turn — these are tools **we**
+    executed server-side inside the Fireworks external-search loop, so each span
+    carries both the ``input`` (query / url) and the ``output`` (the results we
+    fed back to the model). They nest under the same parent as the generation
+    (detached ``trace_context`` for streaming, current ``@observe`` scope
+    otherwise), matching how ``record_tool_call_spans`` nests.
+
+    Crucially these spans carry **no** ``model`` or ``usage_details``: the
+    search provider (Exa) is priced per request, not per token, so attaching
+    token usage would mis-attribute the upstream model's per-token cost to the
+    search. Token cost stays solely on the parent generation; the search's own
+    cost (and identity) lives here as plain span metadata, fully separated.
+
+    Args:
+        artifacts: The ``external_search`` server artifacts recorded by the
+            loop, each ``{"tool", "provider", "input", "results"?, "error"?}``.
+            Non-list / empty → no-op.
+        trace_context: Detached-mode trace context, or ``None`` to attach to
+            the current ``@observe`` scope.
+        metadata: Extra metadata merged into every span (alias / provider so a
+            "show every web_search run during this turn" filter is one click).
+    """
+    if not isinstance(artifacts, list) or not artifacts:
+        return
+
+    base_metadata = dict(metadata or {})
+
+    try:
+        langfuse_client = get_client()
+    except Exception as exc:  # pragma: no cover - defensive against stub clients
+        logger.warning(f"Could not get Langfuse client for search-tool span emission: {exc}")
+        return
+
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        tool = artifact.get("tool") or "search"
+        span_metadata = {**base_metadata, "search_provider": artifact.get("provider")}
+        if artifact.get("error"):
+            span_metadata["error"] = artifact["error"]
+
+        try:
+            kwargs: dict[str, Any] = {
+                "name": f"tool:{tool}",
+                "as_type": "span",
+                "input": artifact.get("input"),
+                "output": artifact.get("results") or artifact.get("error"),
+                "metadata": span_metadata,
+            }
+            if trace_context is not None:
+                kwargs["trace_context"] = trace_context
+            obs = langfuse_client.start_observation(**kwargs)
+            with contextlib.suppress(Exception):
+                obs.end()
+        except Exception as exc:
+            logger.warning(f"Failed to record search-tool span for {tool!r}: {exc}")

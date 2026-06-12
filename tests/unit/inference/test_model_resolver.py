@@ -162,7 +162,7 @@ class TestModelResolverCanonicalAliases:
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:kimi")
 
-        assert config.api_kind == ApiKind.ANTHROPIC_MESSAGES
+        assert config.api_kind == ApiKind.FIREWORKS
         assert config.label == "fireworks"
         assert config.alias == "kimi"
         assert config.base_url == "https://api.fireworks.ai/account/v1/completions"
@@ -172,7 +172,7 @@ class TestModelResolverCanonicalAliases:
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:deepseek")
 
-        assert config.api_kind == ApiKind.ANTHROPIC_MESSAGES
+        assert config.api_kind == ApiKind.FIREWORKS
         assert config.label == "fireworks"
         assert config.alias == "deepseek"
 
@@ -181,7 +181,7 @@ class TestModelResolverCanonicalAliases:
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:qwen")
 
-        assert config.api_kind == ApiKind.ANTHROPIC_MESSAGES
+        assert config.api_kind == ApiKind.FIREWORKS
         assert config.label == "fireworks"
         assert config.alias == "qwen"
 
@@ -397,14 +397,14 @@ class TestModelResolverWebSearchMode:
 
         assert config.web_search_mode == WebSearchMode.GEMINI_GOOGLE_SEARCH
 
-    def test_fireworks_drops_web_search(self, mock_settings):
-        """Fireworks models should have DROP web search mode."""
+    def test_fireworks_uses_external_search(self, mock_settings):
+        """Fireworks models run search via the external-tool loop (no native index)."""
         from minds.inference.types import WebSearchMode
 
         resolver = ModelResolver(mock_settings)
         config = resolver.resolve("latest:kimi")
 
-        assert config.web_search_mode == WebSearchMode.DROP
+        assert config.web_search_mode == WebSearchMode.EXTERNAL_TOOL
 
 
 class TestModelResolverObservabilityMetadata:

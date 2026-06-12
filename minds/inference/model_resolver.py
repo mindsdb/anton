@@ -71,9 +71,12 @@ _PROVIDER_CONFIG: dict[str, ProviderConfig] = {
         label="gemini",
         api_key_attr="api_key",
     ),
+    # Fireworks shares the Anthropic transport shape but has no hosted search
+    # index, so it routes through its own adapter (ApiKind.FIREWORKS) that drives
+    # a server-side external-search loop (WebSearchMode.EXTERNAL_TOOL).
     "fireworks": ProviderConfig(
-        api_kind="ANTHROPIC_MESSAGES",
-        web_search_mode="DROP",
+        api_kind="FIREWORKS",
+        web_search_mode="EXTERNAL_TOOL",
         label="fireworks",
         api_key_attr="api_key",
         base_url_attr="anthropic_base_url",

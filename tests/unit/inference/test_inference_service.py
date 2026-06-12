@@ -352,6 +352,13 @@ class TestInferenceServiceAdapterFactory:
         adapter = inference_service._create_adapter(ApiKind.GEMINI_NATIVE)
         assert isinstance(adapter, GeminiAdapter)
 
+    def test_create_adapter_fireworks(self, inference_service):
+        """_create_adapter creates FireworksAdapter for FIREWORKS."""
+        from minds.inference.providers.fireworks_adapter import FireworksAdapter
+
+        adapter = inference_service._create_adapter(ApiKind.FIREWORKS)
+        assert isinstance(adapter, FireworksAdapter)
+
     def test_create_adapter_unknown_raises(self, inference_service):
         """_create_adapter raises ValueError for unknown api_kind."""
         with pytest.raises(ValueError, match="Unknown api_kind"):

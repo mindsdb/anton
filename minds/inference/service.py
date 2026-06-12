@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from minds.inference.adapter import ProviderAdapter
 from minds.inference.model_resolver import ModelResolver
 from minds.inference.providers.anthropic_adapter import AnthropicAdapter
+from minds.inference.providers.fireworks_adapter import FireworksAdapter
 from minds.inference.providers.gemini_adapter import GeminiAdapter
 from minds.inference.providers.openai_adapter import OpenAIAdapter
 from minds.inference.types import ApiKind, UsageBox
@@ -136,8 +137,8 @@ class InferenceService:
             api_kind: The upstream provider transport type.
 
         Returns:
-            A new adapter instance (OpenAIAdapter, AnthropicAdapter, or
-            GeminiAdapter).
+            A new adapter instance (OpenAIAdapter, AnthropicAdapter,
+            GeminiAdapter, or FireworksAdapter).
 
         Raises:
             ValueError: If api_kind is not recognized.
@@ -148,5 +149,7 @@ class InferenceService:
             return AnthropicAdapter()
         elif api_kind == ApiKind.GEMINI_NATIVE:
             return GeminiAdapter()
+        elif api_kind == ApiKind.FIREWORKS:
+            return FireworksAdapter()
         else:
             raise ValueError(f"Unknown api_kind: {api_kind}")
