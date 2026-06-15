@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 from anton.core.artifacts.models import Artifact
-from anton.core.datasources.data_vault import LocalDataVault
+from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
 
@@ -176,13 +176,19 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
 
 def _collect_datasource_secrets(
     artifact: Artifact,
+    vault: DataVault | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Resolve DS_*__FIELD secrets for an artifact's declared datasources.
 
     Returns (secrets, missing) where `missing` is the list of slugs whose
     vault entry could not be loaded. Caller decides how to surface that.
+
+    `vault` lets a caller point at a non-default credential store (e.g.
+    cowork-server, which keeps its vault at `~/.cowork/data-vault` rather
+    than anton's default `~/.anton/data_vault`). Defaults to the local
+    anton vault when not provided.
     """
-    vault = LocalDataVault()
+    vault = vault or LocalDataVault()
     secrets: dict[str, str] = {}
     missing: list[str] = []
     for ref in artifact.datasources:
@@ -207,6 +213,7 @@ def publish(
     ssl_verify: bool = True,
     password: str | None = None,
     pwd_version: int = 1,
+    vault: DataVault | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
 
@@ -224,6 +231,10 @@ def publish(
                   responsible for storing the plaintext owner-side.
         pwd_version: Monotonic version bumped whenever the password
                   changes, so previously issued access cookies invalidate.
+        vault: Credential store to resolve datasource secrets from. Defaults
+                  to anton's local vault (`~/.anton/data_vault`); cowork-server
+                  passes its own vault so published secrets match where the
+                  connection credentials were actually saved.
 
     Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
     """
@@ -235,7 +246,7 @@ def publish(
     artifact = _load_artifact_metadata(file_path) if file_path.is_dir() else None
     if artifact is not None and artifact.type in FULLSTACK_ARTIFACT_TYPES:
         zipped, _included = _zip_fullstack(file_path)
-        secrets, missing = _collect_datasource_secrets(artifact)
+        secrets, missing = _collect_datasource_secrets(artifact, vault)
         payload_dict["artifact_type"] = artifact.type
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
