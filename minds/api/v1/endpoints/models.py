@@ -6,8 +6,9 @@ Backs the OpenAI Python SDK's ``client.models.list()``, which issues
 
 Only passthrough aliases whose upstream provider is actually configured
 are advertised — matches the 400-on-missing-provider contract of
-``resolve_passthrough_model``. Deprecated bare spellings (``_reason_``,
-``_code_``) are intentionally hidden from this listing.
+``ModelResolver.resolve``. Per-user Statsig policy (alias overrides /
+allow-list) is threaded in via ``get_passthrough_model_config``. Deprecated
+bare spellings (``_reason_``, ``_code_``) are intentionally hidden here.
 """
 
 from fastapi import APIRouter, Depends
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends
 from minds.api.v1.deps import get_context
 from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
+from minds.common.statsig.dynamic_config.model_config import get_passthrough_model_config
 from minds.inference.model_resolver import ModelResolver
 from minds.requests.context import Context
 
@@ -34,8 +36,9 @@ async def list_models(context: Context = Depends(get_context)) -> dict:
         deserializes into ``ListObject[Model]``.
     """
     logger.debug(f"List models requested for user {context.user_id}")
+    policy = get_passthrough_model_config(context)
     resolver = ModelResolver(get_app_settings())
-    configs = resolver.list_available()
+    configs = resolver.list_available(policy=policy)
     return {
         "object": "list",
         "data": [

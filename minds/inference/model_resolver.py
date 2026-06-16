@@ -20,6 +20,7 @@ from minds.inference.types import (
     ProviderConfig,
     WebSearchMode,
 )
+from minds.schemas.passthrough import PassthroughModelStatsigConfig
 
 if TYPE_CHECKING:
     from minds.common.settings.app_settings import AppSettings
@@ -90,21 +91,34 @@ class ModelResolver:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
 
-    def resolve(self, model_name: str) -> PassthroughModelConfig:
+    def resolve(
+        self,
+        model_name: str,
+        *,
+        policy: PassthroughModelStatsigConfig | None = None,
+    ) -> PassthroughModelConfig:
         """Resolve passthrough model name to config.
 
         Accepts canonical ``latest:<alias>`` or deprecated bare spellings.
         Raises ValueError for invalid patterns, HTTPException(400) if unconfigured.
+
+        ``policy`` carries the per-user Statsig routing policy (overrides,
+        allow-list, search settings — see
+        :mod:`minds.common.statsig.dynamic_config.model_config`). It is a plain
+        Pydantic data model, so the resolver stays free of any Statsig/Context
+        import; ``None`` (the empty policy) means "no policy" and every
+        context-free caller is unchanged.
         """
+        policy = policy or PassthroughModelStatsigConfig()
         if model_name in _DEPRECATED_ALIASES:
-            config = self._resolve_alias(_DEPRECATED_ALIASES[model_name])
+            config = self._resolve_alias(_DEPRECATED_ALIASES[model_name], policy=policy)
             return dataclasses.replace(config, alias=model_name)
 
         m = _PASSTHROUGH_PATTERN.match(model_name)
         if not m:
             raise ValueError(f"{model_name!r} is not a valid passthrough model name")
 
-        return self._resolve_alias(m.group(1).lower())
+        return self._resolve_alias(m.group(1).lower(), policy=policy)
 
     def is_passthrough_model(self, model_name: str) -> bool:
         """Return True if model_name matches passthrough pattern."""
@@ -112,23 +126,59 @@ class ModelResolver:
             return True
         return _PASSTHROUGH_PATTERN.match(model_name) is not None
 
-    def list_available(self) -> list[PassthroughModelConfig]:
-        """List all configured provider models."""
+    def list_available(
+        self,
+        *,
+        policy: PassthroughModelStatsigConfig | None = None,
+    ) -> list[PassthroughModelConfig]:
+        """List all configured provider models.
+
+        Used by ``GET /v1/models`` to advertise currently-callable models.
+
+        ``policy.allowed_aliases`` (None = all) filters the listing to the
+        aliases a user may call, and ``policy.alias_overrides`` repoints the
+        advertised ``model_name`` — so the listing matches what :meth:`resolve`
+        would return for that user.
+        """
         from contextlib import suppress
 
+        policy = policy or PassthroughModelStatsigConfig()
         configs: list[PassthroughModelConfig] = []
         for alias in _ALIASES:
+            if policy.allowed_aliases is not None and alias not in policy.allowed_aliases:
+                continue
             with suppress(HTTPException):
-                configs.append(self._resolve_alias(alias))
+                configs.append(self._resolve_alias(alias, policy=policy))
         return configs
 
-    def _resolve_alias(self, alias: str) -> PassthroughModelConfig:
-        """Resolve alias to config, checking provider availability."""
+    def _resolve_alias(
+        self,
+        alias: str,
+        *,
+        policy: PassthroughModelStatsigConfig,
+    ) -> PassthroughModelConfig:
+        """Resolve alias to config, checking provider availability.
+
+        Order of checks matters: an *unknown* alias is a 400 (a typo, regardless
+        of who asked), a *known but disallowed* alias is a 403 (real alias, this
+        user can't use it), and a known/allowed alias with no configured
+        provider is a 400 (unchanged contract). An ``overrides`` entry only
+        repoints the model id within an already-configured provider — it cannot
+        enable a provider whose key is missing, since the availability check
+        runs first. The per-user search policy is stamped onto the returned
+        config for the Fireworks adapter to read.
+        """
         mapping = _ALIASES.get(alias)
         if not mapping:
             raise HTTPException(
                 status_code=400,
                 detail=f"Unknown passthrough alias 'latest:{alias}'",
+            )
+
+        if policy.allowed_aliases is not None and alias not in policy.allowed_aliases:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Passthrough alias 'latest:{alias}' is not available for this user.",
             )
 
         provider_settings = getattr(self.settings, mapping.provider)
@@ -142,6 +192,12 @@ class ModelResolver:
                 status_code=400,
                 detail=f"No provider configured for passthrough alias 'latest:{alias}'",
             )
+
+        # An override only repoints the model id within the already-configured
+        # provider; it runs after the availability check so it can't enable a
+        # provider whose key is missing.
+        if alias in policy.alias_overrides:
+            model_name_value = policy.alias_overrides[alias]
 
         provider_config = _PROVIDER_CONFIG[mapping.provider]
 
@@ -161,4 +217,6 @@ class ModelResolver:
             label=provider_config.label,
             alias=alias,
             reasoning_effort=mapping.reasoning_effort,
+            search_enabled=policy.search_enabled,
+            search_provider_name=policy.search_provider,
         )

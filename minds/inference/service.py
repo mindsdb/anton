@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from minds.inference.types import PassthroughModelConfig
     from minds.schemas.chat import Message
+    from minds.schemas.passthrough import PassthroughModelStatsigConfig
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class InferenceService:
         tool_choice: str | dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        policy: PassthroughModelStatsigConfig | None = None,
     ) -> tuple[StreamingResponse | JSONResponse, InferenceResult]:
         """Execute an inference request.
 
@@ -86,6 +88,8 @@ class InferenceService:
             tool_choice: Optional tool choice constraint.
             temperature: Optional temperature override.
             max_tokens: Optional max tokens override.
+            policy: Per-user passthrough routing policy from Statsig (alias
+                overrides, allow-list, search settings). ``None`` = no policy.
 
         Returns:
             Tuple of (HTTP response, InferenceResult with captured state).
@@ -94,8 +98,8 @@ class InferenceService:
             HTTPException: If model alias is unknown or provider unconfigured.
             ValueError: If api_kind is not recognized.
         """
-        # Step 1: Resolve model alias to config
-        config = self.model_resolver.resolve(model_name)
+        # Step 1: Resolve model alias to config (stamping per-user policy)
+        config = self.model_resolver.resolve(model_name, policy=policy)
 
         # Step 2: Create fresh adapter for this request
         adapter = self._create_adapter(config.api_kind)

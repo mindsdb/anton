@@ -128,6 +128,12 @@ class PassthroughModelConfig:
     label: str = ""
     alias: str = ""
     reasoning_effort: str | None = None
+    # Per-user web-search policy from Statsig (see schemas.passthrough). These
+    # default to the "no policy" values so a config built without Statsig
+    # behaves exactly as before. The Fireworks adapter reads them to decide
+    # whether to run the external-search loop and which provider to use.
+    search_enabled: bool = True
+    search_provider_name: str | None = None
 
     def to_observability_metadata(self) -> PassthroughObservabilityMetadata:
         """Project config into Langfuse metadata."""

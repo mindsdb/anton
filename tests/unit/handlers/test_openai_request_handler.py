@@ -499,3 +499,49 @@ class TestBuildPassthroughInputPayload:
         assert payload["max_tokens"] is None
         assert payload["tools"] is None
         assert payload["tool_choice"] is None
+
+
+class TestOpenAIRequestHandlerStatsigPolicy:
+    """Tests that the per-user Statsig routing policy is threaded into inference."""
+
+    @pytest.mark.asyncio
+    async def test_proxy_threads_statsig_policy_into_inference(
+        self, mock_session, mock_context, sample_messages, mock_inference_result
+    ):
+        """proxy_chat_completions passes the resolved Statsig policy to inference()."""
+        from minds.schemas.passthrough import PassthroughModelStatsigConfig
+
+        mock_response = JSONResponse(content={"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
+        handler = OpenAIRequestHandler(
+            session=mock_session,
+            context=mock_context,
+            messages=sample_messages,
+            model="latest:kimi",
+            stream=False,
+            request_id="req",
+        )
+
+        statsig_config = PassthroughModelStatsigConfig(
+            alias_overrides={"kimi": "accounts/fireworks/models/custom"},
+            allowed_aliases=["kimi"],
+            search_provider="exa",
+            search_enabled=False,
+        )
+
+        with (
+            patch(
+                "minds.handlers.openai_request_handler.get_passthrough_model_config",
+                return_value=statsig_config,
+            ),
+            patch.object(handler, "inference_service") as mock_inference_service,
+            patch.object(handler, "_save_usage"),
+        ):
+            mock_inference_service.inference = AsyncMock(return_value=(mock_response, mock_inference_result))
+            await handler.proxy_chat_completions()
+
+        policy = mock_inference_service.inference.call_args.kwargs["policy"]
+        assert policy is statsig_config
+        assert policy.alias_overrides == {"kimi": "accounts/fireworks/models/custom"}
+        assert policy.allowed_aliases == ["kimi"]
+        assert policy.search_provider == "exa"
+        assert policy.search_enabled is False

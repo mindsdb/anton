@@ -36,9 +36,21 @@ _BUILDERS: dict[str, Callable[[AppSettings], SearchProvider]] = {
 }
 
 
-def get_search_provider(settings: AppSettings) -> SearchProvider:
-    """Return the configured search provider, raising on an unknown name."""
-    name = settings.search.provider
+def supported_search_providers() -> list[str]:
+    """Names of the search providers this build knows how to construct."""
+    return sorted(_BUILDERS)
+
+
+def get_search_provider(settings: AppSettings, *, provider_name: str | None = None) -> SearchProvider:
+    """Return a search provider, raising on an unknown name.
+
+    ``provider_name`` overrides ``settings.search.provider`` (used to honor a
+    per-user Statsig selection); the rest of the search settings (api key,
+    max_results) still come from ``settings``. With no override the behavior is
+    unchanged. The no-silent-fallback discipline is preserved: an unknown name
+    raises rather than quietly degrading to "no search".
+    """
+    name = provider_name or settings.search.provider
     builder = _BUILDERS.get(name)
     if builder is None:
         raise ValueError(f"Unknown search provider {name!r}. Supported: {sorted(_BUILDERS)}")

@@ -154,17 +154,22 @@ def build_search_provider_for_request(
     """Build the search provider for this request, or ``None`` to skip search.
 
     Returns ``None`` (so the request degrades to a single-shot call with web
-    tools dropped) when no generic web tool was requested, or when the provider
-    can't be constructed (e.g. the exa key isn't set). A construction failure is
-    logged as a warning rather than raised, so a search misconfig never 5xxs an
-    otherwise-valid Fireworks request.
+    tools dropped) when the per-user search kill switch is off, when no generic
+    web tool was requested, or when the provider can't be constructed (e.g. the
+    exa key isn't set). A construction failure is logged as a warning rather
+    than raised, so a search misconfig never 5xxs an otherwise-valid Fireworks
+    request. ``config.search_provider_name`` (a per-user Statsig override) wins
+    over the env-configured ``SEARCH__PROVIDER`` when set.
     """
+    if not config.search_enabled:
+        logger.debug("External search disabled for this user; dropping web tools")
+        return None
     if not any(_is_generic_web_tool(t) for t in (tools or [])):
         return None
     from minds.common.search import get_search_provider
 
     try:
-        return get_search_provider(get_app_settings())
+        return get_search_provider(get_app_settings(), provider_name=config.search_provider_name)
     except Exception as exc:  # noqa: BLE001 - degrade to no-search rather than failing the request
         logger.warning("Could not build search provider; dropping web tools", extra={"error": str(exc)})
         return None

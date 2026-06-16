@@ -47,6 +47,11 @@ HEADER_LANGFUSE_TRACE_INPUT = "Langfuse-Trace-Input"
 
 DYNAMIC_CONFIG_MIND_USAGE_LIMITS = "mind-usage-limits"
 
+# Per-user passthrough routing policy: alias → concrete model overrides, the
+# allow-list of callable aliases, and the web-search provider / kill switch.
+# See ``minds.common.statsig.dynamic_config.model_config``.
+DYNAMIC_CONFIG_PASSTHROUGH_MODELS = "passthrough-model-config"
+
 # =============================================================================
 # CONTEXT FIELDS
 # =============================================================================

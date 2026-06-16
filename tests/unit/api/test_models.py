@@ -48,9 +48,17 @@ def stub_available_models():
             reasoning_effort="low",
         ),
     ]
-    with patch(
-        "minds.inference.model_resolver.ModelResolver.list_available",
-        return_value=configs,
+    from minds.schemas.passthrough import PassthroughModelStatsigConfig
+
+    with (
+        patch(
+            "minds.api.v1.endpoints.models.get_passthrough_model_config",
+            return_value=PassthroughModelStatsigConfig(),
+        ),
+        patch(
+            "minds.inference.model_resolver.ModelResolver.list_available",
+            return_value=configs,
+        ),
     ):
         yield configs
 
@@ -86,3 +94,26 @@ def test_list_models_excludes_deprecated_aliases(client, auth_headers, stub_avai
 def test_list_models_requires_auth(client, stub_available_models):
     response = client.get("/v1/models/")
     assert response.status_code == 401
+
+
+def test_list_models_threads_statsig_policy_into_listing(client, auth_headers):
+    """The endpoint passes the per-user overrides/allow-list to the resolver."""
+    from minds.schemas.passthrough import PassthroughModelStatsigConfig
+
+    statsig_config = PassthroughModelStatsigConfig(
+        alias_overrides={"opus": "claude-opus-4-8"}, allowed_aliases=["opus"]
+    )
+    with (
+        patch(
+            "minds.api.v1.endpoints.models.get_passthrough_model_config",
+            return_value=statsig_config,
+        ),
+        patch(
+            "minds.inference.model_resolver.ModelResolver.list_available",
+            return_value=[],
+        ) as mock_list,
+    ):
+        response = client.get("/v1/models/", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert mock_list.call_args.kwargs["policy"] is statsig_config

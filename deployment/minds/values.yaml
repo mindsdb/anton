@@ -8,7 +8,7 @@ deployment:
 
   # What group we're in in gitlab and what namespace we deploy to in kubernetes
   image:
-    repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-minds
+    repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-mindshub-inference
     command: ["python", "-m", "uvicorn", "minds.server:app"]
     # Async FastAPI: the event loop handles concurrency per worker. Scale via
     # replicas (and HPA) rather than worker count to avoid duplicating ~300 MiB
@@ -164,6 +164,20 @@ deployment:
         secretKeyRef:
           name: mindsdb-secrets
           key: GEMINI_API_KEY
+
+    # ====================================
+    # WEB SEARCH SETTINGS
+    # ====================================
+
+    # Exa web search — open-source models (Fireworks: kimi/deepseek/qwen) have no
+    # native search index, so the server-side search loop calls Exa. Without this
+    # key the provider fails to build and web tools are silently dropped.
+    # SEARCH__PROVIDER defaults to "exa" in app_settings, so no need to set it.
+    - name: SEARCH__EXA_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: mindsdb-secrets
+          key: SEARCH_EXA_API_KEY
 
     # ====================================
     # STATSIG SETTINGS

@@ -204,7 +204,7 @@ def test_build_provider_none_without_web_tool(monkeypatch):
     # A Fireworks request with no web tool must NOT build a provider, so it
     # never requires an Exa key (regression: plain Fireworks chat).
     sentinel = object()
-    monkeypatch.setattr("minds.common.search.get_search_provider", lambda _s: sentinel)
+    monkeypatch.setattr("minds.common.search.get_search_provider", lambda _s, *, provider_name=None: sentinel)
 
     assert build_search_provider_for_request(_external_config(), None) is None
     function_tool = [{"type": "function", "function": {"name": "f"}}]
@@ -213,7 +213,7 @@ def test_build_provider_none_without_web_tool(monkeypatch):
 
 def test_build_provider_built_when_web_tool_present(monkeypatch):
     sentinel = object()
-    monkeypatch.setattr("minds.common.search.get_search_provider", lambda _s: sentinel)
+    monkeypatch.setattr("minds.common.search.get_search_provider", lambda _s, *, provider_name=None: sentinel)
 
     assert build_search_provider_for_request(_external_config(), [{"type": "web_search"}]) is sentinel
 
@@ -221,9 +221,38 @@ def test_build_provider_built_when_web_tool_present(monkeypatch):
 def test_build_provider_degrades_on_construction_error(monkeypatch):
     # A misconfigured provider (e.g. missing exa key) must not 5xx the request:
     # build_search_provider_for_request swallows the error and returns None.
-    def _boom(_s):
+    def _boom(_s, *, provider_name=None):
         raise ValueError("SEARCH__EXA_API_KEY is not set")
 
     monkeypatch.setattr("minds.common.search.get_search_provider", _boom)
 
     assert build_search_provider_for_request(_external_config(), [{"type": "web_search"}]) is None
+
+
+def test_build_provider_none_when_search_disabled(monkeypatch):
+    # The per-user Statsig kill switch (search_enabled=False) disables search
+    # even when a web tool is requested and a provider could be built.
+    import dataclasses
+
+    sentinel = object()
+    monkeypatch.setattr("minds.common.search.get_search_provider", lambda _s, *, provider_name=None: sentinel)
+    config = dataclasses.replace(_external_config(), search_enabled=False)
+
+    assert build_search_provider_for_request(config, [{"type": "web_search"}]) is None
+
+
+def test_build_provider_honors_provider_name_override(monkeypatch):
+    # A per-user Statsig search_provider override is forwarded to the registry.
+    import dataclasses
+
+    captured = {}
+
+    def _fake(_s, *, provider_name=None):
+        captured["provider_name"] = provider_name
+        return object()
+
+    monkeypatch.setattr("minds.common.search.get_search_provider", _fake)
+    config = dataclasses.replace(_external_config(), search_provider_name="exa")
+
+    build_search_provider_for_request(config, [{"type": "web_search"}])
+    assert captured["provider_name"] == "exa"

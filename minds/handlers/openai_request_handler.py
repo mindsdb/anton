@@ -6,6 +6,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
+from minds.common.statsig.dynamic_config.model_config import get_passthrough_model_config
 from minds.inference.model_resolver import ModelResolver
 from minds.inference.service import InferenceResult, InferenceService
 from minds.model.chat_completion import ChatCompletion
@@ -18,6 +19,7 @@ from minds.requests.langfuse_tracing import (
 )
 from minds.requests.stream import MessageStreamer
 from minds.schemas.chat import Message
+from minds.schemas.passthrough import PassthroughModelStatsigConfig
 from minds.services.conversations import ConversationsService
 from minds.services.limits import LimitsService
 
@@ -242,6 +244,16 @@ class OpenAIRequestHandler:
                 metadata=metadata,
             )
 
+    def _passthrough_policy(self) -> PassthroughModelStatsigConfig:
+        """Per-user passthrough routing policy (Statsig) for ``inference``.
+
+        One Statsig fetch feeds both the alias resolver (overrides + allow-list)
+        and the Fireworks search policy (provider override + kill switch).
+        Self-hosted / Statsig-unavailable returns an empty policy, reproducing
+        today's env-backed behavior.
+        """
+        return get_passthrough_model_config(self.context)
+
     async def proxy_chat_completions(self) -> StreamingResponse | JSONResponse:
         """Passthrough proxy — returns the upstream response directly."""
         # Snapshot the request shape now so it can be attached to the
@@ -257,6 +269,7 @@ class OpenAIRequestHandler:
             tool_choice=self.tool_choice,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            policy=self._passthrough_policy(),
         )
 
         if isinstance(response, StreamingResponse):
@@ -383,6 +396,7 @@ class OpenAIRequestHandler:
             tool_choice=self.tool_choice,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            policy=self._passthrough_policy(),
         )
 
         conversation_service = ConversationsService(
