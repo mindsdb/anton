@@ -8,6 +8,9 @@ deployment:
 
   # What group we're in in gitlab and what namespace we deploy to in kubernetes
   image:
+    # The build-push-ecr action derives the ECR repo name from the GitHub repo
+    # slug, so this must track the GitHub repo name (renamed minds →
+    # mindshub-inference on 2026-06-11).
     repository: 168681354662.dkr.ecr.us-east-1.amazonaws.com/mindsdb-mindshub-inference
     command: ["python", "-m", "uvicorn", "minds.server:app"]
     # Async FastAPI: the event loop handles concurrency per worker. Scale via

@@ -384,6 +384,14 @@ async def proxy_fireworks(
         kwargs["tool_choice"] = anthropic_tc
     if temperature is not None:
         kwargs["temperature"] = temperature
+    if config.reasoning_effort:
+        # Fireworks' Anthropic-compatible endpoint takes the OpenAI-style
+        # ``reasoning_effort`` as an extension field (mutually exclusive with
+        # ``thinking``), so it rides in the request body via ``extra_body``.
+        # The level string was validated by the resolver and forwarded
+        # verbatim; ``base_kwargs`` spreads into every search-loop turn, so
+        # the loop path inherits it too.
+        kwargs["extra_body"] = {"reasoning_effort": config.reasoning_effort}
     if stream and not use_loop:
         kwargs["stream"] = True
 
@@ -395,6 +403,7 @@ async def proxy_fireworks(
             "stream": stream,
             "use_search_loop": use_loop,
             "has_tools": bool(translated_tools),
+            "reasoning_effort": config.reasoning_effort,
         },
     )
 

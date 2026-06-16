@@ -445,3 +445,77 @@ class TestModelResolverObservabilityMetadata:
         # reasoning_effort should not be in dict since it's None
         assert "reasoning_effort" not in metadata_dict
         assert metadata_dict["passthrough_alias"] == "sonnet"
+
+
+class TestModelResolverReasoningEffort:
+    """Client-requested effort: validation against the concrete model + precedence."""
+
+    def test_request_effort_wins_over_alias_default(self, mock_settings):
+        mock_settings.openai.passthrough_gpt_model = "gpt-5.5"
+        resolver = ModelResolver(mock_settings)
+        config = resolver.resolve("latest:gpt-high", reasoning_effort="low")
+        assert config.reasoning_effort == "low"
+
+    def test_alias_default_preserved_without_request_effort(self, mock_settings):
+        mock_settings.openai.passthrough_gpt_model = "gpt-5.5"
+        resolver = ModelResolver(mock_settings)
+        config = resolver.resolve("latest:gpt-high")
+        assert config.reasoning_effort == "high"
+
+    def test_effort_stamped_on_anthropic_config(self, mock_settings):
+        mock_settings.anthropic.passthrough_opus_model = "claude-opus-4-8"
+        resolver = ModelResolver(mock_settings)
+        config = resolver.resolve("latest:opus", reasoning_effort="xhigh")
+        assert config.reasoning_effort == "xhigh"
+
+    def test_invalid_effort_raises_400(self, mock_settings):
+        mock_settings.anthropic.passthrough_sonnet_model = "claude-sonnet-4-6"
+        resolver = ModelResolver(mock_settings)
+        with pytest.raises(HTTPException) as exc_info:
+            resolver.resolve("latest:sonnet", reasoning_effort="xhigh")
+        assert exc_info.value.status_code == 400
+        assert "low, medium, high, max" in exc_info.value.detail
+
+    def test_effort_on_unsupported_model_raises_400(self, mock_settings):
+        mock_settings.anthropic.passthrough_haiku_model = "claude-haiku-4-5"
+        resolver = ModelResolver(mock_settings)
+        with pytest.raises(HTTPException) as exc_info:
+            resolver.resolve("latest:haiku", reasoning_effort="low")
+        assert exc_info.value.status_code == 400
+
+    def test_validation_uses_post_override_model(self, mock_settings):
+        """Statsig alias_overrides repoint the model; effort validates against the new one."""
+        from minds.schemas.passthrough import PassthroughModelStatsigConfig
+
+        mock_settings.anthropic.passthrough_opus_model = "claude-opus-4-8"
+        resolver = ModelResolver(mock_settings)
+        # Repointed to 4.6, which has no xhigh.
+        with pytest.raises(HTTPException) as exc_info:
+            resolver.resolve(
+                "latest:opus",
+                policy=PassthroughModelStatsigConfig(alias_overrides={"opus": "claude-opus-4-6"}),
+                reasoning_effort="xhigh",
+            )
+        assert exc_info.value.status_code == 400
+
+    def test_no_pr_rollout_flow(self, mock_settings):
+        """New model day: family fallback works immediately; Statsig refines it."""
+        from minds.schemas.passthrough import PassthroughModelStatsigConfig
+
+        resolver = ModelResolver(mock_settings)
+        policy = PassthroughModelStatsigConfig(alias_overrides={"opus": "claude-opus-4-9"})
+
+        # Family fallback (low/medium/high) applies before any Statsig edit.
+        config = resolver.resolve("latest:opus", policy=policy, reasoning_effort="high")
+        assert config.model_name == "claude-opus-4-9"
+        assert config.reasoning_effort == "high"
+        with pytest.raises(HTTPException):
+            resolver.resolve("latest:opus", policy=policy, reasoning_effort="xhigh")
+
+        # Statsig effort_overrides then enable a level the code has never seen.
+        policy_with_effort = PassthroughModelStatsigConfig(
+            alias_overrides={"opus": "claude-opus-4-9"},
+            effort_overrides={"claude-opus-4-9": {"levels": ["low", "high", "ultra"], "default": "high"}},
+        )
+        config = resolver.resolve("latest:opus", policy=policy_with_effort, reasoning_effort="ultra")
+        assert config.reasoning_effort == "ultra"

@@ -44,6 +44,7 @@ class OpenAIRequestHandler:
         tool_choice: str | dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
         limits_service: LimitsService | None = None,
     ):
         """Initialize the chat completions handler for passthrough inference."""
@@ -61,6 +62,7 @@ class OpenAIRequestHandler:
         self.tool_choice = tool_choice
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.limits_service = limits_service
 
         self.inference_service: InferenceService | None = None
@@ -82,6 +84,7 @@ class OpenAIRequestHandler:
         tool_choice: str | dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
         limits_service: LimitsService | None = None,
         **langfuse_kwargs,
     ) -> "OpenAIRequestHandler":
@@ -101,6 +104,7 @@ class OpenAIRequestHandler:
             tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
             limits_service=limits_service,
         )
 
@@ -270,6 +274,7 @@ class OpenAIRequestHandler:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             policy=self._passthrough_policy(),
+            reasoning_effort=self.reasoning_effort,
         )
 
         if isinstance(response, StreamingResponse):
@@ -374,6 +379,7 @@ class OpenAIRequestHandler:
             "tool_choice": self.tool_choice,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "reasoning_effort": self.reasoning_effort,
         }
 
     async def responses(self, streamer: MessageStreamer, message: Message):
@@ -397,6 +403,7 @@ class OpenAIRequestHandler:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             policy=self._passthrough_policy(),
+            reasoning_effort=self.reasoning_effort,
         )
 
         conversation_service = ConversationsService(

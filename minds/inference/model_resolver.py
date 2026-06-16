@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
+from minds.inference.effort import validate_effort
 from minds.inference.types import (
     AliasMapping,
     ApiKind,
@@ -96,6 +97,7 @@ class ModelResolver:
         model_name: str,
         *,
         policy: PassthroughModelStatsigConfig | None = None,
+        reasoning_effort: str | None = None,
     ) -> PassthroughModelConfig:
         """Resolve passthrough model name to config.
 
@@ -103,22 +105,28 @@ class ModelResolver:
         Raises ValueError for invalid patterns, HTTPException(400) if unconfigured.
 
         ``policy`` carries the per-user Statsig routing policy (overrides,
-        allow-list, search settings — see
+        allow-list, search settings, effort overrides — see
         :mod:`minds.common.statsig.dynamic_config.model_config`). It is a plain
         Pydantic data model, so the resolver stays free of any Statsig/Context
         import; ``None`` (the empty policy) means "no policy" and every
         context-free caller is unchanged.
+
+        ``reasoning_effort`` is the client-requested effort level; it is
+        validated against the resolved *concrete* model (400 on mismatch) and
+        wins over any alias-mapped default (``gpt-low`` etc.).
         """
         policy = policy or PassthroughModelStatsigConfig()
         if model_name in _DEPRECATED_ALIASES:
-            config = self._resolve_alias(_DEPRECATED_ALIASES[model_name], policy=policy)
+            config = self._resolve_alias(
+                _DEPRECATED_ALIASES[model_name], policy=policy, reasoning_effort=reasoning_effort
+            )
             return dataclasses.replace(config, alias=model_name)
 
         m = _PASSTHROUGH_PATTERN.match(model_name)
         if not m:
             raise ValueError(f"{model_name!r} is not a valid passthrough model name")
 
-        return self._resolve_alias(m.group(1).lower(), policy=policy)
+        return self._resolve_alias(m.group(1).lower(), policy=policy, reasoning_effort=reasoning_effort)
 
     def is_passthrough_model(self, model_name: str) -> bool:
         """Return True if model_name matches passthrough pattern."""
@@ -156,6 +164,7 @@ class ModelResolver:
         alias: str,
         *,
         policy: PassthroughModelStatsigConfig,
+        reasoning_effort: str | None = None,
     ) -> PassthroughModelConfig:
         """Resolve alias to config, checking provider availability.
 
@@ -199,6 +208,13 @@ class ModelResolver:
         if alias in policy.alias_overrides:
             model_name_value = policy.alias_overrides[alias]
 
+        # A client-requested effort is validated against the *concrete* model
+        # (post-override, since overrides can repoint to a model with a
+        # different level set) and wins over the alias-mapped default.
+        if reasoning_effort is not None:
+            validate_effort(reasoning_effort, model_name_value, alias, policy.effort_capabilities())
+        resolved_effort = reasoning_effort if reasoning_effort is not None else mapping.reasoning_effort
+
         provider_config = _PROVIDER_CONFIG[mapping.provider]
 
         api_kind = getattr(ApiKind, provider_config.api_kind)
@@ -216,7 +232,7 @@ class ModelResolver:
             web_search_mode=web_search_mode,
             label=provider_config.label,
             alias=alias,
-            reasoning_effort=mapping.reasoning_effort,
+            reasoning_effort=resolved_effort,
             search_enabled=policy.search_enabled,
             search_provider_name=policy.search_provider,
         )

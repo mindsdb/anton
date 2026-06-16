@@ -117,3 +117,73 @@ def test_list_models_threads_statsig_policy_into_listing(client, auth_headers):
 
     assert response.status_code == 200
     assert mock_list.call_args.kwargs["policy"] is statsig_config
+
+
+def _config(alias, model_name, label, api_kind, reasoning_effort=None):
+    return PassthroughModelConfig(
+        api_kind=api_kind,
+        model_name=model_name,
+        api_key="k",
+        label=label,
+        alias=alias,
+        reasoning_effort=reasoning_effort,
+    )
+
+
+def test_list_models_advertises_reasoning_efforts(client, auth_headers):
+    """Effort-capable models carry reasoning_efforts + default; others omit both."""
+    from minds.schemas.passthrough import PassthroughModelStatsigConfig
+
+    configs = [
+        _config("opus", "claude-opus-4-8", "anthropic", ApiKind.ANTHROPIC_MESSAGES),
+        _config("haiku", "claude-haiku-4-5", "anthropic", ApiKind.ANTHROPIC_MESSAGES),
+        _config("gpt", "gpt-5.5", "openai", ApiKind.OPENAI_RESPONSES, reasoning_effort="low"),
+        _config("kimi", "accounts/fireworks/models/kimi-k2p6", "fireworks", ApiKind.FIREWORKS),
+    ]
+    with (
+        patch(
+            "minds.api.v1.endpoints.models.get_passthrough_model_config",
+            return_value=PassthroughModelStatsigConfig(),
+        ),
+        patch("minds.inference.model_resolver.ModelResolver.list_available", return_value=configs),
+    ):
+        response = client.get("/v1/models/", headers=auth_headers)
+
+    assert response.status_code == 200
+    by_id = {m["id"]: m for m in response.json()["data"]}
+
+    opus = by_id["latest:opus"]
+    assert opus["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    assert opus["default_reasoning_effort"] == "high"
+
+    # Alias-pinned effort wins over the model's provider-side default.
+    gpt = by_id["latest:gpt"]
+    assert gpt["reasoning_efforts"] == ["none", "low", "medium", "high", "xhigh"]
+    assert gpt["default_reasoning_effort"] == "low"
+
+    # No effort support → both keys omitted (UI shows picker iff present).
+    for model_id in ("latest:haiku", "latest:kimi"):
+        assert "reasoning_efforts" not in by_id[model_id]
+        assert "default_reasoning_effort" not in by_id[model_id]
+
+
+def test_list_models_applies_statsig_effort_overrides(client, auth_headers):
+    """A Statsig effort_overrides entry reshapes the advertised levels — no deploy."""
+    from minds.schemas.passthrough import PassthroughModelStatsigConfig
+
+    configs = [_config("opus", "claude-opus-4-9", "anthropic", ApiKind.ANTHROPIC_MESSAGES)]
+    statsig_config = PassthroughModelStatsigConfig(
+        effort_overrides={"claude-opus-4-9": {"levels": ["low", "high", "ultra"], "default": "ultra"}}
+    )
+    with (
+        patch(
+            "minds.api.v1.endpoints.models.get_passthrough_model_config",
+            return_value=statsig_config,
+        ),
+        patch("minds.inference.model_resolver.ModelResolver.list_available", return_value=configs),
+    ):
+        response = client.get("/v1/models/", headers=auth_headers)
+
+    opus = next(m for m in response.json()["data"] if m["id"] == "latest:opus")
+    assert opus["reasoning_efforts"] == ["low", "high", "ultra"]
+    assert opus["default_reasoning_effort"] == "ultra"

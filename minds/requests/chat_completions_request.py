@@ -41,3 +41,7 @@ class ChatCompletionsRequest(BaseModel):
         default=None,
         description="Maximum number of completion tokens to generate (OpenAI alias)",
     )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="Reasoning effort level; allowed values are per-model (see GET /v1/models reasoning_efforts)",
+    )

@@ -64,6 +64,7 @@ async def chat_completions_request_handler(
         tool_choice=chat_completions_request.tool_choice,
         temperature=chat_completions_request.temperature,
         max_tokens=chat_completions_request.max_completion_tokens or chat_completions_request.max_tokens,
+        reasoning_effort=chat_completions_request.reasoning_effort,
         limits_service=limits_service,
         **langfuse_kwargs,
     )

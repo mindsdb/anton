@@ -375,6 +375,12 @@ async def proxy_anthropic(
         kwargs["tool_choice"] = anthropic_tc
     if temperature is not None:
         kwargs["temperature"] = temperature
+    if config.reasoning_effort:
+        # Effort-capable Claude models (Opus 4.5+, Sonnet 4.6, Fable 5) take
+        # the level inside ``output_config`` — not top-level and not inside
+        # ``thinking``. The level string was validated against the model by
+        # the resolver and is forwarded verbatim.
+        kwargs["output_config"] = {"effort": config.reasoning_effort}
     if stream:
         kwargs["stream"] = True
 
@@ -386,6 +392,7 @@ async def proxy_anthropic(
             "stream": stream,
             "has_tools": bool(anthropic.tools),
             "needs_web_fetch_beta": anthropic.needs_web_fetch_beta,
+            "reasoning_effort": config.reasoning_effort,
         },
     )
     try:

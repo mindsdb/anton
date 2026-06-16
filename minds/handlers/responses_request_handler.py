@@ -136,6 +136,7 @@ async def responses_request_handler(
             request_id=request_id,
             langfuse_trace_id=get_langfuse_trace_id(),
             langfuse_trace_context=langfuse_trace_context,
+            reasoning_effort=responses_request.reasoning.effort if responses_request.reasoning else None,
             limits_service=limits_service,
         )
 

@@ -112,6 +112,11 @@ async def responses(
         )
 
         return response
+    except HTTPException:
+        # Intended client errors (400/403 from model resolution, effort
+        # validation, etc.) must reach the client with their own status —
+        # don't let the catch-all below mask them as 500.
+        raise
     except Exception as e:
         logger.error(f"❌ [{context.request_id}] Error processing Responses API request: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e

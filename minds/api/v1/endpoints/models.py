@@ -17,6 +17,7 @@ from minds.api.v1.deps import get_context
 from minds.common.logger import get_logger
 from minds.common.settings.app_settings import get_app_settings
 from minds.common.statsig.dynamic_config.model_config import get_passthrough_model_config
+from minds.inference.effort import get_effort_capability
 from minds.inference.model_resolver import ModelResolver
 from minds.requests.context import Context
 
@@ -39,15 +40,31 @@ async def list_models(context: Context = Depends(get_context)) -> dict:
     policy = get_passthrough_model_config(context)
     resolver = ModelResolver(get_app_settings())
     configs = resolver.list_available(policy=policy)
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": f"latest:{cfg.alias}",
-                "object": "model",
-                "created": 0,
-                "owned_by": cfg.label or cfg.api_kind.value,
-            }
-            for cfg in configs
-        ],
-    }
+    effort_overrides = policy.effort_capabilities()
+
+    data = []
+    for cfg in configs:
+        entry: dict = {
+            "id": f"latest:{cfg.alias}",
+            "object": "model",
+            "created": 0,
+            "owned_by": cfg.label or cfg.api_kind.value,
+        }
+        # Non-standard extension fields (OpenAI clients ignore unknown keys):
+        # the discrete reasoning-effort levels this model accepts, in display
+        # order, so a UI can render the right picker per model. Keyed off the
+        # *concrete* model id, so per-user alias overrides are reflected.
+        # Omitted entirely for models without effort support — a UI shows the
+        # picker iff ``reasoning_efforts`` is present.
+        capability = get_effort_capability(cfg.model_name, effort_overrides)
+        if capability is not None and capability.supported:
+            entry["reasoning_efforts"] = list(capability.levels)
+            # Alias-pinned effort (gpt-low/medium/high) is what a request
+            # without an explicit reasoning_effort actually gets, so it wins
+            # over the model's provider-side default.
+            default = cfg.reasoning_effort or capability.default
+            if default:
+                entry["default_reasoning_effort"] = default
+        data.append(entry)
+
+    return {"object": "list", "data": data}

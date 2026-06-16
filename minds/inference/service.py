@@ -72,6 +72,7 @@ class InferenceService:
         temperature: float | None = None,
         max_tokens: int | None = None,
         policy: PassthroughModelStatsigConfig | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[StreamingResponse | JSONResponse, InferenceResult]:
         """Execute an inference request.
 
@@ -89,7 +90,10 @@ class InferenceService:
             temperature: Optional temperature override.
             max_tokens: Optional max tokens override.
             policy: Per-user passthrough routing policy from Statsig (alias
-                overrides, allow-list, search settings). ``None`` = no policy.
+                overrides, allow-list, search settings, effort overrides).
+                ``None`` = no policy.
+            reasoning_effort: Client-requested effort level; validated against
+                the resolved concrete model (400 on mismatch).
 
         Returns:
             Tuple of (HTTP response, InferenceResult with captured state).
@@ -99,7 +103,7 @@ class InferenceService:
             ValueError: If api_kind is not recognized.
         """
         # Step 1: Resolve model alias to config (stamping per-user policy)
-        config = self.model_resolver.resolve(model_name, policy=policy)
+        config = self.model_resolver.resolve(model_name, policy=policy, reasoning_effort=reasoning_effort)
 
         # Step 2: Create fresh adapter for this request
         adapter = self._create_adapter(config.api_kind)

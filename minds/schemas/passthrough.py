@@ -11,7 +11,25 @@ the precedent for a Statsig-shaped config model.
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from minds.inference.effort import EffortCapability
 from minds.inference.types import PassthroughAlias
+
+
+class EffortOverride(BaseModel):
+    """Statsig-shaped override of one effort-catalog entry.
+
+    ``levels`` is an ordered list of opaque level strings (forwarded verbatim
+    upstream), so a brand-new provider level needs only a config edit. An
+    empty list disables effort for the matched models (kill switch).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    levels: list[str] = Field(default_factory=list)
+    default: str | None = None
+
+    def to_capability(self) -> EffortCapability:
+        return EffortCapability(tuple(self.levels), self.default)
 
 
 class PassthroughModelStatsigConfig(BaseModel):
@@ -48,3 +66,15 @@ class PassthroughModelStatsigConfig(BaseModel):
         default=True,
         description="Per-user web-search kill switch. False disables external search entirely for the user.",
     )
+    effort_overrides: dict[str, EffortOverride] = Field(
+        default_factory=dict,
+        description=(
+            "Map of concrete model-id prefix → effort override. Merged over the in-code effort catalog "
+            "(longest prefix wins, override beats catalog on ties) so new models / new effort levels ship "
+            "via this config without a deploy."
+        ),
+    )
+
+    def effort_capabilities(self) -> dict[str, EffortCapability]:
+        """Project ``effort_overrides`` into the shape the effort catalog consumes."""
+        return {prefix: override.to_capability() for prefix, override in self.effort_overrides.items()}

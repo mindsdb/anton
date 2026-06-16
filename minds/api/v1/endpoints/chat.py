@@ -85,6 +85,11 @@ async def chat_completions(
         )
 
         return response
+    except HTTPException:
+        # Intended client errors (400/403 from model resolution, effort
+        # validation, etc.) must reach the client with their own status —
+        # don't let the catch-all below mask them as 500.
+        raise
     except Exception as e:
         logger.error(f"Error processing chat completions: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e
