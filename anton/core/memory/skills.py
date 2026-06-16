@@ -2,67 +2,38 @@
 
 A *skill* is one concept with multiple representations that coexist:
 
-  - Stage 1 (declarative.md) — step-by-step procedure the LLM reads. Always present.
-  - Stage 2 (chunks.md)      — higher-level recipes/macros. Emerges from use. (v2+)
-  - Stage 3 (code/)          — runnable helper modules. Emerges from reliability. (v2+)
+  - Stage 1 (SKILL.md body)  — step-by-step procedure the LLM reads. Always present.
+  - Stage 2 (references/)    — higher-level recipes/macros. Emerges from use.
+  - Stage 3 (scripts/)       — runnable helper modules. Emerges from reliability.
 
 Each skill lives at `~/.anton/skills/<label>/` as a directory:
 
-    ~/.anton/skills/csv_summary/
-    ├── meta.json          # label, name, description, when_to_use, provenance, presence flags
-    ├── declarative.md     # Stage 1 — required
-    ├── chunks.md          # Stage 2 — optional
-    ├── code/              # Stage 3 — optional
-    │   └── __init__.py
-    ├── requirements.txt   # Stage 3 deps — optional
-    └── stats.json         # per-stage usage counters
+    ~/.anton/skills/csv-summary/
+    ├── SKILL.md           # agentskills.io format: frontmatter + declarative body
+    ├── references/        # Stage 2 — optional
+    ├── scripts/           # Stage 3 — optional
+    └── stats.json         # per-stage usage counters (internal sidecar)
 
-This module is the storage layer only — read/write/search. The classifier
-(`recall_skill` tool) and the LLM-driven save command live elsewhere.
+Legacy format (meta.json + declarative.md) is migrated transparently on first
+read via check_migrate().
 
-Brain analogue: cortico-striatal procedural memory. The executive (PFC)
-recognizes a familiar pattern in the user's request, retrieves the
-matching procedure from the striatum, and executes it. Stages coexist
-rather than graduating — the executive picks the highest stage that's
-reliable enough for the current context.
-
-Relationship to `Engram` (anton/core/memory/hippocampus.py):
-    `Engram` is the unit of *declarative* memory in Anton — a single
-    fact, rule, or lesson stored as a flat bullet in rules.md / lessons.md /
-    profile.md. Engrams are loaded into every prompt unconditionally because
-    they're cheap (one line each). The brain-region analogue is the
-    hippocampus → neocortex consolidation pathway.
-
-    `Skill` is the unit of *procedural* memory in Anton — a multi-step
-    workflow stored as a directory of staged representations. Skills are
-    NOT loaded into every prompt; the LLM sees only their compact label +
-    when_to_use line and explicitly retrieves the full procedure via the
-    `recall_skill` tool when it recognizes a match. The brain-region
-    analogue is the hippocampus → striatum / cerebellum pathway.
-
-    Both systems coexist in the brain (declarative and procedural memory
-    are dissociable — H.M. lost the former but kept the latter), and they
-    coexist in Anton. Engrams hold facts; Skills hold procedures.
-
-Naming note:
-    The unique identifier for a skill is called its `label`. In cognitive
-    psychology this is the declarative handle by which a procedural
-    memory is addressed in working memory — the verbal token the
-    executive holds when deciding to invoke a stored procedure. It is
-    deliberately distinct from `name` (the human-readable display) and
-    `when_to_use` (the retrieval cue describing the matching context).
+Labels use hyphens (e.g. `my-cat`), not underscores.
 """
 
 from __future__ import annotations
 
 import difflib
 import json
+import logging
 import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from anton.core.memory.skill_md import SkillFrontmatter, dump_skill_md, parse_skill_md
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_SKILLS_ROOT = Path("~/.anton/skills").expanduser()
 
@@ -74,18 +45,9 @@ _DEFAULT_SKILLS_ROOT = Path("~/.anton/skills").expanduser()
 
 @dataclass
 class StageStats:
-    """Per-stage usage tracking.
-
-    `recommended` increments every time the classifier (recall_skill tool)
-    pulls this stage into context. `used` increments when scratchpad code
-    actually imports a Stage 3 helper — Stage 1 and Stage 2 only have a
-    `recommended` signal because there's no mechanical way to detect
-    whether the LLM "followed" a markdown procedure.
-    """
-
     recommended: int = 0
     used: int = 0
-    last_used: str = ""  # ISO timestamp
+    last_used: str = ""
     confidence: float = 0.0
 
 
@@ -101,13 +63,8 @@ class SkillStats:
 class Skill:
     """In-memory representation of a skill directory.
 
-    Always carries the metadata. The Stage 1 markdown is loaded eagerly
-    because it's small and almost always needed. Stage 2 and Stage 3
-    content (when present) is loaded on demand by callers.
-
-    The `label` is the declarative handle for this procedural memory —
-    the snake_case identifier the LLM uses when it calls
-    `recall_skill(label)`. It is the directory name on disk.
+    `label` is the hyphen-case identifier (= SKILL.md `name` field = dir name).
+    `name` is the human-readable display name (metadata.display_name).
     """
 
     label: str
@@ -116,25 +73,11 @@ class Skill:
     when_to_use: str
     declarative_md: str
     created_at: str
-    provenance: str  # "manual" | "consolidator" (future)
+    provenance: str  # "manual" | "consolidator"
     stage_1_present: bool = True
     stage_2_present: bool = False
     stage_3_present: bool = False
     stats: SkillStats = field(default_factory=SkillStats)
-
-    def to_meta_dict(self) -> dict:
-        """Serialize the meta.json payload (excludes declarative content + stats)."""
-        return {
-            "label": self.label,
-            "name": self.name,
-            "description": self.description,
-            "when_to_use": self.when_to_use,
-            "created_at": self.created_at,
-            "provenance": self.provenance,
-            "stage_1_present": self.stage_1_present,
-            "stage_2_present": self.stage_2_present,
-            "stage_3_present": self.stage_3_present,
-        }
 
     def to_stats_dict(self) -> dict:
         return {
@@ -168,38 +111,124 @@ def _stage_stats_from_dict(d: dict) -> StageStats:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-_SLUG_RE = re.compile(r"[^a-z0-9_]+")
+_SLUG_RE = re.compile(r"[^a-z0-9-]+")
 
 
 def slugify(text: str) -> str:
-    """Normalize arbitrary text into a snake_case identifier.
+    """Normalize arbitrary text into a hyphen-case label.
 
-    Strips non-alphanumerics, lowercases, collapses runs of underscores.
-    Empty input becomes 'skill'. Used to produce path/URL-safe labels;
-    the term "slugify" refers to the formatting operation, not to the
-    semantic role of the result (which we call a `label`).
+    Strips non-alphanumerics (except hyphens), lowercases, collapses runs.
+    Empty input becomes 'skill'.
     """
-    s = text.strip().lower().replace("-", "_").replace(" ", "_")
-    s = _SLUG_RE.sub("_", s)
-    s = re.sub(r"_+", "_", s).strip("_")
+    s = text.strip().lower().replace("_", "-").replace(" ", "-")
+    s = _SLUG_RE.sub("-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
     return s or "skill"
 
 
 def make_unique_label(base: str, store: "SkillStore") -> str:
     """Return a label that doesn't collide with any existing skill.
 
-    If `base` (after slugify normalization) is already unique, return it
-    as-is. Otherwise append `_2`, `_3`, ... until a free slot is found.
+    Appends `-2`, `-3`, ... until a free slot is found.
     """
     candidate = slugify(base)
     if store.load(candidate) is None:
         return candidate
     n = 2
     while True:
-        next_candidate = f"{candidate}_{n}"
+        next_candidate = f"{candidate}-{n}"
         if store.load(next_candidate) is None:
             return next_candidate
         n += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Migration
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
+    """Migrate a legacy skill directory to SKILL.md format in place.
+
+    Old format: meta.json + declarative.md
+    New format: SKILL.md (agentskills.io spec)
+
+    Also renames the directory from snake_case to hyphen-case and moves:
+      chunks.md  → references/chunks.md
+      code/      → scripts/
+
+    Returns the (possibly renamed) directory path.
+    Raises OSError on IO failures.
+    Idempotent: returns immediately if SKILL.md already exists.
+    """
+    skill_md_path = skill_dir / "SKILL.md"
+    if skill_md_path.is_file():
+        return skill_dir
+
+    meta_path = skill_dir / "meta.json"
+    decl_path = skill_dir / "declarative.md"
+    if not meta_path.is_file() and not decl_path.is_file():
+        return None
+
+    # Load legacy data
+    meta: dict = {}
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    declarative = decl_path.read_text(encoding="utf-8") if decl_path.is_file() else ""
+
+    old_label = skill_dir.name
+    new_label = old_label.replace("_", "-")
+
+    # Resolve collision when renaming
+    final_label = new_label
+    if new_label != old_label:
+        target = store_root / new_label
+        if target.exists():
+            n = 2
+            while True:
+                candidate = f"{new_label}-{n}"
+                if not (store_root / candidate).exists():
+                    final_label = candidate
+                    break
+                n += 1
+
+    # Build metadata dict (omit empty values)
+    meta_fields = {
+        "display_name": meta.get("name", ""),
+        "when_to_use": meta.get("when_to_use", ""),
+        "provenance": meta.get("provenance", "manual"),
+        "created_at": meta.get("created_at", ""),
+    }
+    metadata = {k: str(v) for k, v in meta_fields.items() if v}
+
+    fm = SkillFrontmatter.model_construct(
+        name=final_label,
+        description=str(meta.get("description", "")),
+        metadata=metadata,
+    )
+    skill_md_path.write_text(dump_skill_md(fm, declarative), encoding="utf-8")
+
+    # code/ → scripts/
+    code_dir = skill_dir / "code"
+    scripts_dir = skill_dir / "scripts"
+    if code_dir.is_dir() and not scripts_dir.exists():
+        shutil.move(str(code_dir), str(scripts_dir))
+
+    # Remove legacy files
+    meta_path.unlink(missing_ok=True)
+    decl_path.unlink(missing_ok=True)
+
+    # Rename directory
+    if final_label != old_label:
+        final_dir = store_root / final_label
+        skill_dir.rename(final_dir)
+        return final_dir
+
+    return skill_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -210,17 +239,16 @@ def make_unique_label(base: str, store: "SkillStore") -> str:
 class SkillStore:
     """File-backed store of skills under `~/.anton/skills/` (by default).
 
-    Each skill is a directory whose name is its `label` (the snake_case
-    declarative handle). The store is stateless — it reads from disk on
-    demand. Callers should not cache Skill instances long-term, since
-    stats are mutated through the store's increment helpers and a stale
-    in-memory copy will drift.
+    Each skill is a directory whose name is its `label` (hyphen-case).
+    The store is stateless — reads from disk on demand.
+    Legacy directories (meta.json + declarative.md) are migrated transparently
+    on first access via check_migrate().
     """
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else _DEFAULT_SKILLS_ROOT
 
-    # ── reading ─────────────────────────────────────────────────────
+    # ── internal helpers ─────────────────────────────────────────────
 
     def _skill_dir(self, label: str) -> Path:
         return self.root / label
@@ -228,35 +256,60 @@ class SkillStore:
     def _ensure_root(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def load(self, label: str) -> Skill | None:
-        """Read a single skill by label. Returns None if absent or malformed."""
-        d = self._skill_dir(label)
-        meta_path = d / "meta.json"
-        decl_path = d / "declarative.md"
-        if not meta_path.is_file() or not decl_path.is_file():
+    def _find_dir(self, label: str) -> Path | None:
+        """Locate the directory for a label, tolerating legacy underscore names."""
+        norm = label.replace("_", "-")
+        d = self.root / norm
+        if d.is_dir():
+            return d
+        if norm != label:
+            old = self.root / label
+            if old.is_dir():
+                return old
+        return None
+
+    def _skill_from_dir(self, d: Path) -> Skill | None:
+        """Build a Skill from a (already-migrated) directory."""
+        skill_md_path = d / "SKILL.md"
+        if not skill_md_path.is_file():
             return None
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        try:
-            declarative = decl_path.read_text(encoding="utf-8")
+            text = skill_md_path.read_text(encoding="utf-8")
         except OSError:
             return None
-        stats = self._load_stats(label)
+        fm, body = parse_skill_md(text, folder_name=d.name)
+        if fm is None:
+            return None
+        label = fm.name or d.name
         return Skill(
-            label=str(meta.get("label", label)),
-            name=str(meta.get("name", label)),
-            description=str(meta.get("description", "")),
-            when_to_use=str(meta.get("when_to_use", "")),
-            declarative_md=declarative,
-            created_at=str(meta.get("created_at", "")),
-            provenance=str(meta.get("provenance", "manual")),
-            stage_1_present=bool(meta.get("stage_1_present", True)),
-            stage_2_present=bool(meta.get("stage_2_present", False)),
-            stage_3_present=bool(meta.get("stage_3_present", False)),
-            stats=stats,
+            label=label,
+            name=fm.metadata.get("display_name", label),
+            description=fm.description,
+            when_to_use=fm.metadata.get("when_to_use", ""),
+            declarative_md=body,
+            created_at=fm.metadata.get("created_at", ""),
+            provenance=fm.metadata.get("provenance", "manual"),
+            stage_1_present=True,
+            stage_2_present=(d / "references").is_dir(),
+            stage_3_present=(d / "scripts").is_dir(),
+            stats=self._load_stats(d.name),
         )
+
+    # ── reading ─────────────────────────────────────────────────────
+
+    def load(self, label: str) -> Skill | None:
+        """Read a single skill by label. Returns None if absent or unreadable."""
+        if not self.root.is_dir():
+            return None
+        d = self._find_dir(label)
+        if d is None:
+            return None
+
+        d = check_migrate(d, self.root)
+        if d is None:
+            return None
+
+        return self._skill_from_dir(d)
 
     def _load_stats(self, label: str) -> SkillStats:
         path = self._skill_dir(label) / "stats.json"
@@ -281,57 +334,75 @@ class SkillStore:
         for child in sorted(self.root.iterdir()):
             if not child.is_dir():
                 continue
-            skill = self.load(child.name)
+            try:
+                child = check_migrate(child, self.root)
+                if child is None:
+                    continue
+            except OSError:
+                continue
+            skill = self._skill_from_dir(child)
             if skill is not None:
                 out.append(skill)
         return out
 
     def list_summaries(self) -> list[dict]:
-        """Lightweight listing for prompt-building — label + when_to_use only.
-
-        Avoids reading declarative.md for skills the LLM won't recall this turn.
-        """
+        """Lightweight listing for prompt-building — label + when_to_use only."""
         if not self.root.is_dir():
             return []
         out: list[dict] = []
         for child in sorted(self.root.iterdir()):
             if not child.is_dir():
                 continue
-            meta_path = child / "meta.json"
-            if not meta_path.is_file():
+            try:
+                child = check_migrate(child, self.root)
+                if child is None:
+                    continue
+            except OSError:
+                continue
+            skill_md_path = child / "SKILL.md"
+            if not skill_md_path.is_file():
                 continue
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+                text = skill_md_path.read_text(encoding="utf-8")
+            except OSError:
                 continue
-            out.append(
-                {
-                    "label": str(meta.get("label", child.name)),
-                    "name": str(meta.get("name", child.name)),
-                    "when_to_use": str(meta.get("when_to_use", "")),
-                }
-            )
+            fm, _ = parse_skill_md(text, folder_name=child.name)
+            if fm is None:
+                continue
+            label = fm.name or child.name
+            out.append({
+                "label": label,
+                "name": fm.metadata.get("display_name", label),
+                "when_to_use": fm.metadata.get("when_to_use", ""),
+            })
         return out
 
     # ── writing ─────────────────────────────────────────────────────
 
     def save(self, skill: Skill) -> Path:
-        """Write the skill directory to disk. Overwrites in place.
+        """Write the skill directory to disk. Overwrites SKILL.md in place.
 
-        Returns the directory path. Creates the parent root if needed.
-        Stage 2 and Stage 3 files are NOT touched here — they have their
-        own writers (consolidator, future).
+        Returns the directory path. Stage 2/3 files are not touched here.
+        stats.json is only initialized if it doesn't already exist.
         """
         self._ensure_root()
         d = self._skill_dir(skill.label)
         d.mkdir(parents=True, exist_ok=True)
-        (d / "meta.json").write_text(
-            json.dumps(skill.to_meta_dict(), indent=2) + "\n",
-            encoding="utf-8",
+
+        metadata = {k: v for k, v in {
+            "display_name": skill.name,
+            "when_to_use": skill.when_to_use,
+            "provenance": skill.provenance,
+            "created_at": skill.created_at,
+        }.items() if v}
+
+        fm = SkillFrontmatter.model_construct(
+            name=skill.label,
+            description=skill.description,
+            metadata=metadata,
         )
-        (d / "declarative.md").write_text(skill.declarative_md, encoding="utf-8")
-        # Only initialize stats.json if it doesn't already exist — we
-        # never want save() to wipe accumulated counts.
+        (d / "SKILL.md").write_text(dump_skill_md(fm, skill.declarative_md), encoding="utf-8")
+
         stats_path = d / "stats.json"
         if not stats_path.is_file():
             stats_path.write_text(
@@ -351,13 +422,7 @@ class SkillStore:
     # ── stats updates ───────────────────────────────────────────────
 
     def increment_recommended(self, label: str, *, stage: int = 1) -> None:
-        """Atomic-ish bump of the per-stage `recommended` counter.
-
-        Reads the existing stats.json, mutates the right field, writes
-        back. Best-effort — if the skill doesn't exist or the file is
-        unwritable, silently no-ops. Concurrent writers may race; that's
-        acceptable for a counter that's used for guidance, not billing.
-        """
+        """Bump the per-stage `recommended` counter. Best-effort, no-ops on error."""
         d = self._skill_dir(label)
         if not d.is_dir():
             return
@@ -396,12 +461,7 @@ class SkillStore:
     # ── search ──────────────────────────────────────────────────────
 
     def closest_match(self, bad_label: str, *, cutoff: float = 0.6) -> str | None:
-        """Find the existing label closest to `bad_label`, or None.
-
-        Used by the recall_skill tool to recover from typos and guesses.
-        Cutoff is intentionally generous — we'd rather suggest a wrong
-        match the LLM can reject than return nothing.
-        """
+        """Find the existing label closest to `bad_label`, or None."""
         bad = slugify(bad_label)
         candidates = [s["label"] for s in self.list_summaries()]
         if not candidates:
@@ -417,6 +477,7 @@ __all__ = [
     "SkillStats",
     "SkillStore",
     "StageStats",
+    "check_migrate",
     "make_unique_label",
     "slugify",
 ]
