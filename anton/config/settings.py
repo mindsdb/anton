@@ -34,6 +34,12 @@ class AntonSettings(CoreSettings):
     # "max"), forwarded to the provider in its native shape when set. None means
     # the provider's own default. The value is validated by the upstream
     # router/provider, not here.
+    #
+    # NOTE: effort only applies to reasoning-capable models. Anthropic returns a
+    # 400 for `effort` on Haiku 4.5 / Sonnet 4.5 — including the default
+    # `coding_model` above — so it needs an Opus-4.5+/Sonnet-4.6-class model; the
+    # OpenAI `reasoning_effort` likewise needs a reasoning model (o-series / GPT-5
+    # class). Set these only when the corresponding model supports it.
     planning_reasoning_effort: str | None = None
     coding_reasoning_effort: str | None = None
 
