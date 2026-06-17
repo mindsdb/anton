@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from anton.core.tools.skill_format import AgentSkill, dump_skill, parse_skill_dir, normalize_name
+from anton.core.tools.skill_format import AgentSkill, dump_skill, parse_skill_dir, normalize_name, DESC_MAX
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +203,7 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
     when_to_use = str(meta.get("when_to_use", "")).strip()
     if when_to_use:
         description = f"{description}. {when_to_use}" if description else when_to_use
+    description = description[:DESC_MAX]
 
     metadata = {k: str(v) for k, v in {
         "display_name": meta.get("name", ""),

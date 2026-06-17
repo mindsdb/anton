@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 # ─── spec constraints (used by validators, not enforced on read) ──────────────
 
 SKILL_FILE = "SKILL.md"
+DESC_MAX = 1024
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 _NAME_MAX = 64
-_DESC_MAX = 1024
 _COMPAT_MAX = 500
 
 # canonical YAML keys defined by the spec
@@ -96,8 +96,8 @@ class AgentSkill(BaseModel):
     def _validate_description(cls, v: str) -> str:
         if not v:
             raise ValueError("description must not be empty")
-        if len(v) > _DESC_MAX:
-            raise ValueError(f"description exceeds {_DESC_MAX} chars")
+        if len(v) > DESC_MAX:
+            raise ValueError(f"description exceeds {DESC_MAX} chars")
         return v
 
     @field_validator("compatibility")
@@ -173,7 +173,7 @@ def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
     return AgentSkill.model_construct(
         name=normalize_name(name),
         instructions=body,
-        description=str(props.get("description", ""))[:_DESC_MAX],
+        description=str(props.get("description", "")),
         license=props.get("license"),
         compatibility=props.get("compatibility"),
         allowed_tools=props.get("allowed-tools"),
