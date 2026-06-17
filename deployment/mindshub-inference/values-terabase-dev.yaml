@@ -5,19 +5,19 @@ deployment:
       # Gives permission to use the mind-castle kms key
       eks.amazonaws.com/role-arn: arn:aws:iam::168681354662:role/minds-20260204203650912200000002
       
-
   ingress:
-    name: minds
+    enabled: true
+    name: mindshub-inference
     annotations:
       nginx.ingress.kubernetes.io/enable-cors: "true"
-      nginx.ingress.kubernetes.io/cors-allow-origin: "https://console.staging.mindshub.ai, https://staging.mdb.ai, https://hub.staging.mindsdb.com"
-      nginx.ingress.kubernetes.io/auth-url: "http://auth.staging.svc.cluster.local:80/v1/authenticate/"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "https://console-terabase.dev.mindshub.ai, https://terabase.dev.mdb.ai, https://hub-terabase.dev.mindsdb.com"
+      nginx.ingress.kubernetes.io/auth-url: "http://auth.terabase-dev.svc.cluster.local:80/v1/authenticate/"
     hosts:
-      - host: api.staging.mindshub.ai
+      - host: api-terabase.dev.mindshub.ai
         enableMultiPath: true
         paths:
           - path: /v1
-            serviceName: minds
+            serviceName: mindshub-inference
             servicePort: 80
   
   extraEnvs:
@@ -27,7 +27,7 @@ deployment:
     # ====================================
 
     - name: ENV
-      value: "staging"
+      value: "terabase-dev"
 
     # ====================================
     # LOGGING SETTINGS
@@ -41,7 +41,14 @@ deployment:
     # ====================================
 
     - name: LANGFUSE_TRACING_ENVIRONMENT
-      value: "staging"
+      value: "terabase-dev"
+
+    # ====================================
+    # DATA CATALOG SETTINGS
+    # ====================================
+
+    - name: DATA_CATALOG__JOB_DEPLOYMENT_NAME
+      value: "terabase-dev--data-catalog-loader"
 
     # ====================================
     # MIND CASTLE SETTINGS
@@ -49,11 +56,18 @@ deployment:
 
     - name: MIND_CASTLE_AWS_KMS_KEY_ARN
       value: "arn:aws:kms:us-east-1:168681354662:key/679a2faa-925c-4da3-bc27-d4adbdcbcb13"
+
+    # ====================================
+    # MINDS SETTINGS
+    # ====================================
+
+    - name: MINDS__ENABLE_MODEL_SELECTION
+      value: "true"
     
     # ====================================
     # STATSIG SETTINGS
     # ====================================
 
     - name: STATSIG__ENVIRONMENT
-      value: "staging"
+      value: "development"
           

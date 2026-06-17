@@ -148,7 +148,7 @@ jobs:
         run: |
           export NAMESPACE=${{matrix.environment}}
 
-          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=10m pod -l app=minds
+          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=10m pod -l app=mindshub-inference
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         # Run this even if the deployment fails

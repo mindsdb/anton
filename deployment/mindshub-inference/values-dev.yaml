@@ -3,21 +3,21 @@ deployment:
     enabled: true
     annotations:
       # Gives permission to use the mind-castle kms key
-      eks.amazonaws.com/role-arn: arn:aws:iam::065786718370:role/minds-20260204214712848900000002
-  
+      eks.amazonaws.com/role-arn: arn:aws:iam::168681354662:role/minds-20260204203650912200000002
 
   ingress:
-    name: minds
+    enabled: true
+    name: mindshub-inference
     annotations:
       nginx.ingress.kubernetes.io/enable-cors: "true"
-      nginx.ingress.kubernetes.io/cors-allow-origin: "https://console.mindshub.ai, https://mdb.ai, https://hub.mindsdb.com"
-      nginx.ingress.kubernetes.io/auth-url: "http://auth.prod.svc.cluster.local:80/v1/authenticate/"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "https://console.dev.mindshub.ai, https://dev.mdb.ai, https://hub.dev.mindsdb.com"
+      nginx.ingress.kubernetes.io/auth-url: "http://auth.dev.svc.cluster.local:80/v1/authenticate/"
     hosts:
-      - host: api.mindshub.ai
+      - host: api.dev.mindshub.ai
         enableMultiPath: true
         paths:
           - path: /v1
-            serviceName: minds
+            serviceName: mindshub-inference
             servicePort: 80
   
   extraEnvs:
@@ -27,7 +27,7 @@ deployment:
     # ====================================
 
     - name: ENV
-      value: "prod"
+      value: "dev"
 
     # ====================================
     # LOGGING SETTINGS
@@ -41,19 +41,19 @@ deployment:
     # ====================================
 
     - name: LANGFUSE_TRACING_ENVIRONMENT
-      value: "prod"
+      value: "dev"
 
     # ====================================
     # MIND CASTLE SETTINGS
     # ====================================
 
     - name: MIND_CASTLE_AWS_KMS_KEY_ARN
-      value: "arn:aws:kms:us-east-1:065786718370:key/1787cc0e-18e5-4c7d-af9f-6f9f01b06f17"
-    
+      value: "arn:aws:kms:us-east-1:168681354662:key/679a2faa-925c-4da3-bc27-d4adbdcbcb13"
+
     # ====================================
     # STATSIG SETTINGS
     # ====================================
 
     - name: STATSIG__ENVIRONMENT
-      value: "production"
+      value: "development"
           

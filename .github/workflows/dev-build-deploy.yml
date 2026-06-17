@@ -177,7 +177,7 @@ jobs:
       - name: Wait for Deployment to be ready
         run: |
           export NAMESPACE=${{matrix.deploy-env}}
-          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=10m pod -l app=minds
+          kubectl -n $NAMESPACE wait --for=condition=ready --timeout=10m pod -l app=mindshub-inference
       - name: Notify of deployment finish
         uses: ./github-actions/slack-deploy-msg
         if: always()
