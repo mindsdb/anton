@@ -1156,8 +1156,11 @@ def _parse_response_object(response, model: str) -> LLMResponse:
         # the model's output_text already incorporates their effects.
 
     usage = getattr(response, "usage", None)
-    input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
-    output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+    # `or 0` guards an explicit None (the attr is present but null) — the
+    # Responses API returns usage.input_tokens=None on web-search responses,
+    # which a bare getattr default does NOT catch. Mirrors the streaming path.
+    input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
     return LLMResponse(
         content=content_text,

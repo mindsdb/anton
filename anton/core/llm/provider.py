@@ -281,8 +281,16 @@ _CONTEXT_WINDOWS: list[tuple[str, int]] = [
 _DEFAULT_CONTEXT_WINDOW = 128_000
 
 
-def compute_context_pressure(model: str, input_tokens: int) -> float:
-    """Return input_tokens / context_window as a 0.0–1.0 float."""
+def compute_context_pressure(model: str, input_tokens: int | None) -> float:
+    """Return input_tokens / context_window as a 0.0–1.0 float.
+
+    ``input_tokens`` may be ``None``: some providers omit a usage count for
+    tool-augmented responses (e.g. the MindsHub passthrough returns
+    ``usage.input_tokens = None`` on web-search responses). Treat a missing
+    count as no measurable pressure rather than crashing on ``None / int``.
+    """
+    if not input_tokens:  # None or 0 → no measurable pressure
+        return 0.0
     window = _DEFAULT_CONTEXT_WINDOW
     for prefix, size in _CONTEXT_WINDOWS:
         if model.startswith(prefix):
