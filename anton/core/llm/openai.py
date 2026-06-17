@@ -518,6 +518,7 @@ class OpenAIProvider(LLMProvider):
         supports_vision: bool = True,
         vision_format: str = "openai",
         flavor: str = FLAVOR_OPENAI_COMPATIBLE_GENERIC,
+        reasoning_effort: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url
@@ -526,6 +527,10 @@ class OpenAIProvider(LLMProvider):
         self._supports_vision = supports_vision
         self._flavor = flavor
         self._vision_format = vision_format
+        # Opaque effort level. Forwarded as top-level ``reasoning_effort`` on the
+        # chat.completions path and as ``reasoning={"effort": ...}`` on the
+        # Responses API path. None = the model's default.
+        self._reasoning_effort = reasoning_effort
         # Whether to attach langfuse-style headers (Langfuse-Session-Id,
         # Langfuse-Tags, Langfuse-Metadata) to outbound requests. Default-on
         # only for the MindsHub-backed deployment, which is the curated
@@ -645,6 +650,8 @@ class OpenAIProvider(LLMProvider):
             messages=oai_messages,
             max_tokens=max_tokens,
         )
+        if self._reasoning_effort:
+            kwargs["reasoning_effort"] = self._reasoning_effort
         merged_tools: list[dict] = []
         if tools:
             merged_tools.extend(_translate_tools(tools))
@@ -754,6 +761,8 @@ class OpenAIProvider(LLMProvider):
             max_tokens=max_tokens,
             stream=True,
         )
+        if self._reasoning_effort:
+            kwargs["reasoning_effort"] = self._reasoning_effort
         merged_tools: list[dict] = []
         if tools:
             merged_tools.extend(_translate_tools(tools))
@@ -910,6 +919,8 @@ class OpenAIProvider(LLMProvider):
         }
         if system:
             kwargs["instructions"] = system
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
 
         merged_tools: list[dict] = []
         if tools:

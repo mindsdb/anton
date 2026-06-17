@@ -254,16 +254,22 @@ class LLMClient:
 
         api_version = getattr(settings, "openai_api_version", None)
         compatible_flavor = _resolve_openai_compatible_flavor(settings)
+        # Each factory takes the per-role effort so planning and coding stay
+        # independent even when they resolve to the same provider type.
         providers = {
-            "anthropic": lambda: AnthropicProvider(api_key=settings.anthropic_api_key),
-            "openai": lambda: OpenAIProvider(
+            "anthropic": lambda effort: AnthropicProvider(
+                api_key=settings.anthropic_api_key,
+                reasoning_effort=effort,
+            ),
+            "openai": lambda effort: OpenAIProvider(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 ssl_verify=settings.minds_ssl_verify,
                 api_version=api_version,
                 flavor=OpenAIProvider.FLAVOR_OPENAI,
+                reasoning_effort=effort,
             ),
-            "openai-compatible": lambda: OpenAIProvider(
+            "openai-compatible": lambda effort: OpenAIProvider(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 ssl_verify=settings.minds_ssl_verify,
@@ -271,6 +277,7 @@ class LLMClient:
                 supports_vision=True,
                 vision_format="anthropic",
                 flavor=compatible_flavor,
+                reasoning_effort=effort,
             ),
         }
 
@@ -283,9 +290,13 @@ class LLMClient:
             raise ValueError(f"Unknown coding provider: {settings.coding_provider}")
 
         return cls(
-            planning_provider=planning_factory(),
+            planning_provider=planning_factory(
+                getattr(settings, "planning_reasoning_effort", None)
+            ),
             planning_model=settings.planning_model,
-            coding_provider=coding_factory(),
+            coding_provider=coding_factory(
+                getattr(settings, "coding_reasoning_effort", None)
+            ),
             coding_model=settings.coding_model,
             max_tokens=getattr(settings, "max_tokens", 8192),
         )
