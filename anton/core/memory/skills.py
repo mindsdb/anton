@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from anton.core.tools.skill_format import AgentSkill, dump_skill, parse_skill_dir
+from anton.core.tools.skill_format import AgentSkill, dump_skill, parse_skill_dir, normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,6 @@ class Skill:
     label: str
     name: str
     description: str
-    when_to_use: str
     declarative_md: str
     created_at: str
     provenance: str  # "manual" | "consolidator"
@@ -185,7 +184,7 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
     declarative = decl_path.read_text(encoding="utf-8") if decl_path.is_file() else ""
 
     old_label = skill_dir.name
-    new_label = old_label.replace("_", "-")
+    new_label = normalize_name(old_label)
 
     # Resolve collision when renaming
     final_label = new_label
@@ -200,18 +199,20 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
                     break
                 n += 1
 
-    # Build metadata dict (omit empty values)
-    meta_fields = {
+    description = str(meta.get("description", "")).strip()
+    when_to_use = str(meta.get("when_to_use", "")).strip()
+    if when_to_use:
+        description = f"{description}. {when_to_use}" if description else when_to_use
+
+    metadata = {k: str(v) for k, v in {
         "display_name": meta.get("name", ""),
-        "when_to_use": meta.get("when_to_use", ""),
         "provenance": meta.get("provenance", "manual"),
         "created_at": meta.get("created_at", ""),
-    }
-    metadata = {k: str(v) for k, v in meta_fields.items() if v}
+    }.items() if v}
 
     fm = AgentSkill.model_construct(
         name=final_label,
-        description=str(meta.get("description", "")),
+        description=description,
         instructions=declarative,
         metadata=metadata,
     )
@@ -278,12 +279,11 @@ class SkillStore:
         fm = parse_skill_dir(d)
         if fm is None:
             return None
-        label = fm.name or d.name
+
         return Skill(
-            label=label,
-            name=fm.metadata.get("display_name", label),
+            label=fm.metadata.get("display_name", fm.name),
+            name=fm.name,
             description=fm.description,
-            when_to_use=fm.metadata.get("when_to_use", ""),
             declarative_md=fm.instructions,
             created_at=fm.metadata.get("created_at", ""),
             provenance=fm.metadata.get("provenance", "manual"),
@@ -346,7 +346,7 @@ class SkillStore:
     def list_summaries(self) -> list[dict]:
         """Lightweight listing for prompt-building.
 
-        Returns dicts with keys: label, name, when_to_use.
+        Returns dicts with keys: label, name, description.
         Reads only SKILL.md frontmatter, skips the body.
         """
         if not self.root.is_dir():
@@ -364,11 +364,11 @@ class SkillStore:
             fm = parse_skill_dir(child)
             if fm is None:
                 continue
-            label = fm.name or child.name
+
             out.append({
-                "label": label,
-                "name": fm.metadata.get("display_name", label),
-                "when_to_use": fm.metadata.get("when_to_use", ""),
+                "label": fm.metadata.get("display_name", fm.name),
+                "name": fm.name,
+                "description": fm.description,
             })
         return out
 
@@ -386,7 +386,6 @@ class SkillStore:
 
         metadata = {k: v for k, v in {
             "display_name": skill.name,
-            "when_to_use": skill.when_to_use,
             "provenance": skill.provenance,
             "created_at": skill.created_at,
         }.items() if v}
