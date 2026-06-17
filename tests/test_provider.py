@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from anton.core.llm.anthropic import AnthropicProvider
+from anton.core.llm.openai import _parse_response_object
 from anton.core.llm.provider import LLMResponse, ToolCall, compute_context_pressure
 
 
@@ -22,6 +24,31 @@ class TestComputeContextPressure:
 
     def test_clamps_at_one(self):
         assert compute_context_pressure("claude-3", 10_000_000) == 1.0
+
+    def test_parse_response_object_coerces_none_usage_tokens(self):
+        # End-to-end at the crash site: a web-search Responses object comes
+        # back with usage.input_tokens/output_tokens = None. _parse_response_object
+        # must coerce them to 0 (not pass None into compute_context_pressure)
+        # and must not raise.
+        response = SimpleNamespace(
+            output=[],
+            usage=SimpleNamespace(input_tokens=None, output_tokens=None),
+        )
+        result = _parse_response_object(response, "claude-sonnet-4-6")
+        assert result.usage.input_tokens == 0
+        assert result.usage.output_tokens == 0
+        assert result.usage.context_pressure == 0.0
+
+    def test_parse_response_object_keeps_real_usage_tokens(self):
+        # Sanity: valid counts are preserved unchanged.
+        response = SimpleNamespace(
+            output=[],
+            usage=SimpleNamespace(input_tokens=100_000, output_tokens=250),
+        )
+        result = _parse_response_object(response, "claude-sonnet-4-6")
+        assert result.usage.input_tokens == 100_000
+        assert result.usage.output_tokens == 250
+        assert result.usage.context_pressure == 0.5
 
 
 class TestDataclasses:
