@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from anton.core.memory.skill_md import SkillFrontmatter, dump_skill_md, parse_skill_md
+from anton.core.tools.skill_format import AgentSkill, dump_skill, parse_skill_dir
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ _DEFAULT_SKILLS_ROOT = Path("~/.anton/skills").expanduser()
 class StageStats:
     recommended: int = 0
     used: int = 0
-    last_used: str = ""
+    last_used: str = ""  # ISO timestamp
     confidence: float = 0.0
 
 
@@ -65,6 +65,9 @@ class Skill:
 
     `label` is the hyphen-case identifier (= SKILL.md `name` field = dir name).
     `name` is the human-readable display name (metadata.display_name).
+    `stage_*_present` flags are derived from directory presence on disk, not
+    stored explicitly: stage_1 is always True, stage_2 requires `references/`,
+    stage_3 requires `scripts/`.
     """
 
     label: str
@@ -157,9 +160,10 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
       chunks.md  → references/chunks.md
       code/      → scripts/
 
-    Returns the (possibly renamed) directory path.
+    Returns the (possibly renamed) directory path, or None if the directory
+    contains neither legacy files nor a SKILL.md (unrecognised dir, skip it).
     Raises OSError on IO failures.
-    Idempotent: returns immediately if SKILL.md already exists.
+    Idempotent: returns skill_dir immediately if SKILL.md already exists.
     """
     skill_md_path = skill_dir / "SKILL.md"
     if skill_md_path.is_file():
@@ -205,12 +209,13 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
     }
     metadata = {k: str(v) for k, v in meta_fields.items() if v}
 
-    fm = SkillFrontmatter.model_construct(
+    fm = AgentSkill.model_construct(
         name=final_label,
         description=str(meta.get("description", "")),
+        instructions=declarative,
         metadata=metadata,
     )
-    skill_md_path.write_text(dump_skill_md(fm, declarative), encoding="utf-8")
+    skill_md_path.write_text(dump_skill(fm), encoding="utf-8")
 
     # code/ → scripts/
     code_dir = skill_dir / "code"
@@ -270,14 +275,7 @@ class SkillStore:
 
     def _skill_from_dir(self, d: Path) -> Skill | None:
         """Build a Skill from a (already-migrated) directory."""
-        skill_md_path = d / "SKILL.md"
-        if not skill_md_path.is_file():
-            return None
-        try:
-            text = skill_md_path.read_text(encoding="utf-8")
-        except OSError:
-            return None
-        fm, body = parse_skill_md(text, folder_name=d.name)
+        fm = parse_skill_dir(d)
         if fm is None:
             return None
         label = fm.name or d.name
@@ -286,7 +284,7 @@ class SkillStore:
             name=fm.metadata.get("display_name", label),
             description=fm.description,
             when_to_use=fm.metadata.get("when_to_use", ""),
-            declarative_md=body,
+            declarative_md=fm.instructions,
             created_at=fm.metadata.get("created_at", ""),
             provenance=fm.metadata.get("provenance", "manual"),
             stage_1_present=True,
@@ -346,7 +344,11 @@ class SkillStore:
         return out
 
     def list_summaries(self) -> list[dict]:
-        """Lightweight listing for prompt-building — label + when_to_use only."""
+        """Lightweight listing for prompt-building.
+
+        Returns dicts with keys: label, name, when_to_use.
+        Reads only SKILL.md frontmatter, skips the body.
+        """
         if not self.root.is_dir():
             return []
         out: list[dict] = []
@@ -359,14 +361,7 @@ class SkillStore:
                     continue
             except OSError:
                 continue
-            skill_md_path = child / "SKILL.md"
-            if not skill_md_path.is_file():
-                continue
-            try:
-                text = skill_md_path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            fm, _ = parse_skill_md(text, folder_name=child.name)
+            fm = parse_skill_dir(child)
             if fm is None:
                 continue
             label = fm.name or child.name
@@ -396,12 +391,13 @@ class SkillStore:
             "created_at": skill.created_at,
         }.items() if v}
 
-        fm = SkillFrontmatter.model_construct(
+        fm = AgentSkill.model_construct(
             name=skill.label,
             description=skill.description,
+            instructions=skill.declarative_md,
             metadata=metadata,
         )
-        (d / "SKILL.md").write_text(dump_skill_md(fm, skill.declarative_md), encoding="utf-8")
+        (d / "SKILL.md").write_text(dump_skill(fm), encoding="utf-8")
 
         stats_path = d / "stats.json"
         if not stats_path.is_file():

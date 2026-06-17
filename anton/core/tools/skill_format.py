@@ -17,8 +17,8 @@ SKILL.md layout:
 
 Parsing is intentionally lenient — no field validation is applied when
 reading, since files may be authored by external tools.  Validators on
-SkillFrontmatter exist for write/creation paths only and must be called
-explicitly via SkillFrontmatter.model_validate().
+AgentSkill exist for write/creation paths only and must be called
+explicitly via AgentSkill.model_validate().
 
 Unknown top-level YAML keys are folded into `metadata` automatically.
 """
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -47,15 +48,36 @@ _SPEC_KEYS = {"name", "description", "license", "compatibility", "metadata", "al
 
 # ─── model ────────────────────────────────────────────────────────────────────
 
+def validate_name(v: str) -> str:
+    if len(v) > _NAME_MAX:
+        raise ValueError(f"name exceeds {_NAME_MAX} chars")
+    if "--" in v:
+        raise ValueError("name must not contain '--'")
+    if not _NAME_RE.match(v):
+        raise ValueError(
+            f"name {v!r} must match {_NAME_RE.pattern}"
+        )
+    return v
 
-class SkillFrontmatter(BaseModel):
-    """In-memory representation of a SKILL.md frontmatter block.
+
+def normalize_name(value: str) -> str:
+    slug = value.strip().lower()
+    slug = re.sub(_NAME_RE, "-", slug)  # non-alnum runs -> single hyphen
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+
+    return slug[:_NAME_MAX].rstrip("-")
+
+
+
+class AgentSkill(BaseModel):
+    """In-memory representation of a SKILL.md file (frontmatter + body).
 
     Validators are active when you call model_validate() (write / creation
-    path).  parse_skill_md() uses model_construct() so validators are skipped.
+    path).  parse_skill_dir() uses model_construct() so validators are skipped.
     """
 
     name: str = ""
+    instructions: str
     description: str = ""
     license: str | None = None
     compatibility: str | None = None
@@ -67,15 +89,7 @@ class SkillFrontmatter(BaseModel):
     @field_validator("name")
     @classmethod
     def _validate_name(cls, v: str) -> str:
-        if len(v) > _NAME_MAX:
-            raise ValueError(f"name exceeds {_NAME_MAX} chars")
-        if "--" in v:
-            raise ValueError("name must not contain '--'")
-        if not _NAME_RE.match(v):
-            raise ValueError(
-                f"name {v!r} must match {_NAME_RE.pattern}"
-            )
-        return v
+        return validate_name(v)
 
     @field_validator("description")
     @classmethod
@@ -104,18 +118,21 @@ class SkillFrontmatter(BaseModel):
 # ─── parse ────────────────────────────────────────────────────────────────────
 
 
-def parse_skill_md(text: str, folder_name: str = "") -> tuple[SkillFrontmatter | None, str]:
-    """Parse SKILL.md text into (frontmatter, body).
+def parse_skill_dir(skill_dir: Path) -> AgentSkill:
+    """Read ``<skill_dir>/SKILL.md`` into a ``Skill``"""
+    folder_name = skill_dir.name
+    md_path = skill_dir / "SKILL.md"
 
-    No field validation is applied — accepts files created by any tool.
-    Unknown top-level YAML keys are merged into metadata.
-    Returns (None, full_text) only on structural failures (missing delimiters,
-    broken YAML, non-mapping root).
-    """
+
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return None
+
     lines = text.split("\n")
     if not lines or lines[0].rstrip() != "---":
         logger.debug("parse_skill_md: no opening '---' delimiter")
-        return None, text
+        return None
 
     close_idx: int | None = None
     for i, line in enumerate(lines[1:], 1):
@@ -125,7 +142,7 @@ def parse_skill_md(text: str, folder_name: str = "") -> tuple[SkillFrontmatter |
 
     if close_idx is None:
         logger.debug("parse_skill_md: no closing '---' delimiter")
-        return None, text
+        return None
 
     yaml_text = "\n".join(lines[1:close_idx])
     body = "\n".join(lines[close_idx + 1 :])
@@ -134,11 +151,11 @@ def parse_skill_md(text: str, folder_name: str = "") -> tuple[SkillFrontmatter |
         props = yaml.safe_load(yaml_text)
     except yaml.YAMLError as exc:
         logger.warning("parse_skill_md: YAML error: %s", exc)
-        return None, text
+        return None
 
     if not isinstance(props, dict):
         logger.warning("parse_skill_md: frontmatter is not a YAML mapping")
-        return None, text
+        return None
 
     # Collect metadata from the spec field, then fold in unknown top-level keys
     meta: dict[str, str] = {}
@@ -154,38 +171,34 @@ def parse_skill_md(text: str, folder_name: str = "") -> tuple[SkillFrontmatter |
     if not name:
         name = folder_name
 
-    name = re.sub(_NAME_RE, "", name).replace("--", " - ")[:_NAME_MAX]
-    if name.startswith("-"):
-        name = name[1:]
-
-    fm = SkillFrontmatter.model_construct(
-        name=name,
+    return AgentSkill.model_construct(
+        name=normalize_name(name),
+        instructions=body,
         description=str(props.get("description", ""))[:_DESC_MAX],
         license=props.get("license"),
         compatibility=props.get("compatibility"),
         allowed_tools=props.get("allowed-tools"),
         metadata=meta,
     )
-    return fm, body
 
 
 # ─── dump ─────────────────────────────────────────────────────────────────────
 
 
-def dump_skill_md(frontmatter: SkillFrontmatter, body: str) -> str:
-    """Serialise frontmatter + body back to SKILL.md text."""
+def dump_skill(skill: AgentSkill) -> str:
+    """Serialise an AgentSkill back to SKILL.md text."""
     data: dict[str, Any] = {
-        "name": frontmatter.name,
-        "description": frontmatter.description,
+        "name": skill.name,
+        "description": skill.description,
     }
-    if frontmatter.license is not None:
-        data["license"] = frontmatter.license
-    if frontmatter.compatibility is not None:
-        data["compatibility"] = frontmatter.compatibility
-    if frontmatter.allowed_tools is not None:
-        data["allowed-tools"] = frontmatter.allowed_tools
-    if frontmatter.metadata:
-        data["metadata"] = dict(frontmatter.metadata)
+    if skill.license is not None:
+        data["license"] = skill.license
+    if skill.compatibility is not None:
+        data["compatibility"] = skill.compatibility
+    if skill.allowed_tools is not None:
+        data["allowed-tools"] = skill.allowed_tools
+    if skill.metadata:
+        data["metadata"] = dict(skill.metadata)
 
     yaml_text = yaml.dump(
         data,
@@ -193,7 +206,7 @@ def dump_skill_md(frontmatter: SkillFrontmatter, body: str) -> str:
         allow_unicode=True,
         sort_keys=False,
     )
-    return f"---\n{yaml_text}---\n{body}"
+    return f"---\n{yaml_text}---\n{skill.instructions}"
 
 
-__all__ = ["SkillFrontmatter", "parse_skill_md", "dump_skill_md"]
+__all__ = ["AgentSkill", "parse_skill_dir", "dump_skill"]
