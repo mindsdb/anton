@@ -446,26 +446,33 @@ def detect_reset_churn(events: Sequence[Event]) -> Lesson | None:
 
 
 def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
-    """The same scratchpad name had >= N cells killed (timeout/cancel/OOM).
+    """>= N scratchpad cells were killed (timeout/cancel/OOM) in one turn.
+
+    Fires when a single scratchpad is killed >= N times (a per-pad loop) OR
+    when >= N cells are killed across the turn regardless of name. The
+    name-agnostic count is deliberate: renaming the scratchpad between failed
+    attempts (`build_pres` → `write_html` → …) used to split the kill count
+    across buckets and hide the loop. A kill is a kill, and the right lesson
+    (make the next cell smaller) is the same either way.
 
     Reads `kind == "scratchpad_killed"`; looks at `detail.name`.
     """
+    killed = [e for e in events if e.kind == "scratchpad_killed"]
     by_name: defaultdict[str, int] = defaultdict(int)
-    for e in events:
-        if e.kind != "scratchpad_killed":
-            continue
+    for e in killed:
         n = e.detail.get("name") or ""
         if n:
             by_name[n] += 1
-    if not by_name or max(by_name.values()) < _KILL_LOOP_THRESHOLD:
+    per_name_max = max(by_name.values()) if by_name else 0
+    if per_name_max < _KILL_LOOP_THRESHOLD and len(killed) < _KILL_LOOP_THRESHOLD:
         return None
     return Lesson(
         rule=(
-            "When a scratchpad cell is killed (timeout, cancel, OOM), "
-            "the next cell on the same scratchpad needs to be smaller — "
-            "fewer rows, smaller batch, explicit timeout, narrower scope. "
-            "Two kills on the same scratchpad means the approach itself is "
-            "too heavy, not that the same cell needs another try."
+            "When a scratchpad cell is killed (timeout, cancel, OOM), the next "
+            "cell needs to be smaller — fewer rows, smaller batch, explicit "
+            "timeout, narrower scope — and stay on the SAME scratchpad. Two "
+            "kills in a turn (even across renamed scratchpads) mean the approach "
+            "is too heavy, not that the same cell needs another try."
         ),
         kind="when",
         triggers=("scratchpad_killed",),

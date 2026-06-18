@@ -14,7 +14,21 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
     name = tc_input.get("name", "")
     code = tc_input.get("code", "")
     if not code or not code.strip():
-        return "No code provided."
+        # An empty `code` on an exec call is almost never the model meaning
+        # to run nothing — it's the large-payload drop: an oversized `code`
+        # argument gets truncated to "" in transit. Returning a bare "no
+        # code" here used to read as a no-op, so the model would retry the
+        # same oversized cell. Make the failure self-correcting and ensure
+        # it reads as an error (note the word "failed") so the per-tool
+        # error streak in _apply_error_tracking counts it toward the
+        # circuit breaker instead of silently resetting.
+        return (
+            "Scratchpad exec failed: the `code` argument was empty. This usually "
+            "means the code payload was too large and got truncated in transit. "
+            "Do NOT retry the same large cell — instead write the output to disk in "
+            "small append steps (open(path, 'a'), keep each cell's string under ~5KB), "
+            "or generate the content inside the cell rather than passing a big literal."
+        )
 
     pad = await session._scratchpads.get_or_create(name)
 
