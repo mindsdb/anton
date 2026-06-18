@@ -17,6 +17,7 @@ class CoreSettings(BaseSettings):
     cell_timeout_default: int = 120  # Total timeout when no estimate given (s)
     cell_inactivity_timeout: int = 30  # Max silence between output lines (s)
     cell_inactivity_after_progress: int = 60  # Grace window after progress() call (s)
+    cell_inactivity_max: int = 60  # Ceiling on the silence window even when a large estimate scales it up (s)
     cell_install_timeout: int = 120  # pip/uv install timeout (s)
     cell_keep_recent: int = 5  # Recent cells preserved during compaction
 

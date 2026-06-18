@@ -831,28 +831,40 @@ class TestProgressAndTimeouts:
         assert inactivity == 30.0
 
     async def test_compute_timeouts_with_estimate(self):
-        """Estimate should scale total timeout and inactivity with no hard cap."""
+        """Estimate scales the total with no cap; inactivity is clamped to cell_inactivity_max (default 60)."""
         from anton.core.backends.utils import compute_timeouts as _compute_timeouts
 
         # Small estimate: max(10*2, 10+30) = max(20, 40) = 40
         total, inactivity = _compute_timeouts(10)
         assert total == 40.0
-        assert inactivity == 30.0  # max(5, 30) = 30
+        assert inactivity == 30.0  # max(5, 30) = 30, under the cap
 
         # Medium estimate: max(60*2, 60+30) = max(120, 90) = 120
         total, inactivity = _compute_timeouts(60)
         assert total == 120.0
-        assert inactivity == 30.0  # max(30, 30) = 30
+        assert inactivity == 30.0  # max(30, 30) = 30, under the cap
 
-        # Large estimate: max(300*2, 300+30) = max(600, 330) = 600
+        # Large estimate: total still scales, inactivity is capped at 60
         total, inactivity = _compute_timeouts(300)
         assert total == 600.0
-        assert inactivity == 150.0  # max(150, 30) = 150
+        assert inactivity == 60.0  # min(max(150, 30), 60) = 60
 
-        # Very large estimate: scales with estimate
+        # Very large estimate: total keeps scaling so long-but-active cells
+        # can run; the silence window stays capped.
         total, inactivity = _compute_timeouts(1000)
         assert total == 2000.0
-        assert inactivity == 500.0  # max(500, 30) = 500
+        assert inactivity == 60.0  # min(max(500, 30), 60) = 60
+
+    async def test_compute_timeouts_inactivity_cap_is_configurable(self):
+        """cell_inactivity_max bounds the silence window regardless of estimate."""
+        from anton.core.backends import utils as _utils
+        from anton.core.settings import CoreSettings
+
+        # est=300 would scale inactivity to 150s without the cap; with the
+        # default cap (60) it is clamped, and the cap is tunable via settings.
+        total, inactivity = _utils.compute_timeouts(300)
+        assert inactivity == float(CoreSettings().cell_inactivity_max)
+        assert total == 600.0  # total is intentionally left uncapped
 
 
 class TestSampleFunction:
