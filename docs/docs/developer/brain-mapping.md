@@ -64,10 +64,9 @@ Two scopes: **global** (cross-project, under the home directory) and
 │       └── *.md
 └── skills/                            PROCEDURAL MEMORY (striatum)
     └── <label>/                       One directory per skill
-        ├── meta.json                  label, name, when_to_use, provenance, presence flags
-        ├── declarative.md             Stage 1 — step-by-step procedure (always present)
-        ├── chunks.md                  Stage 2 — higher-level recipes/macros (optional, v2+)
-        ├── code/                      Stage 3 — runnable helper modules (optional, v2+)
+        ├── SKILL.md                   name, description, instructions (agentskills.io format)
+        ├── references/                Stage 2 — higher-level recipes/macros (optional, v2+)
+        ├── scripts/                   Stage 3 — runnable helper modules (optional, v2+)
         │   └── __init__.py
         ├── requirements.txt           Stage 3 dependencies (optional)
         └── stats.json                 Per-stage usage counters (recommended/used)

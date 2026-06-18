@@ -57,7 +57,7 @@ At the highest level there are three layers:
   │ (hipp.)    │  │ Buffers bad  │  │ /skill save → LLM   │
   │            │  │ cells, runs  │  │ drafts a procedure  │
   │ Episodes — │  │ post-mortem  │  │ with label + name + │
-  │ JSONL log  │  │ via LLM,     │  │ when_to_use +       │
+  │ JSONL log  │  │ via LLM,     │  │ description +       │
   │ of every   │  │ encodes new  │  │ declarative_md.     │
   │ turn.      │  │ lessons via  │  │                     │
   │            │  │ Cortex.      │  │ Future turns recall │

@@ -64,6 +64,8 @@ class AntonSettings(CoreSettings):
     exa_api_key: str | None = None
     brave_api_key: str | None = None
 
+    skills_root: Path | None = None
+
     memory_enabled: bool = True
     # TODO: Calling this memory_dir is a bit misleading, because there are other directories that live here
     memory_dir: str = ".anton"

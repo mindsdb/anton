@@ -27,7 +27,6 @@ def store(tmp_path: Path) -> SkillStore:
             label="csv_summary",
             name="CSV Summary",
             description="Load a CSV, infer schema, compute summary stats.",
-            when_to_use="User asks to explore, summarize, or describe a CSV file.",
             declarative_md="1. Load the CSV.\n2. Infer types.\n3. Print summary.",
             created_at="2026-04-10T12:00:00+00:00",
             provenance="manual",
@@ -38,7 +37,6 @@ def store(tmp_path: Path) -> SkillStore:
             label="web_scraping",
             name="Web Scraping",
             description="Fetch and parse HTML to extract structured data.",
-            when_to_use="User asks to scrape or extract data from a webpage.",
             declarative_md="1. Fetch the URL.\n2. Parse with BeautifulSoup.\n3. Select elements.",
             created_at="2026-04-10T12:00:00+00:00",
             provenance="manual",
@@ -49,7 +47,6 @@ def store(tmp_path: Path) -> SkillStore:
             label="api_fetcher",
             name="API Fetcher",
             description="Call a REST API and normalize the response.",
-            when_to_use="User asks to fetch data from a JSON API.",
             declarative_md="1. Identify auth.\n2. Call endpoint.\n3. Normalize.",
             created_at="2026-04-10T12:00:00+00:00",
             provenance="manual",
@@ -139,7 +136,7 @@ class TestTypoFallback:
         session = _session_with(store)
         result = await handle_recall_skill(session, {"label": "csv_sumary"})
         assert "⚠" in result
-        assert "csv_summary" in result
+        assert "csv-summary" in result
         # The full procedure is still included after the warning
         assert "Load the CSV" in result
 
@@ -154,8 +151,8 @@ class TestTypoFallback:
     @pytest.mark.asyncio
     async def test_dash_to_underscore_recovered(self, store: SkillStore):
         session = _session_with(store)
-        result = await handle_recall_skill(session, {"label": "web-scraping"})
-        assert "web_scraping" in result
+        result = await handle_recall_skill(session, {"label": "web__scraping"})
+        assert "web-scraping" in result
         # Could match exactly via slugify, in which case there's no warning,
         # or via fuzzy match. Either way the procedure should be returned.
         assert "BeautifulSoup" in result
@@ -175,9 +172,9 @@ class TestUnknownSlug:
         result = await handle_recall_skill(session, {"label": "xyzzy_quark"})
         assert "NO MATCH" in result
         # Should mention all available labels
-        assert "csv_summary" in result
-        assert "web_scraping" in result
-        assert "api_fetcher" in result
+        assert "csv-summary" in result
+        assert "web-scraping" in result
+        assert "api-fetcher" in result
 
     @pytest.mark.asyncio
     async def test_unrelated_does_not_increment_counters(
@@ -185,7 +182,7 @@ class TestUnknownSlug:
     ):
         session = _session_with(store)
         await handle_recall_skill(session, {"label": "xyzzy_quark"})
-        for label in ("csv_summary", "web_scraping", "api_fetcher"):
+        for label in ("csv-summary", "web-scraping", "api-fetcher"):
             loaded = store.load(label)
             assert loaded is not None
             assert loaded.stats.stage_1.recommended == 0
