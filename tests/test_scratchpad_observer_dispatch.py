@@ -288,3 +288,69 @@ class TestHandleScratchpadObserverIntegration:
 
         assert obs.pre_calls == []
         assert obs.post_calls == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-scratchpad guard — challenge a second distinct scratchpad per task
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CHALLENGE_MARK = "confirm_new_scratchpad=true"
+
+
+class TestSingleScratchpadGuard:
+    def _exec(self, name: str, **extra: object) -> dict:
+        tc = {
+            "action": "exec",
+            "name": name,
+            "code": "print(1)",
+            "one_line_description": "do a thing",
+            "estimated_execution_time_seconds": 5,
+        }
+        tc.update(extra)
+        return tc
+
+    @pytest.mark.asyncio
+    async def test_first_scratchpad_not_challenged(self):
+        session, _ = _fake_session()
+        result = await handle_scratchpad(session, self._exec("dash"))
+        assert _CHALLENGE_MARK not in result
+        assert "dash" in session._agent_scratchpad_names
+
+    @pytest.mark.asyncio
+    async def test_reusing_same_name_not_challenged(self):
+        session, _ = _fake_session()
+        session._agent_scratchpad_names = {"dash"}
+        result = await handle_scratchpad(session, self._exec("dash"))
+        assert _CHALLENGE_MARK not in result
+
+    @pytest.mark.asyncio
+    async def test_second_distinct_name_is_challenged(self):
+        session, _ = _fake_session()
+        session._agent_scratchpad_names = {"dash"}
+        result = await handle_scratchpad(session, self._exec("report"))
+        assert _CHALLENGE_MARK in result
+        # The challenged name must NOT be recorded, so a later confirm works.
+        assert "report" not in session._agent_scratchpad_names
+        # A challenge is not a failure — it must not contain an error marker
+        # that would trip the per-tool circuit breaker.
+        assert "failed" not in result and "[error]" not in result
+
+    @pytest.mark.asyncio
+    async def test_confirm_allows_second_scratchpad(self):
+        session, _ = _fake_session()
+        session._agent_scratchpad_names = {"dash"}
+        result = await handle_scratchpad(
+            session, self._exec("report", confirm_new_scratchpad=True)
+        )
+        assert _CHALLENGE_MARK not in result
+        assert "report" in session._agent_scratchpad_names
+
+    @pytest.mark.asyncio
+    async def test_system_pads_do_not_count_against_agent(self):
+        # A system-created pad (e.g. the artifact backend launcher's slug pad)
+        # lives in _scratchpads.pads but never in _agent_scratchpad_names, so
+        # the agent's first real scratchpad is not challenged by its presence.
+        session, _ = _fake_session()
+        session._scratchpads.pads = {"my-artifact-slug": MagicMock()}
+        result = await handle_scratchpad(session, self._exec("dash"))
+        assert _CHALLENGE_MARK not in result

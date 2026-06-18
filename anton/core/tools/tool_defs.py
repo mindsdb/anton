@@ -93,6 +93,10 @@ SCRATCHPAD_TOOL = ToolDef(
                 "type": "integer",
                 "description": "Estimated execution time in seconds. Drives the total timeout (roughly 2x estimate). Use progress() for long cells.",
             },
+            "confirm_new_scratchpad": {
+                "type": "boolean",
+                "description": "Set true only to deliberately create a SECOND scratchpad while one is already in use this task. Normally reuse one scratchpad name for the whole task — each name is a separate isolated environment, so a new one loses all existing state. Leave unset/false unless you truly need isolation.",
+            },
         },
         "required": ["action", "name"],
     },

@@ -322,8 +322,8 @@ nav/JS → closing tags. Each cell appends a small chunk you can sanity-check. \
 Do NOT build a single 20KB+ HTML string in memory and write it at the end.
   3. CAP STRING SIZE PER CELL at ~5KB. Large-string scratchpad calls are the \
 single biggest cause of silent failures (the tool occasionally drops the \
-`code` payload on oversized inputs and returns "No code provided", which still \
-counts against the round cap). If a section is too big, split it.
+`code` payload on oversized inputs and the cell comes back with an empty-code \
+error, which still counts against the round cap). If a section is too big, split it.
   4. NEVER re-emit the full HTML mid-build. Append deltas, don't re-print \
 the world. Assembly is a one-line concat at the end, not a re-render of \
 everything you've written so far.

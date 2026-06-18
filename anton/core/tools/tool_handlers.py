@@ -408,6 +408,34 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             fn(kind, detail, severity=severity)
 
     if action == "exec":
+        # Single-scratchpad guard: the agent should reuse ONE scratchpad per
+        # task. A new name spins up a separate, empty process — state from the
+        # existing pad isn't visible there — a common source of wasted rounds
+        # (re-import, re-fetch, shuffling state across pads). Challenge a new
+        # name when the agent already has a working scratchpad this session,
+        # unless it explicitly confirms it needs isolation.
+        #
+        # We track names the agent has exec'd here — NOT session._scratchpads.pads,
+        # which also holds system-created pads (e.g. the artifact backend
+        # launcher's slug pad). Those must never count against the agent.
+        seen = getattr(session, "_agent_scratchpad_names", None)
+        if not isinstance(seen, set):
+            seen = set()
+            session._agent_scratchpad_names = seen
+        confirm_new = bool(tc_input.get("confirm_new_scratchpad", False))
+        if name not in seen and seen and not confirm_new:
+            existing = "', '".join(sorted(seen))
+            return (
+                f"You already have an active scratchpad ('{existing}') with live state "
+                f"(imports, variables, fetched data). Starting a new one named '{name}' "
+                "creates a SEPARATE, empty environment — nothing from the existing "
+                "scratchpad is available there, so you'd re-import and re-fetch. Reuse the "
+                "existing scratchpad for this task; it is stateful across cells. If you "
+                "genuinely need an isolated environment, call scratchpad exec again with "
+                "confirm_new_scratchpad=true."
+            )
+        seen.add(name)
+
         result = await prepare_scratchpad_exec(session, tc_input)
         if isinstance(result, str):
             # Empty / malformed code parameter — the dispatcher rejected
