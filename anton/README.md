@@ -508,7 +508,7 @@ anton> [opens scratchpad, loads pandas, infers schema, prints describe(), plots 
 
 you> /skill save csv summary
 anton> Drafting a skill from recent work…
-       Saved skill csv_summary → ~/.anton/skills/csv_summary/
+       Saved skill csv-summary → ~/.anton/skills/csv-summary/
        Name: CSV Summary
        Description: User asks to explore, summarize, or describe a CSV file.
 ```
@@ -520,10 +520,10 @@ Automatic skill extraction (the consolidator promoting recurring scratchpad patt
 On every turn, the system prompt includes a compact `## Procedural memory` section listing every available skill as one line: `- <label> — <description>`. The full procedures stay on disk. When the LLM recognizes a match, it calls the `recall_skill` tool:
 
 ```
-{"name": "recall_skill", "input": {"label": "csv_summary"}}
+{"name": "recall_skill", "input": {"label": "csv-summary"}}
 ```
 
-The tool reads `declarative.md` and returns it as the tool result, which the LLM follows as guidance for the rest of the turn. Each successful recall increments `stats.json::stage_1::recommended` — that's the classifier signal, mechanically captured without any LLM compliance dance.
+The tool reads the SKILL.md body and returns it as the tool result, which the LLM follows as guidance for the rest of the turn. Each successful recall increments `stats.json::stage_1::recommended` — that's the classifier signal, mechanically captured without any LLM compliance dance.
 
 Brain analog: the prefrontal cortex doesn't keep every skill loaded. It has fast pattern recognition that flags "I might need skill X" and *retrieves* the skill into working memory only when it actually needs it. The `recall_skill` tool is exactly this retrieval operation.
 
@@ -538,7 +538,7 @@ Brain analog: the prefrontal cortex doesn't keep every skill loaded. It has fast
 
 ### Typo Recovery
 
-When the LLM passes a label that doesn't exist (typos, guesses), `recall_skill` uses `closest_match()` to find the nearest existing slug via difflib and returns that skill's procedure with a warning. The `recommended` counter is credited to the *resolved* label, not the input — so `recall_skill('csv_sumary')` still increments `csv_summary` in the stats. The LLM gets useful behavior even when it gets the spelling wrong.
+When the LLM passes a label that doesn't exist (typos, guesses), `recall_skill` uses `closest_match()` to find the nearest existing slug via difflib and returns that skill's procedure with a warning. The `recommended` counter is credited to the *resolved* label, not the input — so `recall_skill('csv_sumary')` still increments `csv-summary` in the stats. The LLM gets useful behavior even when it gets the spelling wrong.
 
 ## Cerebellum — Supervised Error Learning
 
@@ -889,13 +889,13 @@ Tests live at `tests/test_acc.py` (44 tests, 4 layers: pure-function detectors �
 |---|---|
 | `SkillStore.list_all()` | Return every loadable skill, sorted by label. |
 | `SkillStore.list_summaries()` | Lightweight listing — `[{"label": "...", "name": "...", "description": "..."}]`. Used by the prompt builder to inject the procedural-memory section without loading any declarative content. |
-| `SkillStore.load(label)` | Read a single skill by label. Returns None if absent or malformed. |
-| `SkillStore.save(skill)` | Write the skill directory. Creates `SKILL.md`, `stats.json`. Never wipes accumulated counters. |
-| `SkillStore.delete(label)` | Remove a skill directory. |
-| `SkillStore.increment_recommended(label, *, stage)` | Atomic-ish bump of the per-stage `recommended` counter (called by `recall_skill`). |
-| `SkillStore.closest_match(bad_label, *, cutoff=0.6)` | Difflib-based fuzzy match for typo recovery. |
-| `make_unique_label(base, store)` | Generate a slug that doesn't collide with any existing skill (`csv_summary`, `csv_summary_2`, ...). |
-| `slugify(text)` | Normalize arbitrary text into a snake_case identifier. |
+| `SkillStore.load(label)` | Read a single skill by label. Returns None if absent or malformed.                                                                                                                           |
+| `SkillStore.save(skill)` | Write the skill directory. Creates `SKILL.md`, `stats.json`. Never wipes accumulated counters.                                                                                               |
+| `SkillStore.delete(label)` | Remove a skill directory.                                                                                                                                                                    |
+| `SkillStore.increment_recommended(label, *, stage)` | Atomic-ish bump of the per-stage `recommended` counter (called by `recall_skill`).                                                                                                           |
+| `SkillStore.closest_match(bad_label, *, cutoff=0.6)` | Difflib-based fuzzy match for typo recovery.                                                                                                                                                 |
+| `make_unique_label(base, store)` | Generate a slug that doesn't collide with any existing skill (`csv-summary`, `csv-summary_2`, ...).                                                                                          |
+| `slugify(text)` | Normalize arbitrary text into a kebab-case identifier.                                                                                                                                       |
 
 ### `tools/recall_skill.py` — Procedural Memory Retrieval Tool
 
