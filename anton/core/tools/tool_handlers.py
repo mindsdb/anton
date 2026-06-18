@@ -423,7 +423,15 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             seen = set()
             session._agent_scratchpad_names = seen
         confirm_new = bool(tc_input.get("confirm_new_scratchpad", False))
-        if name not in seen and seen and not confirm_new:
+        # Challenge AT MOST ONCE per session. The challenge returns a non-error
+        # string (so it doesn't trip the circuit breaker), so if we re-challenged
+        # every new name a model that keeps renaming without confirming would
+        # loop until the round cap with nothing to stop it. One firm nudge is the
+        # enforcement; after that we respect the model's choice. `is True` (not
+        # truthiness) so a MagicMock attr in tests doesn't read as "challenged".
+        challenged_before = getattr(session, "_scratchpad_challenged", False) is True
+        if name not in seen and seen and not confirm_new and not challenged_before:
+            session._scratchpad_challenged = True
             existing = "', '".join(sorted(seen))
             return (
                 f"You already have an active scratchpad ('{existing}') with live state "

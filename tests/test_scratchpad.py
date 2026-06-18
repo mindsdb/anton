@@ -866,6 +866,19 @@ class TestProgressAndTimeouts:
         assert inactivity == float(CoreSettings().cell_inactivity_max)
         assert total == 600.0  # total is intentionally left uncapped
 
+    async def test_compute_timeouts_total_max_off_by_default(self):
+        """cell_total_max defaults to 0 — the total is uncapped out of the box."""
+        from anton.core.settings import CoreSettings
+        assert CoreSettings().cell_total_max == 0
+
+    async def test_compute_timeouts_total_max_backstop(self, monkeypatch):
+        """When set, cell_total_max bounds the total; inactivity stays capped."""
+        from anton.core.backends.utils import compute_timeouts as _compute_timeouts
+        monkeypatch.setenv("ANTON_CELL_TOTAL_MAX", "300")
+        total, inactivity = _compute_timeouts(1000)
+        assert total == 300.0  # min(2000, 300)
+        assert inactivity == 60.0
+
 
 class TestSampleFunction:
     async def test_sample_available_in_namespace(self):

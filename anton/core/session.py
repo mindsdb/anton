@@ -339,7 +339,11 @@ class ChatSession:
         low = result_text.lower()
         if "timed out" in low or "inactivity" in low:
             return SCRATCHPAD_TIMEOUT_NUDGE
-        if "argument was empty" in low or "too large" in low or "truncated" in low:
+        # Match the empty-code dispatcher message specifically — generic
+        # phrases like "too large"/"truncated" appear in unrelated errors
+        # (e.g. a MySQL "Data truncated for column" warning) and would
+        # misfire the chunking advice.
+        if "argument was empty" in low:
             return SCRATCHPAD_SIZE_NUDGE
         return ""
 

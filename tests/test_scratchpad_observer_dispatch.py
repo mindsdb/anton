@@ -346,6 +346,19 @@ class TestSingleScratchpadGuard:
         assert "report" in session._agent_scratchpad_names
 
     @pytest.mark.asyncio
+    async def test_challenge_fires_at_most_once_per_session(self):
+        # The challenge must not be able to induce its own loop: a model that
+        # keeps requesting new names without confirming is nudged once, then
+        # allowed (the challenge isn't an error, so nothing else would stop it).
+        session, _ = _fake_session()
+        session._agent_scratchpad_names = {"dash"}
+        first = await handle_scratchpad(session, self._exec("report"))
+        assert _CHALLENGE_MARK in first
+        second = await handle_scratchpad(session, self._exec("report2"))
+        assert _CHALLENGE_MARK not in second
+        assert "report2" in session._agent_scratchpad_names
+
+    @pytest.mark.asyncio
     async def test_system_pads_do_not_count_against_agent(self):
         # A system-created pad (e.g. the artifact backend launcher's slug pad)
         # lives in _scratchpads.pads but never in _agent_scratchpad_names, so
