@@ -164,7 +164,7 @@ wheels = [
 ]
 
 [[package]]
-name = "anton-agent"
+name = "anton"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
