@@ -17,7 +17,11 @@ from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
-from anton.core.llm.prompts import RESILIENCE_NUDGE
+from anton.core.llm.prompts import (
+    RESILIENCE_NUDGE,
+    SCRATCHPAD_SIZE_NUDGE,
+    SCRATCHPAD_TIMEOUT_NUDGE,
+)
 from anton.core.llm.provider import (
     ContextOverflowError,
     StreamComplete,
@@ -303,8 +307,10 @@ class ChatSession:
 
         streak = error_streak.get(tool_name, 0)
         if streak >= self._resilience_nudge_at and tool_name not in resilience_nudged:
-            result_text += RESILIENCE_NUDGE
-            resilience_nudged.add(tool_name)
+            nudge = self._select_resilience_nudge(tool_name, result_text)
+            if nudge:
+                result_text += nudge
+                resilience_nudged.add(tool_name)
 
         if streak >= self._max_consecutive_errors:
             result_text += (
@@ -314,6 +320,28 @@ class ChatSession:
             )
 
         return result_text
+
+    @staticmethod
+    def _select_resilience_nudge(tool_name: str, result_text: str) -> str:
+        """Pick the right soft-nudge for a repeated failure.
+
+        The generic RESILIENCE_NUDGE is scrape/fetch advice ("try a public
+        API / archive.org / different headers"). That actively misdirects a
+        scratchpad failure: a cell that's too big or too slow doesn't need a
+        different data source, it needs to be chunked or scoped down. Route
+        scratchpad failures to size/timeout-specific guidance by inspecting
+        the error text; everything else keeps the generic nudge. Returns ""
+        when no useful nudge applies (e.g. a generic scratchpad runtime error
+        like NameError, where scraping advice would be nonsense).
+        """
+        if tool_name != "scratchpad":
+            return RESILIENCE_NUDGE
+        low = result_text.lower()
+        if "timed out" in low or "inactivity" in low:
+            return SCRATCHPAD_TIMEOUT_NUDGE
+        if "argument was empty" in low or "too large" in low or "truncated" in low:
+            return SCRATCHPAD_SIZE_NUDGE
+        return ""
 
     def repair_history(self) -> None:
         """Fix dangling tool_use blocks left by mid-stream cancellation.

@@ -810,3 +810,22 @@ RESILIENCE_NUDGE = (
     "a public API, archive.org, an alternate library, or a completely different data source. "
     "Only involve the user if the problem truly requires something only they can provide."
 )
+
+# Scratchpad failures need different advice than the generic (scrape/fetch)
+# RESILIENCE_NUDGE above — telling the model to "try a public API / archive.org"
+# when a cell is too big or too slow just sends it renaming-and-retrying. These
+# are chosen by failure type in ChatSession._apply_error_tracking.
+SCRATCHPAD_SIZE_NUDGE = (
+    "\n\nSYSTEM: This scratchpad cell keeps failing on its size, not its logic. "
+    "Stop retrying the same large cell. Write the output to disk incrementally — "
+    "open(path, 'w') once, then open(path, 'a') to append each chunk, keeping each "
+    "cell's string under ~5KB — or generate the content inside the cell instead of "
+    "passing a large literal. Reuse the SAME scratchpad; do not rename it."
+)
+SCRATCHPAD_TIMEOUT_NUDGE = (
+    "\n\nSYSTEM: This scratchpad cell keeps timing out — the work is too heavy, not "
+    "the write. Make the next cell smaller: fewer rows/items per cell, split a long "
+    "loop across cells (process a batch, return, continue), or narrow the scope. Call "
+    "progress() inside long loops so active work isn't mistaken for a hang. Reuse the "
+    "SAME scratchpad; do not rename it."
+)
