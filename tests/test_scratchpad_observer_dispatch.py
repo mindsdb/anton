@@ -23,6 +23,59 @@ from anton.core.tools.tool_handlers import (
     _fire_pre_execute,
     handle_scratchpad,
 )
+from anton.core.utils.scratchpad import observe_scratchpad_cell
+
+
+class _RecordingAccSession:
+    """Session stub that records ACC observations."""
+
+    def __init__(self):
+        self.events: list[tuple] = []
+
+    def _acc_observe(self, kind, detail, *, severity=1):
+        self.events.append((kind, detail, severity))
+
+
+class TestObserveScratchpadCell:
+    """observe_scratchpad_cell is the shared post-exec ACC emitter used by
+    BOTH the CLI (handle_scratchpad) and streaming (turn_stream) paths."""
+
+    def test_timeout_kill_emits_scratchpad_killed(self):
+        s = _RecordingAccSession()
+        cell = Cell(code="x", stdout="", stderr="", error="Cell timed out after 180s total. Process killed")
+        observe_scratchpad_cell(s, "dash", cell)
+        assert s.events[0][0] == "scratchpad_killed"
+        assert s.events[0][1]["name"] == "dash"
+
+    def test_inactivity_kill_emits_scratchpad_killed(self):
+        s = _RecordingAccSession()
+        cell = Cell(code="x", stdout="", stderr="", error="Cell killed after 60s of inactivity")
+        observe_scratchpad_cell(s, "dash", cell)
+        assert s.events[0][0] == "scratchpad_killed"
+
+    def test_runtime_error_emits_result_failure(self):
+        s = _RecordingAccSession()
+        cell = Cell(code="x", stdout="", stderr="", error="Traceback...\nNameError: x")
+        observe_scratchpad_cell(s, "dash", cell)
+        assert s.events[0][0] == "scratchpad_result"
+        assert s.events[0][1]["success"] is False
+
+    def test_success_emits_result_success(self):
+        s = _RecordingAccSession()
+        cell = Cell(code="x", stdout="42", stderr="", error=None)
+        observe_scratchpad_cell(s, "dash", cell)
+        assert s.events[0][0] == "scratchpad_result"
+        assert s.events[0][1]["success"] is True
+
+    def test_none_cell_emits_nothing(self):
+        s = _RecordingAccSession()
+        observe_scratchpad_cell(s, "dash", None)
+        assert s.events == []
+
+    def test_no_acc_observer_is_noop(self):
+        # A session without _acc_observe (e.g. ACC off) must not raise.
+        observe_scratchpad_cell(SimpleNamespace(), "dash",
+                                Cell(code="x", stdout="", stderr="", error=None))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

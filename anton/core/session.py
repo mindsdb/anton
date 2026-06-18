@@ -52,7 +52,11 @@ from anton.core.tools.tool_defs import (
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
-from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
+from anton.core.utils.scratchpad import (
+    prepare_scratchpad_exec,
+    format_cell_result,
+    observe_scratchpad_cell,
+)
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
@@ -1822,6 +1826,15 @@ class ChatSession:
                                         pad_name=tc.input.get("name", ""),
                                         description=description,
                                         cell=cell,
+                                    )
+                                    # Same post-execute ACC event as the CLI
+                                    # path (handle_scratchpad) — this inline
+                                    # streaming exec bypasses that handler, so
+                                    # without this scratchpad_killed/result
+                                    # would never fire here and detect_kill_loop
+                                    # would be blind in the streaming product.
+                                    observe_scratchpad_cell(
+                                        self, tc.input.get("name", ""), cell
                                     )
                                     yield StreamToolResult(
                                         name=tc.name,

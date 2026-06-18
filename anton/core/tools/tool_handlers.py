@@ -4,7 +4,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
-from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
+from anton.core.utils.scratchpad import (
+    prepare_scratchpad_exec,
+    format_cell_result,
+    observe_scratchpad_cell,
+)
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
@@ -408,60 +412,16 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             fn(kind, detail, severity=severity)
 
     if action == "exec":
-        # Single-scratchpad guard: the agent should reuse ONE scratchpad per
-        # task. A new name spins up a separate, empty process — state from the
-        # existing pad isn't visible there — a common source of wasted rounds
-        # (re-import, re-fetch, shuffling state across pads). Challenge a new
-        # name when the agent already has a working scratchpad this session,
-        # unless it explicitly confirms it needs isolation.
-        #
-        # We track names the agent has exec'd here — NOT session._scratchpads.pads,
-        # which also holds system-created pads (e.g. the artifact backend
-        # launcher's slug pad). Those must never count against the agent.
-        seen = getattr(session, "_agent_scratchpad_names", None)
-        if not isinstance(seen, set):
-            seen = set()
-            session._agent_scratchpad_names = seen
-        confirm_new = bool(tc_input.get("confirm_new_scratchpad", False))
-        # Challenge AT MOST ONCE per session. The challenge returns a non-error
-        # string (so it doesn't trip the circuit breaker), so if we re-challenged
-        # every new name a model that keeps renaming without confirming would
-        # loop until the round cap with nothing to stop it. One firm nudge is the
-        # enforcement; after that we respect the model's choice. `is True` (not
-        # truthiness) so a MagicMock attr in tests doesn't read as "challenged".
-        challenged_before = getattr(session, "_scratchpad_challenged", False) is True
-        if name not in seen and seen and not confirm_new and not challenged_before:
-            session._scratchpad_challenged = True
-            existing = "', '".join(sorted(seen))
-            return (
-                f"You already have an active scratchpad ('{existing}') with live state "
-                f"(imports, variables, fetched data). Starting a new one named '{name}' "
-                "creates a SEPARATE, empty environment — nothing from the existing "
-                "scratchpad is available there, so you'd re-import and re-fetch. Reuse the "
-                "existing scratchpad for this task; it is stateful across cells. If you "
-                "genuinely need an isolated environment, call scratchpad exec again with "
-                "confirm_new_scratchpad=true."
-            )
-        seen.add(name)
-
+        # The single-scratchpad guard and the pre-execute ACC events
+        # (scratchpad_empty_code / scratchpad_call) live in
+        # prepare_scratchpad_exec — the SHARED entry point that the streaming
+        # path (ChatSession.turn_stream) also calls — so they fire on both
+        # paths. A str return is a message the call should not run past
+        # (empty code, single-scratchpad challenge, or install failure).
         result = await prepare_scratchpad_exec(session, tc_input)
         if isinstance(result, str):
-            # Empty / malformed code parameter — the dispatcher rejected
-            # it before reaching the runtime. This is exactly the
-            # "silent code-clip" failure mode the ACC's
-            # detect_oversized_cell watches for.
-            _acc_observe("scratchpad_empty_code", {"name": name}, severity=7)
             return result
         pad, code, description, estimated_time, estimated_seconds = result
-
-        _acc_observe(
-            "scratchpad_call",
-            {
-                "name": name,
-                "code_len": len(code or ""),
-                "one_line_description": description or "",
-            },
-        )
 
         # Notify pre-execute observers (e.g. cerebellum). The runtime
         # never sees these — observation is an orchestration concern,
@@ -488,31 +448,9 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
                 pad_name=name, description=description, cell=cell,
             )
             await _fire_post_execute(session, cell)
-            # ACC: distinguish "killed" (timeout/cancel/OOM) from a
-            # plain runtime error. The local backend sets cell.error
-            # to a string starting with "Cancelled" or matching the
-            # "Cell timed out"/"Cell killed" prefixes from the
-            # asyncio.TimeoutError path. Everything else (NameError,
-            # ImportError, …) is a regular result with success=False.
-            err = (cell.error or "").strip()
-            if err.startswith(("Cancelled", "Cell timed out", "Cell killed")):
-                _acc_observe(
-                    "scratchpad_killed",
-                    {"name": name, "reason": err[:120]},
-                    severity=6,
-                )
-            else:
-                success = not err and not (cell.stderr or "").strip()
-                _acc_observe(
-                    "scratchpad_result",
-                    {
-                        "name": name,
-                        "success": success,
-                        "stdout_len": len(cell.stdout or ""),
-                        "error": err[:300] if err else "",
-                    },
-                    severity=5 if not success else 1,
-                )
+            # Post-execute ACC event (killed vs result) via the shared helper —
+            # the streaming path emits the same.
+            observe_scratchpad_cell(session, name, cell)
         return format_cell_result(cell)
 
     elif action == "view":
