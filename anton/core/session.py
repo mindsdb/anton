@@ -233,16 +233,17 @@ class ChatSession:
         # turn. Mirrors ANTON_MEMORY_MODE for shape consistency:
         #   "off"     — ACC observes nothing (skipped at every emit site).
         #   "passive" — Layer 1: lessons drain to memory at end-of-turn,
-        #               next turn's system prompt picks them up. SAFE
-        #               DEFAULT — adds no surface-area to the turn loop.
-        #   "active"  — Layer 2: ALSO inject lessons inline as text
-        #               blocks in tool_results so the LLM sees them on
-        #               the very next round. Stronger learning signal,
-        #               but more invasive — the LLM has to handle the
-        #               nudge gracefully without confusing it for a
-        #               user instruction.
-        _mode_raw = os.environ.get("ANTON_ACC_MODE", "passive").strip().lower()
-        self._acc_mode = _mode_raw if _mode_raw in ("off", "passive", "active") else "passive"
+        #               next turn's system prompt picks them up. No
+        #               surface-area on the turn loop.
+        #   "active"  — Layer 2 (DEFAULT): ALSO inject lessons inline as
+        #               text blocks in tool_results so the LLM sees them on
+        #               the very next round and can self-correct mid-task.
+        #               Stronger signal; the nudge is clearly labelled as an
+        #               automatic self-check (not a user instruction). Set
+        #               ANTON_ACC_MODE=passive to revert to learn-next-turn,
+        #               or =off to disable, if it ever causes trouble.
+        _mode_raw = os.environ.get("ANTON_ACC_MODE", "active").strip().lower()
+        self._acc_mode = _mode_raw if _mode_raw in ("off", "passive", "active") else "active"
         # Scratchpad observers — list of objects with on_pre_execute /
         # on_post_execute. Fired by handle_scratchpad around pad.execute.
         # The runtime never sees this list; observation lives at the
@@ -334,9 +335,8 @@ class ChatSession:
         scratchpad failure: a cell that's too big or too slow doesn't need a
         different data source, it needs to be chunked or scoped down. Route
         scratchpad failures to size/timeout-specific guidance by inspecting
-        the error text; everything else keeps the generic nudge. Returns ""
-        when no useful nudge applies (e.g. a generic scratchpad runtime error
-        like NameError, where scraping advice would be nonsense).
+        the error text; a generic scratchpad error (e.g. a SyntaxError) and
+        every non-scratchpad tool keep the generic nudge.
         """
         if tool_name != "scratchpad":
             return RESILIENCE_NUDGE
@@ -349,7 +349,10 @@ class ChatSession:
         # misfire the chunking advice.
         if "argument was empty" in low:
             return SCRATCHPAD_SIZE_NUDGE
-        return ""
+        # Other scratchpad failures (syntax/runtime errors): the generic
+        # "you've failed twice, change approach" nudge still applies — only
+        # the size/timeout cases get specialised advice.
+        return RESILIENCE_NUDGE
 
     def repair_history(self) -> None:
         """Fix dangling tool_use blocks left by mid-stream cancellation.

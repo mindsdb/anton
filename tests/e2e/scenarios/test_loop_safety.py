@@ -63,9 +63,12 @@ def test_session_exits_within_timeout(cfg, stub, tmp_path):
 
 @pytest.mark.stub_only
 def test_resilience_nudge_injected_after_two_errors(cfg, stub, tmp_path):
+    # Reuse ONE scratchpad name: a realistic retry loop is the same cell
+    # failing twice. (Distinct names would instead trip the single-scratchpad
+    # guard, which is exercised separately.)
     bad_code = "def oops(:\n    pass"
-    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "bad1", "code": bad_code})
-    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "bad2", "code": bad_code})
+    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "bad", "code": bad_code})
+    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "bad", "code": bad_code})
     stub.queue_text("NUDGE_RECEIVED")
     stub.queue_verification_ok()
     result = run_anton(["--folder", str(tmp_path)], ["do bad stuff", "exit"],
@@ -82,9 +85,12 @@ def test_resilience_nudge_injected_after_two_errors(cfg, stub, tmp_path):
 
 @pytest.mark.stub_only
 def test_circuit_breaker_fires_after_five_consecutive_errors(cfg, stub, tmp_path):
+    # Reuse ONE scratchpad name so this exercises the consecutive-error
+    # circuit breaker, not the single-scratchpad guard (distinct names would
+    # trigger a guard challenge that resets the streak).
     bad_code = "def bad(:\n    pass"
     for i in range(5):
-        stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"err_{i}", "code": bad_code})
+        stub.queue_tool_call("scratchpad", {"action": "exec", "name": "err", "code": bad_code})
     stub.queue_text("ERRORS_EXHAUSTED")
     stub.queue_verification_ok()
     result = run_anton(["--folder", str(tmp_path)], ["break everything", "exit"],
