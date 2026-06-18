@@ -80,6 +80,18 @@ def test_list_models_returns_openai_list_shape(client, auth_headers, stub_availa
     assert gpt["owned_by"] == "openai"
 
 
+@pytest.mark.parametrize("path", ["/v1/models", "/v1/models/"])
+def test_list_models_serves_both_slash_variants_without_redirect(client, auth_headers, stub_available_models, path):
+    """Both /v1/models and /v1/models/ return 200 directly (no 307 redirect).
+
+    The OpenAI SDK's client.models.list() hits /v1/models with no trailing
+    slash; relying on a redirect can drop auth headers behind some proxies.
+    """
+    response = client.get(path, headers=auth_headers, follow_redirects=False)
+    assert response.status_code == 200
+    assert response.json()["object"] == "list"
+
+
 def test_list_models_excludes_deprecated_aliases(client, auth_headers, stub_available_models):
     # The endpoint relies on list_available_passthrough_models to filter; this
     # confirms no deprecated spelling leaks through the endpoint's id format.

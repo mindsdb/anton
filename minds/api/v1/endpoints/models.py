@@ -26,6 +26,11 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+# Registered for both ``/v1/models`` and ``/v1/models/``. The OpenAI SDK's
+# ``client.models.list()`` issues ``GET /v1/models`` with no trailing slash;
+# serving both paths directly avoids FastAPI's 307 redirect, which can drop
+# auth headers behind some proxies/ingresses.
+@router.get("")
 @router.get("/")
 async def list_models(context: Context = Depends(get_context)) -> dict:
     """
