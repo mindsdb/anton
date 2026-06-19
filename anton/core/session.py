@@ -60,6 +60,11 @@ from anton.utils.datasources import (
 from anton.core.settings import CoreSettings
 
 
+# Sentinel prefixing a compacted-history summary so later compactions can
+# recognize and update it in place rather than summarize a summary.
+_COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
+
+
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
@@ -782,12 +787,18 @@ class ChatSession:
         old_turns = self._history[:split]
         recent_turns = self._history[split:]
 
-        # Serialize old turns into text for summarization
+        # Serialize old turns. Pull out any prior compacted summary so we
+        # UPDATE it in place rather than summarize a summary (which compounds
+        # loss every compaction).
+        prior_summary = ""
         lines: list[str] = []
         for msg in old_turns:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if isinstance(content, str):
+                if content.lstrip().startswith(_COMPACTED_MARKER):
+                    prior_summary = content
+                    continue
                 lines.append(f"[{role}]: {content[:2000]}")
             elif isinstance(content, list):
                 for block in content:
@@ -808,17 +819,40 @@ class ChatSession:
         if len(old_text) > 8000:
             old_text = old_text[:8000] + "\n... (truncated)"
 
+        if prior_summary:
+            user_content = (
+                "PREVIOUS SUMMARY (update this in place — merge the new turns into it, "
+                "don't restate it verbatim):\n"
+                f"{prior_summary}\n\n"
+                "NEW TURNS TO FOLD IN:\n"
+                f"{old_text}"
+            )
+        else:
+            user_content = old_text
+
         try:
+            # 3b-full: a structured, in-place-updated STATE RECORD rather than a
+            # freeform blob — so "Remaining" work survives compaction instead of
+            # being flattened into prose.
             summary_response = await self._llm.code(
                 system=(
-                    "Summarize this conversation history concisely. Preserve:\n"
-                    "- Key decisions and conclusions\n"
-                    "- Important data/results discovered\n"
-                    "- Variable names and values that are still relevant\n"
-                    "- Errors encountered and how they were resolved\n"
-                    "Keep it under 2000 tokens. Use bullet points."
+                    "You compact an agent's earlier conversation into a terse, factual "
+                    "STATE RECORD (not prose). Output only these sections, omitting any "
+                    "that are empty:\n"
+                    "## Goal — what the user ultimately wants\n"
+                    "## Constraints — explicit requirements / preferences / do-nots\n"
+                    "## Completed — work already done, each as `action → outcome`\n"
+                    "## Active state — variables, data, files/artifacts in play and their "
+                    "current values or paths\n"
+                    "## Blocked — anything stuck and why\n"
+                    "## Decisions — choices made and the reason\n"
+                    "## Remaining — what is still left to do\n\n"
+                    "If a PREVIOUS SUMMARY is provided, update it with the new turns "
+                    "instead of starting over. If the user changed direction, narrowed "
+                    "scope, or cancelled something, reflect that — drop superseded items "
+                    "from Remaining, don't keep them. Keep it under ~2000 tokens."
                 ),
-                messages=[{"role": "user", "content": old_text}],
+                messages=[{"role": "user", "content": user_content}],
                 max_tokens=2048,
             )
             summary = summary_response.content or "(summary unavailable)"
@@ -826,17 +860,26 @@ class ChatSession:
             # If summarization fails, just do a simple truncation
             summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
 
-        summary_msg = {
-            "role": "user",
-            "content": f"[Context summary of earlier conversation]\n{summary}",
-        }
+        # 3b-light: reference-only framing so the model treats this as compacted
+        # history, not a fresh instruction, and never resumes superseded/cancelled
+        # work after a compaction (which Anton's auto-continue verifier would
+        # otherwise be nudged to do).
+        summary_body = (
+            f"{_COMPACTED_MARKER}\n"
+            "Compacted record of earlier conversation, for REFERENCE ONLY — not a new "
+            "request. The most recent user message takes priority; if the user changed "
+            "direction, narrowed scope, or cancelled something, follow that and do NOT "
+            "resume superseded work described below.\n\n"
+            f"{summary}"
+        )
+        summary_msg = {"role": "user", "content": summary_body}
 
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
             self._history = [
                 summary_msg,
-                {"role": "assistant", "content": "Understood."},
+                {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
             ]
         else:
