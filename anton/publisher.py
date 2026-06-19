@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 from anton.core.artifacts.models import Artifact
-from anton.core.datasources.data_vault import LocalDataVault
+from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
 
@@ -59,6 +59,54 @@ def hash_access_password(password: str) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
     b64 = lambda b: base64.b64encode(b).decode("ascii")
     return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${b64(salt)}${b64(dk)}"
+
+
+def _normalize_emails(values) -> list[str]:
+    """Strip + lowercase + de-dupe, preserving first-seen order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values or []:
+        email = str(raw).strip().lower()
+        if email and email not in seen:
+            seen.add(email)
+            out.append(email)
+    return out
+
+
+def build_access_payload(access: dict | None, *, pwd_version: int = 1, access_version: int = 1) -> dict:
+    """Translate the inbound access spec into the `/upload` ``access`` block.
+
+    Input (from cowork-server, the caller) is one of::
+
+        {"mode": "public"}                                          # or None
+        {"mode": "password", "password": "plaintext"}
+        {"mode": "restricted", "emails": [...], "org_allowed": bool}
+
+    Output (what travels to anton-services):
+
+        {"mode": "public"}
+        {"mode": "password", "password_hash": "pbkdf2_sha256$...", "pwd_version": N}
+        {"mode": "restricted", "allowed_emails": [...], "org_allowed": bool, "access_version": N}
+
+    The plaintext password is hashed here and never forwarded. Emails are
+    normalized and forwarded as-is (auth compares them server-side) and never
+    enter the zip bundle.
+    """
+    mode = (access or {}).get("mode", "public")
+    if mode == "password":
+        return {
+            "mode": "password",
+            "password_hash": hash_access_password(access["password"]),
+            "pwd_version": pwd_version,
+        }
+    if mode == "restricted":
+        return {
+            "mode": "restricted",
+            "allowed_emails": _normalize_emails(access.get("emails")),
+            "org_allowed": bool(access.get("org_allowed")),
+            "access_version": access_version,
+        }
+    return {"mode": "public"}
 
 # Patterns that capture relative paths from HTML attributes and CSS url()
 _REF_PATTERNS = [
@@ -176,13 +224,19 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
 
 def _collect_datasource_secrets(
     artifact: Artifact,
+    vault: DataVault | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Resolve DS_*__FIELD secrets for an artifact's declared datasources.
 
     Returns (secrets, missing) where `missing` is the list of slugs whose
     vault entry could not be loaded. Caller decides how to surface that.
+
+    `vault` lets a caller point at a non-default credential store (e.g.
+    cowork-server, which keeps its vault at `~/.cowork/data-vault` rather
+    than anton's default `~/.anton/data_vault`). Defaults to the local
+    anton vault when not provided.
     """
-    vault = LocalDataVault()
+    vault = vault or LocalDataVault()
     secrets: dict[str, str] = {}
     missing: list[str] = []
     for ref in artifact.datasources:
@@ -207,6 +261,9 @@ def publish(
     ssl_verify: bool = True,
     password: str | None = None,
     pwd_version: int = 1,
+    access: dict | None = None,
+    access_version: int = 1,
+    vault: DataVault | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
 
@@ -224,6 +281,18 @@ def publish(
                   responsible for storing the plaintext owner-side.
         pwd_version: Monotonic version bumped whenever the password
                   changes, so previously issued access cookies invalidate.
+        access: Structured access spec, mutually exclusive with `password`:
+                  {"mode": "public"} |
+                  {"mode": "password", "password": "..."} |
+                  {"mode": "restricted", "emails": [...], "org_allowed": bool}.
+                  When omitted, a bare `password=` is mapped to password mode.
+                  See `build_access_payload` for the outbound shape.
+        access_version: Monotonic version bumped whenever the restricted list/
+                  org flag changes, invalidating previously issued grants.
+        vault: Credential store to resolve datasource secrets from. Defaults
+                  to anton's local vault (`~/.anton/data_vault`); cowork-server
+                  passes its own vault so published secrets match where the
+                  connection credentials were actually saved.
 
     Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
     """
@@ -235,7 +304,7 @@ def publish(
     artifact = _load_artifact_metadata(file_path) if file_path.is_dir() else None
     if artifact is not None and artifact.type in FULLSTACK_ARTIFACT_TYPES:
         zipped, _included = _zip_fullstack(file_path)
-        secrets, missing = _collect_datasource_secrets(artifact)
+        secrets, missing = _collect_datasource_secrets(artifact, vault)
         payload_dict["artifact_type"] = artifact.type
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
@@ -248,17 +317,16 @@ def publish(
     payload_dict["file_payload"] = base64.b64encode(zipped).decode()
     if report_id:
         payload_dict["report_id"] = report_id
-    # Access control: send the hash (never the plaintext). Omitting the
-    # key entirely on a public publish lets the server clear any prior
-    # protection on re-publish.
-    payload_dict["access"] = (
-        {
-            "requires_password": True,
-            "password_hash": hash_access_password(password),
-            "pwd_version": pwd_version,
-        }
-        if password
-        else {"requires_password": False}
+    # Access control: send the hash (never the plaintext) and, for restricted
+    # mode, the normalized email list + org flag (auth is the source of truth;
+    # neither the list nor the password plaintext enters the zip bundle). A
+    # `public` mode clears any prior protection on re-publish.
+    #
+    # Backward-compat: a bare `password=` (no `access=`) maps to password mode.
+    if access is None and password:
+        access = {"mode": "password", "password": password}
+    payload_dict["access"] = build_access_payload(
+        access, pwd_version=pwd_version, access_version=access_version
     )
     payload = json.dumps(payload_dict).encode()
 

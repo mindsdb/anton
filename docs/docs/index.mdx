@@ -1,0 +1,73 @@
+---
+id: index
+title: Welcome to Anton
+slug: /
+hide_table_of_contents: true
+---
+
+import Link from '@docusaurus/Link';
+
+<div className="anton-hero">
+
+# Meet Anton
+
+<p className="anton-hero-tagline">
+Anton is an open-source AI coworker that can execute tasks, connect to tools
+and data, remember lessons, and improve its workflows over time.
+</p>
+
+<div className="anton-hero-buttons">
+  <Link className="button button--primary button--lg" to="/start/quickstart">
+    Quickstart — 5 minutes
+  </Link>
+  <Link className="button button--secondary button--lg" to="/use/desktop">
+    Download Desktop
+  </Link>
+  <a className="button button--secondary button--lg" href="https://github.com/mindsdb/anton">
+    View on GitHub
+  </a>
+</div>
+
+<div className="anton-hero-demo">
+
+![Anton running in a terminal](/img/anton-promo.gif)
+
+</div>
+
+</div>
+
+## What Anton does
+
+You describe the outcome; Anton figures out the steps. It writes and runs code
+in an isolated workspace, connects to your databases and apps, searches the
+web, and delivers the result — a report, a cleaned inbox, a live dashboard, a
+working integration.
+
+- **Hand off real tasks** — automated reporting, email cleanup, calendar
+  management, research and synthesis, workflow automation.
+- **Connect your data and apps** — Postgres, BigQuery, Snowflake, Gmail,
+  Salesforce, HubSpot, and more, with credentials kept in a local vault that
+  is never exposed to the model. See [Connect things](/connect/overview).
+- **Teach it your way of working** — Anton saves lessons, rules, and reusable
+  skills as it works, and gets better at *your* workflows over time. See
+  [Teach Anton](/teach/memory-overview).
+- **Use any model** — Minds, Anthropic, OpenAI, Gemini, or any
+  OpenAI-compatible endpoint, including local ones. See
+  [Pick a provider](/start/pick-a-provider).
+
+Anton is not a coding copilot. It writes code as a *means* to deliver an
+outcome, not as the product. And it is not a chatbot — it takes action,
+remembers what it learned, and improves.
+
+## Where to go next
+
+- [Quickstart](/start/quickstart) — install, run your first task, and watch
+  Anton learn from it, in about five minutes.
+- [Use Anton](/use/cli) — the terminal interface, sessions, and workspaces.
+- [Reference](/reference/cli-commands) — every CLI and slash command.
+
+<p className="anton-contributor-note">
+Curious how Anton thinks? Read the <Link to="/developer/architecture">architecture
+overview</Link> — the contributor guide covers the brain-inspired memory systems,
+the scratchpad runtime, and how to add tools and data sources.
+</p>

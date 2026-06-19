@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 METADATA_FILENAME = "metadata.json"
 README_FILENAME = "README.md"
+PUBLISHED_FILENAME = ".published.json"
+
+# Files the store owns or that hold publish-state — not artifact content the
+# agent authored — so they're excluded from `files[]`. Mirrors cowork-server's
+# artifacts-service housekeeping set so the agent's view and the UI agree on
+# what counts as an artifact file.
+_HOUSEKEEPING_FILES = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
 
 # Same character whitelist projects_store uses — keeps slug shapes
 # consistent across antontron's project names AND artifact slugs.
@@ -224,14 +231,24 @@ class ArtifactStore:
                 continue
             artifact = self._load_silent(child.name)
             if artifact is not None:
-                out.append(artifact)
+                # Reconcile against disk so file counts are accurate even
+                # though scratchpad writes bypass the store (see _reconcile_files).
+                out.append(self._reconcile_files(artifact))
         out.sort(key=lambda a: a.updatedAt, reverse=True)
         return out
 
     def open(self, slug: str) -> Artifact | None:
-        """Load an artifact by slug. None when the folder doesn't
-        exist or the metadata file is missing/corrupt."""
-        return self._load_silent(slug)
+        """Load an artifact by slug, reconciling `files[]` against disk.
+
+        None when the folder doesn't exist or the metadata file is
+        missing/corrupt. Reconciliation (see `_reconcile_files`) is what
+        makes scratchpad-written files show up in `files[]` — the agent
+        writes them directly to the folder, bypassing the store.
+        """
+        artifact = self._load_silent(slug)
+        if artifact is None:
+            return None
+        return self._reconcile_files(artifact)
 
     # ── Provenance + per-turn updates ───────────────────────────
 
@@ -287,18 +304,39 @@ class ArtifactStore:
         return artifact
 
     def rescan_files(self, slug: str) -> Artifact | None:
-        """Refresh `files[]` from disk. Skips `metadata.json` and
-        `README.md` — those are housekeeping, not artifact content."""
+        """Reconcile `files[]` with what's actually on disk, by slug.
+
+        Returns the (possibly refreshed) artifact, or None when the slug
+        is missing. See `_reconcile_files` for the why.
+        """
         artifact = self._load_silent(slug)
         if artifact is None:
             return None
-        folder = self.folder_for(slug)
+        return self._reconcile_files(artifact)
+
+    def _reconcile_files(self, artifact: Artifact) -> Artifact:
+        """Re-derive `files[]` from disk for an already-loaded artifact.
+
+        Scratchpad code writes artifact files straight into the folder via
+        plain ``open()``, bypassing the store — so without this, `files[]`
+        stays frozen at whatever ``create()``/``update()`` last set (usually
+        empty), and ``open()``/``list()`` report file_count 0 for artifacts
+        that are fully written on disk. The agent then concludes the file is
+        missing and burns turns in a recovery loop.
+
+        Persists (and bumps ``updatedAt``) ONLY when the on-disk file set
+        actually changed, so this is safe and cheap to call on every read —
+        no metadata/README churn and no spurious ``updatedAt`` bumps when
+        nothing moved. Skips housekeeping files (`metadata.json` /
+        `README.md` / `.published.json`).
+        """
+        folder = self.folder_for(artifact.slug)
         entries: list[FileEntry] = []
         for p in sorted(folder.rglob("*")):
             if not p.is_file() or p.is_symlink():
                 continue
             rel = str(p.relative_to(folder))
-            if rel in (METADATA_FILENAME, README_FILENAME):
+            if rel in _HOUSEKEEPING_FILES:
                 continue
             try:
                 stat = p.stat()
@@ -308,6 +346,13 @@ class ArtifactStore:
                 stat.st_mtime, timezone.utc
             ).isoformat(timespec="seconds")
             entries.append(FileEntry(path=rel, bytes=stat.st_size, modifiedAt=mtime_iso))
+
+        def _fingerprint(files: list[FileEntry]) -> list[tuple]:
+            return sorted((f.path, f.bytes, f.modifiedAt) for f in files)
+
+        if _fingerprint(entries) == _fingerprint(artifact.files):
+            return artifact  # nothing changed on disk — don't rewrite metadata
+
         artifact.files = entries
         artifact.updatedAt = _utc_now()
         self._save(artifact)

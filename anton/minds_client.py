@@ -126,7 +126,7 @@ def describe_minds_connection_error(err: Exception) -> tuple[str, str]:
 
 
 def list_minds(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
-    url = f"{base_url}/api/v1/minds/"  # trailing slash required
+    url = f"{base_url}/v1/minds"  # new format (legacy /api/v1 still works but /v1 is preferred)
     raw = minds_request(url, api_key, verify=verify)
     data = _json.loads(raw.decode())
     if isinstance(data, list):
@@ -137,7 +137,7 @@ def list_minds(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
 def get_mind(
     base_url: str, api_key: str, mind_name: str, verify: bool = True
 ) -> dict | None:
-    url = f"{base_url}/api/v1/minds/{mind_name}"
+    url = f"{base_url}/v1/minds/{mind_name}"
     try:
         raw = minds_request(url, api_key, verify=verify, timeout=15)
         return _json.loads(raw.decode())
@@ -177,7 +177,7 @@ def refresh_knowledge(settings: AntonSettings, cortex) -> None:
 def list_datasources(
     base_url: str, api_key: str, verify: bool = True
 ) -> list[dict]:
-    url = f"{base_url}/api/v1/datasources"
+    url = f"{base_url}/v1/datasources"
     raw = minds_request(url, api_key, verify=verify)
     data = _json.loads(raw.decode())
     if isinstance(data, list):
@@ -186,14 +186,17 @@ def list_datasources(
 
 
 def test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
-    """Test if the Minds server supports LLM endpoints (_code_/_reason_ models)."""
-    url = f"{base_url}/api/v1/chat/completions"
+    """Test if the Minds server supports LLM endpoints (_code_/_reason_ models).
+
+    Uses the new /v1/ format (legacy /api/v1/ is still supported by the server).
+    """
     payload = _json.dumps(build_chat_completion_kwargs(
         model="_code_",
         messages=[{"role": "user", "content": "ping"}],
         max_tokens=1,
     )).encode()
 
+    url = f"{base_url}/v1/chat/completions"
     try:
         minds_request(url, api_key, method="POST", payload=payload, verify=verify)
         return True

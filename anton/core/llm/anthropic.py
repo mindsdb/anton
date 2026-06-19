@@ -61,8 +61,17 @@ class AnthropicProvider(LLMProvider):
         # web_fetch tools; we route both through the provider when enabled.
         return {"web_search", "web_fetch"}
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self, api_key: str | None = None, reasoning_effort: str | None = None
+    ) -> None:
         self._api_key = api_key
+        # Opaque effort level forwarded as ``output_config={"effort": ...}`` on
+        # every call when set (None = the model's default). Sent via ``extra_body``
+        # rather than a typed kwarg so it doesn't depend on the resolved
+        # ``anthropic`` SDK version exposing ``output_config`` as a parameter
+        # (the Stainless client rejects unknown kwargs, which would otherwise be a
+        # hard TypeError on older SDKs the moment an effort is set).
+        self._reasoning_effort = reasoning_effort
         kwargs = {}
         if api_key:
             kwargs["api_key"] = api_key
@@ -95,6 +104,8 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
+        if self._reasoning_effort:
+            kwargs["extra_body"] = {"output_config": {"effort": self._reasoning_effort}}
         if beta_headers:
             # Anthropic accepts a comma-separated list of beta features.
             kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
@@ -172,6 +183,8 @@ class AnthropicProvider(LLMProvider):
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
+        if self._reasoning_effort:
+            kwargs["extra_body"] = {"output_config": {"effort": self._reasoning_effort}}
         if beta_headers:
             kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
 

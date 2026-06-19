@@ -1,0 +1,110 @@
+/**
+ * Anton docs theme — Minds-hub press kit branding (https://mindshub.ai/press-kit).
+ *
+ * Colors:  Aqua primary ramp (#1F9CB0 family), Frost neutrals.
+ * Type:    Arimo (headlines), Noto Sans (body), Menlo (code).
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Arimo:wght@400;500;600;700&family=Noto+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  /* Aqua — primary brand ramp */
+  --ifm-color-primary: #1f9cb0;
+  --ifm-color-primary-dark: #16788e;
+  --ifm-color-primary-darker: #115562;
+  --ifm-color-primary-darkest: #0e4651;
+  --ifm-color-primary-light: #45a9b9;
+  --ifm-color-primary-lighter: #7cc3ce;
+  --ifm-color-primary-lightest: #aedae1;
+
+  /* Signal accents */
+  --anton-cobalt: #2f6bd6;
+  --anton-sage: #2e9f7e;
+  --anton-clay: #c25b3f;
+  --anton-citrine: #d9a02c;
+
+  /* Frost neutrals */
+  --anton-frost-bg: #f7f9fa;
+  --anton-frost-border: #dde9ee;
+
+  --ifm-font-family-base: 'Noto Sans', system-ui, -apple-system, 'Segoe UI',
+    Roboto, sans-serif;
+  --ifm-heading-font-family: 'Arimo', 'Noto Sans', system-ui, sans-serif;
+  --ifm-font-family-monospace: Menlo, Monaco, 'Courier New', monospace;
+
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(31, 156, 176, 0.1);
+}
+
+/* Dark mode — lighter aqua for contrast on Frost-dark backgrounds */
+[data-theme='dark'] {
+  --ifm-color-primary: #45a9b9;
+  --ifm-color-primary-dark: #1f9cb0;
+  --ifm-color-primary-darker: #16788e;
+  --ifm-color-primary-darkest: #115562;
+  --ifm-color-primary-light: #7cc3ce;
+  --ifm-color-primary-lighter: #aedae1;
+  --ifm-color-primary-lightest: #d6ecf0;
+
+  --ifm-background-color: #0e1518;
+  --ifm-background-surface-color: #1b262b;
+
+  --docusaurus-highlighted-code-line-bg: rgba(124, 195, 206, 0.15);
+}
+
+.navbar__title {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: 0.02em;
+}
+
+/* Subdued contributor callout used at the bottom of the homepage */
+.anton-contributor-note {
+  margin-top: 4rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--anton-frost-border);
+  color: var(--ifm-color-emphasis-600);
+  font-size: 0.9rem;
+}
+
+[data-theme='dark'] .anton-contributor-note {
+  border-top-color: #2a3940;
+}
+
+/* Hero on the homepage */
+.anton-hero {
+  text-align: center;
+  padding: 3rem 1rem 2rem;
+}
+
+.anton-hero h1 {
+  font-size: 2.6rem;
+}
+
+.anton-hero .anton-hero-tagline {
+  max-width: 42rem;
+  margin: 0 auto 2rem;
+  font-size: 1.15rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.anton-hero-buttons {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.anton-hero-demo {
+  max-width: 760px;
+  margin: 2.5rem auto 0;
+}
+
+.anton-hero-demo img {
+  width: 100%;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(14, 70, 81, 0.25);
+}
+
+[data-theme='dark'] .anton-hero-demo img {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}

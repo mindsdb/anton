@@ -264,6 +264,62 @@ def test_rescan_excludes_metadata_and_readme(store: ArtifactStore):
     assert paths == {"real-file.md"}
 
 
+# ─── Reconcile-on-read (ENG-372) ────────────────────────────────────────────
+# Scratchpad code writes artifact files straight into the folder via plain
+# open(), bypassing the store. open()/list() must reconcile files[] against
+# disk so the agent never sees file_count 0 for a fully-written artifact.
+
+
+def test_open_reflects_scratchpad_written_files(store: ArtifactStore):
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    assert artifact.files == []  # create starts empty
+    folder = store.folder_for(artifact.slug)
+    (folder / "dashboard.html").write_text("<html>" + "x" * 1000 + "</html>")
+    opened = store.open(artifact.slug)
+    assert [f.path for f in opened.files] == ["dashboard.html"]
+    assert opened.files[0].bytes > 1000
+
+
+def test_list_reflects_scratchpad_written_files(store: ArtifactStore):
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    (store.folder_for(artifact.slug) / "dashboard.html").write_text("<html></html>")
+    match = next(a for a in store.list() if a.slug == artifact.slug)
+    assert {f.path for f in match.files} == {"dashboard.html"}
+
+
+def test_reconcile_excludes_published_json(store: ArtifactStore):
+    """.published.json is publish-state housekeeping, not artifact content."""
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    folder = store.folder_for(artifact.slug)
+    (folder / "dashboard.html").write_text("<html></html>")
+    (folder / ".published.json").write_text("{}")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"dashboard.html"}
+
+
+def test_reconcile_on_read_is_idempotent(store: ArtifactStore):
+    """A read with no on-disk change must not re-save or bump updatedAt."""
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    (store.folder_for(artifact.slug) / "dashboard.html").write_text("<html></html>")
+    first = store.open(artifact.slug)   # reconciles + persists
+    second = store.open(artifact.slug)  # no disk change → no re-save
+    assert {f.path for f in second.files} == {"dashboard.html"}
+    assert second.updatedAt == first.updatedAt
+
+
+def test_reconcile_re_saves_and_persists_when_files_change(store: ArtifactStore):
+    """A changed on-disk file set must reconcile AND persist to metadata.json."""
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    folder = store.folder_for(artifact.slug)
+    (folder / "a.html").write_text("<html></html>")
+    assert {f.path for f in store.open(artifact.slug).files} == {"a.html"}
+    # A second file lands on disk → next read reconciles and persists it.
+    (folder / "b.html").write_text("<html></html>")
+    assert {f.path for f in store.open(artifact.slug).files} == {"a.html", "b.html"}
+    on_disk = json.loads(store.metadata_path(artifact.slug).read_text())
+    assert {f["path"] for f in on_disk["files"]} == {"a.html", "b.html"}
+
+
 # ─── README rendering ───────────────────────────────────────────────────────
 
 

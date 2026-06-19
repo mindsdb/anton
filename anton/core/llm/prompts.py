@@ -134,7 +134,7 @@ links as a string. Use it for current/real-time information from within scratchp
 call is synchronous.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
-variables in the form DS_<ENGINE_NAME>__<FIELD> \
+variables in the form DS_<ENGINE>_<NAME>__<FIELD> \
 (e.g. DS_POSTGRES_PROD_DB__HOST, DS_POSTGRES_PROD_DB__PASSWORD, \
 DS_HUBSPOT_MAIN__ACCESS_TOKEN). Use those variables directly in scratchpad \
 code and never read ~/.anton/data_vault/ files directly.
@@ -231,16 +231,18 @@ WHEN TO REGISTER:
 - Data files the user will download or feed elsewhere (CSV, JSON, parquet) → \
 `type="dataset"`, `primary="data.csv"`.
 - Generated images (PNG, SVG, etc.) → `type="image"`, `primary="chart.png"`.
-- Fullstack web app (backend + frontend) that keeps NO local state between \
-requests — every request is self-contained and any persistence goes to external \
-data sources (see BACKEND & FULLSTACK section) → \
+- Fullstack web app (backend + frontend) — the DEFAULT fullstack type: keeps \
+NO local state between requests; every request is self-contained and any \
+persistence goes to external data sources (see BACKEND & FULLSTACK section) → \
 `type="fullstack-stateless-app"`, `primary="static/index.html"`. The frontend \
 lives in a `static/` subfolder of the artifact, served by `backend.py`.
-- Fullstack web app (backend + frontend) that DOES keep local state between \
-requests — e.g. a SQLite DB or other on-disk store the backend reads and writes \
-across requests (see BACKEND & FULLSTACK section) → \
-`type="fullstack-stateful-app"`, `primary="static/index.html"`. The frontend \
-lives in a `static/` subfolder of the artifact, served by `backend.py`.
+- Fullstack web app (backend + frontend) that keeps local state between \
+requests — e.g. a SQLite DB or other on-disk store the backend reads and \
+writes across requests. Use ONLY when that state genuinely cannot live in an \
+external data source; prefer stateless when in doubt (see BACKEND & FULLSTACK \
+section) → `type="fullstack-stateful-app"`, `primary="static/index.html"`. \
+The frontend lives in a `static/` subfolder of the artifact, served by \
+`backend.py`.
 
 WHEN NOT TO REGISTER:
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
@@ -479,16 +481,35 @@ Never split CSS or chart logic into separate files — only large data payloads.
 BACKEND_GENERATION_PROMPT = """\
 BACKEND & FULLSTACK APPLICATION GENERATION:
 
-When the user asks to build a backend service, web application with a backend, or stateless \
-API-driven system, follow this workflow:
+When the user asks to build a backend service, web application with a backend, or \
+API-driven system, follow this workflow. It covers BOTH fullstack artifact types — \
+the steps are identical; only the LOCAL STATE rule (see RULES) differs.
+
+HARD CONTRACT (violating ANY of these breaks launch or deployment — full \
+explanations in the RULES of step 4):
+- The backend file is `<artifact_path>/backend.py`; the `handler` attribute \
+and the `SECRETS` dict keep exactly those names.
+- `handler = Mangum(app, lifespan="off")`.
+- ALL API routes live under `/api/*` and are registered BEFORE \
+`app.mount("/", StaticFiles(...))`.
+- The script accepts `--port` via argparse and binds to it — never hardcode a port.
+- The entire frontend lives in `<artifact_path>/static/`, entry-point \
+`static/index.html`.
+- `<artifact_path>/requirements.txt` exists and lists at least `fastapi`, \
+`mangum`, `uvicorn`.
+- Secrets are read from `SECRETS[...]` at their point of use inside routes — \
+never copied into module-level variables at import time.
 
 1. REGISTER THE ARTIFACT: Follow the universal artifact contract from the \
 ARTIFACTS section. For backend apps specifically:
-  - `type`: `"fullstack-stateless-app"` — apps built here keep NO local state \
-between requests (the deployment target is stateless: AWS Lambda with a \
-read-only filesystem, see RULES and DEPLOYMENT NOTES below). All persistence \
-goes through external data sources. (`fullstack-stateful-app` is reserved for \
-a future local-persistence deployment and is not built by this workflow yet.)
+  - `type`: pick between the two fullstack types:
+    * `"fullstack-stateless-app"` — the DEFAULT. Always start here. The app \
+keeps NO local state between requests (the deployment target is stateless: \
+AWS Lambda with a read-only filesystem, see RULES and DEPLOYMENT NOTES below); \
+all persistence goes through external data sources.
+    * `"fullstack-stateful-app"` — ONLY when the app genuinely requires local \
+on-disk state between requests (e.g. a SQLite DB) AND that state cannot live \
+in an external connected data source. When in doubt, choose stateless.
   - `primary`: set to `"static/index.html"` — the frontend ALWAYS lives in a \
 `static/` subfolder of the artifact (see steps 4 and 5 below).
   Use the returned `<artifact_path>` for ALL subsequent writes — `backend.py` \
@@ -619,17 +640,21 @@ NEVER hardcode the port — `launch_backend` picks a free one and passes it in.
   - Prefer `async def` for I/O-bound routes (DB queries, external HTTP \
 calls via `httpx.AsyncClient`). Sync `def` is fine for trivial CPU work, but \
 sync blocking I/O inside an async app stalls the event loop.
-  - STATELESS: no module-level mutable caches that matter across requests \
-(`USERS = {{}}`, `SESSIONS = []`). In Lambda these globals may or may not \
-survive between invocations — never rely on them. All persistence goes \
-through external data sources.
-  - FILESYSTEM: do NOT persist files at runtime. Treat the filesystem as \
-read-only and non-persistent — anything written is lost between requests and \
+  - LOCAL STATE (the ONE rule that differs between the two fullstack types):
+    * `fullstack-stateless-app`: no local state of any kind survives a \
+request. No module-level mutable caches that matter across requests \
+(`USERS = {{}}`, `SESSIONS = []`) — in Lambda these globals may or may not \
+survive between invocations, never rely on them. Treat the filesystem as \
+read-only and non-persistent: anything written is lost between requests and \
 may fail outright depending on the host (Linux, Windows, or a read-only cloud \
 sandbox). NEVER write to `<artifact_path>` at runtime, and never rely on a \
-file surviving to a later request. All persistence goes through external data \
-sources. If a request genuinely needs scratch space, use the OS temp dir via \
-`tempfile` and treat it as ephemeral (gone the moment the request ends).
+file surviving to a later request. If a request genuinely needs scratch \
+space, use the OS temp dir via `tempfile` and treat it as ephemeral (gone \
+the moment the request ends). ALL persistence goes through external data \
+sources.
+    * `fullstack-stateful-app`: local on-disk state (e.g. a SQLite file) IS \
+allowed — keep it in the artifact root (`<artifact_path>/`, next to \
+`backend.py`). Every other rule in this list still applies.
   - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go \
 to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
   - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at \

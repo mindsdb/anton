@@ -30,6 +30,19 @@ class AntonSettings(CoreSettings):
     coding_provider: str = "anthropic"
     coding_model: str = "claude-haiku-4-5-20251001"
 
+    # Opaque reasoning-effort level (e.g. "low" | "medium" | "high" | "xhigh" |
+    # "max"), forwarded to the provider in its native shape when set. None means
+    # the provider's own default. The value is validated by the upstream
+    # router/provider, not here.
+    #
+    # NOTE: effort only applies to reasoning-capable models. Anthropic returns a
+    # 400 for `effort` on Haiku 4.5 / Sonnet 4.5 — including the default
+    # `coding_model` above — so it needs an Opus-4.5+/Sonnet-4.6-class model; the
+    # OpenAI `reasoning_effort` likewise needs a reasoning model (o-series / GPT-5
+    # class). Set these only when the corresponding model supports it.
+    planning_reasoning_effort: str | None = None
+    coding_reasoning_effort: str | None = None
+
     max_tokens: int = 8192  # max output tokens per LLM call
 
     anthropic_api_key: str | None = None
@@ -50,6 +63,8 @@ class AntonSettings(CoreSettings):
     external_search_provider: str | None = None  # "exa" | "brave" | None
     exa_api_key: str | None = None
     brave_api_key: str | None = None
+
+    skills_root: Path | None = None
 
     memory_enabled: bool = True
     # TODO: Calling this memory_dir is a bit misleading, because there are other directories that live here
