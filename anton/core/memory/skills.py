@@ -90,6 +90,7 @@ class Skill:
     declarative_md: str
     created_at: str
     provenance: str  # "manual" | "consolidator"
+    when_to_use: str = ""
     stage_1_present: bool = True
     stage_2_present: bool = False
     stage_3_present: bool = False
@@ -406,9 +407,14 @@ class SkillStore:
             "created_at": skill.created_at,
         }.items() if v}
 
+        description = skill.description
+        if skill.when_to_use:
+            description = f"{description}. {skill.when_to_use}" if description else skill.when_to_use
+        description = description[:DESC_MAX]
+
         fm = AgentSkill.model_construct(
             name=skill.label,
-            description=skill.description,
+            description=description,
             instructions=skill.declarative_md,
             metadata=metadata,
         )
