@@ -7,6 +7,7 @@ from anton.core.tools.tool_handlers import (
     handle_read_image,
     handle_recall,
     handle_scratchpad,
+    handle_select_path,
     handle_update_artifact_metadata,
 )
 
@@ -421,4 +422,58 @@ READ_IMAGE_TOOL = ToolDef(
         "required": ["file_path"],
     },
     handler=handle_read_image,
+)
+
+
+SELECT_PATH_TOOL = ToolDef(
+    name="select_path",
+    description=(
+        "Ask the user to pick the exact file or folder they meant, via an inline "
+        "picker. Use this ONLY when a path is genuinely ambiguous and you cannot "
+        "safely resolve it yourself — e.g. several files share the name the user "
+        "mentioned, or the reference is vague. Do NOT use it for a path you already "
+        "know, and do NOT use it to browse: it is a disambiguator, not a file "
+        "explorer.\n\n"
+        "Provide EITHER an explicit `candidates` list (paths you already found), OR "
+        "a glob `pattern` (optionally under `base_dir`) and the tool finds matches "
+        "within the project. If exactly one candidate matches it is returned "
+        "immediately with no prompt; if none match you are told to refine or ask in "
+        "text. On selection the tool returns JSON "
+        '{"status":"resolved","path":"<absolute path>"} — use that path directly and '
+        "continue; never re-ask the user in plain text after a resolved selection."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "One short line telling the user what to choose, "
+                'e.g. \'Which "report.csv" did you mean?\'.',
+            },
+            "candidates": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Explicit candidate paths (absolute, or relative to the "
+                "project root). Preferred when you already know the options.",
+            },
+            "pattern": {
+                "type": "string",
+                "description": "Glob to find candidates within the project "
+                "(e.g. '**/config.json'). Used when `candidates` is omitted.",
+            },
+            "base_dir": {
+                "type": "string",
+                "description": "Directory to resolve `pattern` against, relative to the "
+                "project root. Defaults to the project root.",
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["file", "folder", "any"],
+                "description": "Restrict candidates to files, folders, or allow both. "
+                "Default 'any'.",
+            },
+        },
+        "required": ["prompt"],
+    },
+    handler=handle_select_path,
 )

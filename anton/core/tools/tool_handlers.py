@@ -578,3 +578,170 @@ async def handle_read_image(
         },
         {"type": "text", "text": summary},
     ]
+
+
+# ---------------------------------------------------------------------------
+# select_path — interactive file/folder disambiguation
+# ---------------------------------------------------------------------------
+
+# Hard caps keep the picker fast and the prompt readable: never offer more
+# than _SELECTION_MAX_CANDIDATES options, and stop walking a glob after
+# _SELECTION_SCAN_LIMIT entries so a `**` pattern on a huge tree can't stall.
+_SELECTION_MAX_CANDIDATES = 50
+_SELECTION_SCAN_LIMIT = 5000
+
+
+def _selection_root(session: "ChatSession") -> "Path":
+    """The directory candidates are confined to: the project root (or cwd)."""
+    from pathlib import Path
+
+    workspace = getattr(session, "_workspace", None)
+    return (workspace.base if workspace is not None else Path.cwd()).resolve()
+
+
+def _is_within(root: "Path", candidate: "Path") -> bool:
+    """True when *candidate* is inside *root* — the path-traversal guard."""
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _collect_selection_candidates(
+    session: "ChatSession", tc_input: dict, root: "Path", kind: str
+) -> "list[Path]":
+    """Resolve candidate paths: confined to *root*, deduped, kind-filtered, capped.
+
+    Prefers the model's explicit ``candidates`` list; otherwise globs
+    ``pattern`` (under an optional ``base_dir``). The private ``.anton``
+    workspace is never exposed.
+    """
+    from pathlib import Path
+
+    seen: set[Path] = set()
+    found: list[Path] = []
+
+    def consider(path: Path) -> bool:
+        """Add *path* if it qualifies. Returns False once the cap is hit."""
+        if len(found) >= _SELECTION_MAX_CANDIDATES:
+            return False
+        resolved = path.resolve()
+        if resolved in seen or not _is_within(root, resolved) or not resolved.exists():
+            return True
+        if ".anton" in resolved.relative_to(root).parts:
+            return True
+        if (kind == "file" and not resolved.is_file()) or (kind == "folder" and not resolved.is_dir()):
+            return True
+        seen.add(resolved)
+        found.append(resolved)
+        return True
+
+    explicit = tc_input.get("candidates")
+    if isinstance(explicit, list) and explicit:
+        for raw in explicit:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            if not consider(candidate):
+                break
+    else:
+        pattern = (tc_input.get("pattern") or "").strip()
+        if pattern:
+            base_dir = (tc_input.get("base_dir") or "").strip()
+            search_root = root
+            if base_dir:
+                rel = Path(base_dir).expanduser()
+                search_root = (rel if rel.is_absolute() else root / rel).resolve()
+            if _is_within(root, search_root):
+                for scanned, match in enumerate(search_root.glob(pattern)):
+                    if scanned >= _SELECTION_SCAN_LIMIT or not consider(match):
+                        break
+
+    found.sort(key=lambda p: str(p).lower())
+    return found
+
+
+def _selection_option(path: "Path", root: "Path"):
+    """Build a display option for *path* (label = path relative to the root)."""
+    from anton.core.interaction.selection import SelectionOption
+
+    try:
+        label = str(path.relative_to(root))
+    except ValueError:
+        label = str(path)
+    return SelectionOption(
+        value=str(path),
+        label=label,
+        kind="folder" if path.is_dir() else "file",
+    )
+
+
+def _resolve_selection_elicitor(session: "ChatSession"):
+    """The host-injected elicitor, falling back to a terminal picker on the CLI."""
+    elicitor = getattr(session, "selection_elicitor", None)
+    if elicitor is not None:
+        return elicitor
+    console = getattr(session, "_console", None)
+    if console is None:
+        return None
+    from anton.core.interaction.cli import CLISelectionElicitor
+
+    return CLISelectionElicitor(console)
+
+
+async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
+    """Ask the user to disambiguate a file/folder; return the chosen path as JSON.
+
+    Auto-resolves when exactly one candidate matches and reports "no matches"
+    when none do, so the picker is shown only when the choice is genuinely
+    ambiguous (≥2 candidates). The result is fed back as the tool result, so the
+    agent continues without a separate user message.
+    """
+    import json
+
+    from anton.core.interaction.selection import SelectionRequest
+
+    prompt = (tc_input.get("prompt") or "Select a file or folder.").strip()
+    kind = (tc_input.get("kind") or "any").strip().lower()
+    if kind not in ("file", "folder", "any"):
+        kind = "any"
+
+    root = _selection_root(session)
+    candidates = _collect_selection_candidates(session, tc_input, root, kind)
+
+    if not candidates:
+        return json.dumps({
+            "status": "no_matches",
+            "message": "No matching file or folder was found. Refine the pattern, or ask the user to clarify the path in plain text.",
+        })
+
+    if len(candidates) == 1:
+        return json.dumps({"status": "resolved", "auto_resolved": True, "path": str(candidates[0])})
+
+    elicitor = _resolve_selection_elicitor(session)
+    if elicitor is None:
+        return json.dumps({
+            "status": "picker_unavailable",
+            "candidates": [str(p) for p in candidates],
+            "message": "An interactive picker is unavailable here; ask the user which of these paths they meant.",
+        })
+
+    options = tuple(_selection_option(p, root) for p in candidates)
+    try:
+        chosen = await elicitor.elicit(SelectionRequest(prompt=prompt, options=options, kind=kind))
+    except Exception as exc:
+        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Selection failed: {exc}"})
+
+    if chosen is None:
+        return json.dumps({
+            "status": "cancelled",
+            "message": "The user dismissed the picker without choosing. Ask how they would like to proceed.",
+        })
+    if chosen not in {option.value for option in options}:
+        return json.dumps({"status": "invalid", "message": "The returned selection was not one of the offered options."})
+
+    return json.dumps({"status": "resolved", "path": chosen})
