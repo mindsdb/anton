@@ -147,6 +147,7 @@ class ChatSessionConfig:
     # so resuming a conversation days later still reports the real "now".
     # None → fall back to today.
     started_at: datetime | None = None
+    selection_elicitor: SelectionElicitor | None = None
 
 
 class ChatSession:
@@ -201,7 +202,7 @@ class ChatSession:
         # tool). Hosts inject a concrete elicitor — a streaming GUI picker in
         # cowork-server, a terminal picker on the CLI. None falls back to the
         # console picker (CLI) or a graceful no-op (headless).
-        self.selection_elicitor: SelectionElicitor | None = None
+        self.selection_elicitor: SelectionElicitor | None = config.selection_elicitor
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -1947,11 +1948,13 @@ class ChatSession:
                             )
                             if self._escape_watcher:
                                 self._escape_watcher.pause()
-                            result_text = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
-                            )
-                            if self._escape_watcher:
-                                self._escape_watcher.resume()
+                            try:
+                                result_text = await self.tool_registry.dispatch_tool(
+                                    self, tc.name, tc.input
+                                )
+                            finally:
+                                if self._escape_watcher:
+                                    self._escape_watcher.resume()
                             yield StreamTaskProgress(
                                 phase="analyzing",
                                 message="Analyzing results...",

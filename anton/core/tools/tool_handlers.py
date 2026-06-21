@@ -717,7 +717,7 @@ async def _run_elicitor(elicitor, request):
         return None, json.dumps({"status": "error", "message": f"Selection failed: {exc}"})
 
 
-def _finalize_browse_choice(chosen: "str | None", kind: str) -> str:
+def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
     """Validate a browse-mode pick: any existing path of the requested kind."""
     import json
     from pathlib import Path
@@ -728,6 +728,8 @@ def _finalize_browse_choice(chosen: "str | None", kind: str) -> str:
             "message": "The user dismissed the picker without choosing. Ask how they would like to proceed.",
         })
     path = Path(chosen).expanduser()
+    if not path.is_absolute():
+        path = root / path
     if not path.exists():
         return json.dumps({"status": "invalid", "message": "The selected path no longer exists."})
     if kind == "file" and not path.is_file():
@@ -754,6 +756,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     separate user message.
     """
     import json
+    from pathlib import Path
 
     from anton.core.interaction.selection import SelectionRequest
 
@@ -778,7 +781,8 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             prompt=prompt, kind=kind, mode="browse", root=str(_browse_start_dir(tc_input, root))
         )
         chosen, error = await _run_elicitor(elicitor, request)
-        return error or _finalize_browse_choice(chosen, kind)
+        browse_root = Path(request.root) if request.root else root
+        return error or _finalize_browse_choice(chosen, kind, browse_root)
 
     # ── pick — disambiguate concrete candidates within the project ───────
     candidates = _collect_selection_candidates(session, tc_input, root, kind)
