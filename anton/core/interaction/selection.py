@@ -41,11 +41,22 @@ class SelectionOption:
 
 @dataclass(frozen=True, slots=True)
 class SelectionRequest:
-    """A request for the user to disambiguate between candidate paths."""
+    """A request for the user to choose a file or folder.
+
+    Two modes:
+
+    * ``"pick"`` — disambiguate between the concrete ``options`` (e.g. several
+      files share a name). This is the default.
+    * ``"browse"`` — the target is unknown/unspecified; the host shows a
+      navigable browser rooted at ``root`` and the user locates the path
+      themselves. ``options`` is empty in this mode.
+    """
 
     prompt: str
-    options: tuple[SelectionOption, ...]
+    options: tuple[SelectionOption, ...] = ()
     kind: str = "any"  # "file" | "folder" | "any" — what is being chosen
+    mode: str = "pick"  # "pick" | "browse"
+    root: str = ""  # browse-mode start directory (absolute)
 
 
 @runtime_checkable

@@ -21,6 +21,15 @@ class CLISelectionElicitor:
     async def elicit(self, request: SelectionRequest) -> str | None:
         from anton.utils.prompt import prompt_or_cancel
 
+        # Browse mode has no visual file tree on a terminal — fall back to a
+        # typed path (the GUI host gets a real navigable browser instead).
+        if request.mode == "browse":
+            self._console.print(f"\n[bold]{request.prompt}[/]")
+            if request.root:
+                self._console.print(f"  [dim]starting at {request.root}[/]")
+            chosen = await prompt_or_cancel("Enter a path (Esc to cancel)")
+            return (chosen or "").strip() or None
+
         options = request.options
         if not options:
             return None

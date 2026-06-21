@@ -692,13 +692,66 @@ def _resolve_selection_elicitor(session: "ChatSession"):
     return CLISelectionElicitor(console)
 
 
-async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
-    """Ask the user to disambiguate a file/folder; return the chosen path as JSON.
+def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
+    """Resolve the browse-mode starting directory (defaults to the project root)."""
+    from pathlib import Path
 
-    Auto-resolves when exactly one candidate matches and reports "no matches"
-    when none do, so the picker is shown only when the choice is genuinely
-    ambiguous (≥2 candidates). The result is fed back as the tool result, so the
-    agent continues without a separate user message.
+    raw = (tc_input.get("start_dir") or "").strip()
+    if not raw:
+        return root
+    start = Path(raw).expanduser()
+    if not start.is_absolute():
+        start = root / start
+    start = start.resolve()
+    return start if start.is_dir() else root
+
+
+async def _run_elicitor(elicitor, request):
+    """Run the elicitor, returning (chosen, error_json). error_json is None on success."""
+    import json
+
+    try:
+        return await elicitor.elicit(request), None
+    except Exception as exc:
+        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+        return None, json.dumps({"status": "error", "message": f"Selection failed: {exc}"})
+
+
+def _finalize_browse_choice(chosen: "str | None", kind: str) -> str:
+    """Validate a browse-mode pick: any existing path of the requested kind."""
+    import json
+    from pathlib import Path
+
+    if chosen is None:
+        return json.dumps({
+            "status": "cancelled",
+            "message": "The user dismissed the picker without choosing. Ask how they would like to proceed.",
+        })
+    path = Path(chosen).expanduser()
+    if not path.exists():
+        return json.dumps({"status": "invalid", "message": "The selected path no longer exists."})
+    if kind == "file" and not path.is_file():
+        return json.dumps({"status": "invalid", "message": "A folder was selected but a file was expected."})
+    if kind == "folder" and not path.is_dir():
+        return json.dumps({"status": "invalid", "message": "A file was selected but a folder was expected."})
+    return json.dumps({"status": "resolved", "path": str(path.resolve())})
+
+
+async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
+    """Have the user choose a file/folder; return the chosen path as JSON.
+
+    Two modes, chosen automatically from the inputs:
+
+    * **browse** — no ``candidates``/``pattern`` given: the location is unknown,
+      so the user navigates a picker to locate it. Use this instead of asking
+      the user to type or paste a path.
+    * **pick** — ``candidates`` or ``pattern`` given: disambiguate concrete
+      matches within the project. Auto-resolves a single match and reports
+      "no matches" for none, so the picker appears only for a genuine (≥2)
+      ambiguity.
+
+    The result is fed back as the tool result, so the agent continues without a
+    separate user message.
     """
     import json
 
@@ -710,18 +763,32 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         kind = "any"
 
     root = _selection_root(session)
-    candidates = _collect_selection_candidates(session, tc_input, root, kind)
+    elicitor = _resolve_selection_elicitor(session)
+    has_candidates = isinstance(tc_input.get("candidates"), list) and bool(tc_input.get("candidates"))
+    has_pattern = bool((tc_input.get("pattern") or "").strip())
 
+    # ── browse — locate an unspecified path ──────────────────────────────
+    if not has_candidates and not has_pattern:
+        if elicitor is None:
+            return json.dumps({
+                "status": "picker_unavailable",
+                "message": "An interactive picker is unavailable here; ask the user for the path in plain text.",
+            })
+        request = SelectionRequest(
+            prompt=prompt, kind=kind, mode="browse", root=str(_browse_start_dir(tc_input, root))
+        )
+        chosen, error = await _run_elicitor(elicitor, request)
+        return error or _finalize_browse_choice(chosen, kind)
+
+    # ── pick — disambiguate concrete candidates within the project ───────
+    candidates = _collect_selection_candidates(session, tc_input, root, kind)
     if not candidates:
         return json.dumps({
             "status": "no_matches",
-            "message": "No matching file or folder was found. Refine the pattern, or ask the user to clarify the path in plain text.",
+            "message": "No match found. Refine the pattern, omit candidates/pattern to let the user browse, or ask in plain text.",
         })
-
     if len(candidates) == 1:
         return json.dumps({"status": "resolved", "auto_resolved": True, "path": str(candidates[0])})
-
-    elicitor = _resolve_selection_elicitor(session)
     if elicitor is None:
         return json.dumps({
             "status": "picker_unavailable",
@@ -730,12 +797,9 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         })
 
     options = tuple(_selection_option(p, root) for p in candidates)
-    try:
-        chosen = await elicitor.elicit(SelectionRequest(prompt=prompt, options=options, kind=kind))
-    except Exception as exc:
-        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
-        return json.dumps({"status": "error", "message": f"Selection failed: {exc}"})
-
+    chosen, error = await _run_elicitor(elicitor, SelectionRequest(prompt=prompt, options=options, kind=kind))
+    if error:
+        return error
     if chosen is None:
         return json.dumps({
             "status": "cancelled",
@@ -743,5 +807,4 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         })
     if chosen not in {option.value for option in options}:
         return json.dumps({"status": "invalid", "message": "The returned selection was not one of the offered options."})
-
     return json.dumps({"status": "resolved", "path": chosen})
