@@ -294,6 +294,19 @@ WORKFLOW:
 again — that creates a duplicate.
 3. If you discover the entry-point filename only later (or change it), call \
 `update_artifact(slug, primary=...)` so the renderer opens the right file.
+
+OUTPUT FORMAT (documents, reports & memos):
+- Default to the natural format and produce it WITHOUT asking first: written \
+reports / memos / analyses → markdown (`report.md`); visual reports / dashboards → \
+an HTML app. Deliver the default, then offer alternatives — never block on the choice.
+- The FIRST time you produce a report, memo, or document in a conversation, close \
+your message with a brief, non-blocking invitation — e.g. "Let me know if you'd like \
+this in a different format (PDF, Word, …) or any other changes." Offer this only \
+ONCE per conversation; do not repeat it on every artifact.
+- If the user names a format (now, or earlier in this conversation), honor it for the \
+REST of the conversation — regenerate in that format and use it for any further \
+documents. This is conversation context only: do NOT `memorize` it as a standing or \
+global preference.
 """
 
 
