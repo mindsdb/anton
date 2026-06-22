@@ -29,8 +29,7 @@ def store_with_one_skill(tmp_path: Path) -> SkillStore:
         Skill(
             label="csv_summary",
             name="CSV Summary",
-            description="Load a CSV, infer schema, compute stats.",
-            when_to_use="User asks to explore or summarize a CSV file.",
+            description="User asks to explore or summarize a CSV file.",
             declarative_md="1. Load CSV\n2. Describe\n3. Plot",
             created_at="2026-04-10T12:00:00+00:00",
             provenance="manual",
@@ -74,7 +73,7 @@ class TestPromptBuilderReceivesStore:
             skill_store=store_with_one_skill,
         )
         assert "## Procedural memory" in prompt
-        assert "csv_summary" in prompt
+        assert "csv-summary" in prompt
 
     def test_section_omitted_when_no_store(self):
         builder = ChatSystemPromptBuilder()

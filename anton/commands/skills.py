@@ -3,7 +3,7 @@
 Commands:
 
 - `/skill save [optional name hint]` — LLM reads recent scratchpad work +
-  conversation history and drafts a Skill (label, name, when_to_use,
+  conversation history and drafts a Skill (label, name, description,
   declarative procedure). Saved automatically; no interactive editing.
 - `/skills list` — show all saved skills with usage counters.
 - `/skill show <label>` — print a single skill's full procedure + stats.
@@ -54,9 +54,9 @@ class _SkillDraft(BaseModel):
     label: str = Field(
         ...,
         description=(
-            "snake_case identifier for the skill. Short (2-4 words), "
-            "captures the essence. Examples: 'csv_summary', "
-            "'web_scraping', 'api_paginated_fetch'."
+            "kebab-case identifier for the skill. Short (2-4 words), "
+            "captures the essence. Examples: 'csv-summary', "
+            "'web-scraping', 'api-paginated-fetch'."
         ),
     )
     name: str = Field(
@@ -64,10 +64,6 @@ class _SkillDraft(BaseModel):
         description="Human-readable display name (e.g. 'CSV Summary').",
     )
     description: str = Field(
-        default="",
-        description="One-sentence description of what the skill does.",
-    )
-    when_to_use: str = Field(
         ...,
         description=(
             "One sentence describing when this skill applies — what the "
@@ -229,7 +225,7 @@ async def handle_skill_save(
     name_hint_section = (
         f"The user suggested the name: {name_hint!r}. "
         "Use it as the basis for `name` and `label`, but you may refine the label "
-        "to be snake_case and short.\n"
+        "to be kebab-case and short.\n"
         if name_hint.strip()
         else ""
     )
@@ -261,7 +257,6 @@ async def handle_skill_save(
     raw_label = draft.label.strip() or slugify(name_hint or draft.name)
     name = draft.name.strip() or raw_label.replace("_", " ").title()
     description = draft.description.strip()
-    when_to_use = draft.when_to_use.strip()
     declarative_md = draft.declarative_md.strip()
 
     if not declarative_md:
@@ -278,7 +273,6 @@ async def handle_skill_save(
         label=label,
         name=name,
         description=description,
-        when_to_use=when_to_use,
         declarative_md=declarative_md,
         created_at=datetime.now(timezone.utc).isoformat(),
         provenance="manual",
@@ -290,8 +284,6 @@ async def handle_skill_save(
         f"[anton.success](anton)[/] Saved skill [bold]{label}[/bold] → {path}"
     )
     console.print(f"        [anton.muted]Name:[/] {name}")
-    if when_to_use:
-        console.print(f"        [anton.muted]When to use:[/] {when_to_use}")
     console.print(
         "        [anton.muted]Available next session — and via `recall_skill` this turn.[/]"
     )
@@ -318,7 +310,7 @@ def handle_skills_list(console: Console, store: SkillStore | None = None) -> Non
     table = Table(title="Procedural memory — saved skills", show_lines=False)
     table.add_column("Label", style="bold")
     table.add_column("Name")
-    table.add_column("When to use")
+    table.add_column("Description")
     table.add_column("Recalls", justify="right")
     table.add_column("Stages")
 
@@ -330,11 +322,11 @@ def handle_skills_list(console: Console, store: SkillStore | None = None) -> Non
             stages.append("2")
         if s.stage_3_present:
             stages.append("3")
-        when = s.when_to_use if len(s.when_to_use) <= 60 else s.when_to_use[:57] + "..."
+        desc = s.description if len(s.description) <= 60 else s.description[:57] + "..."
         table.add_row(
             s.label,
             s.name,
-            when,
+            desc,
             str(s.stats.total_recalls),
             ",".join(stages) or "-",
         )
@@ -374,8 +366,6 @@ def handle_skill_show(
     console.print(f"[anton.cyan](anton)[/] [bold]{skill.name}[/]  ([dim]{skill.label}[/])")
     if skill.description:
         console.print(f"        {skill.description}")
-    if skill.when_to_use:
-        console.print(f"        [dim]when to use:[/] {skill.when_to_use}")
     console.print()
     console.print(
         f"        [dim]recalls:[/] {skill.stats.total_recalls}  "

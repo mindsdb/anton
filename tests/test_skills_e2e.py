@@ -94,8 +94,7 @@ async def test_full_skills_loop(console, store_root):
     draft = _SkillDraft(
         label="csv_summary",
         name="CSV Summary",
-        description="Load a CSV with pandas, print shape/describe/dtypes, plot a histogram.",
-        when_to_use="User asks to explore, summarize, or describe a CSV file.",
+        description="User asks to explore, summarize, or describe a CSV file.",
         declarative_md=(
             "1. Use `pandas.read_csv()` to load the file.\n"
             "2. Print `df.shape` and `df.dtypes`.\n"
@@ -112,7 +111,7 @@ async def test_full_skills_loop(console, store_root):
     skills = store.list_all()
     assert len(skills) == 1
     saved = skills[0]
-    assert saved.label == "csv_summary"
+    assert saved.label == "csv-summary"
     assert saved.name == "CSV Summary"
     assert "pandas.read_csv" in saved.declarative_md
     assert saved.stats.stage_1.recommended == 0  # no recalls yet
@@ -130,7 +129,7 @@ async def test_full_skills_loop(console, store_root):
         skill_store=fresh_store,
     )
     assert "## Procedural memory" in prompt
-    assert "`csv_summary`" in prompt
+    assert "`csv-summary`" in prompt
     assert "explore, summarize, or describe a CSV" in prompt
 
     # ── Step 3: LLM "decides" to recall the skill via the tool registry ─
@@ -139,7 +138,7 @@ async def test_full_skills_loop(console, store_root):
     fresh_session = SimpleNamespace(_skill_store=fresh_store)
 
     result = await registry.dispatch_tool(
-        fresh_session, "recall_skill", {"label": "csv_summary"}
+        fresh_session, "recall_skill", {"label": "csv-summary"}
     )
 
     assert "CSV Summary" in result
@@ -147,7 +146,7 @@ async def test_full_skills_loop(console, store_root):
     assert "describe" in result
 
     # Counter incremented to 1
-    after_recall_1 = fresh_store.load("csv_summary")
+    after_recall_1 = fresh_store.load("csv-summary")
     assert after_recall_1 is not None
     assert after_recall_1.stats.stage_1.recommended == 1
     assert after_recall_1.stats.total_recalls == 1
@@ -158,31 +157,25 @@ async def test_full_skills_loop(console, store_root):
         fresh_session, "recall_skill", {"label": "csv_sumary"}  # missing 'm'
     )
     assert "⚠" in typo_result
-    assert "csv_summary" in typo_result
+    assert "csv-summary" in typo_result
     assert "pandas.read_csv" in typo_result  # full procedure still returned
 
     # Counter is now 2 (typo credited to the resolved label)
-    after_recall_2 = fresh_store.load("csv_summary")
+    after_recall_2 = fresh_store.load("csv-summary")
     assert after_recall_2 is not None
     assert after_recall_2.stats.stage_1.recommended == 2
     assert after_recall_2.stats.total_recalls == 2
 
     # ── Step 5: Disk verification ───────────────────────────────────────
-    skill_dir = store_root / "csv_summary"
+    skill_dir = store_root / "csv-summary"
     assert skill_dir.is_dir()
-    assert (skill_dir / "meta.json").is_file()
-    assert (skill_dir / "declarative.md").is_file()
+    assert (skill_dir / "SKILL.md").is_file()
     assert (skill_dir / "stats.json").is_file()
+
+    skill_md_text = (skill_dir / "SKILL.md").read_text()
+    assert "name: csv-summary" in skill_md_text
+    assert "pandas.read_csv" in skill_md_text
 
     stats_on_disk = json.loads((skill_dir / "stats.json").read_text())
     assert stats_on_disk["total_recalls"] == 2
     assert stats_on_disk["stage_1"]["recommended"] == 2
-
-    meta_on_disk = json.loads((skill_dir / "meta.json").read_text())
-    assert meta_on_disk["label"] == "csv_summary"
-    assert meta_on_disk["stage_1_present"] is True
-    assert meta_on_disk["stage_2_present"] is False
-    assert meta_on_disk["stage_3_present"] is False
-
-    declarative_on_disk = (skill_dir / "declarative.md").read_text()
-    assert "pandas.read_csv" in declarative_on_disk

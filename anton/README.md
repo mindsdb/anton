@@ -67,7 +67,7 @@ The high-level flow — how the executive, scratchpads, and the long-term stores
   │ (hipp.)    │  │ Buffers bad  │  │ /skill save → LLM   │
   │            │  │ cells, runs  │  │ drafts a procedure  │
   │ Episodes — │  │ post-mortem  │  │ with label + name + │
-  │ JSONL log  │  │ via LLM,     │  │ when_to_use +       │
+  │ JSONL log  │  │ via LLM,     │  │ description +       │
   │ of every   │  │ encodes new  │  │ declarative_md.     │
   │ turn.      │  │ lessons via  │  │                     │
   │            │  │ Cortex.      │  │ Future turns recall │
@@ -157,10 +157,9 @@ And the Hipocampus also is controlled as follows:
 │       └── *.md
 └── skills/                            PROCEDURAL MEMORY (striatum)
     └── <label>/                       One directory per skill
-        ├── meta.json                  label, name, when_to_use, provenance, presence flags
-        ├── declarative.md             Stage 1 — step-by-step procedure (always present)
-        ├── chunks.md                  Stage 2 — higher-level recipes/macros (optional, v2+)
-        ├── code/                      Stage 3 — runnable helper modules (optional, v2+)
+        ├── SKILL.md                   name, description, instructions (agentskills.io format)
+        ├── references/                Stage 2 — higher-level recipes/macros (optional, v2+)
+        ├── scripts/                   Stage 3 — runnable helper modules (optional, v2+)
         │   └── __init__.py
         ├── requirements.txt           Stage 3 dependencies (optional)
         └── stats.json                 Per-stage usage counters (recommended/used)
@@ -477,11 +476,10 @@ Skills are intentionally distinct from engrams. **Engrams hold facts** ("CoinGec
 Each skill is a directory at `~/.anton/skills/<label>/` containing multi-stage representations that coexist (rather than graduating between stages):
 
 ```
-~/.anton/skills/csv_summary/
-├── meta.json          ← label, name, description, when_to_use, provenance, presence flags
-├── declarative.md     ← Stage 1: step-by-step procedure the LLM reads (always present)
-├── chunks.md          ← Stage 2: higher-level recipes/macros (emerges with use, v2+)
-├── code/              ← Stage 3: runnable helper modules (emerges with reliability, v2+)
+~/.anton/skills/csv-summary/
+├── SKILL.md           ← agentskills.io format: frontmatter (name, description, metadata) + body
+├── references/        ← Stage 2: higher-level recipes/macros (emerges with use, v2+)
+├── scripts/           ← Stage 3: runnable helper modules (emerges with reliability, v2+)
 │   └── __init__.py
 ├── requirements.txt   ← Stage 3 dependencies (optional)
 └── stats.json         ← per-stage usage counters
@@ -496,7 +494,7 @@ The executive picks the highest stage that's reliable enough for the current con
 
 ### Naming: `label`, not `slug`
 
-Each skill's unique identifier is its `label`. In cognitive psychology, a *label* is the declarative handle by which a procedural memory is addressed in working memory — the verbal token the executive holds when deciding to invoke a stored procedure. It's deliberately distinct from `name` (the human-readable display like "CSV Summary") and `when_to_use` (the retrieval cue describing the matching context).
+Each skill's unique identifier is its `label`. In cognitive psychology, a *label* is the declarative handle by which a procedural memory is addressed in working memory — the verbal token the executive holds when deciding to invoke a stored procedure. It's deliberately distinct from `name` (the human-readable display like "CSV Summary") and `description` (the retrieval cue describing the matching context).
 
 ### How Skills Get Created
 
@@ -510,22 +508,22 @@ anton> [opens scratchpad, loads pandas, infers schema, prints describe(), plots 
 
 you> /skill save csv summary
 anton> Drafting a skill from recent work…
-       Saved skill csv_summary → ~/.anton/skills/csv_summary/
+       Saved skill csv-summary → ~/.anton/skills/csv-summary/
        Name: CSV Summary
-       When to use: User asks to explore, summarize, or describe a CSV file.
+       Description: User asks to explore, summarize, or describe a CSV file.
 ```
 
 Automatic skill extraction (the consolidator promoting recurring scratchpad patterns into skills) is a v2/v3 feature. v1 deliberately uses manual curation to learn what "good" skills look like before automating.
 
 ### How Skills Get Used
 
-On every turn, the system prompt includes a compact `## Procedural memory` section listing every available skill as one line: `- <label> — <when_to_use>`. The full procedures stay on disk. When the LLM recognizes a match, it calls the `recall_skill` tool:
+On every turn, the system prompt includes a compact `## Procedural memory` section listing every available skill as one line: `- <label> — <description>`. The full procedures stay on disk. When the LLM recognizes a match, it calls the `recall_skill` tool:
 
 ```
-{"name": "recall_skill", "input": {"label": "csv_summary"}}
+{"name": "recall_skill", "input": {"label": "csv-summary"}}
 ```
 
-The tool reads `declarative.md` and returns it as the tool result, which the LLM follows as guidance for the rest of the turn. Each successful recall increments `stats.json::stage_1::recommended` — that's the classifier signal, mechanically captured without any LLM compliance dance.
+The tool reads the SKILL.md body and returns it as the tool result, which the LLM follows as guidance for the rest of the turn. Each successful recall increments `stats.json::stage_1::recommended` — that's the classifier signal, mechanically captured without any LLM compliance dance.
 
 Brain analog: the prefrontal cortex doesn't keep every skill loaded. It has fast pattern recognition that flags "I might need skill X" and *retrieves* the skill into working memory only when it actually needs it. The `recall_skill` tool is exactly this retrieval operation.
 
@@ -540,7 +538,7 @@ Brain analog: the prefrontal cortex doesn't keep every skill loaded. It has fast
 
 ### Typo Recovery
 
-When the LLM passes a label that doesn't exist (typos, guesses), `recall_skill` uses `closest_match()` to find the nearest existing slug via difflib and returns that skill's procedure with a warning. The `recommended` counter is credited to the *resolved* label, not the input — so `recall_skill('csv_sumary')` still increments `csv_summary` in the stats. The LLM gets useful behavior even when it gets the spelling wrong.
+When the LLM passes a label that doesn't exist (typos, guesses), `recall_skill` uses `closest_match()` to find the nearest existing slug via difflib and returns that skill's procedure with a warning. The `recommended` counter is credited to the *resolved* label, not the input — so `recall_skill('csv_sumary')` still increments `csv-summary` in the stats. The LLM gets useful behavior even when it gets the spelling wrong.
 
 ## Cerebellum — Supervised Error Learning
 
@@ -890,14 +888,14 @@ Tests live at `tests/test_acc.py` (44 tests, 4 layers: pure-function detectors �
 | Method | Purpose |
 |---|---|
 | `SkillStore.list_all()` | Return every loadable skill, sorted by label. |
-| `SkillStore.list_summaries()` | Lightweight listing — `[{"label": "...", "name": "...", "when_to_use": "..."}]`. Used by the prompt builder to inject the procedural-memory section without loading any declarative content. |
-| `SkillStore.load(label)` | Read a single skill by label. Returns None if absent or malformed. |
-| `SkillStore.save(skill)` | Write the skill directory. Creates `meta.json`, `declarative.md`, `stats.json`. Never wipes accumulated counters. |
-| `SkillStore.delete(label)` | Remove a skill directory. |
-| `SkillStore.increment_recommended(label, *, stage)` | Atomic-ish bump of the per-stage `recommended` counter (called by `recall_skill`). |
-| `SkillStore.closest_match(bad_label, *, cutoff=0.6)` | Difflib-based fuzzy match for typo recovery. |
-| `make_unique_label(base, store)` | Generate a slug that doesn't collide with any existing skill (`csv_summary`, `csv_summary_2`, ...). |
-| `slugify(text)` | Normalize arbitrary text into a snake_case identifier. |
+| `SkillStore.list_summaries()` | Lightweight listing — `[{"label": "...", "name": "...", "description": "..."}]`. Used by the prompt builder to inject the procedural-memory section without loading any declarative content. |
+| `SkillStore.load(label)` | Read a single skill by label. Returns None if absent or malformed.                                                                                                                           |
+| `SkillStore.save(skill)` | Write the skill directory. Creates `SKILL.md`, `stats.json`. Never wipes accumulated counters.                                                                                               |
+| `SkillStore.delete(label)` | Remove a skill directory.                                                                                                                                                                    |
+| `SkillStore.increment_recommended(label, *, stage)` | Atomic-ish bump of the per-stage `recommended` counter (called by `recall_skill`).                                                                                                           |
+| `SkillStore.closest_match(bad_label, *, cutoff=0.6)` | Difflib-based fuzzy match for typo recovery.                                                                                                                                                 |
+| `make_unique_label(base, store)` | Generate a slug that doesn't collide with any existing skill (`csv-summary`, `csv-summary_2`, ...).                                                                                          |
+| `slugify(text)` | Normalize arbitrary text into a kebab-case identifier.                                                                                                                                       |
 
 ### `tools/recall_skill.py` — Procedural Memory Retrieval Tool
 
@@ -1060,10 +1058,10 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
 | Global lessons | ATL semantics | ~1000 tokens | Always (most recent first) |
 | Project lessons | ATL semantics | ~1000 tokens | Always (most recent first) |
 | Scratchpad wisdom | Procedural priming | ~500 tokens | Scratchpad active (tool desc). Cerebellum-generated lessons flow through here. |
-| Procedural memory list | Striatum (skill labels) | ~50 tokens per skill (compact list) | Always — when any skills are saved. Full procedures NOT loaded; only labels + when_to_use. |
+| Procedural memory list | Striatum (skill labels) | ~50 tokens per skill (compact list) | Always — when any skills are saved. Full procedures NOT loaded; only labels + description. |
 | Topic files | Cortical association | Unlimited | On demand |
 | Skill procedures | Striatum (full skills) | Variable per skill | On demand (`recall_skill` tool) — only when the LLM recognizes a match |
 | Episodic recall | MTL episodic | Variable | On demand (`recall` tool) |
 | **Total in prompt** | **Working memory** | **~5800 tokens + ~50/skill** | ~3% of 200K context |
 
-The procedural memory list scales linearly with the number of saved skills but stays cheap (~50 tokens each — slug + one-line `when_to_use`). The full skill procedures are *paid for only when retrieved*, the same way the prefrontal cortex doesn't keep every procedural memory loaded — it has fast pattern recognition that flags relevance and pulls the full procedure from storage on demand.
+The procedural memory list scales linearly with the number of saved skills but stays cheap (~50 tokens each — slug + one-line `description`). The full skill procedures are *paid for only when retrieved*, the same way the prefrontal cortex doesn't keep every procedural memory loaded — it has fast pattern recognition that flags relevance and pulls the full procedure from storage on demand.

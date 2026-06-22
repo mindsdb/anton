@@ -42,7 +42,7 @@ _INPUT_SCHEMA = {
         "label": {
             "type": "string",
             "description": (
-                "The skill label to recall, e.g. 'csv_summary'. Must come from "
+                "The skill label to recall, e.g. 'csv-summary'. Must come from "
                 "the procedural memory list in your system prompt."
             ),
         },
@@ -113,7 +113,7 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
         )
 
     # Increment the recommended counter for the *resolved* label, not the
-    # input. If the LLM typo'd 'csv_sumary', we credit 'csv_summary'.
+    # input. If the LLM typo'd 'csv-sumary', we credit 'csv-summary'.
     store.increment_recommended(skill.label, stage=1)
 
     return _format_skill_response(skill, warning=warning)

@@ -56,9 +56,10 @@ ARTIFACT_TYPES: tuple[str, ...] = (
 class FileEntry(BaseModel):
     """One file inside the artifact folder.
 
-    Re-derived from disk on every save (`ArtifactStore.rescan_files`)
-    rather than mutated in place. The agent never writes here
-    directly — it just creates the files; the server records them.
+    Re-derived from disk on read (`ArtifactStore._reconcile_files`, called
+    by `open()` / `list()`) rather than mutated in place. The agent never
+    populates this directly — it writes the files into the folder via the
+    scratchpad, and the store reconciles `files[]` against disk on access.
     """
 
     path: str  # relative to the artifact folder (e.g. "dashboard.html", "data/prices.csv")

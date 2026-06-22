@@ -29,11 +29,10 @@ Each skill is a directory at `~/.anton/skills/<label>/` containing multi-stage
 representations that **coexist** (rather than graduating between stages):
 
 ```
-~/.anton/skills/csv_summary/
-├── meta.json          ← label, name, description, when_to_use, provenance, presence flags
-├── declarative.md     ← Stage 1: step-by-step procedure the LLM reads (always present)
-├── chunks.md          ← Stage 2: higher-level recipes/macros (emerges with use, v2+)
-├── code/              ← Stage 3: runnable helper modules (emerges with reliability, v2+)
+~/.anton/skills/csv-summary/
+├── SKILL.md           ← agentskills.io format: frontmatter (name, description, metadata) + body
+├── references/        ← Stage 2: higher-level recipes/macros (emerges with use, v2+)
+├── scripts/           ← Stage 3: runnable helper modules (emerges with reliability, v2+)
 │   └── __init__.py
 ├── requirements.txt   ← Stage 3 dependencies (optional)
 └── stats.json         ← per-stage usage counters
@@ -52,16 +51,16 @@ The executive picks the highest stage reliable enough for the current context.
 **v1 only ships Stage 1**; the directory format pre-allocates the other slots so
 consolidation can fill them later without a migration.
 
-## Naming: `label` vs `name` vs `when_to_use`
+## Naming: `label` vs `name` vs `description`
 
-A skill's unique identifier is its **`label`** (snake_case slug, e.g.
-`csv_summary`). In cognitive psychology, a *label* is the declarative handle by
+A skill's unique identifier is its **`label`** (hyphen-case slug, e.g.
+`csv-summary`). In cognitive psychology, a *label* is the declarative handle by
 which a procedural memory is addressed in working memory — the verbal token the
 executive holds when deciding to invoke a stored procedure. It is deliberately
 distinct from:
 
 - **`name`** — the human-readable display ("CSV Summary"),
-- **`when_to_use`** — the retrieval cue describing the matching context. This
+- **`description`** — the retrieval cue describing the matching context. This
   is the most important field: it's the one line the LLM sees in every prompt.
 
 ## Creation: `/skill save` and `_SkillDraft`
@@ -76,10 +75,9 @@ LLM's instructions:
 
 | Field | Required | Guidance baked into the schema |
 |---|---|---|
-| `label` | yes | snake_case, 2-4 words, captures the essence |
+| `label` | yes | hyphen-case, 2-4 words, captures the essence |
 | `name` | yes | Human-readable display name |
-| `description` | no | One sentence on what the skill does |
-| `when_to_use` | yes | One sentence on when it applies — "what the classifier shows to the LLM next time" |
+| `description` | yes | One sentence on when it applies — "what the classifier shows to the LLM next time" |
 | `declarative_md` | yes | Numbered steps, specific decisions, written as instructions for a future agent — not a retrospective |
 
 The result is saved via `SkillStore.save()`, with `make_unique_label()` avoiding
@@ -92,7 +90,7 @@ v2/v3 feature — v1 deliberately uses manual curation.
 On every turn, the prompt builder (`_build_procedural_memory_section` in
 `anton/core/llm/prompt_builder.py`) injects a compact
 `## Procedural memory (skills available)` section: one line per skill —
-`` `label` — when_to_use `` — built from `SkillStore.list_summaries()` without
+`` `label` — description `` — built from `SkillStore.list_summaries()` without
 loading any declarative content (~50 tokens per skill). The full procedures
 stay on disk.
 
@@ -123,9 +121,9 @@ increments `csv_summary`.
 | Method | Purpose |
 |---|---|
 | `list_all()` | Every loadable skill, sorted by label |
-| `list_summaries()` | Lightweight listing — label, name, when_to_use only. Used by the prompt builder |
+| `list_summaries()` | Lightweight listing — label, name, description only. Used by the prompt builder |
 | `load(label)` | Read one skill. Returns None if absent or malformed |
-| `save(skill)` | Write the directory: `meta.json`, `declarative.md`, `stats.json`. Never wipes accumulated counters |
+| `save(skill)` | Write the directory: `SKILL.md`, `stats.json`. Never wipes accumulated counters |
 | `delete(label)` | Remove a skill directory |
 | `increment_recommended(label, *, stage)` | Atomic-ish bump of the per-stage `recommended` counter (called by `recall_skill`) |
 | `closest_match(bad_label, *, cutoff=0.6)` | Difflib fuzzy match for typo recovery |

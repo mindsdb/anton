@@ -67,7 +67,7 @@ class ChatSystemPromptBuilder:
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
-        Lists each skill as `- label: when_to_use` (one line) plus a short
+        Lists each skill as `- label: description` (one line) plus a short
         instruction telling the LLM to call `recall_skill(label)` to load
         the full procedure. Returns an empty string if no store is wired
         or no skills are saved — the caller skips the section entirely.
@@ -98,7 +98,7 @@ class ChatSystemPromptBuilder:
         ]
         for s in summaries:
             label = s.get("label", "")
-            when = s.get("when_to_use", "").strip()
+            when = s.get("description", "").strip()
             if not label:
                 continue
             if when:
