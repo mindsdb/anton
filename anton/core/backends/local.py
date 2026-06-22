@@ -356,8 +356,16 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             }
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
+        else:
+            # Explicitly remove any inherited ANTON_SCRATCHPAD_MODEL from the
+            # parent env — otherwise a model configured in the parent process
+            # (e.g. Anton's own _code_ model) leaks into test scratchpads that
+            # intentionally have no model, injecting get_llm() unexpectedly.
+            env.pop("ANTON_SCRATCHPAD_MODEL", None)
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
+        else:
+            env.pop("ANTON_SCRATCHPAD_PROVIDER", None)
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
             env["ANTHROPIC_API_KEY"] = env["ANTON_ANTHROPIC_API_KEY"]
         if "OPENAI_API_KEY" not in env and "ANTON_OPENAI_API_KEY" in env:
