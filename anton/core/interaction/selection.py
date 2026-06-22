@@ -19,7 +19,7 @@ transport — so the same disambiguation logic serves every host.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 __all__ = ["SelectionOption", "SelectionRequest", "SelectionElicitor"]
 
@@ -59,9 +59,13 @@ class SelectionRequest:
     root: str = ""  # browse-mode start directory (absolute)
 
 
-@runtime_checkable
 class SelectionElicitor(Protocol):
-    """Strategy for surfacing a :class:`SelectionRequest` and awaiting a choice."""
+    """Strategy for surfacing a :class:`SelectionRequest` and awaiting a choice.
+
+    A Protocol (not an ABC) on purpose: hosts satisfy it by shape, so the
+    cowork-server streaming picker implements ``elicit`` without importing or
+    inheriting this class. The tool depends only on the shape.
+    """
 
     async def elicit(self, request: SelectionRequest) -> str | None:
         """Present *request*, block until the user responds.

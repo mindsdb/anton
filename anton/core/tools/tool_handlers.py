@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
@@ -593,8 +595,6 @@ _SELECTION_SCAN_LIMIT = 5000
 
 def _selection_root(session: "ChatSession") -> "Path":
     """The directory candidates are confined to: the project root (or cwd)."""
-    from pathlib import Path
-
     workspace = getattr(session, "_workspace", None)
     return (workspace.base if workspace is not None else Path.cwd()).resolve()
 
@@ -608,17 +608,13 @@ def _is_within(root: "Path", candidate: "Path") -> bool:
         return False
 
 
-def _collect_selection_candidates(
-    session: "ChatSession", tc_input: dict, root: "Path", kind: str
-) -> "list[Path]":
+def _collect_selection_candidates(tc_input: dict, root: "Path", kind: str) -> "list[Path]":
     """Resolve candidate paths: confined to *root*, deduped, kind-filtered, capped.
 
     Prefers the model's explicit ``candidates`` list; otherwise globs
     ``pattern`` (under an optional ``base_dir``). The private ``.anton``
     workspace is never exposed.
     """
-    from pathlib import Path
-
     seen: set[Path] = set()
     found: list[Path] = []
 
@@ -694,8 +690,6 @@ def _resolve_selection_elicitor(session: "ChatSession"):
 
 def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
     """Resolve the browse-mode starting directory (defaults to the project root)."""
-    from pathlib import Path
-
     raw = (tc_input.get("start_dir") or "").strip()
     if not raw:
         return root
@@ -706,37 +700,34 @@ def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
     return start if start.is_dir() else root
 
 
+def _status(status: str, message: str = "", **extra) -> str:
+    """Serialize a select_path tool result, omitting an empty message."""
+    return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
+
+
 async def _run_elicitor(elicitor, request):
     """Run the elicitor, returning (chosen, error_json). error_json is None on success."""
-    import json
-
     try:
         return await elicitor.elicit(request), None
     except Exception as exc:
         _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
-        return None, json.dumps({"status": "error", "message": f"Selection failed: {exc}"})
+        return None, _status("error", f"Selection failed: {exc}")
 
 
 def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
     """Validate a browse-mode pick: any existing path of the requested kind."""
-    import json
-    from pathlib import Path
-
     if chosen is None:
-        return json.dumps({
-            "status": "cancelled",
-            "message": "The user dismissed the picker without choosing. Ask how they would like to proceed.",
-        })
+        return _status("cancelled", "The user dismissed the picker without choosing. Ask how they would like to proceed.")
     path = Path(chosen).expanduser()
     if not path.is_absolute():
         path = root / path
     if not path.exists():
-        return json.dumps({"status": "invalid", "message": "The selected path no longer exists."})
+        return _status("invalid", "The selected path no longer exists.")
     if kind == "file" and not path.is_file():
-        return json.dumps({"status": "invalid", "message": "A folder was selected but a file was expected."})
+        return _status("invalid", "A folder was selected but a file was expected.")
     if kind == "folder" and not path.is_dir():
-        return json.dumps({"status": "invalid", "message": "A file was selected but a folder was expected."})
-    return json.dumps({"status": "resolved", "path": str(path.resolve())})
+        return _status("invalid", "A file was selected but a folder was expected.")
+    return _status("resolved", path=str(path.resolve()))
 
 
 async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
@@ -755,9 +746,6 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     The result is fed back as the tool result, so the agent continues without a
     separate user message.
     """
-    import json
-    from pathlib import Path
-
     from anton.core.interaction.selection import SelectionRequest
 
     prompt = (tc_input.get("prompt") or "Select a file or folder.").strip()
@@ -773,10 +761,10 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     # ── browse — locate an unspecified path ──────────────────────────────
     if not has_candidates and not has_pattern:
         if elicitor is None:
-            return json.dumps({
-                "status": "picker_unavailable",
-                "message": "An interactive picker is unavailable here; ask the user for the path in plain text.",
-            })
+            return _status(
+                "picker_unavailable",
+                "An interactive picker is unavailable here; ask the user for the path in plain text.",
+            )
         request = SelectionRequest(
             prompt=prompt, kind=kind, mode="browse", root=str(_browse_start_dir(tc_input, root))
         )
@@ -785,30 +773,27 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         return error or _finalize_browse_choice(chosen, kind, browse_root)
 
     # ── pick — disambiguate concrete candidates within the project ───────
-    candidates = _collect_selection_candidates(session, tc_input, root, kind)
+    candidates = _collect_selection_candidates(tc_input, root, kind)
     if not candidates:
-        return json.dumps({
-            "status": "no_matches",
-            "message": "No match found. Refine the pattern, omit candidates/pattern to let the user browse, or ask in plain text.",
-        })
+        return _status(
+            "no_matches",
+            "No match found. Refine the pattern, omit candidates/pattern to let the user browse, or ask in plain text.",
+        )
     if len(candidates) == 1:
-        return json.dumps({"status": "resolved", "auto_resolved": True, "path": str(candidates[0])})
+        return _status("resolved", auto_resolved=True, path=str(candidates[0]))
     if elicitor is None:
-        return json.dumps({
-            "status": "picker_unavailable",
-            "candidates": [str(p) for p in candidates],
-            "message": "An interactive picker is unavailable here; ask the user which of these paths they meant.",
-        })
+        return _status(
+            "picker_unavailable",
+            "An interactive picker is unavailable here; ask the user which of these paths they meant.",
+            candidates=[str(p) for p in candidates],
+        )
 
     options = tuple(_selection_option(p, root) for p in candidates)
     chosen, error = await _run_elicitor(elicitor, SelectionRequest(prompt=prompt, options=options, kind=kind))
     if error:
         return error
     if chosen is None:
-        return json.dumps({
-            "status": "cancelled",
-            "message": "The user dismissed the picker without choosing. Ask how they would like to proceed.",
-        })
+        return _status("cancelled", "The user dismissed the picker without choosing. Ask how they would like to proceed.")
     if chosen not in {option.value for option in options}:
-        return json.dumps({"status": "invalid", "message": "The returned selection was not one of the offered options."})
-    return json.dumps({"status": "resolved", "path": chosen})
+        return _status("invalid", "The returned selection was not one of the offered options.")
+    return _status("resolved", path=chosen)
