@@ -1,6 +1,6 @@
 [project]
 name = "minds"
-version = "1.10.0"
+version = "2.0.2"
 requires-python = ">=3.10,<4.0"
 dependencies = [
     "pydantic==2.12.5",
