@@ -41,6 +41,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
         _venvs_base: Path | None = None,
+        allowed_env_keys: set[str] | None = None,
     ) -> None:
         super().__init__(
             name,
@@ -59,6 +60,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # is a "where to put scratchpad venvs" hint; the explicit
         # arg is "the agent's project, when known".
         self._explicit_workspace_path: Path | None = workspace_path
+        # When set, only these env-var names are passed to the scratchpad
+        # subprocess. None means copy everything (legacy / CLI behaviour).
+        self._allowed_env_keys: set[str] | None = allowed_env_keys
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -330,7 +334,26 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         os.close(fd)
         self._boot_path = path
 
-        env = os.environ.copy()
+        # Build the subprocess env: either a full copy (legacy/CLI default when
+        # allowed_env_keys is None) or a filtered subset (cowork-server passes
+        # only the DS_* vars for connections enabled in this conversation, plus
+        # system essentials). This prevents unrelated credentials from leaking
+        # into the scratchpad subprocess.
+        if self._allowed_env_keys is None:
+            env = os.environ.copy()
+        else:
+            # Always include system essentials so the subprocess can run at all.
+            _SYSTEM_KEYS = {
+                "PATH", "HOME", "USER", "LOGNAME", "SHELL",
+                "TMPDIR", "TEMP", "TMP",
+                "LANG", "LC_ALL", "LC_CTYPE",
+                "PYTHONPATH", "PYTHONHASHSEED",
+                "SystemRoot", "COMSPEC",  # Windows
+            }
+            env = {
+                k: v for k, v in os.environ.items()
+                if k in _SYSTEM_KEYS or k in self._allowed_env_keys
+            }
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:
@@ -732,6 +755,7 @@ def local_scratchpad_runtime_factory(
     coding_base_url: str,
     cells: list[Cell] | None,
     workspace_path: Path | None,
+    allowed_env_keys: set[str] | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -741,4 +765,5 @@ def local_scratchpad_runtime_factory(
         coding_base_url=coding_base_url,
         cells=cells,
         workspace_path=workspace_path,
+        allowed_env_keys=allowed_env_keys,
     )

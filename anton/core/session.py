@@ -145,6 +145,14 @@ class ChatSessionConfig:
     # so resuming a conversation days later still reports the real "now".
     # None → fall back to today.
     started_at: datetime | None = None
+    # Restrict which environment variables the scratchpad subprocess may see.
+    # When set, the subprocess env is filtered to this set plus system
+    # essentials (PATH, HOME, …). None (default) preserves legacy behaviour:
+    # the full os.environ is copied — safe for the CLI, where all DS_* vars
+    # are the user's own. Cowork-server sets this to the DS_* keys for the
+    # connections enabled in the current conversation, preventing unrelated
+    # credentials from leaking into the scratchpad.
+    scratchpad_env_keys: set[str] | None = None
 
 
 class ChatSession:
@@ -206,6 +214,7 @@ class ChatSession:
             coding_base_url=coding_conn.base_url or "",
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
+            allowed_env_keys=config.scratchpad_env_keys,
         )
 
         self.tool_registry = ToolRegistry()

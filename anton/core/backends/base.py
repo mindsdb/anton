@@ -258,4 +258,5 @@ class ScratchpadRuntimeFactory(Protocol):
         coding_api_key: str,
         coding_base_url: str,
         workspace_path: Path | None,
+        allowed_env_keys: set[str] | None = None,
     ) -> ScratchpadRuntime: ...
