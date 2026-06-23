@@ -8,7 +8,10 @@ from anton.core.settings import CoreSettings
 
 
 def _build_env_files() -> list[str]:
-    """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env"""
+    """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env
+    -> ~/.cowork/.env. Later files win, so the consolidated ~/.cowork/.env
+    takes precedence; ~/.anton/.env stays as a fallback for installs that
+    haven't migrated yet."""
     files: list[str] = [".env"]
     local_env = Path.cwd() / ".anton" / ".env"
     if local_env.is_file():
@@ -16,6 +19,9 @@ def _build_env_files() -> list[str]:
     user_env = Path("~/.anton/.env").expanduser()
     if user_env.is_file():
         files.append(str(user_env))
+    cowork_env = Path("~/.cowork/.env").expanduser()
+    if cowork_env.is_file():
+        files.append(str(cowork_env))
     return files
 
 
