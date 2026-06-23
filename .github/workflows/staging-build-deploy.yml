@@ -1,9 +1,9 @@
-name: Staging - Build and Deploy on push to main
+name: Staging - Build and Deploy on push to staging
 
 on:
   push:
     branches:
-      - main
+      - staging
 
 defaults:
   run:

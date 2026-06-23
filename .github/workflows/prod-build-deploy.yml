@@ -1,8 +1,9 @@
-name: Prod - Build and Deploy on release
+name: Prod - Build and Deploy on push to main
 
 on:
-  release:
-    types: [published]
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 defaults:
@@ -46,7 +47,6 @@ jobs:
         with:
           module-name: ${{ env.CI_REPOSITORY_SLUG }}
           build-for-environment: production
-          image-ref: ${{ env.CI_REF_SLUG }}
 
   scan:
     runs-on: mdb-dev
@@ -129,7 +129,7 @@ jobs:
         with:
           environment-slug: prod
           k8s-namespace: prod
-          image-tag: production-${{ env.CI_REF_SLUG }}
+          image-tag: production-${{ env.SLUG }}
           timeout: 600s
           wait: "true"  # We need to wait till deployment is finished here, since we're going to test the deployment env
       - name: Wait for Deployment to be ready

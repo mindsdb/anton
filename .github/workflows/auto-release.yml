@@ -1,0 +1,98 @@
+name: Auto Release - CalVer tag and GitHub Release
+
+on:
+  push:
+    branches:
+      - main
+
+# Only one release at a time
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: mdb-dev
+    # Skip auto-version commits to prevent loops (belt-and-suspenders;
+    # GITHUB_TOKEN commits don't trigger workflows anyway)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need tags for sequence calculation
+
+      - name: Compute CalVer version
+        id: version
+        run: |
+          set -euo pipefail
+
+          MAJOR=2
+          YY=$(date -u +%y)    # e.g. 26
+          M=$(date -u +%-m)    # e.g. 6 (no zero-pad)
+          DD=$(date -u +%-d)   # e.g. 23 (no zero-pad)
+
+          # Find the highest sequence for today's date
+          PREFIX="v${MAJOR}.${YY}.${M}.${DD}."
+          SEQ=0
+          for tag in $(git tag -l "${PREFIX}*" | sort -t. -k5 -n); do
+            N="${tag##*.}"
+            if [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt "$SEQ" ]; then
+              SEQ="$N"
+            fi
+          done
+          SEQ=$((SEQ + 1))
+
+          VERSION="${MAJOR}.${YY}.${M}.${DD}.${SEQ}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${VERSION}"
+
+      - name: Update pyproject.toml version
+        run: |
+          sed -i'' -e 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' pyproject.toml
+          echo "Updated pyproject.toml:"
+          head -5 pyproject.toml
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "release: ${{ steps.version.outputs.tag }} [skip ci]"
+          git push
+
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            --title "${{ steps.version.outputs.tag }}"
+
+  notify-failure:
+    runs-on: mdb-dev
+    needs: [release]
+    if: failure()
+    steps:
+      - name: Checkout for Slack action
+        uses: actions/checkout@v4
+      - name: Pull MindsDB Github Actions
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/github-actions
+          path: github-actions
+      - uses: ./github-actions/setup-env
+      - name: Notify Slack of auto-release failure
+        uses: ./github-actions/slack-deploy-msg
+        with:
+          channel-id: ${{ secrets.SLACK_DEPLOYMENTS_CHANNEL_ID }}
+          status: "failed"
+          color: "#FF4444"
+          env-name: "auto-release"
+          env-url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          slack-token: ${{ secrets.GH_ACTIONS_SLACK_BOT_TOKEN }}
