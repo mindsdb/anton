@@ -1,4 +1,4 @@
-name: Auto-release on version bump
+name: Auto-release on push to main
 
 permissions:
   contents: write
@@ -6,8 +6,6 @@ permissions:
 on:
   push:
     branches: [main]
-    paths:
-      - 'anton/__init__.py'
   workflow_dispatch:
 
 concurrency:
@@ -17,52 +15,69 @@ concurrency:
 jobs:
   auto-release:
     runs-on: ubuntu-latest
+    # Skip auto-version commits to prevent loops (belt-and-suspenders;
+    # GITHUB_TOKEN commits don't trigger workflows anyway)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     outputs:
       tag: ${{ steps.version.outputs.tag }}
-      created: ${{ steps.tag_check.outputs.exists == 'false' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # need tags for sequence calculation
 
-      - name: Read __version__ from anton/__init__.py
+      - name: Compute CalVer version
         id: version
         run: |
-          PKG_VERSION=$(grep -oE '__version__\s*=\s*"[^"]+"' anton/__init__.py | grep -oE '"[^"]+"' | tr -d '"')
-          if [ -z "${PKG_VERSION}" ]; then
-            echo "::error::Could not parse __version__ from anton/__init__.py"
-            exit 1
-          fi
-          echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
 
-      - name: Check if tag already exists
-        id: tag_check
+          MAJOR=2
+          YY=$(date -u +%y)    # e.g. 26
+          M=$(date -u +%-m)    # e.g. 6 (no zero-pad)
+          DD=$(date -u +%-d)   # e.g. 23 (no zero-pad)
+
+          # Find the highest sequence for today's date
+          PREFIX="v${MAJOR}.${YY}.${M}.${DD}."
+          SEQ=0
+          for tag in $(git tag -l "${PREFIX}*" | sort -t. -k5 -n); do
+            N="${tag##*.}"
+            if [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt "$SEQ" ]; then
+              SEQ="$N"
+            fi
+          done
+          SEQ=$((SEQ + 1))
+
+          VERSION="${MAJOR}.${YY}.${M}.${DD}.${SEQ}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${VERSION}"
+
+      - name: Update anton/__init__.py version
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists; nothing to do."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Tag ${TAG} does not exist; will create release."
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          sed -i 's/^__version__ = ".*"/__version__ = "${{ steps.version.outputs.version }}"/' anton/__init__.py
+          echo "Updated anton/__init__.py:"
+          grep __version__ anton/__init__.py
 
-      - name: Create tag and GitHub release
-        if: steps.tag_check.outputs.exists == 'false'
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add anton/__init__.py
+          git commit -m "release: ${{ steps.version.outputs.tag }} [skip ci]"
+          git push
+
+      - name: Create tag and GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "${TAG}" \
-            --target "${GITHUB_SHA}" \
-            --title "${TAG}" \
-            --generate-notes
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            --title "${{ steps.version.outputs.tag }}"
 
   publish:
     name: Publish to PyPI
     needs: auto-release
-    if: needs.auto-release.outputs.created == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -87,7 +102,6 @@ jobs:
 
   e2e:
     needs: auto-release
-    if: needs.auto-release.outputs.created == 'true'
     uses: ./.github/workflows/tests_e2e_release.yml
     with:
       tag: ${{ needs.auto-release.outputs.tag }}
