@@ -89,7 +89,8 @@ class TestProceduralMemorySection:
             datasource_context="\n\n## Datasources\nDS HERE",
             skill_store=populated_store,
         )
-        # Procedural memory should appear AFTER datasource_context
+        # Procedural memory should appear AFTER datasource_context and AFTER memory_context
+        # (it lives in the volatile prompt tail, after all injected context blocks)
         memory_pos = prompt.find("MEMORY HERE")
         ds_pos = prompt.find("DS HERE")
         proc_pos = prompt.find("## Procedural memory")
