@@ -126,7 +126,7 @@ class ChatSystemPromptBuilder:
     def build(
         self,
         *,
-        conversation_started: str,
+        conversation_started: str = "",
         current_datetime: str,
         system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
@@ -178,10 +178,6 @@ class ChatSystemPromptBuilder:
         if datasource_context:
             prompt += datasource_context
 
-        procedural_memory = self._build_procedural_memory_section(skill_store)
-        if procedural_memory:
-            prompt += procedural_memory
-
         suffix = system_prompt_context.suffix.strip()
         if suffix:
             prompt += f"\n\n{suffix}"
@@ -197,6 +193,10 @@ class ChatSystemPromptBuilder:
         )
         if memory_context:
             prompt += memory_context
+
+        procedural_memory = self._build_procedural_memory_section(skill_store)
+        if procedural_memory:
+            prompt += procedural_memory
 
         return prompt
 
