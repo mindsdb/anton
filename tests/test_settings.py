@@ -106,3 +106,56 @@ class TestWorkspaceResolution:
         s = AntonSettings(anthropic_api_key="test", _env_file=None)
         # Before resolve, workspace_path falls back to cwd
         assert s.workspace_path == tmp_path
+
+
+class TestMindsOpenAIBaseUrlDerivation:
+    """model_post_init derives a host-aware openai_base_url from minds_url.
+
+    Regression for the mdb.ai-era hardcoded /api/v1 (ENG-436): api.mindshub.ai
+    must derive /v1, mdb.ai keeps /api/v1, and an already-suffixed URL is
+    preserved. Derivation only fires for an openai-compatible provider when
+    no openai key/url is already set.
+    """
+
+    def _derive(self, minds_url, monkeypatch):
+        for k in _ANTON_MODEL_KEYS + [
+            "ANTON_OPENAI_API_KEY",
+            "ANTON_OPENAI_BASE_URL",
+            "ANTON_MINDS_API_KEY",
+            "ANTON_MINDS_URL",
+        ]:
+            monkeypatch.delenv(k, raising=False)
+        return AntonSettings(
+            minds_api_key="mdb_test",
+            minds_url=minds_url,
+            planning_provider="openai-compatible",
+            coding_provider="openai-compatible",
+            _env_file=None,
+        )
+
+    def test_mindshub_derives_v1(self, monkeypatch):
+        s = self._derive("https://api.mindshub.ai", monkeypatch)
+        assert s.openai_api_key == "mdb_test"
+        assert s.openai_base_url == "https://api.mindshub.ai/v1"
+
+    def test_legacy_mdb_ai_derives_api_v1(self, monkeypatch):
+        s = self._derive("https://mdb.ai", monkeypatch)
+        assert s.openai_base_url == "https://mdb.ai/api/v1"
+
+    def test_already_suffixed_url_preserved(self, monkeypatch):
+        s = self._derive("https://api.mindshub.ai/v1", monkeypatch)
+        assert s.openai_base_url == "https://api.mindshub.ai/v1"
+
+    def test_no_derivation_when_openai_key_present(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS + ["ANTON_OPENAI_BASE_URL"]:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(
+            minds_api_key="mdb_test",
+            minds_url="https://api.mindshub.ai",
+            openai_api_key="sk-real-user-key",
+            planning_provider="openai-compatible",
+            _env_file=None,
+        )
+        # Derivation is skipped because openai_api_key is already set.
+        assert s.openai_api_key == "sk-real-user-key"
+        assert s.openai_base_url is None
