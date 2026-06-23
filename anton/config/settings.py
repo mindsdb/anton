@@ -112,7 +112,7 @@ class AntonSettings(CoreSettings):
     minds_ssl_verify: bool = True
 
     # Publish service
-    publish_url: str = "https://4nton.ai"
+    publish_url: str = "https://view.mindshub.ai"
 
     backend: str = "local"  # local | remote
 

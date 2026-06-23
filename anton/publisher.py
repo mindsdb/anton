@@ -35,7 +35,7 @@ FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-state
 _FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.json"}
 
 
-DEFAULT_PUBLISH_URL = "https://4nton.ai"
+DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 
 # Owner-side housekeeping files that must never enter the published
 # bundle. `.published.json` in particular holds the artifact's plaintext
