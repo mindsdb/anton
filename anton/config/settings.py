@@ -139,7 +139,18 @@ class AntonSettings(CoreSettings):
         ):
             self.openai_api_key = self.minds_api_key
             if not self.openai_base_url:
-                self.openai_base_url = f"{self.minds_url.rstrip('/')}/api/v1"
+                # Host-aware base URL: api.mindshub.ai serves the
+                # OpenAI-compatible API at /v1, the legacy mdb.ai host at
+                # /api/v1. The previous hardcoded /api/v1 was correct only
+                # for mdb.ai and produced a wrong endpoint for mindshub
+                # (ENG-436). Mirrors cowork-server's minds_chat_base_url.
+                base = self.minds_url.rstrip("/")
+                if base.endswith("/v1"):
+                    self.openai_base_url = base
+                elif "mdb.ai" in base:
+                    self.openai_base_url = f"{base}/api/v1"
+                else:
+                    self.openai_base_url = f"{base}/v1"
 
     _workspace: Path = PrivateAttr(default=None)
 
