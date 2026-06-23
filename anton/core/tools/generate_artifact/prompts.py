@@ -27,14 +27,29 @@ HARD RULES:
 - Call `write_file` exactly once per file with the COMPLETE contents.
   Do NOT split a single file across multiple calls.
 - All `path` values are RELATIVE to the artifact folder — never write outside it.
-- Do not access the network. Use only what is in the brief and the pre-fetched
-  data sidecar files.
 - Call `finish(summary="<one line>")` exactly once when all files are written.
 
 AVAILABLE TOOLS:
 - `write_file(path, content)` — write a UTF-8 text file at `<artifact>/<path>`.
 - `read_file(path)` — read a file you already wrote (for iterative refinement).
-- `finish(summary)` — terminate generation with a one-line summary.\
+- `scratchpad(action, name, ...)` — drive a persistent Python scratchpad
+  (`exec`, `view`, `dump`, `install`, `reset`, `remove`). Use it to reach the
+  real data described in the brief's `## Data` section.
+- `finish(summary)` — terminate generation with a one-line summary.
+
+USING DATA:
+- The brief's `## Data` section names the scratchpads and cells the main agent
+  already used, and what was done in them. Start by inspecting them with
+  `scratchpad(action="view", name="<pad>")` (or `dump`) to see existing cells
+  and outputs.
+- Use `scratchpad(action="exec", name="<pad>", code=...)` to pull or rebuild the
+  exact data you need (re-query, aggregate, reshape). Provide
+  `one_line_description` and `estimated_execution_time_seconds` on every `exec`.
+- For an html-app, EMBED the real data into the output file: print small results
+  to stdout and inline them in `write_file`, or for larger data `exec`-write a
+  file into the artifact folder and `read_file` it back.
+- For a fullstack app, the generated backend queries the live source itself —
+  use the scratchpad mainly to confirm the schema and a sample.\
 """
 
 
@@ -232,28 +247,11 @@ def build_subagent_system_prompt(artifact_type: str, artifact_path: Path) -> str
     return "\n\n".join(parts)
 
 
-def build_user_kickoff(
-    context: str,
-    data_summaries: list[dict],
-) -> str:
+def build_user_kickoff(context: str) -> str:
     parts: list[str] = ["## Brief", context.strip()]
-
-    if data_summaries:
-        parts.append("## Pre-fetched data")
-        parts.append(
-            "Each variable below is already on disk. "
-            "Load with `pickle.load(open(file,'rb'))` for `.pkl` files "
-            "or `json.load(open(file))` for `.json` files."
-        )
-        for d in data_summaries:
-            parts.append(
-                f"### `{d['variable']}` (from scratchpad `{d['scratchpad']}`)\n"
-                f"format: {d['format']}  •  file: `{d['sidecar_path']}`\n"
-                f"```\n{d['summary']}\n```"
-            )
-
     parts.append(
-        "Write every file now using `write_file`, then call `finish`."
+        "Use the `scratchpad` tool to reach any data described under `## Data`. "
+        "Then write every file using `write_file`, and call `finish`."
     )
     return "\n\n".join(parts)
 
@@ -266,9 +264,9 @@ _API_SPEC_SYSTEM = """\
 You are a REST API designer.
 
 Given requirements (which may include a `### Sample` of real data under the
-`## Data` section) and any pre-fetched data summaries, write a concise API
-specification that both a backend developer and a frontend developer can
-implement from independently and in parallel.
+`## Data` section), write a concise API specification that both a backend
+developer and a frontend developer can implement from independently and in
+parallel.
 
 Output an OpenAPI 3.1 specification as a single JSON document.
 
@@ -278,7 +276,7 @@ Rules:
   a `requestBody` schema for POST/PUT, and `responses` for `200` plus any
   non-200 codes callers must handle.
 - Provide response `examples` derived from the data the brief describes
-  (the `### Sample` subsection and any pre-fetched data summaries).
+  (the `### Sample` subsection, when present).
 - Be precise — frontend and backend are generated in parallel from this spec.
 - Output ONLY the raw JSON document — no markdown fences, no preamble.\
 """
@@ -286,19 +284,10 @@ Rules:
 
 def build_api_spec_prompt(
     context: str,
-    data_summaries: list[dict],
     *,
     stateless: bool = False,
 ) -> tuple[str, str]:
     parts = ["## Requirements", context.strip()]
-
-    if data_summaries:
-        parts.append("## Available data")
-        for d in data_summaries:
-            parts.append(
-                f"### `{d['variable']}` (from scratchpad `{d['scratchpad']}`)\n"
-                f"{d['summary']}"
-            )
 
     if stateless:
         parts.append(
@@ -352,29 +341,14 @@ def build_backend_system_prompt(artifact_path: Path, *, stateless: bool = False)
 
 def build_backend_kickoff(
     context: str,
-    data_summaries: list[dict],
     api_spec: str,
 ) -> str:
     parts = ["## Brief", context.strip()]
     parts.append("## API Specification\n" + api_spec)
-
-    if data_summaries:
-        parts.append("## Pre-fetched data")
-        parts.append(
-            "Each variable below is already on disk. "
-            "Load with `pickle.load(open(file,'rb'))` for `.pkl` files "
-            "or `json.load(open(file))` for `.json` files."
-        )
-        for d in data_summaries:
-            parts.append(
-                f"### `{d['variable']}` (from scratchpad `{d['scratchpad']}`)\n"
-                f"format: {d['format']}  •  file: `{d['sidecar_path']}`\n"
-                f"```\n{d['summary']}\n```"
-            )
-
     parts.append(
-        "Write `backend.py` first using `write_file`. "
-        "You will receive the next instruction after it is written."
+        "Use the `scratchpad` tool to confirm the schema/sample of any data "
+        "described under `## Data`. Then write `backend.py` first using "
+        "`write_file`. You will receive the next instruction after it is written."
     )
     return "\n\n".join(parts)
 
@@ -404,7 +378,6 @@ def build_frontend_system_prompt(artifact_path: Path) -> str:
 
 def build_frontend_kickoff(
     context: str,
-    data_summaries: list[dict],
     api_spec: str,
 ) -> str:
     parts = ["## Brief", context.strip()]
@@ -414,17 +387,9 @@ def build_frontend_kickoff(
         "the backend serves them.)\n\n"
         + api_spec
     )
-
-    if data_summaries:
-        parts.append("## Data summaries")
-        parts.append(
-            "(Shape and sample values of the backend data — "
-            "use these to design charts and tables.)"
-        )
-        for d in data_summaries:
-            parts.append(f"### `{d['variable']}`\n{d['summary']}")
-
     parts.append(
-        "Write `static/index.html` using `write_file`, then call `finish`."
+        "Use the `scratchpad` tool to inspect a data sample if you need it to "
+        "design charts and tables. Then write `static/index.html` using "
+        "`write_file`, and call `finish`."
     )
     return "\n\n".join(parts)

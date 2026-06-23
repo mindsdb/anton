@@ -5,9 +5,10 @@ For fullstack-stateless-app and fullstack-stateful-app:
   1. One-shot planning call → OpenAPI specification (JSON, kept in memory).
   2. asyncio.gather → backend loop + frontend loop in parallel.
 
-The caller is responsible for providing real data context: a `### Sample`
-subsection inside `## Data` in the brief and/or `data_refs` pointing at
-scratchpad variables. The engine no longer fabricates test data.
+The sub-generator reaches real data itself through the `scratchpad` sub-tool,
+guided by the free-form `## Data` section of the brief (which names the
+scratchpads/cells the main agent already used). The engine no longer fabricates
+test data or pre-pickles variables.
 
 The loop protocol is Anthropic tool-use / tool-result blocks, which both
 providers Anton ships (AnthropicProvider, OpenAIProvider) accept on input.
@@ -21,7 +22,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import sub_tools
-from .data_resolver import resolve_refs
 from .prompts import (
     build_api_spec_prompt,
     build_backend_kickoff,
@@ -36,7 +36,9 @@ if TYPE_CHECKING:
     from anton.chat_session import ChatSession
 
 
-MAX_ROUNDS = 12
+# Higher than the old 12 because the sub-generator now also spends rounds on
+# scratchpad calls (pulling/rebuilding data) on top of writing files.
+MAX_ROUNDS = 16
 
 
 # ---------------------------------------------------------------------------
@@ -50,25 +52,19 @@ async def generate(
     artifact_type: str,
     artifact_path: Path,
     context: str,
-    data_refs: list[dict],
 ) -> dict | str:
     """Drive the inner LLM(s) to populate ``artifact_path``.
 
     Returns either a result dict (on success) or a single error string.
+    The sub-generator reaches real data itself via the `scratchpad` sub-tool,
+    guided by the brief's free-form ``## Data`` section.
     """
-    sidecar_dir = artifact_path / "_gen_data"
-    sidecar_dir.mkdir(parents=True, exist_ok=True)
-
-    resolved = await resolve_refs(session, data_refs, sidecar_dir)
-    if isinstance(resolved, str):
-        return resolved
-
-    # --- html-app: single generation loop, no changes --------------------
+    # --- html-app: single generation loop --------------------------------
     if artifact_type == "html-app":
         return await _run_loop(
             session=session,
             system=build_subagent_system_prompt("html-app", artifact_path),
-            kickoff=build_user_kickoff(context, resolved),
+            kickoff=build_user_kickoff(context),
             artifact_path=artifact_path,
         )
 
@@ -78,9 +74,7 @@ async def generate(
 
     stateless = artifact_type == "fullstack-stateless-app"
 
-    api_spec_or_err = await _generate_api_spec(
-        session, context, resolved, stateless=stateless
-    )
+    api_spec_or_err = await _generate_api_spec(session, context, stateless=stateless)
     if api_spec_or_err.startswith("Error:"):
         return api_spec_or_err
     api_spec = api_spec_or_err
@@ -89,7 +83,7 @@ async def generate(
         _run_loop(
             session=session,
             system=build_backend_system_prompt(artifact_path, stateless=stateless),
-            kickoff=build_backend_kickoff(context, resolved, api_spec),
+            kickoff=build_backend_kickoff(context, api_spec),
             artifact_path=artifact_path,
             # Two-step backend generation: write backend.py first so that
             # requirements.txt can be based on its actual imports.
@@ -105,7 +99,7 @@ async def generate(
         _run_loop(
             session=session,
             system=build_frontend_system_prompt(artifact_path),
-            kickoff=build_frontend_kickoff(context, resolved, api_spec),
+            kickoff=build_frontend_kickoff(context, api_spec),
             artifact_path=artifact_path,
         ),
     )
@@ -137,7 +131,6 @@ async def generate(
 async def _generate_api_spec(
     session: "ChatSession",
     context: str,
-    data_summaries: list[dict],
     *,
     stateless: bool = False,
 ) -> str:
@@ -147,7 +140,7 @@ async def _generate_api_spec(
     response by parsing it with ``json.loads``; if parsing succeeds the spec
     is considered valid and the (normalized) JSON string is returned.
     """
-    system, user = build_api_spec_prompt(context, data_summaries, stateless=stateless)
+    system, user = build_api_spec_prompt(context, stateless=stateless)
     response = await session._llm.plan(
         system=system,
         messages=[{"role": "user", "content": user}],
@@ -291,6 +284,20 @@ async def _run_loop(
                         "type": "tool_result",
                         "tool_use_id": tc.id,
                         "content": res["message"],
+                    }
+                )
+            elif name == "scratchpad":
+                # Full scratchpad access: the sub-generator pulls or rebuilds
+                # the data described in the brief's `## Data` section. Lazy
+                # import avoids a tool_handlers <-> generate_artifact cycle.
+                from anton.core.tools.tool_handlers import handle_scratchpad
+
+                content = await handle_scratchpad(session, inp)
+                result_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": content,
                     }
                 )
             else:

@@ -81,8 +81,21 @@ FINISH_SCHEMA: dict = {
 }
 
 
+def _scratchpad_schema() -> dict:
+    # Reuse the exact schema + description the main agent sees, so the
+    # sub-generator drives scratchpads with the same contract. Imported
+    # lazily to avoid a tool_defs <-> generate_artifact import cycle.
+    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+
+    return {
+        "name": SCRATCHPAD_TOOL.name,
+        "description": SCRATCHPAD_TOOL.description,
+        "input_schema": SCRATCHPAD_TOOL.input_schema,
+    }
+
+
 def tool_schemas() -> list[dict]:
-    return [WRITE_FILE_SCHEMA, READ_FILE_SCHEMA, FINISH_SCHEMA]
+    return [WRITE_FILE_SCHEMA, READ_FILE_SCHEMA, FINISH_SCHEMA, _scratchpad_schema()]
 
 
 def _sandboxed_path(root: Path, rel: str) -> Path | None:

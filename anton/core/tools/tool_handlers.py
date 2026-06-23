@@ -257,8 +257,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
     message contains the literal marker `XTESTX`. The handler:
       1. Loads artifact metadata to read its `type` (rejects types outside
          the {html-app, fullstack-stateless-app, fullstack-stateful-app}).
-      2. Validates input shape (context required, data_refs are
-         {scratchpad, variable} dicts).
+      2. Validates input shape (context required).
       3. Hands off to `anton.core.tools.generate_artifact.generate`, which
          runs an inner tool-call loop against `session._llm.code` and writes
          files into the artifact folder.
@@ -288,23 +287,6 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
     if not isinstance(context, str) or not context.strip():
         return "Error: `context` is required (markdown brief)."
 
-    raw_refs = tc_input.get("data_refs") or []
-    if not isinstance(raw_refs, list):
-        return "Error: `data_refs` must be a list."
-    refs: list[dict] = []
-    for item in raw_refs:
-        if not isinstance(item, dict):
-            return "Error: each data_ref must be {scratchpad: str, variable: str}."
-        scratchpad = item.get("scratchpad")
-        variable = item.get("variable")
-        if not isinstance(scratchpad, str) or not isinstance(variable, str):
-            return "Error: each data_ref must have string `scratchpad` and `variable`."
-        scratchpad = scratchpad.strip()
-        variable = variable.strip()
-        if not scratchpad or not variable:
-            return "Error: each data_ref must have non-empty `scratchpad` and `variable`."
-        refs.append({"scratchpad": scratchpad, "variable": variable})
-
     folder = store.folder_for(slug)
     from anton.core.tools.generate_artifact import generate
 
@@ -314,7 +296,6 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
             artifact_type=artifact.type,
             artifact_path=folder,
             context=context,
-            data_refs=refs,
         )
     except Exception as exc:  # last-resort: never escalate to the dispatcher
         return f"Error: generator failed: {exc}"
