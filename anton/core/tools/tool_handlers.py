@@ -517,7 +517,15 @@ async def handle_read_image(
     try:
         path = Path(file_path).expanduser()
         if not path.is_absolute():
-            path = (Path.cwd() / path).resolve()
+            # Resolve relative paths against the project workspace (where
+            # artifacts/decks live), not the process cwd. Under the desktop
+            # app the agent's cwd is NOT the project, so a project-relative
+            # image path would otherwise land in the wrong directory and
+            # come back "file not found". Mirrors publish_or_preview. Falls
+            # back to cwd for the CLI, where cwd already is the project.
+            base = getattr(getattr(session, "_workspace", None), "base", None)
+            root = Path(base) if base else Path.cwd()
+            path = (root / path).resolve()
     except OSError as exc:
         return f"Error: invalid path '{file_path}': {exc}"
 
