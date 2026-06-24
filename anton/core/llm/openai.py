@@ -23,6 +23,7 @@ from .provider import (
     Usage,
     compute_context_pressure,
 )
+from .pricing import compute_cost
 
 
 def _translate_tools(tools: list[dict]) -> list[dict]:
@@ -40,6 +41,26 @@ def _translate_tools(tools: list[dict]) -> list[dict]:
             }
         )
     return result
+
+
+def _openai_cached_tokens(usage_obj) -> int:
+    """Best-effort cached-prompt-token count off an OpenAI usage object.
+
+    OpenAI reports cached tokens as a subset of the prompt under
+    ``prompt_tokens_details.cached_tokens`` (Chat Completions) or
+    ``input_tokens_details.cached_tokens`` (Responses API). Returns 0 when the
+    field is absent — surfaced for telemetry only; it is NOT priced again on
+    top of the input rate (OpenAI already counts it in the input total).
+    """
+    if not usage_obj:
+        return 0
+    details = (
+        getattr(usage_obj, "prompt_tokens_details", None)
+        or getattr(usage_obj, "input_tokens_details", None)
+    )
+    if details is None:
+        return 0
+    return getattr(details, "cached_tokens", 0) or 0
 
 
 def _translate_tool_choice(tool_choice: dict) -> dict | str:
@@ -720,13 +741,22 @@ class OpenAIProvider(LLMProvider):
 
         usage_obj = response.usage
         input_tokens = usage_obj.prompt_tokens if usage_obj else 0
+        output_tokens = usage_obj.completion_tokens if usage_obj else 0
+        # OpenAI folds cached tokens *into* prompt_tokens (a subset, already
+        # priced by the input rate), unlike Anthropic which reports them
+        # separately. So we surface cache_read for telemetry but do NOT add a
+        # cache term to compute_cost — that would double-count. Anton sends no
+        # cache_control today, so this is 0 in practice regardless.
+        cache_read = _openai_cached_tokens(usage_obj)
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
             usage=Usage(
                 input_tokens=input_tokens,
-                output_tokens=usage_obj.completion_tokens if usage_obj else 0,
+                output_tokens=output_tokens,
                 context_pressure=compute_context_pressure(model, input_tokens),
+                cache_read_tokens=cache_read,
+                cost_usd=compute_cost(model, input_tokens, output_tokens),
             ),
             stop_reason=choice.finish_reason,
         )
@@ -777,6 +807,7 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read = 0
         stop_reason: str | None = None
 
         # Track tool call deltas by index
@@ -788,6 +819,7 @@ class OpenAIProvider(LLMProvider):
                 if chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens
                     output_tokens = chunk.usage.completion_tokens
+                    cache_read = _openai_cached_tokens(chunk.usage)
 
                 if not chunk.choices:
                     continue
@@ -888,6 +920,8 @@ class OpenAIProvider(LLMProvider):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     context_pressure=compute_context_pressure(model, input_tokens),
+                    cache_read_tokens=cache_read,
+                    cost_usd=compute_cost(model, input_tokens, output_tokens),
                 ),
                 stop_reason=stop_reason,
             )
@@ -1009,6 +1043,7 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read = 0
         stop_reason: str | None = None
 
         # Map output_index → in-flight function-call state. Responses API uses
@@ -1083,6 +1118,7 @@ class OpenAIProvider(LLMProvider):
                         if usage is not None:
                             input_tokens = getattr(usage, "input_tokens", 0) or 0
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
+                            cache_read = _openai_cached_tokens(usage)
                         stop_reason = getattr(final_response, "status", None)
         except openai.BadRequestError as exc:
             msg = str(exc).lower()
@@ -1119,6 +1155,8 @@ class OpenAIProvider(LLMProvider):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     context_pressure=compute_context_pressure(model, input_tokens),
+                    cache_read_tokens=cache_read,
+                    cost_usd=compute_cost(model, input_tokens, output_tokens),
                 ),
                 stop_reason=stop_reason,
             )
@@ -1161,6 +1199,7 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     # which a bare getattr default does NOT catch. Mirrors the streaming path.
     input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    cache_read = _openai_cached_tokens(usage)
 
     return LLMResponse(
         content=content_text,
@@ -1169,6 +1208,8 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             context_pressure=compute_context_pressure(model, input_tokens),
+            cache_read_tokens=cache_read,
+            cost_usd=compute_cost(model, input_tokens, output_tokens),
         ),
         stop_reason=getattr(response, "status", None),
     )

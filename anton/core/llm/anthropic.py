@@ -21,6 +21,7 @@ from .provider import (
     Usage,
     compute_context_pressure,
 )
+from .pricing import compute_cost
 
 # Native server-side web tool type strings exposed by the Anthropic Messages API.
 # The model invokes these inside the provider — Anton's tool-dispatch loop never
@@ -151,13 +152,24 @@ class AnthropicProvider(LLMProvider):
                 )
 
         input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        # Cache-token counts when present (Anthropic ships them on usage); 0
+        # otherwise. Anton sends no cache_control today, so these are normally
+        # 0 — read defensively so the cost meter is correct if that changes.
+        cache_write = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
             usage=Usage(
                 input_tokens=input_tokens,
-                output_tokens=response.usage.output_tokens,
+                output_tokens=output_tokens,
                 context_pressure=compute_context_pressure(model, input_tokens),
+                cache_write_tokens=cache_write,
+                cache_read_tokens=cache_read,
+                cost_usd=compute_cost(
+                    model, input_tokens, output_tokens, cache_write, cache_read
+                ),
             ),
             stop_reason=response.stop_reason,
         )
@@ -192,6 +204,8 @@ class AnthropicProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_write = 0
+        cache_read = 0
         stop_reason: str | None = None
 
         # Track content blocks by index for tool correlation
@@ -204,6 +218,11 @@ class AnthropicProvider(LLMProvider):
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
                         output_tokens = getattr(usage, "output_tokens", 0)
+                        # Cache-token counts when present; 0 otherwise (Anton
+                        # sends no cache_control today). Read defensively so the
+                        # cost meter stays correct if caching is enabled later.
+                        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+                        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
 
                     elif event.type == "content_block_start":
                         idx = event.index
@@ -294,6 +313,11 @@ class AnthropicProvider(LLMProvider):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     context_pressure=compute_context_pressure(model, input_tokens),
+                    cache_write_tokens=cache_write,
+                    cache_read_tokens=cache_read,
+                    cost_usd=compute_cost(
+                        model, input_tokens, output_tokens, cache_write, cache_read
+                    ),
                 ),
                 stop_reason=stop_reason,
             )
