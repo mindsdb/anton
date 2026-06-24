@@ -26,8 +26,12 @@ unconfigured users — the swap is local to ``handle_web_fetch_fallback``.
 from __future__ import annotations
 
 import html
+import ipaddress
+import os
+import socket
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -45,6 +49,75 @@ EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search"
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 _HTTP_TIMEOUT = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SSRF guard
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Private/loopback/link-local/cloud-metadata ranges that must never be fetched
+# server-side.  Cloud instance metadata (169.254.169.254) lives in link-local.
+_BLOCKED_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),      # loopback
+    ipaddress.ip_network("::1/128"),           # IPv6 loopback
+    ipaddress.ip_network("10.0.0.0/8"),        # RFC1918 private
+    ipaddress.ip_network("172.16.0.0/12"),     # RFC1918 private
+    ipaddress.ip_network("192.168.0.0/16"),    # RFC1918 private
+    ipaddress.ip_network("169.254.0.0/16"),    # link-local / cloud metadata
+    ipaddress.ip_network("fe80::/10"),         # IPv6 link-local
+    ipaddress.ip_network("fc00::/7"),          # IPv6 unique-local
+    ipaddress.ip_network("100.64.0.0/10"),     # carrier-grade NAT / GCP metadata
+    ipaddress.ip_network("0.0.0.0/8"),         # unspecified
+]
+
+
+def _is_blocked_ip(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return True  # unparseable address → block
+    return any(ip in net for net in _BLOCKED_NETWORKS)
+
+
+def _check_url_ssrf(url: str) -> str | None:
+    """Return an error string if *url* targets a private/internal host, else None.
+
+    Resolves the hostname to its IP addresses and rejects any that fall in
+    private/loopback/link-local/cloud-metadata ranges.  This prevents both
+    direct private-IP requests and 302-to-internal redirect bypasses (each
+    redirect target is checked before following).
+
+    Set ANTON_ALLOW_PRIVATE_FETCH=1 to disable (self-hosted / LAN use only).
+    """
+    if os.environ.get("ANTON_ALLOW_PRIVATE_FETCH") == "1":
+        return None
+
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if not host:
+            return f"Invalid URL — could not parse hostname: {url!r}"
+
+        # Resolve all A/AAAA records and reject if any land in a blocked range.
+        # Using all records (not just the first) guards against DNS round-robin
+        # where one record is public and another is internal.
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except socket.gaierror as exc:
+            return f"Could not resolve host {host!r}: {exc}"
+
+        addrs = {info[4][0] for info in infos}
+        for addr in addrs:
+            if _is_blocked_ip(addr):
+                return (
+                    f"Fetch blocked: {host!r} resolves to a private or "
+                    f"reserved address ({addr}). "
+                    "Set ANTON_ALLOW_PRIVATE_FETCH=1 to allow fetching from "
+                    "private/LAN addresses (self-hosted deployments only)."
+                )
+    except Exception as exc:
+        return f"SSRF pre-flight check failed for {url!r}: {exc}"
+
+    return None
 
 
 async def _search_exa(query: str, api_key: str, max_results: int) -> str:
@@ -161,11 +234,30 @@ def _strip_html(body: str) -> str:
 
 async def _fetch_url(url: str, max_chars: int) -> str:
     """GET a URL and return its text content, truncated to ``max_chars``."""
+    # SSRF guard: resolve the initial URL before opening any connection.
+    if err := _check_url_ssrf(url):
+        return err
+
     try:
+        # follow_redirects=False so we can inspect each redirect target before
+        # following it — prevents a public URL redirecting to an internal one.
         async with httpx.AsyncClient(
-            timeout=_HTTP_TIMEOUT, follow_redirects=True
+            timeout=_HTTP_TIMEOUT, follow_redirects=False
         ) as client:
             resp = await client.get(url, headers={"User-Agent": "AntonBot/1.0"})
+
+            # Manually follow redirects, checking each destination for SSRF.
+            hops = 0
+            while resp.is_redirect and hops < 10:
+                location = resp.headers.get("location", "")
+                if not location:
+                    break
+                # Resolve relative redirects against the current URL.
+                next_url = str(resp.next_request.url) if resp.next_request else location
+                if err := _check_url_ssrf(next_url):
+                    return err
+                resp = await client.send(resp.next_request)
+                hops += 1
     except httpx.TimeoutException:
         return f"Fetch timed out after {_HTTP_TIMEOUT}s for {url}"
     except httpx.HTTPError as exc:
