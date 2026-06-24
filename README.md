@@ -15,9 +15,9 @@ Anton can be installed as a desktop application or as a command-line tool.
 
 ### Desktop App:
 
-- **macOS**: Click [here to download](https://downloads.mindsdb.com/anton/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
+- **macOS**: Click [here to download](https://downloads.mindshub.ai/anton/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
 
-- **Windows**: Click [here to download](https://downloads.mindsdb.com/anton/windows/anton-latest.exe) the Anton Desktop App for Windows.
+- **Windows**: Click [here to download](https://downloads.mindshub.ai/anton/windows/anton-latest.exe) the Anton Desktop App for Windows.
  
 ### or - Command-Line App:
 
