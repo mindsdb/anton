@@ -610,9 +610,18 @@ class OpenAIProvider(LLMProvider):
         headers: dict[str, str] = {}
         if ctx.session_id:
             headers["Langfuse-Session-Id"] = ctx.session_id
+        # Langfuse-Tags: the harness identity plus any caller-supplied tags
+        # (e.g. an eval harness adding "eval", "eval_run:<id>"). Comma-joined;
+        # the MindsHub router splits, trims and de-dupes them.
+        tags: list[str] = []
         if ctx.harness:
-            headers["Langfuse-Tags"] = ctx.harness
-        extra: dict[str, object] = {}
+            tags.append(ctx.harness)
+        tags.extend(ctx.tags)
+        if tags:
+            headers["Langfuse-Tags"] = ",".join(tags)
+        # Langfuse-Metadata: caller-supplied metadata first, then the built-in
+        # turn/harness keys so identity always wins on collision.
+        extra: dict[str, object] = dict(ctx.metadata or {})
         if ctx.turn_id is not None:
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:
