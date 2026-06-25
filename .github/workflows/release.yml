@@ -18,9 +18,6 @@ env:
 jobs:
   auto-release:
     runs-on: ubuntu-latest
-    # Skip auto-version commits to prevent loops (belt-and-suspenders;
-    # GITHUB_TOKEN commits don't trigger workflows anyway)
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
