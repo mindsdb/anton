@@ -35,6 +35,7 @@ enough to be a readable query parameter.
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import time
 import urllib.parse
@@ -50,6 +51,32 @@ _TIMEOUT = 3  # seconds
 # Cached after first computation — the fingerprint never changes within
 # a process, so computing it once is sufficient.
 _cached_aid: str | None = None
+
+# Cached CI detection. Env-derived (no PII), so it stays consistent with this
+# module's anonymous design while letting the funnel filter out CI/automation
+# traffic via the ``is_ci`` flag (ENG-385). There is no email/staff signal on
+# this path — events are keyed on the anonymous ``aid``, not a user account.
+_cached_is_ci: bool | None = None
+
+# CI markers across common providers. ``CI`` is set by virtually all of them;
+# the rest catch providers that don't, or set it inconsistently.
+_CI_ENV_VARS = (
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "CIRCLECI",
+    "JENKINS_URL",
+    "TF_BUILD",
+)
+
+
+def _is_ci() -> bool:
+    """Return True when running under CI/automation (cached, env-only)."""
+    global _cached_is_ci
+    if _cached_is_ci is None:
+        _cached_is_ci = any(os.environ.get(v) for v in _CI_ENV_VARS)
+    return _cached_is_ci
 
 
 def get_installation_id() -> str:
@@ -97,6 +124,9 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
         settings: Resolved AntonSettings (checked for analytics_enabled / analytics_url).
         action: Event name, e.g. ``"anton_started"``.
         **extra: Additional key=value pairs appended as query parameters.
+
+    Every event also carries ``is_ci`` (env-derived, no PII) so CI/automation
+    traffic can be excluded from the product funnel.
     """
     try:
         if not settings.analytics_enabled:
@@ -108,6 +138,7 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
         params: dict[str, str] = {
             "action": action,
             "aid": get_installation_id(),
+            "is_ci": "true" if _is_ci() else "false",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "_": str(int(time.time() * 1000)),
         }
