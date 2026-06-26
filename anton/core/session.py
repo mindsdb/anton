@@ -31,6 +31,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StreamUsageSummary,
     TokenLimitExceeded,
     ToolCall,
 )
@@ -1523,6 +1524,8 @@ class ChatSession:
         user_input: str | list[dict],
         *,
         turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive.
 
@@ -1531,8 +1534,19 @@ class ChatSession:
         calls + tool spans made during this turn. Stored on
         `self._current_turn_id` so the provider layer can read it
         without threading the arg through every internal call.
+
+        `trace_tags` / `trace_metadata` are optional, opaque annotations the
+        host can attach to this turn's trace (forwarded to the MindsHub
+        langfuse headers — see the provider's `_build_trace_headers`). They
+        are deliberately generic: hosts can add arbitrary correlation data
+        (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
+        # Per-turn token accumulator — summed across every LLM call in the turn.
+        _turn_input = 0
+        _turn_output = 0
+        _turn_cache_read = 0
+        _turn_cache_creation = 0
         self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
@@ -1568,6 +1582,8 @@ class ChatSession:
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                tags=tuple(trace_tags or ()),
+                metadata=trace_metadata or None,
             )
         )
 
@@ -1577,6 +1593,12 @@ class ChatSession:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):
                             assistant_text_parts.append(event.text)
+                        elif isinstance(event, StreamComplete):
+                            u = event.response.usage
+                            _turn_input += u.input_tokens
+                            _turn_output += u.output_tokens
+                            _turn_cache_read += u.cache_read_input_tokens
+                            _turn_cache_creation += u.cache_creation_input_tokens
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
@@ -1635,12 +1657,37 @@ class ChatSession:
                             ):
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
+                                elif isinstance(event, StreamComplete):
+                                    u = event.response.usage
+                                    _turn_input += u.input_tokens
+                                    _turn_output += u.output_tokens
+                                    _turn_cache_read += u.cache_read_input_tokens
+                                    _turn_cache_creation += u.cache_creation_input_tokens
                                 yield event
                         except Exception as e:
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break
+
+            if _turn_input or _turn_output:
+                import logging as _logging_usage
+                _logging_usage.getLogger(__name__).info(
+                    "turn_tokens session=%s turn=%d in=%d out=%d cache_read=%d cache_write=%d",
+                    self._session_id,
+                    self._turn_count + 1,
+                    _turn_input,
+                    _turn_output,
+                    _turn_cache_read,
+                    _turn_cache_creation,
+                )
+                yield StreamUsageSummary(
+                    input_tokens=_turn_input,
+                    output_tokens=_turn_output,
+                    cache_read_input_tokens=_turn_cache_read,
+                    cache_creation_input_tokens=_turn_cache_creation,
+                )
+
         finally:
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
