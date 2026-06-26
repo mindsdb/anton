@@ -1,7 +1,8 @@
-"""Tests for the anonymous analytics layer — the ENG-385 ``is_ci`` cohort flag.
+"""Tests for the anonymous analytics layer (ENG-385).
 
-``send_event`` fires a daemon thread doing an HTTP GET; both are stubbed here so
-the built URL can be inspected deterministically without network or threads.
+CI/automation traffic is dropped entirely rather than sent. ``send_event`` fires
+a daemon thread doing an HTTP GET; both are stubbed so we can assert what (if
+anything) would be sent, without network or threads.
 """
 
 from __future__ import annotations
@@ -10,10 +11,28 @@ import urllib.parse
 
 import anton.analytics as analytics
 
+# Markers _is_ci() consults — cleared in tests so the suite's own environment
+# (it may run under GitHub Actions) doesn't leak into assertions.
+_CI_MARKERS = (
+    "ANTON_IS_CI",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "CIRCLECI",
+    "TF_BUILD",
+    "JENKINS_URL",
+)
+
 
 class _Settings:
     analytics_enabled = True
     analytics_url = "https://example.test/collect"
+
+
+def _clear_ci(monkeypatch):
+    monkeypatch.setattr(analytics, "_cached_is_ci", None)
+    for var in _CI_MARKERS:
+        monkeypatch.delenv(var, raising=False)
 
 
 def _capture_url(monkeypatch) -> list[str]:
@@ -38,41 +57,49 @@ def _query(url: str) -> dict[str, str]:
     return dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
 
 
-def test_is_ci_true_when_ci_env_set(monkeypatch):
-    monkeypatch.setattr(analytics, "_cached_is_ci", None)
-    monkeypatch.setenv("CI", "true")
+def test_is_ci_true_with_explicit_anton_flag(monkeypatch):
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv("ANTON_IS_CI", "true")
     assert analytics._is_ci() is True
 
 
-def test_is_ci_false_without_ci_env(monkeypatch):
-    monkeypatch.setattr(analytics, "_cached_is_ci", None)
-    for var in analytics._CI_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
+def test_is_ci_true_with_github_actions(monkeypatch):
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert analytics._is_ci() is True
+
+
+def test_is_ci_ignores_bare_ci_false(monkeypatch):
+    # A stray `CI=false` (or a leaked `CI`) must not classify as CI — the bare
+    # `CI` var is intentionally not consulted.
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv("CI", "false")
     assert analytics._is_ci() is False
 
 
-def test_send_event_stamps_is_ci_true(monkeypatch):
-    monkeypatch.setattr(analytics, "_cached_is_ci", None)
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+def test_is_ci_false_without_markers(monkeypatch):
+    _clear_ci(monkeypatch)
+    assert analytics._is_ci() is False
+
+
+def test_send_event_dropped_in_ci(monkeypatch):
+    _clear_ci(monkeypatch)
+    monkeypatch.setenv("ANTON_IS_CI", "true")
     captured = _capture_url(monkeypatch)
 
     analytics.send_event(_Settings(), "anton_started")
 
-    assert len(captured) == 1
-    params = _query(captured[0])
-    assert params["action"] == "anton_started"
-    assert params["is_ci"] == "true"
+    assert captured == []  # CI traffic is dropped, never sent
 
 
-def test_send_event_stamps_is_ci_false_and_preserves_extra(monkeypatch):
-    monkeypatch.setattr(analytics, "_cached_is_ci", None)
-    for var in analytics._CI_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
+def test_send_event_sends_when_not_ci(monkeypatch):
+    _clear_ci(monkeypatch)
     captured = _capture_url(monkeypatch)
 
     analytics.send_event(_Settings(), "anton_query", llm_provider="openai")
 
     assert len(captured) == 1
     params = _query(captured[0])
-    assert params["is_ci"] == "false"
+    assert params["action"] == "anton_query"
     assert params["llm_provider"] == "openai"
+    assert "is_ci" not in params  # flag removed; CI events aren't sent at all

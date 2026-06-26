@@ -52,30 +52,32 @@ _TIMEOUT = 3  # seconds
 # a process, so computing it once is sufficient.
 _cached_aid: str | None = None
 
-# Cached CI detection. Env-derived (no PII), so it stays consistent with this
-# module's anonymous design while letting the funnel filter out CI/automation
-# traffic via the ``is_ci`` flag (ENG-385). There is no email/staff signal on
-# this path — events are keyed on the anonymous ``aid``, not a user account.
+# Cached CI detection. Env-derived (no PII), consistent with this module's
+# anonymous design. CI/automation traffic is dropped entirely (see send_event)
+# rather than tagged, so it can't pollute the product funnel. Driven by an
+# explicit Anton-owned signal (ANTON_IS_CI) with known provider markers as a
+# convenience fallback; the bare ``CI`` var is intentionally not consulted —
+# it's frequently set to "false" or leaks into local dev shells (ENG-385).
 _cached_is_ci: bool | None = None
 
-# CI markers across common providers. ``CI`` is set by virtually all of them;
-# the rest catch providers that don't, or set it inconsistently.
-_CI_ENV_VARS = (
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "BUILDKITE",
-    "CIRCLECI",
-    "JENKINS_URL",
-    "TF_BUILD",
-)
+
+def _env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_ci() -> bool:
-    """Return True when running under CI/automation (cached, env-only)."""
+    """Return True for Anton automation/CI traffic (cached, env-only)."""
     global _cached_is_ci
     if _cached_is_ci is None:
-        _cached_is_ci = any(os.environ.get(v) for v in _CI_ENV_VARS)
+        _cached_is_ci = (
+            _env_true("ANTON_IS_CI")
+            or _env_true("GITHUB_ACTIONS")
+            or _env_true("GITLAB_CI")
+            or _env_true("BUILDKITE")
+            or _env_true("CIRCLECI")
+            or _env_true("TF_BUILD")
+            or bool(os.environ.get("JENKINS_URL"))
+        )
     return _cached_is_ci
 
 
@@ -125,11 +127,15 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
         action: Event name, e.g. ``"anton_started"``.
         **extra: Additional key=value pairs appended as query parameters.
 
-    Every event also carries ``is_ci`` (env-derived, no PII) so CI/automation
-    traffic can be excluded from the product funnel.
+    CI/automation traffic (ANTON_IS_CI, or a known CI provider) is dropped
+    rather than sent, so it can't pollute the product funnel (no PII either way).
     """
     try:
         if not settings.analytics_enabled:
+            return
+        # Drop CI/automation traffic entirely — no value in product analytics
+        # from CI runs, and dropping avoids a per-query exclusion filter.
+        if _is_ci():
             return
         url = settings.analytics_url
         if not url:
@@ -138,7 +144,6 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
         params: dict[str, str] = {
             "action": action,
             "aid": get_installation_id(),
-            "is_ci": "true" if _is_ci() else "false",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "_": str(int(time.time() * 1000)),
         }
