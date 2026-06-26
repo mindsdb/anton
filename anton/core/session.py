@@ -600,24 +600,67 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
-    def _has_fullstack_artifacts(self) -> bool:
-        """Return True if the workspace contains any fullstack artifact.
+    # Keywords that signal backend/fullstack intent when combined with a build verb.
+    _BACKEND_NOUNS: frozenset[str] = frozenset({
+        "app", "application", "api", "backend", "server", "website", "web app",
+        "webapp", "endpoint", "route", "fastapi", "flask", "django", "express",
+        "fullstack", "full stack", "full-stack", "service", "microservice",
+    })
+    # These alone are strong enough — no verb required.
+    _BACKEND_STRONG: frozenset[str] = frozenset({
+        "fastapi", "flask", "django", "backend", "fullstack", "full stack",
+        "full-stack", "web app", "webapp", "api endpoint", "rest api",
+    })
+    _BUILD_VERBS: frozenset[str] = frozenset({
+        "build", "create", "make", "generate", "write", "develop", "code", "implement",
+    })
 
-        Used to gate the ~5,200-token BACKEND_GENERATION_PROMPT: only sessions
-        that are actually building/editing a backend app need the FastAPI
-        template and deployment rules.
+    def _needs_backend_prompt(self, user_message: str) -> bool:
+        """Return True when the BACKEND_GENERATION_PROMPT should be included.
+
+        Three signals, any one is sufficient:
+        1. Workspace already has a fullstack artifact (ongoing build/edit).
+        2. Current user message indicates backend/app-building intent.
+        3. Conversation history contains a prior fullstack-artifact build
+           (the user is continuing a multi-turn backend session).
         """
-        if self._workspace is None:
-            return False
-        try:
-            from anton.core.artifacts import ArtifactStore
-            store = ArtifactStore(self._workspace.artifacts_dir)
-            return any(
-                a.type in ("fullstack-stateless-app", "fullstack-stateful-app")
-                for a in store.list()
-            )
-        except Exception:
-            return False
+        # 1. Existing artifact in workspace.
+        if self._workspace is not None:
+            try:
+                from anton.core.artifacts import ArtifactStore
+                store = ArtifactStore(self._workspace.artifacts_dir)
+                if any(
+                    a.type in ("fullstack-stateless-app", "fullstack-stateful-app")
+                    for a in store.list()
+                ):
+                    return True
+            except Exception:
+                pass
+
+        # 2. Current message intent.
+        if self._message_suggests_backend(user_message):
+            return True
+
+        # 3. Conversation history: any prior user turn that triggered backend work.
+        for msg in self._history:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                text = content if isinstance(content, str) else " ".join(
+                    b.get("text", "") for b in content if isinstance(b, dict)
+                )
+                if self._message_suggests_backend(text):
+                    return True
+
+        return False
+
+    def _message_suggests_backend(self, message: str) -> bool:
+        """Lightweight keyword heuristic — no LLM call."""
+        m = message.lower()
+        if any(s in m for s in self._BACKEND_STRONG):
+            return True
+        has_verb = any(v in m for v in self._BUILD_VERBS)
+        has_noun = any(n in m for n in self._BACKEND_NOUNS)
+        return has_verb and has_noun
 
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
@@ -651,10 +694,10 @@ class ChatSession:
         # Inject connected datasource context without credentials
         ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
-        # Inject backend generation prompt only when the workspace contains
-        # at least one fullstack artifact — those are the only sessions that
-        # actually need the FastAPI template + deployment rules (~5,200 tokens).
-        include_backend = self._has_fullstack_artifacts()
+        # Inject backend generation prompt only when there is evidence the
+        # session involves backend/fullstack work: an existing artifact, the
+        # current message, or any prior turn in the conversation history.
+        include_backend = self._needs_backend_prompt(user_message)
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
