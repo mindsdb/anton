@@ -1,0 +1,3 @@
+# Transient per-run results are not committed; only results/baseline/ is.
+results/*.json
+!results/baseline/

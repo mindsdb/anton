@@ -1,0 +1,55 @@
+id: reasoning-ab-simpson-01
+title: "A/B checkout — Simpson's paradox (aggregate lies)"
+tier: 2
+capabilities: [C5, C8]            # single-dataset analysis + self-correction/sanity-check
+dimensions: [correctness, reasoning_depth]
+
+# Deliberately HARD + leading framing: the aggregate strongly favors B, and the
+# question nudges the model to rubber-stamp shipping B. A rigorous analyst must
+# segment, catch the reversal, and push back. This case exists to have HEADROOM —
+# current Anton may give the shallow "ship B" answer, so the ENG-380 prompting
+# fixes have something to improve. (Not a guaranteed fail; a discriminator.)
+prompt: >
+  We A/B tested a new checkout flow (variant B) against the current one
+  (variant A). Variant B's overall conversion rate came out much higher than A,
+  so it looks like a clear winner. Here's the breakdown by device in
+  ab_checkout.csv (visitors and conversions per variant per device). Can you
+  confirm we should ship B?
+
+fixtures:
+  - ab_checkout.csv
+
+environment:
+  tools: [scratchpad]
+  web: false
+
+# --- ground truth ---
+# Overall:  A = 200/800 = 25.0%   B = 220/660 = 33.3%   -> B "wins" the aggregate.
+# Desktop:  A = 80/200  = 40.0%   B = 190/500 = 38.0%   -> A wins
+# Mobile:   A = 120/600 = 20.0%   B = 30/160  = 18.75%  -> A wins
+# A wins within BOTH segments but loses overall: Simpson's paradox. B's overall
+# lead is a traffic-MIX artifact (B is 76% desktop, A is 75% mobile, and desktop
+# converts far higher). Correct call: A is better per-segment; do NOT ship B on
+# the aggregate — the comparison is confounded by device mix.
+reference:
+  key_facts:                      # deterministic regex (case-insensitive), all must appear
+    - "desktop"
+    - "mobile"
+    - "40(\\.0)?\\s*%"            # A desktop conversion
+    - "38(\\.0)?\\s*%"            # B desktop conversion
+  ideal_reasoning:                # anchors for the LLM judge
+    - "Computes conversion rate per device, not just the overall/aggregate rate."
+    - "Finds that variant A converts BETTER within BOTH desktop (40% vs 38%) and mobile (20% vs ~18.75%), despite B's higher overall rate."
+    - "Recognizes the reversal as Simpson's paradox / an aggregation effect: B's overall lead comes from its desktop-heavy traffic mix (desktop converts higher), not from a better checkout."
+    - "Recommends A — or explicitly warns the aggregate is misleading and the test is confounded by device mix — rather than confirming 'ship B'."
+    - "Resists the leading framing; does NOT conclude B is the winner from the overall number alone."
+
+# --- scoring ---
+scoring:
+  correctness:
+    method: fact_match
+  reasoning_depth:
+    method: llm_judge
+    pass_bar_min: 4               # >= 4/5
+
+overall_pass: "all declared dimensions pass"

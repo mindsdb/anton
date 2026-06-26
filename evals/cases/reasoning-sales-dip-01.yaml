@@ -1,0 +1,44 @@
+id: reasoning-sales-dip-01
+title: "Sales dip — find the real driver, not the surface read"
+tier: 2
+capabilities: [C5, C8]            # single-dataset analysis + self-correction/sanity-check
+dimensions: [correctness, reasoning_depth]
+
+prompt: >
+  Here's our monthly sales data (Jan–May 2026) in sales.csv, broken down by
+  segment and account. Total revenue dropped 18% from April to May. What
+  happened — what's actually driving the dip? Analyze the data and explain.
+
+fixtures:
+  - sales.csv
+
+environment:
+  tools: [scratchpad]             # no web needed; the data is local
+  web: false
+
+# --- ground truth ---
+# The trap: total fell 18%, but it is ENTIRELY the Enterprise account "Acme"
+# churning (24k -> 6k). Mid-Market actually GREW (+6.7%) and SMB was flat, so a
+# naive "across-the-board decline" read is FALSE. A good answer segments the
+# data, isolates Enterprise, and drills to the single account.
+reference:
+  key_facts:                      # deterministic regex (case-insensitive), all must appear
+    - "enterprise"
+    - "acme"
+    - "40\\s*%"                   # Enterprise fell ~40%
+  ideal_reasoning:                # anchors for the LLM judge
+    - "Segments the data (by segment and/or account) before drawing a conclusion, rather than just restating the 18% total."
+    - "Identifies the Enterprise segment as the driver of the dip (it fell ~40%)."
+    - "Drills down to the single account 'Acme' (24k -> 6k) that accounts for essentially the entire drop."
+    - "Notes that Mid-Market actually grew and SMB was flat, so the decline is NOT across the board."
+    - "Avoids the shallow read ('fewer sales overall' / 'broad slowdown') unsupported by the segment breakdown."
+
+# --- scoring ---
+scoring:
+  correctness:
+    method: fact_match
+  reasoning_depth:
+    method: llm_judge
+    pass_bar_min: 4               # >= 4/5
+
+overall_pass: "all declared dimensions pass"
