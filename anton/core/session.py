@@ -600,6 +600,25 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    def _has_fullstack_artifacts(self) -> bool:
+        """Return True if the workspace contains any fullstack artifact.
+
+        Used to gate the ~5,200-token BACKEND_GENERATION_PROMPT: only sessions
+        that are actually building/editing a backend app need the FastAPI
+        template and deployment rules.
+        """
+        if self._workspace is None:
+            return False
+        try:
+            from anton.core.artifacts import ArtifactStore
+            store = ArtifactStore(self._workspace.artifacts_dir)
+            return any(
+                a.type in ("fullstack-stateless-app", "fullstack-stateful-app")
+                for a in store.list()
+            )
+        except Exception:
+            return False
+
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
@@ -632,6 +651,11 @@ class ChatSession:
         # Inject connected datasource context without credentials
         ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
+        # Inject backend generation prompt only when the workspace contains
+        # at least one fullstack artifact — those are the only sessions that
+        # actually need the FastAPI template + deployment rules (~5,200 tokens).
+        include_backend = self._has_fullstack_artifacts()
+
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
 
@@ -649,6 +673,7 @@ class ChatSession:
             self_awareness_context=sa_section,
             datasource_context=ds_ctx,
             skill_store=self._skill_store,
+            include_backend_prompt=include_backend,
         )
 
         return prompt
