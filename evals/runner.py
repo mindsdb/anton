@@ -191,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all", action="store_true", help="run every case under cases/")
     ap.add_argument("--baseline", action="store_true",
                     help="also write results/baseline/<case>.json")
+    ap.add_argument("--effort", choices=["low", "medium", "high", "max"],
+                    help="override the SUBJECT's planning effort (judge stays fixed "
+                         "so grading is a constant yardstick). Default: ModelConfig (high).")
     args = ap.parse_args(argv)
 
     if not args.case and not args.all:
@@ -198,6 +201,10 @@ def main(argv: list[str] | None = None) -> int:
 
     base_url, api_key = load_minds_credentials()
     cfg = ModelConfig()
+    if args.effort:
+        # Vary only the subject's reasoning effort — the judge keeps its own
+        # (high) effort so the measuring stick doesn't move between runs.
+        cfg.planning_effort = args.effort
 
     case_paths = discover_cases(CASES_DIR) if args.all else [Path(args.case)]
     results = [run_case(p, cfg, api_key, base_url) for p in case_paths]
