@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -50,8 +50,8 @@ Issues = "https://github.com/mindsdb/anton/issues"
 anton = "anton.cli:app"
 
 [tool.hatch.version]
-source = "regex"
-path = "anton/__init__.py"
+source = "vcs"
+fallback-version = "2.0.0-dev"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
