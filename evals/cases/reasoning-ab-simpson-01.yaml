@@ -1,7 +1,7 @@
 id: reasoning-ab-simpson-01
 title: "A/B checkout — Simpson's paradox (aggregate lies)"
 tier: 2
-capabilities: [C5, C8]            # single-dataset analysis + self-correction/sanity-check
+capabilities: [C3, C4, C5, C8]    # load CSV + compute + single-dataset analysis + sanity-check (see ../CAPABILITIES.md)
 dimensions: [correctness, reasoning_depth]
 
 # Deliberately HARD + leading framing: the aggregate strongly favors B, and the

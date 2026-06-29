@@ -1,7 +1,7 @@
 id: reasoning-sales-dip-01
 title: "Sales dip — find the real driver, not the surface read"
 tier: 2
-capabilities: [C5, C8]            # single-dataset analysis + self-correction/sanity-check
+capabilities: [C3, C4, C5, C8]    # load CSV + compute + single-dataset analysis + sanity-check (see ../CAPABILITIES.md)
 dimensions: [correctness, reasoning_depth]
 
 prompt: >

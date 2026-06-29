@@ -57,15 +57,12 @@ A case passes when all its declared dimensions pass.
 
 ## Capability map → coverage (which cases to write)
 
-Cases are chosen to span Anton's surface deliberately, not at random. Tier =
-how much of Anton the task exercises.
-
-| Tier | Exercises | Example |
-|---|---|---|
-| 0 | base LLM only (skip — no Anton value-add) | "capital of France" |
-| 1 | single-tool grounding / honesty | "AAPL price today"; the SpaceX-is-private trap |
-| 2 | analytical reasoning on given data | **this case** — find the real driver of a dip |
-| 3 | full build: data → artifact/dashboard | "get X data and build a dashboard" |
+Cases are chosen to span Anton's surface deliberately, not at random. Two
+independent axes describe a case — **tier** (how much of Anton it exercises) and
+**capability** (which specific skills it tests). Both, the full `C1..Cn`
+capability list, and the live **coverage matrix** (what's covered vs. the gaps
+that are still on the ENG-381 worklist) live in **[CAPABILITIES.md](CAPABILITIES.md)**
+— that file is the source of truth for the `tier:` and `capabilities:` fields.
 
 Scoring dimensions (scored independently so we see *what* moved): `correctness`,
 `reasoning_depth`, `honesty`, `task_completion`, `efficiency`.
@@ -76,7 +73,7 @@ Scoring dimensions (scored independently so we see *what* moved): `correctness`,
 id: <stable-slug>
 title: <human title>
 tier: <0-3>
-capabilities: [C5, C8]          # tags from the capability map (free-form)
+capabilities: [C5, C8]          # tags from the capability map — see CAPABILITIES.md
 dimensions: [correctness, reasoning_depth]   # what gets scored
 prompt: <what the user asks>
 fixtures: [sales.csv]           # files staged into the agent's workspace
