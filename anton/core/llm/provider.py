@@ -26,6 +26,16 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     context_pressure: float = 0.0
+    # Cache-token counts, when the provider reports them. Anton does not send
+    # cache_control today, so these are 0 in practice — they exist so the USD
+    # cost meter (see pricing.compute_cost / cost_usd below) stays correct the
+    # moment prompt caching is enabled upstream.
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    # Additive telemetry: USD cost of this single call's tokens, priced by
+    # pricing.compute_cost(). 0.0 when the model has no maintained rate. This is
+    # read-only output for hosts ("$ this turn"); it gates nothing.
+    cost_usd: float = 0.0
 
 
 @dataclass
