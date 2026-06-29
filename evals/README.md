@@ -52,6 +52,14 @@ Each case declares `dimensions`; each dimension names a scoring `method`:
 - **`llm_judge`** (model-as-judge): an LLM scores the answer 1–5 against
   `reference.ideal_reasoning` anchors; passes at `pass_bar_min`. Catches
   shallow-but-plausible reasoning — the ENG-380 axis a substring check can't see.
+- **`artifact_check`** (deterministic, for Tier-3 build cases): grades the
+  produced artifact ON DISK, not the chat text. The runner captures
+  `<workspace>/.anton/artifacts/` before teardown; this scorer checks an
+  artifact of `reference.artifact.type` (e.g. `html-app`) exists, its entry HTML
+  is a complete self-contained document, optionally `require_chart`, and every
+  `must_contain` regex appears in the HTML. Grading the file (not the summary)
+  stops a case passing by merely *claiming* it built something. Offline — never
+  publishes to 4nton.ai.
 
 A case passes when all its declared dimensions pass.
 

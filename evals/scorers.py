@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from .models import ModelConfig, chat_completion
@@ -39,6 +40,114 @@ def score_fact_match(answer: str, key_facts: list[str]) -> dict[str, Any]:
         "method": "fact_match",
         "passed": matched == len(checks) and checks != [],
         "detail": f"{matched}/{len(checks)} facts present",
+        "checks": checks,
+    }
+
+
+# Chart-ish markers — a revenue dashboard that claims a chart should carry one
+# of these. Deliberately broad (any common charting approach counts).
+_CHART_MARKERS = re.compile(
+    r"<canvas|<svg|chart\.js|new\s+Chart\s*\(|plotly|echarts|\bd3\b|"
+    r"highcharts|apexcharts|<script[^>]*chart",
+    re.IGNORECASE,
+)
+
+
+def _resolve_primary_html(folder: Path, primary: str | None) -> Path | None:
+    """Find the artifact's entry HTML on DISK (not via metadata.files[], which is
+    reconciled only on store read and can be stale — ENG-372). Mirrors the
+    renderer heuristic: declared primary → index.html → newest .html."""
+    if primary:
+        p = folder / primary
+        if p.is_file() and p.suffix.lower() in (".html", ".htm"):
+            return p
+    htmls = sorted(folder.rglob("*.html")) + sorted(folder.rglob("*.htm"))
+    if not htmls:
+        return None
+    for h in htmls:
+        if h.name.lower() == "index.html":
+            return h
+    return max(htmls, key=lambda h: h.stat().st_mtime)
+
+
+def score_artifact_check(artifacts_dir: Path | None, spec: dict[str, Any]) -> dict[str, Any]:
+    """Grade a built artifact ON DISK — never the chat text — so a case can't pass
+    by *claiming* it built something (the C12 failure mode).
+
+    ``artifacts_dir`` is the captured ``.anton/artifacts`` directory (the runner
+    copies it out before tearing down the workspace). ``spec`` (case
+    ``reference.artifact``) declares: ``type`` (default ``html-app``),
+    ``require_chart`` (bool), and ``must_contain`` (regexes that must appear in
+    the entry HTML — the figures/labels the dashboard should render).
+
+    Offline only: inspects files, does NOT publish to 4nton.ai.
+    """
+    want_type = spec.get("type", "html-app")
+    must_contain = spec.get("must_contain", [])
+    require_chart = bool(spec.get("require_chart", False))
+    checks: list[dict[str, Any]] = []
+
+    def _fail(detail: str) -> dict[str, Any]:
+        return {"method": "artifact_check", "passed": False, "detail": detail, "checks": checks}
+
+    if not artifacts_dir or not Path(artifacts_dir).is_dir():
+        return _fail("no artifacts produced (no .anton/artifacts directory)")
+    artifacts_dir = Path(artifacts_dir)
+
+    # Find an artifact folder of the wanted type (read metadata.json per folder).
+    match_folder: Path | None = None
+    match_primary: str | None = None
+    seen_types: list[str] = []
+    for meta_path in sorted(artifacts_dir.glob("*/metadata.json")):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        seen_types.append(meta.get("type", "?"))
+        if meta.get("type") == want_type:
+            match_folder = meta_path.parent
+            match_primary = meta.get("primary")
+            break
+
+    checks.append({"check": f"artifact type {want_type!r} exists",
+                   "passed": match_folder is not None,
+                   "detail": f"types found: {seen_types or 'none'}"})
+    if match_folder is None:
+        return _fail(f"no {want_type!r} artifact (found: {seen_types or 'none'})")
+
+    html = _resolve_primary_html(match_folder, match_primary)
+    checks.append({"check": "entry HTML file on disk", "passed": html is not None,
+                   "detail": (str(html.relative_to(artifacts_dir)) if html else "none")})
+    if html is None:
+        return _fail("html-app artifact has no entry .html file on disk")
+
+    content = html.read_text(encoding="utf-8", errors="replace")
+    low = content.lower()
+
+    complete = ("<html" in low or "<!doctype" in low) and "</html>" in low and len(content) >= 200
+    checks.append({"check": "self-contained HTML document", "passed": complete,
+                   "detail": f"{len(content)} bytes, has <html>/</html>"})
+
+    if require_chart:
+        has_chart = _CHART_MARKERS.search(content) is not None
+        checks.append({"check": "renders a chart", "passed": has_chart,
+                       "detail": "chart marker present" if has_chart else "no chart markup found"})
+
+    for pat in must_contain:
+        try:
+            hit = re.search(pat, content, re.IGNORECASE | re.DOTALL) is not None
+        except re.error:
+            hit = pat.lower() in low
+        checks.append({"check": f"contains /{pat}/", "passed": hit, "detail": ""})
+
+    passed = all(c["passed"] for c in checks)
+    npass = sum(c["passed"] for c in checks)
+    return {
+        "method": "artifact_check",
+        "passed": passed,
+        "detail": f"{npass}/{len(checks)} checks passed — {match_folder.name}/{html.name}",
+        "artifact": match_folder.name,
+        "primary": html.name,
         "checks": checks,
     }
 

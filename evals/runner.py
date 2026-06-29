@@ -32,7 +32,7 @@ from .models import (
     load_minds_credentials,
     resolve_model,
 )
-from .scorers import score_fact_match, score_llm_judge
+from .scorers import score_artifact_check, score_fact_match, score_llm_judge
 from .spec import EvalCase, discover_cases, load_case
 
 EVALS_DIR = Path(__file__).resolve().parent
@@ -71,9 +71,10 @@ async def _run_turn(case: EvalCase, prompt: str, workspace_dir: Path, cfg: Model
 
 
 def _score_case(case: EvalCase, answer: str, cfg: ModelConfig,
-                api_key: str, base_url: str) -> dict:
+                api_key: str, base_url: str, artifacts_dir: Path | None = None) -> dict:
     """Score every declared dimension via its method, pulling ground truth from
-    ``case.reference``."""
+    ``case.reference``. ``artifacts_dir`` is the captured ``.anton/artifacts``
+    directory (build cases grade the produced file, not the chat text)."""
     ref = case.reference
     dims: dict[str, dict] = {}
     for dim in case.dimensions:
@@ -91,6 +92,8 @@ def _score_case(case: EvalCase, answer: str, cfg: ModelConfig,
                 base_url=base_url,
                 api_key=api_key,
             )
+        elif method == "artifact_check":
+            dims[dim] = score_artifact_check(artifacts_dir, ref.get("artifact", {}))
         else:
             dims[dim] = {"method": method, "passed": False,
                          "detail": f"unknown scoring method: {method!r}"}
@@ -131,17 +134,29 @@ def run_case(case_path: Path, cfg: ModelConfig, api_key: str, base_url: str) -> 
     started = time.time()
     error = None
     answer = ""
+    artifacts_capture: Path | None = None
     try:
         answer = asyncio.run(_run_turn(case, prompt, workspace_dir, cfg, api_key, base_url))
     except Exception as exc:  # noqa: BLE001 — record, don't crash the suite
         error = f"{type(exc).__name__}: {exc}"
         print(f"  !! turn failed: {error}")
     finally:
+        # Capture any produced artifacts BEFORE tearing down the workspace —
+        # build cases grade the file on disk, and the workspace is about to go.
+        artifacts_src = workspace_dir / ".anton" / "artifacts"
+        if artifacts_src.is_dir():
+            artifacts_capture = Path(tempfile.mkdtemp(prefix=f"eval-art-{case.id}-")) / "artifacts"
+            shutil.copytree(artifacts_src, artifacts_capture)
         os.chdir(prev_cwd)
         shutil.rmtree(workspace_dir, ignore_errors=True)
     elapsed = round(time.time() - started, 1)
 
-    dims = {} if error else _score_case(case, answer, cfg, api_key, base_url)
+    try:
+        dims = {} if error else _score_case(
+            case, answer, cfg, api_key, base_url, artifacts_dir=artifacts_capture)
+    finally:
+        if artifacts_capture is not None:
+            shutil.rmtree(artifacts_capture.parent, ignore_errors=True)
     overall = bool(dims) and all(d.get("passed") for d in dims.values())
 
     for name, d in dims.items():

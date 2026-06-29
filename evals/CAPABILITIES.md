@@ -89,15 +89,15 @@ Grouped for readability; the `Cn` id is what cases tag.
 | C7 Trend / forecasting | — | — |
 | C8 Self-correction | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01` | passes |
 | C9 Decision support | `decision-housing-01` | **medium** (data-dump / pick-cheapest is a real failure) |
-| C10 Artifact construction | — *(blocked: runner discards the workspace + scores only chat text; needs artifact capture — see below)* | — |
-| C11 Efficiency | — *(no scorer yet)* | — |
+| C10 Artifact construction | `build-sales-dashboard-01` | **yes** (a complete, self-contained, chart-bearing html-app is real work Anton can miss) |
+| C11 Efficiency | — *(no scorer yet — next; runner already records `elapsed_seconds`)* | — |
 | C12 Scope discipline | — | — |
 
-**Reading of the gaps:** the suite now spans Tiers 1–2 across honesty (C2), the
-analytical cluster (C3/C4/C5/C8), and decision support (C9) — and two of the new
-cases (C2, C9) deliberately carry headroom Anton can miss, so the baseline has
-somewhere to move. Still open: C1 (web/retrieval grounding), C6 (multi-source),
-C7 (trend/forecast), and the **Tier-3 build** path (C10/C11).
+**Reading of the gaps:** the suite now spans Tiers 1–3 across honesty (C2), the
+analytical cluster (C3/C4/C5/C8), decision support (C9), and artifact build
+(C10) — with headroom on C2/C9/C10 so the baseline has somewhere to move. Still
+open: C1 (web/retrieval grounding), C6 (multi-source), C7 (trend/forecast), and
+C11 efficiency (needs a scorer).
 
 **Ground-truth durability rule (learned the hard way):** a case's ground truth
 must not depend on a real-world fact that can drift. The original C2 case asked
@@ -106,11 +106,11 @@ the agent to refuse a stock price because "SpaceX is private" — but SpaceX IPO
 absence-01` instead anchors ground truth to the committed fixture's own month
 range and columns, which cannot change underneath it.
 
-**Why C10 is blocked (not just unwritten):** the deliverable of a build case is a
-file on disk (an HTML dashboard), but `runner.py` `rmtree`s the scratch workspace
-before scoring and the scorers only see `ChatSession.turn()`'s **chat text**.
-Grading the chat summary instead of the artifact would reward *claimed* progress
-— the exact C12 failure mode. A Tier-3 build case needs the runner to (a)
-preserve the produced files and (b) a scorer that inspects the artifact
-(exists / correct type / contains the right figures + chart). That lands with the
-efficiency scorer work.
+**Tier-3 build grading (how C10 got unblocked):** the deliverable of a build case
+is a file on disk (an HTML dashboard), not chat text. The runner now **captures
+`<workspace>/.anton/artifacts/` before tearing down the workspace**, and the
+`artifact_check` scorer grades the produced file offline — an `html-app` of the
+right type exists, its entry HTML is a complete self-contained document, it
+renders a chart, and it contains the required figures/labels. Grading the file
+(not the chat summary) is what stops a case passing by merely *claiming* it built
+something (the C12 failure mode). It does **not** publish to 4nton.ai.
