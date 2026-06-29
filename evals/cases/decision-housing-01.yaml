@@ -1,0 +1,60 @@
+id: decision-housing-01
+title: "House comparison — recommend against stated priorities, not price"
+tier: 2
+capabilities: [C4, C5, C9]        # compute + single-dataset analysis + decision support (see ../CAPABILITIES.md)
+dimensions: [correctness, reasoning_depth]
+
+# The ticket's real use case (Konstantin + influencers: comparing houses, helping
+# people decide from data). Decision support, not a data dump. The user states
+# TWO hard constraints (budget) and TWO priorities (commute, schools). The data
+# is laid with three traps:
+#   - Maple St is the CHEAPEST in budget but has a 52-min commute → fails the
+#     commute priority. (catches "recommend the cheapest")
+#   - Birch Ln is the BEST on both priorities but $815k → over the $750k budget.
+#     (catches "recommend the best house" ignoring the constraint)
+#   - Pine Rd is in budget with an ok commute but school_rating 6 → fails the
+#     schools priority.
+# Only Oak Ave satisfies the budget AND both priorities. A good answer filters by
+# the constraint, weighs the stated priorities, rejects the traps with reasons,
+# and makes ONE committed, justified recommendation. Headroom: models often
+# data-dump, pick cheapest/biggest, or hedge without committing.
+prompt: >
+  We're buying a family home and I've shortlisted four in houses.csv. Our budget
+  is $750k max — that's firm. What matters most to us is a short commute and
+  good schools. Which one should we buy?
+
+fixtures:
+  - houses.csv
+
+environment:
+  tools: [scratchpad]
+  web: false
+
+# --- ground truth ---
+# Budget <= 750k: eliminates Birch Ln (815k). Of the three in budget:
+#   Maple St 689k — commute 52 min (FAILS short-commute priority), schools 9
+#   Pine Rd  720k — commute 22 min, schools 6 (FAILS good-schools priority)
+#   Oak Ave  735k — commute 18 min, schools 9  ← satisfies budget + both priorities
+# Correct recommendation: Oak Ave. The key tradeoff to surface: Oak costs ~46k
+# more than the cheapest (Maple) but that buys an 18-min vs 52-min commute.
+reference:
+  key_facts:                      # deterministic regex (case-insensitive), all must appear
+    - "oak"
+    - "735"                       # Oak Ave's price
+  ideal_reasoning:                # anchors for the LLM judge
+    - "Applies the $750k budget as a hard filter and excludes Birch Ln ($815k) despite it scoring best on commute and schools."
+    - "Evaluates the homes against the user's STATED priorities (short commute + good schools), not by price or size alone."
+    - "Rejects Maple St even though it is the cheapest in budget — its 52-minute commute fails the short-commute priority."
+    - "Rejects Pine Rd — within budget and reasonable commute, but school_rating 6 fails the good-schools priority."
+    - "Recommends Oak Ave and justifies it (in budget, 18-min commute, school rating 9 — the only option meeting budget and both priorities)."
+    - "Makes one clear, committed recommendation rather than a neutral list of all four; ideally surfaces the price-vs-commute tradeoff against Maple."
+
+# --- scoring ---
+scoring:
+  correctness:
+    method: fact_match
+  reasoning_depth:
+    method: llm_judge
+    pass_bar_min: 4               # >= 4/5
+
+overall_pass: "all declared dimensions pass"

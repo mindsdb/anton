@@ -80,21 +80,37 @@ Grouped for readability; the `Cn` id is what cases tag.
 
 | Capability | Covered by | Headroom? |
 |---|---|---|
-| C1 Grounding | — | — |
-| C2 Honesty under absence | — | — |
-| C3 Data loading | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01` (implicit) | passes |
-| C4 Quant computation | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01` | passes |
-| C5 Single-dataset analysis | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01` | passes |
+| C1 Grounding | — *(needs a web/retrieval case)* | — |
+| C2 Honesty under absence | `honesty-data-absence-01` | **yes** (extrapolating/fabricating the missing value is a real failure) |
+| C3 Data loading | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01`, `decision-housing-01` | passes |
+| C4 Quant computation | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01`, `decision-housing-01` | passes |
+| C5 Single-dataset analysis | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01`, `decision-housing-01` | passes |
 | C6 Multi-source | — | — |
 | C7 Trend / forecasting | — | — |
 | C8 Self-correction | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01` | passes |
-| C9 Decision support | — | — |
-| C10 Artifact construction | — | — |
+| C9 Decision support | `decision-housing-01` | **medium** (data-dump / pick-cheapest is a real failure) |
+| C10 Artifact construction | — *(blocked: runner discards the workspace + scores only chat text; needs artifact capture — see below)* | — |
 | C11 Efficiency | — *(no scorer yet)* | — |
 | C12 Scope discipline | — | — |
 
-**Reading of the gaps:** today the suite tests one analytical cluster (C3/C4/C5/C8)
-on two cases that both pass — no Tier-1 grounding/honesty, no Tier-3 build, no
-decision-support, and the two operational capabilities (C11/C12) have no scorer.
-The baseline has **no headroom** until cases land on capabilities Anton can
-currently miss (C2, C9, C10, C11).
+**Reading of the gaps:** the suite now spans Tiers 1–2 across honesty (C2), the
+analytical cluster (C3/C4/C5/C8), and decision support (C9) — and two of the new
+cases (C2, C9) deliberately carry headroom Anton can miss, so the baseline has
+somewhere to move. Still open: C1 (web/retrieval grounding), C6 (multi-source),
+C7 (trend/forecast), and the **Tier-3 build** path (C10/C11).
+
+**Ground-truth durability rule (learned the hard way):** a case's ground truth
+must not depend on a real-world fact that can drift. The original C2 case asked
+the agent to refuse a stock price because "SpaceX is private" — but SpaceX IPO'd
+2026-06-12 (Nasdaq: SPCX), silently inverting the correct answer. `honesty-data-
+absence-01` instead anchors ground truth to the committed fixture's own month
+range and columns, which cannot change underneath it.
+
+**Why C10 is blocked (not just unwritten):** the deliverable of a build case is a
+file on disk (an HTML dashboard), but `runner.py` `rmtree`s the scratch workspace
+before scoring and the scorers only see `ChatSession.turn()`'s **chat text**.
+Grading the chat summary instead of the artifact would reward *claimed* progress
+— the exact C12 failure mode. A Tier-3 build case needs the runner to (a)
+preserve the produced files and (b) a scorer that inspects the artifact
+(exists / correct type / contains the right figures + chart). That lands with the
+efficiency scorer work.
