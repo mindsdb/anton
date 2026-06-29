@@ -78,19 +78,81 @@ def load_minds_credentials() -> tuple[str, str]:
     return minds_chat_base_url(host), key
 
 
-def build_llm_client(cfg: ModelConfig, api_key: str, base_url: str):
+@dataclass
+class UsageMeter:
+    """Accumulates the SUBJECT's LLM cost over one turn (C11 efficiency).
+
+    Wired in at the provider boundary by ``build_llm_client`` so it sees every
+    ``complete()`` / ``stream()`` call the turn makes — across planning, coding,
+    and structured-output paths. The judge runs through a separate urllib path
+    (``chat_completion``), so judge tokens are correctly excluded.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    llm_calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def record(self, usage) -> None:
+        self.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
+        self.output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+
+    def as_dict(self) -> dict:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "llm_calls": self.llm_calls,
+        }
+
+
+class _MeteredProvider:
+    """Transparent proxy that counts calls + sums token usage, delegating
+    everything else to the wrapped provider."""
+
+    def __init__(self, inner, meter: UsageMeter) -> None:
+        self._inner = inner
+        self._meter = meter
+
+    async def complete(self, *args, **kwargs):
+        resp = await self._inner.complete(*args, **kwargs)
+        self._meter.llm_calls += 1
+        self._meter.record(getattr(resp, "usage", None))
+        return resp
+
+    async def stream(self, *args, **kwargs):
+        from anton.core.llm.provider import StreamComplete
+
+        self._meter.llm_calls += 1
+        async for event in self._inner.stream(*args, **kwargs):
+            if isinstance(event, StreamComplete):
+                self._meter.record(getattr(event.response, "usage", None))
+            yield event
+
+    def __getattr__(self, name):  # pass-through (native_web_tools, attrs, …)
+        return getattr(self._inner, name)
+
+
+def build_llm_client(cfg: ModelConfig, api_key: str, base_url: str,
+                     meter: UsageMeter | None = None):
     """Construct an anton LLMClient pinned to ``cfg`` — independent of the
     user's DB/.env provider settings (the whole point: we choose the model).
 
     Mirrors cowork-server's minds-cloud branch: an openai-compatible
-    ``OpenAIProvider`` at the minds base URL, effort passed only when set.
+    ``OpenAIProvider`` at the minds base URL, effort passed only when set. When
+    ``meter`` is given, both providers are wrapped so the turn's token/call cost
+    is captured for the C11 efficiency dimension.
     """
     from anton.core.llm.client import LLMClient
     from anton.core.llm.openai import OpenAIProvider
 
-    def _provider(effort: str | None) -> OpenAIProvider:
+    def _provider(effort: str | None):
         kw = {"reasoning_effort": effort} if effort else {}
-        return OpenAIProvider(api_key=api_key, base_url=base_url, **kw)
+        p = OpenAIProvider(api_key=api_key, base_url=base_url, **kw)
+        return _MeteredProvider(p, meter) if meter is not None else p
 
     return LLMClient(
         planning_provider=_provider(cfg.planning_effort),

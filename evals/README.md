@@ -60,6 +60,12 @@ Each case declares `dimensions`; each dimension names a scoring `method`:
   `must_contain` regex appears in the HTML. Grading the file (not the summary)
   stops a case passing by merely *claiming* it built something. Offline — never
   publishes to 4nton.ai.
+- **`efficiency`** (deterministic, C11 / ENG-350): gates the SUBJECT's measured
+  turn cost against `reference.efficiency` ceilings — any subset of
+  `max_total_tokens` / `max_llm_calls` / `max_seconds`. Cost is metered at the
+  provider boundary (judge calls excluded) and **recorded on every run** in the
+  result's `efficiency` block, so even cases without ceilings build a baseline
+  for later calibration.
 
 A case passes when all its declared dimensions pass.
 

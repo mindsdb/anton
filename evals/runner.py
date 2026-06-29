@@ -28,11 +28,17 @@ from pathlib import Path
 
 from .models import (
     ModelConfig,
+    UsageMeter,
     build_llm_client,
     load_minds_credentials,
     resolve_model,
 )
-from .scorers import score_artifact_check, score_fact_match, score_llm_judge
+from .scorers import (
+    score_artifact_check,
+    score_efficiency,
+    score_fact_match,
+    score_llm_judge,
+)
 from .spec import EvalCase, discover_cases, load_case
 
 EVALS_DIR = Path(__file__).resolve().parent
@@ -41,7 +47,7 @@ RESULTS_DIR = EVALS_DIR / "results"
 
 
 async def _run_turn(case: EvalCase, prompt: str, workspace_dir: Path, cfg: ModelConfig,
-                    api_key: str, base_url: str) -> str:
+                    api_key: str, base_url: str, meter: UsageMeter | None = None) -> str:
     """Build a minimal ChatSession scoped to ``workspace_dir`` and run one turn."""
     from anton.config.settings import AntonSettings
     from anton.core.session import ChatSession, ChatSessionConfig
@@ -53,7 +59,7 @@ async def _run_turn(case: EvalCase, prompt: str, workspace_dir: Path, cfg: Model
     workspace.initialize()
     workspace.apply_env_to_process()
 
-    llm_client = build_llm_client(cfg, api_key, base_url)
+    llm_client = build_llm_client(cfg, api_key, base_url, meter=meter)
     env = case.environment or {}
     web = bool(env.get("web", False))
 
@@ -71,10 +77,12 @@ async def _run_turn(case: EvalCase, prompt: str, workspace_dir: Path, cfg: Model
 
 
 def _score_case(case: EvalCase, answer: str, cfg: ModelConfig,
-                api_key: str, base_url: str, artifacts_dir: Path | None = None) -> dict:
+                api_key: str, base_url: str, artifacts_dir: Path | None = None,
+                metrics: dict | None = None) -> dict:
     """Score every declared dimension via its method, pulling ground truth from
     ``case.reference``. ``artifacts_dir`` is the captured ``.anton/artifacts``
-    directory (build cases grade the produced file, not the chat text)."""
+    directory (build cases grade the produced file, not the chat text);
+    ``metrics`` is the measured turn cost (for the efficiency dimension)."""
     ref = case.reference
     dims: dict[str, dict] = {}
     for dim in case.dimensions:
@@ -82,6 +90,8 @@ def _score_case(case: EvalCase, answer: str, cfg: ModelConfig,
         method = spec.get("method")
         if method == "fact_match":
             dims[dim] = score_fact_match(answer, ref.get("key_facts", []))
+        elif method == "efficiency":
+            dims[dim] = score_efficiency(metrics or {}, ref.get("efficiency", {}))
         elif method == "llm_judge":
             dims[dim] = score_llm_judge(
                 task=case.prompt,
@@ -135,8 +145,9 @@ def run_case(case_path: Path, cfg: ModelConfig, api_key: str, base_url: str) -> 
     error = None
     answer = ""
     artifacts_capture: Path | None = None
+    meter = UsageMeter()
     try:
-        answer = asyncio.run(_run_turn(case, prompt, workspace_dir, cfg, api_key, base_url))
+        answer = asyncio.run(_run_turn(case, prompt, workspace_dir, cfg, api_key, base_url, meter))
     except Exception as exc:  # noqa: BLE001 — record, don't crash the suite
         error = f"{type(exc).__name__}: {exc}"
         print(f"  !! turn failed: {error}")
@@ -150,10 +161,12 @@ def run_case(case_path: Path, cfg: ModelConfig, api_key: str, base_url: str) -> 
         os.chdir(prev_cwd)
         shutil.rmtree(workspace_dir, ignore_errors=True)
     elapsed = round(time.time() - started, 1)
+    metrics = {**meter.as_dict(), "elapsed_seconds": elapsed}
 
     try:
         dims = {} if error else _score_case(
-            case, answer, cfg, api_key, base_url, artifacts_dir=artifacts_capture)
+            case, answer, cfg, api_key, base_url,
+            artifacts_dir=artifacts_capture, metrics=metrics)
     finally:
         if artifacts_capture is not None:
             shutil.rmtree(artifacts_capture.parent, ignore_errors=True)
@@ -163,7 +176,8 @@ def run_case(case_path: Path, cfg: ModelConfig, api_key: str, base_url: str) -> 
         mark = "PASS" if d.get("passed") else "FAIL"
         print(f"  [{mark}] {name}: {d.get('detail', '')}"
               + (f"  — {d['rationale']}" if d.get("rationale") else ""))
-    print(f"  overall: {'PASS' if overall else 'FAIL'}  ({elapsed}s)")
+    print(f"  cost: {metrics['total_tokens']} tok / {metrics['llm_calls']} calls / {elapsed}s")
+    print(f"  overall: {'PASS' if overall else 'FAIL'}")
 
     return {
         "case_id": case.id,
@@ -181,6 +195,7 @@ def run_case(case_path: Path, cfg: ModelConfig, api_key: str, base_url: str) -> 
         },
         "resolved_models": resolved,  # drift detection
         "elapsed_seconds": elapsed,
+        "efficiency": metrics,  # C11: measured turn cost (tokens/calls/seconds), recorded every run
         "error": error,
         "answer": answer,
         "dimensions": dims,

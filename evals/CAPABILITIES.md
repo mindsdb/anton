@@ -90,14 +90,15 @@ Grouped for readability; the `Cn` id is what cases tag.
 | C8 Self-correction | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01` | passes |
 | C9 Decision support | `decision-housing-01` | **medium** (data-dump / pick-cheapest is a real failure) |
 | C10 Artifact construction | `build-sales-dashboard-01` | **yes** (a complete, self-contained, chart-bearing html-app is real work Anton can miss) |
-| C11 Efficiency | — *(no scorer yet — next; runner already records `elapsed_seconds`)* | — |
+| C11 Efficiency | `build-sales-dashboard-01` *(metrics recorded every run; ceilings provisional)* | tracks ENG-350 — thrash/token-blowup trips it |
 | C12 Scope discipline | — | — |
 
 **Reading of the gaps:** the suite now spans Tiers 1–3 across honesty (C2), the
-analytical cluster (C3/C4/C5/C8), decision support (C9), and artifact build
-(C10) — with headroom on C2/C9/C10 so the baseline has somewhere to move. Still
-open: C1 (web/retrieval grounding), C6 (multi-source), C7 (trend/forecast), and
-C11 efficiency (needs a scorer).
+analytical cluster (C3/C4/C5/C8), decision support (C9), artifact build (C10),
+and efficiency (C11) — with headroom on C2/C9/C10 so the baseline has somewhere
+to move. Every run now also records turn cost (tokens/calls/seconds) regardless
+of whether a case gates on it. Still open: C1 (web/retrieval grounding), C6
+(multi-source), and C7 (trend/forecast).
 
 **Ground-truth durability rule (learned the hard way):** a case's ground truth
 must not depend on a real-world fact that can drift. The original C2 case asked

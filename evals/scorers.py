@@ -152,6 +152,42 @@ def score_artifact_check(artifacts_dir: Path | None, spec: dict[str, Any]) -> di
     }
 
 
+def score_efficiency(metrics: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    """Gate the SUBJECT's turn cost against declared ceilings (C11 — ENG-350).
+
+    ``metrics`` is the runner's measured turn cost (``total_tokens``,
+    ``llm_calls``, ``elapsed_seconds``). ``spec`` (case ``reference.efficiency``)
+    declares any subset of ``max_total_tokens`` / ``max_llm_calls`` /
+    ``max_seconds`` — each present ceiling must hold. With no ceilings declared
+    the dimension is informational (passes); the raw metrics are recorded on
+    every run regardless, so a baseline captures them for later calibration.
+    """
+    fields = [
+        ("max_total_tokens", "total_tokens", "tokens"),
+        ("max_llm_calls", "llm_calls", "calls"),
+        ("max_seconds", "elapsed_seconds", "s"),
+    ]
+    checks = []
+    for cap_key, metric_key, unit in fields:
+        cap = spec.get(cap_key)
+        if cap is None:
+            continue
+        val = metrics.get(metric_key)
+        ok = val is not None and val <= cap
+        checks.append({"check": f"{metric_key} <= {cap}",
+                       "passed": ok, "detail": f"{val}{unit} (cap {cap})"})
+    passed = all(c["passed"] for c in checks)  # vacuously true if no ceilings
+    summary = (f"{metrics.get('total_tokens')} tok / {metrics.get('llm_calls')} calls / "
+               f"{metrics.get('elapsed_seconds')}s")
+    return {
+        "method": "efficiency",
+        "passed": passed,
+        "detail": (summary if checks else summary + " (informational — no ceilings declared)"),
+        "metrics": metrics,
+        "checks": checks,
+    }
+
+
 _JUDGE_SYSTEM = (
     "You are a strict evaluator of an AI data analyst's answer. You are given the "
     "user's task, a list of reasoning qualities an EXCELLENT answer would show, "
