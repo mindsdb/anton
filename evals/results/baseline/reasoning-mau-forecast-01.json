@@ -1,0 +1,47 @@
+{
+  "case_id": "reasoning-mau-forecast-01",
+  "title": "Forecast MAU \u2014 extrapolate with uncertainty, don't over-compound",
+  "tier": 2,
+  "capabilities": [
+    "C4",
+    "C7"
+  ],
+  "timestamp": "2026-06-30T06:35:53.296389+00:00",
+  "model_config": {
+    "provider": "minds-cloud",
+    "base_url": "https://api.mindshub.ai/v1",
+    "planning_model": "latest:sonnet",
+    "coding_model": "latest:haiku",
+    "judge_model": "latest:sonnet",
+    "planning_effort": "high"
+  },
+  "resolved_models": {
+    "planning": "claude-sonnet-4-6",
+    "coding": "claude-haiku-4-5-20251001",
+    "judge": "claude-sonnet-4-6"
+  },
+  "elapsed_seconds": 66.0,
+  "efficiency": {
+    "input_tokens": 42296,
+    "output_tokens": 2300,
+    "total_tokens": 44596,
+    "llm_calls": 3,
+    "elapsed_seconds": 66.0
+  },
+  "error": null,
+  "answer": "The data tells a very clear story \u2014 let me lay it out honestly.\n\n---\n\n## MAU Forecast: June \u2013 August 2026\n\n### What the data shows\n\nYour MAU has grown by **exactly +2,000 every single month** for 12 consecutive months, without a single deviation:\n\n| Month | MAU |\n|-------|-----|\n| 2025-06 | 10,000 |\n| 2025-07 | 12,000 |\n| \u2026 | \u2026 |\n| 2026-05 | 32,000 |\n\nThat's a **perfect linear trend** \u2014 R\u00b2 = 1.0000, zero residual error, zero variance in monthly growth. Every model I fit (OLS regression, Holt-Winters exponential smoothing) gives the identical result.\n\n---\n\n### 3-Month Forecast\n\n| Month | Forecast MAU | Note |\n|-------|-------------|------|\n| 2026-06 | **34,000** | +2,000 |\n| 2026-07 | **36,000** | +2,000 |\n| 2026-08 | **38,000** | +2,000 |\n\n---\n\n### How confident should you be?\n\n**Statistically: extremely high. In practice: be cautious.** Here's why:\n\n**The good news:** The trend is so clean there's almost no statistical uncertainty to speak of. Mathematically, if this pattern holds, those numbers are essentially certain.\n\n**The real question is whether to trust the pattern at all:**\n\n1. **This data looks synthetic.** Real MAU data almost never has zero variance in monthly growth \u2014 you'd normally see seasonality, churn fluctuations, campaign spikes, or at least some noise. Growth of exactly +2,000 for 11 straight months is a red flag that this might be smoothed, modeled, or placeholder data rather than raw telemetry. **If the underlying data is real, verify it hasn't been pre-processed or rounded.**\n\n2. **No history of disruption.** You have 12 months \u2014 one year \u2014 with zero bumps. That means no evidence of how the user base responds to seasonality (summer slowdowns, holiday effects), competitive pressure, or product changes. These forces exist even if they haven't shown up yet.\n\n3. **Linear growth has limits.** At some point MAU growth curves decelerate. With only a 12-month window, you can't tell if you're in early exponential growth (where linear is an underestimate) or approaching a plateau (where it's an overestimate).\n\n**Bottom line:** If the data is genuinely this clean, the 3-month forecast of 34K \u2192 36K \u2192 38K is highly reliable *assuming the trajectory continues*. The uncertainty isn't in the math \u2014 it's in whether the real world keeps cooperating. I'd treat those numbers as the central case but hold them loosely until I could validate the data source.\n\n---\n\nWant me to model what a more realistic scenario looks like \u2014 e.g., adding typical SaaS growth noise or seasonality \u2014 so you can stress-test the forecast? Or if you have the raw event-level data behind these numbers, I can rerun the analysis on that.",
+  "dimensions": {
+    "reasoning_depth": {
+      "method": "llm_judge",
+      "passed": true,
+      "score": 5,
+      "pass_bar_min": 4,
+      "rationale": "The answer correctly reads the perfect +2,000/month linear trend, projects 34k/36k/38k with a stated method, avoids naive compounding of early growth rates, and explicitly addresses confidence with both statistical and practical caveats. It also raises the notable (and correct) observation about decelerating percentage growth and flags the suspiciously clean data as a potential validity concern\u2014going beyond surface-level analysis to question assumptions about the data itself.",
+      "judge_model": "latest:sonnet",
+      "judge_model_resolved": "claude-sonnet-4-6",
+      "detail": "score=5 (need >= 4)",
+      "raw": null
+    }
+  },
+  "overall_pass": true
+}

@@ -1,0 +1,67 @@
+{
+  "case_id": "reasoning-region-join-01",
+  "title": "Multi-file join \u2014 which region drove the dip (requires the mapping)",
+  "tier": 2,
+  "capabilities": [
+    "C3",
+    "C4",
+    "C6"
+  ],
+  "timestamp": "2026-06-30T06:34:39.211605+00:00",
+  "model_config": {
+    "provider": "minds-cloud",
+    "base_url": "https://api.mindshub.ai/v1",
+    "planning_model": "latest:sonnet",
+    "coding_model": "latest:haiku",
+    "judge_model": "latest:sonnet",
+    "planning_effort": "high"
+  },
+  "resolved_models": {
+    "planning": "claude-sonnet-4-6",
+    "coding": "claude-haiku-4-5-20251001",
+    "judge": "claude-sonnet-4-6"
+  },
+  "elapsed_seconds": 34.9,
+  "efficiency": {
+    "input_tokens": 42388,
+    "output_tokens": 1574,
+    "total_tokens": 43962,
+    "llm_calls": 3,
+    "elapsed_seconds": 34.9
+  },
+  "error": null,
+  "answer": "Here's the full picture:\n\n---\n\n## Regional Revenue: April \u2192 May 2026\n\n| Region | April | May | Change | % Change |\n|--------|-------|-----|--------|----------|\n| **West** | $51,000 | $34,000 | **\u2212$17,000** | **\u221233.3%** |\n| East | $49,000 | $48,000 | \u2212$1,000 | \u22122.0% |\n\n**West dropped the most \u2014 down $17K (\u221233%), while East was nearly flat.**\n\n---\n\n## What's Behind It: West Account Breakdown\n\n| Account | Segment | April | May | Change | % Change |\n|---------|---------|-------|-----|--------|----------|\n| **Acme** | Enterprise | $24,000 | $6,000 | **\u2212$18,000** | **\u221275%** |\n| Meridian | Mid-Market | $14,000 | $15,000 | +$1,000 | +7.1% |\n| Bluefin | SMB | $8,000 | $8,000 | $0 | flat |\n| Dune | SMB | $5,000 | $5,000 | $0 | flat |\n\n---\n\n### The culprit is a single account: Acme\n\nAcme \u2014 West's largest Enterprise account \u2014 collapsed from **$24K to $6K** in May, a 75% drop. That single account accounts for **$18K of the $17K net regional decline** (the rest of West actually grew slightly, with Meridian up $1K and SMB accounts flat).\n\n**What this means:**\n- This is **concentrated risk**, not a broad regional softening. East's minor dip confirms it's not a macro or seasonal issue.\n- Acme's revenue didn't go to zero, so it's likely a **partial churn, contract reduction, or delayed renewal** rather than a full loss.\n- The account owner is **J. Rivera** \u2014 worth a direct conversation about what changed at Acme in May.\n\nWant me to pull the full Jan\u2013May trend for Acme to see if this was a sudden cliff or a gradual decline? That could distinguish a one-time event from a slow bleed.",
+  "dimensions": {
+    "correctness": {
+      "method": "fact_match",
+      "passed": true,
+      "detail": "3/3 facts present",
+      "checks": [
+        {
+          "pattern": "west",
+          "matched": true
+        },
+        {
+          "pattern": "acme",
+          "matched": true
+        },
+        {
+          "pattern": "33\\s*%|17[,.]?0?0?0|\\$?\\s*17k|51|34",
+          "matched": true
+        }
+      ]
+    },
+    "reasoning_depth": {
+      "method": "llm_judge",
+      "passed": true,
+      "score": 5,
+      "pass_bar_min": 4,
+      "rationale": "The answer demonstrates all listed qualities: it joins sales to accounts by region, aggregates correctly showing West ~$51k\u2192$34k (\u221233%) and East essentially flat, pinpoints Acme as the driver (24k\u21926k, \u221275%), and correctly characterizes this as concentrated single-account risk rather than a broad regional decline.",
+      "judge_model": "latest:sonnet",
+      "judge_model_resolved": "claude-sonnet-4-6",
+      "detail": "score=5 (need >= 4)",
+      "raw": null
+    }
+  },
+  "overall_pass": true
+}
