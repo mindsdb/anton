@@ -1,0 +1,51 @@
+id: reasoning-region-join-01
+title: "Multi-file join — which region drove the dip (requires the mapping)"
+tier: 2
+capabilities: [C3, C4, C6]        # load + compute + multi-source join (see ../CAPABILITIES.md)
+dimensions: [correctness, reasoning_depth]
+
+# Multi-source reasoning: the revenue (sales.csv) is per-ACCOUNT, but the
+# question is per-REGION — and region lives only in a SECOND file (accounts.csv).
+# The agent must JOIN the two, aggregate by region, then compute the Apr→May
+# drop. A single-file answer can't get there. The trap: Acme (West) churned
+# 24k→6k, so West is the driver; East is essentially flat. An answer that
+# skips the join, or aggregates the wrong key, will miss it.
+prompt: >
+  Revenue by account is in sales.csv and the account→region mapping is in
+  accounts.csv. Which region's revenue dropped the most from April to May 2026,
+  and what's behind it?
+
+fixtures:
+  - sales.csv
+  - accounts.csv
+
+environment:
+  tools: [scratchpad]
+  web: false
+
+# --- ground truth ---
+# Join sales→region, sum by region:
+#   West (Acme, Meridian, Bluefin, Dune): Apr 24+14+8+5 = 51k → May 6+15+8+5 = 34k  (−17k, −33%)
+#   East (Globex, Initech, MidCorp, Cedar): Apr 14+12+16+7 = 49k → May 13+11+17+7 = 48k  (−1k, ~flat)
+# West dropped the most, and it's entirely the Acme account churning (24k→6k).
+reference:
+  key_facts:                      # deterministic regex (case-insensitive), all must appear
+    - "west"                      # the region that dropped most
+    - "acme"                      # the account behind it
+    - "33\\s*%|17[,.]?0?0?0|\\$?\\s*17k|51|34"   # any valid magnitude framing of West's drop
+  ideal_reasoning:                # anchors for the LLM judge
+    - "Joins sales.csv to accounts.csv on account to attach a region to each revenue row, rather than answering from sales.csv alone."
+    - "Aggregates revenue by region for April and May and compares them."
+    - "Identifies WEST as the region with the largest drop (~$51k → $34k, about −33%)."
+    - "Attributes the West drop to the Acme account churning (24k → 6k), not a broad regional decline."
+    - "Notes that East is essentially flat, so the drop is concentrated, not company-wide."
+
+# --- scoring ---
+scoring:
+  correctness:
+    method: fact_match
+  reasoning_depth:
+    method: llm_judge
+    pass_bar_min: 4               # >= 4/5
+
+overall_pass: "all declared dimensions pass"

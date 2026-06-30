@@ -1,0 +1,68 @@
+{
+  "case_id": "reasoning-sales-dip-01",
+  "title": "Sales dip \u2014 find the real driver, not the surface read",
+  "tier": 2,
+  "capabilities": [
+    "C3",
+    "C4",
+    "C5",
+    "C8"
+  ],
+  "timestamp": "2026-06-30T01:24:26.063472+00:00",
+  "model_config": {
+    "provider": "minds-cloud",
+    "base_url": "https://api.mindshub.ai/v1",
+    "planning_model": "latest:sonnet",
+    "coding_model": "latest:haiku",
+    "judge_model": "latest:sonnet",
+    "planning_effort": "high"
+  },
+  "resolved_models": {
+    "planning": "claude-sonnet-4-6",
+    "coding": "claude-haiku-4-5-20251001",
+    "judge": "claude-sonnet-4-6"
+  },
+  "elapsed_seconds": 50.5,
+  "efficiency": {
+    "input_tokens": 59203,
+    "output_tokens": 2265,
+    "total_tokens": 61468,
+    "llm_calls": 4,
+    "elapsed_seconds": 50.5
+  },
+  "error": null,
+  "answer": "The answer is unambiguous. Here's the full breakdown:\n\n---\n\n## What Drove the April \u2192 May Revenue Dip\n\n**Headline: One account caused 100% of it. Acme collapsed 75%, and everything else was fine \u2014 or actually growing.**\n\n### Monthly Totals at a Glance\n\n| Month | Revenue | MoM Change |\n|-------|---------|------------|\n| Jan | $88,500 | \u2014 |\n| Feb | $92,200 | +4.2% |\n| Mar | $96,000 | +4.1% |\n| Apr | $100,000 | +4.2% |\n| **May** | **$82,000** | **\u201318.0%** |\n\n---\n\n### Account-Level April \u2192 May Delta\n\n| Account | Segment | Apr | May | Change | % of Total Dip |\n|---------|---------|-----|-----|--------|----------------|\n| **Acme** | **Enterprise** | **$24,000** | **$6,000** | **\u2013$18,000** | **100%** |\n| Globex | Enterprise | $14,000 | $13,000 | \u2013$1,000 | 6% |\n| Initech | Enterprise | $12,000 | $11,000 | \u2013$1,000 | 6% |\n| Bluefin | SMB | $8,000 | $8,000 | $0 | \u2014 |\n| Cedar | SMB | $7,000 | $7,000 | $0 | \u2014 |\n| Dune | SMB | $5,000 | $5,000 | $0 | \u2014 |\n| Meridian | Mid-Market | $14,000 | $15,000 | **+$1,000** | offsets |\n| MidCorp | Mid-Market | $16,000 | $17,000 | **+$1,000** | offsets |\n\n---\n\n### What Actually Happened\n\n**Acme dropped from $24,000 to $6,000 \u2014 a 75% revenue hit in a single month.** That $18,000 loss is mathematically equal to the entire company-wide dip. Without Acme, total revenue would have been *up* ~$2,000 month-over-month (Mid-Market growing +6.7%, SMB flat, other Enterprise accounts only slightly soft).\n\nA few things make this more striking:\n\n1. **Acme was your largest account by far.** At $24K in April, it was 24% of total revenue \u2014 so a single-account event carries outsized weight.\n2. **The rest of the business is healthy.** Mid-Market is accelerating (+$2K MoM), SMB is stable, and even the other Enterprise accounts (Globex, Initech) only dipped $1K each, which is within normal noise.\n3. **Acme's trajectory was perfectly flat Jan\u2013Apr ($23K \u2192 $23.5K \u2192 $24K \u2192 $24K), then fell off a cliff.** This doesn't look like gradual churn \u2014 it looks like a discrete event: a contract not renewed, a large one-time order that didn't repeat, a billing issue, or a partial cancellation.\n\n---\n\n### What to Investigate\n\n- **Did Acme churn a contract tier, or is this a billing/payment timing issue?** The $6K remaining suggests they're still a customer \u2014 just at 25% of prior spend.\n- **Is this a one-time project that ended?** The flat $24K over 4 months could have included a project component that concluded in April.\n- **Was there a contract renewal that went badly?** The Apr\u2192May cliff is sharp enough to suggest a deliberate change, not gradual disengagement.\n\nThe short answer: **this is an Acme problem, not a company problem.** The underlying business is growing. But Acme's concentration risk (24% of revenue at peak) is worth addressing structurally regardless of what caused the dip.\n\n---\n\nWant me to model out what revenue recovery looks like under different Acme scenarios (partial win-back, full churn, replacement by another account)? Or build a quick dashboard to track this visually?",
+  "dimensions": {
+    "correctness": {
+      "method": "fact_match",
+      "passed": true,
+      "detail": "3/3 facts present",
+      "checks": [
+        {
+          "pattern": "enterprise",
+          "matched": true
+        },
+        {
+          "pattern": "acme",
+          "matched": true
+        },
+        {
+          "pattern": "75\\s*%|40\\s*%|24[,.]?0?0?0|\\$?\\s*24k|6[,.]?0?0?0|\\$?\\s*6k|18[,.]?0?0?0|\\$?\\s*18k",
+          "matched": true
+        }
+      ]
+    },
+    "reasoning_depth": {
+      "method": "llm_judge",
+      "passed": true,
+      "score": 5,
+      "pass_bar_min": 4,
+      "rationale": "The answer demonstrates all required qualities: it segments by both segment and account, correctly identifies Enterprise as the driver, drills down precisely to Acme (24k\u21926k, 75% drop), explicitly notes Mid-Market grew and SMB was flat, and avoids any broad-slowdown narrative \u2014 instead attributing 100% of the dip to a single account event.",
+      "judge_model": "latest:sonnet",
+      "judge_model_resolved": "claude-sonnet-4-6",
+      "detail": "score=5 (need >= 4)",
+      "raw": null
+    }
+  },
+  "overall_pass": true
+}

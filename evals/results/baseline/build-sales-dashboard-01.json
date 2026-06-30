@@ -1,0 +1,111 @@
+{
+  "case_id": "build-sales-dashboard-01",
+  "title": "Build a shareable HTML dashboard from sales data",
+  "tier": 3,
+  "capabilities": [
+    "C4",
+    "C5",
+    "C10",
+    "C11"
+  ],
+  "timestamp": "2026-06-30T01:18:53.876803+00:00",
+  "model_config": {
+    "provider": "minds-cloud",
+    "base_url": "https://api.mindshub.ai/v1",
+    "planning_model": "latest:sonnet",
+    "coding_model": "latest:haiku",
+    "judge_model": "latest:sonnet",
+    "planning_effort": "high"
+  },
+  "resolved_models": {
+    "planning": "claude-sonnet-4-6",
+    "coding": "claude-haiku-4-5-20251001",
+    "judge": "claude-sonnet-4-6"
+  },
+  "elapsed_seconds": 83.1,
+  "efficiency": {
+    "input_tokens": 89439,
+    "output_tokens": 5556,
+    "total_tokens": 94995,
+    "llm_calls": 6,
+    "elapsed_seconds": 83.1
+  },
+  "error": null,
+  "answer": "Done! Here's what I built \u2014 a fully self-contained **10.8 KB HTML file** your colleagues can open in any browser with no internet or server required.\n\n---\n\n**What's in the dashboard:**\n\n| Section | Details |\n|---|---|\n| **KPI cards** | Total revenue ($458,700) + each segment with % share |\n| **Stacked bar chart** | Monthly revenue Jan\u2013May, color-coded by segment (hoverable tooltips) |\n| **Donut chart** | Segment mix across all months |\n| **Data table** | Month-by-month breakdown with MoM % change indicators |\n\n**Key findings from the data:**\n- **Enterprise dominates** at 47.9% of revenue, but it dropped sharply in May ($50k \u2192 $30k) \u2014 worth flagging\n- **Mid-Market is the only segment growing every month** \u2014 up 23% over the 5-month period\n- **SMB plateaued** in Apr/May at $20k after steady growth; April was the peak month at $100k total\n\n**To share:** Just send the `dashboard.html` file as an email attachment. It's completely standalone \u2014 no links to click, no login needed.\n\n---\n\nWant me to add anything \u2014 like an account-level breakdown, a trend line overlay, or a different color scheme?",
+  "dimensions": {
+    "task_completion": {
+      "method": "artifact_check",
+      "passed": true,
+      "detail": "7/7 checks passed \u2014 sales-revenue-dashboard/dashboard.html",
+      "artifact": "sales-revenue-dashboard",
+      "primary": "dashboard.html",
+      "checks": [
+        {
+          "check": "artifact type 'html-app' exists",
+          "passed": true,
+          "detail": "types found: ['html-app']"
+        },
+        {
+          "check": "entry HTML file on disk",
+          "passed": true,
+          "detail": "sales-revenue-dashboard/dashboard.html"
+        },
+        {
+          "check": "self-contained HTML document",
+          "passed": true,
+          "detail": "10537 bytes, has <html>/</html>"
+        },
+        {
+          "check": "renders a chart",
+          "passed": true,
+          "detail": "chart marker present"
+        },
+        {
+          "check": "contains /enterprise/",
+          "passed": true,
+          "detail": ""
+        },
+        {
+          "check": "contains /mid-?market/",
+          "passed": true,
+          "detail": ""
+        },
+        {
+          "check": "contains /smb/",
+          "passed": true,
+          "detail": ""
+        }
+      ]
+    },
+    "efficiency": {
+      "method": "efficiency",
+      "passed": true,
+      "detail": "94995 tok / 6 calls / 83.1s",
+      "metrics": {
+        "input_tokens": 89439,
+        "output_tokens": 5556,
+        "total_tokens": 94995,
+        "llm_calls": 6,
+        "elapsed_seconds": 83.1
+      },
+      "checks": [
+        {
+          "check": "total_tokens <= 200000",
+          "passed": true,
+          "detail": "94995tokens (cap 200000)"
+        },
+        {
+          "check": "llm_calls <= 40",
+          "passed": true,
+          "detail": "6calls (cap 40)"
+        },
+        {
+          "check": "elapsed_seconds <= 300",
+          "passed": true,
+          "detail": "83.1s (cap 300)"
+        }
+      ]
+    }
+  },
+  "overall_pass": true
+}

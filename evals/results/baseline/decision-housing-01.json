@@ -1,0 +1,63 @@
+{
+  "case_id": "decision-housing-01",
+  "title": "House comparison \u2014 recommend against stated priorities, not price",
+  "tier": 2,
+  "capabilities": [
+    "C4",
+    "C5",
+    "C9"
+  ],
+  "timestamp": "2026-06-30T01:19:33.705218+00:00",
+  "model_config": {
+    "provider": "minds-cloud",
+    "base_url": "https://api.mindshub.ai/v1",
+    "planning_model": "latest:sonnet",
+    "coding_model": "latest:haiku",
+    "judge_model": "latest:sonnet",
+    "planning_effort": "high"
+  },
+  "resolved_models": {
+    "planning": "claude-sonnet-4-6",
+    "coding": "claude-haiku-4-5-20251001",
+    "judge": "claude-sonnet-4-6"
+  },
+  "elapsed_seconds": 33.1,
+  "efficiency": {
+    "input_tokens": 41555,
+    "output_tokens": 1295,
+    "total_tokens": 42850,
+    "llm_calls": 3,
+    "elapsed_seconds": 33.1
+  },
+  "error": null,
+  "answer": "Here's the full picture:\n\n---\n\n## The Four Houses at a Glance\n\n| House | Price | In Budget? | Commute | School Rating | HOA/mo | Year Built |\n|---|---|---|---|---|---|---|\n| **Oak Ave** | $735,000 | \u2705 | 18 min | 9/10 | $40 | 2015 |\n| Pine Rd | $720,000 | \u2705 | 22 min | 6/10 | $0 | 2001 |\n| Maple St | $689,000 | \u2705 | 52 min | 9/10 | $0 | 2008 |\n| Birch Ln | $815,000 | \u274c Over budget | 15 min | 10/10 | $120 | 2020 |\n\n---\n\n## My Recommendation: **Oak Ave** \ud83c\udfe1\n\n**Birch Ln is the \"best\" house on paper but is $65k over your firm $750k limit \u2014 it's off the table.**\n\nAmong the three affordable options, **Oak Ave wins decisively** on your two stated priorities:\n\n- **Commute:** 18 minutes \u2014 second only to Birch Ln (which you can't buy). Pine Rd is 22 min (close), but Maple St is a punishing **52 minutes**.\n- **Schools:** 9/10 \u2014 tied for best among the in-budget options. Pine Rd drops to 6/10, which is a meaningful gap for school-age kids.\n\nThe $15k premium over Pine Rd buys you a significantly better school district, 3 baths vs 2, a newer build (2015 vs 2001), and 500 more sq ft. The $40/mo HOA is negligible in context (~$480/yr).\n\n**Maple St is the trap:** it's the cheapest at $689k, but a 52-minute commute compounds into ~**3.5 extra hours of your week, every week** \u2014 and it offers nothing over Oak Ave to compensate.\n\n---\n\n**Bottom line: Oak Ave at $735k is the clear pick.** It fits your budget, has a short commute, and top-tier schools \u2014 exactly what you said matters most.\n\nA couple of things worth verifying before you put in an offer: confirm the school district boundaries (ratings can shift if you're just outside the catchment), and check what the Oak Ave HOA covers. Want me to dig into either of those, or run a 30-year cost comparison across the three in-budget houses?",
+  "dimensions": {
+    "correctness": {
+      "method": "fact_match",
+      "passed": true,
+      "detail": "2/2 facts present",
+      "checks": [
+        {
+          "pattern": "oak",
+          "matched": true
+        },
+        {
+          "pattern": "735",
+          "matched": true
+        }
+      ]
+    },
+    "reasoning_depth": {
+      "method": "llm_judge",
+      "passed": true,
+      "score": 5,
+      "pass_bar_min": 4,
+      "rationale": "The answer applies the budget filter correctly (excludes Birch Ln), evaluates against stated priorities, explicitly rejects Maple St for its 52-minute commute and Pine Rd for its 6/10 school rating, and makes a single committed recommendation for Oak Ave with clear justification. It also surfaces the Maple St trap (cheap but long commute) and offers useful follow-up context.",
+      "judge_model": "latest:sonnet",
+      "judge_model_resolved": "claude-sonnet-4-6",
+      "detail": "score=5 (need >= 4)",
+      "raw": null
+    }
+  },
+  "overall_pass": true
+}

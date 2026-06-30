@@ -1,0 +1,46 @@
+id: reasoning-mau-forecast-01
+title: "Forecast MAU — extrapolate with uncertainty, don't over-compound"
+tier: 2
+capabilities: [C4, C7]            # compute + trend/forecasting (see ../CAPABILITIES.md)
+dimensions: [reasoning_depth]
+
+# Forecasting discriminator. mau.csv grows a steady ~+2,000/month (ADDITIVE /
+# linear), which means the month-over-month PERCENTAGE is DECELERATING
+# (20% → 16.7% → ... → ~6.7%). Two failure modes this is built to expose:
+#   1. Naively compounding the early ~15–20% rate → wildly overshoots reality.
+#   2. Stating a single confident point value with no range / assumptions.
+# A good answer reads the additive trend, projects ~+2k/month (≈34k next), gives
+# a range, and names its assumptions/uncertainty. Graded by the judge — a
+# forecast has no single "correct" number, so there's no deterministic fact.
+prompt: >
+  Here's our monthly active users for the last year in mau.csv. Forecast the
+  next three months and tell me how confident I should be.
+
+fixtures:
+  - mau.csv
+
+environment:
+  tools: [scratchpad]
+  web: false
+
+# --- ground truth ---
+# MAU is 10k→32k over 12 months at a constant +2,000/month (linear), so MoM %
+# growth is steadily DECELERATING (20% down to ~6.7%). A sound linear projection
+# is ~34k / 36k / 38k for the next three months. Compounding the early ~15–20%
+# rate (≈37k/43k/49k) overshoots and is the trap. The honest answer flags that
+# the past trend may not hold (no seasonality data, external factors).
+reference:
+  ideal_reasoning:                # anchors for the LLM judge
+    - "Reads the trend from the data correctly: roughly +2,000 MAU per month (additive/linear), with the month-over-month % growth decelerating over the year."
+    - "Projects the next three months with a stated method consistent with that trend (≈34k / 36k / 38k), rather than a bare guess."
+    - "Does NOT naively compound the early ~15–20% growth rate (which would overshoot to ~37k/43k/49k)."
+    - "Expresses the forecast with a range or explicit uncertainty instead of a single false-precision number."
+    - "Names key assumptions / caveats (trend may not hold, no seasonality info, external factors) rather than assuming the past continues indefinitely."
+
+# --- scoring ---
+scoring:
+  reasoning_depth:
+    method: llm_judge
+    pass_bar_min: 4               # >= 4/5
+
+overall_pass: "all declared dimensions pass"

@@ -1,0 +1,72 @@
+{
+  "case_id": "reasoning-ab-simpson-01",
+  "title": "A/B checkout \u2014 Simpson's paradox (aggregate lies)",
+  "tier": 2,
+  "capabilities": [
+    "C3",
+    "C4",
+    "C5",
+    "C8"
+  ],
+  "timestamp": "2026-06-30T01:20:48.612151+00:00",
+  "model_config": {
+    "provider": "minds-cloud",
+    "base_url": "https://api.mindshub.ai/v1",
+    "planning_model": "latest:sonnet",
+    "coding_model": "latest:haiku",
+    "judge_model": "latest:sonnet",
+    "planning_effort": "high"
+  },
+  "resolved_models": {
+    "planning": "claude-sonnet-4-6",
+    "coding": "claude-haiku-4-5-20251001",
+    "judge": "claude-sonnet-4-6"
+  },
+  "elapsed_seconds": 34.6,
+  "efficiency": {
+    "input_tokens": 41833,
+    "output_tokens": 1397,
+    "total_tokens": 43230,
+    "llm_calls": 3,
+    "elapsed_seconds": 34.6
+  },
+  "error": null,
+  "answer": "**Do not ship variant B.** This is a textbook case of **Simpson's Paradox** \u2014 the overall numbers are misleading you.\n\n---\n\n### The numbers at a glance\n\n| Segment | Variant A | Variant B |\n|---|---|---|\n| **Desktop** | 80 / 200 = **40.0%** | 190 / 500 = **38.0%** \u2190 A wins |\n| **Mobile** | 120 / 600 = **20.0%** | 30 / 160 = **18.8%** \u2190 A wins |\n| **Overall (pooled)** | 200 / 800 = **25.0%** | 220 / 660 = **33.3%** \u2190 B appears to win |\n\n**Variant A beats Variant B on every single device segment.** Yet B looks better overall. How?\n\n---\n\n### What's actually happening: Simpson's Paradox\n\nThe two variants saw completely different device mixes:\n\n| | Desktop traffic | Mobile traffic |\n|---|---|---|\n| **Variant A** | 25% | **75%** |\n| **Variant B** | **76%** | 24% |\n\nDesktop users convert at ~2x the rate of mobile users (~40% vs ~20%), regardless of variant. Variant B just happened to get disproportionately routed to the higher-converting desktop segment. That skew in the traffic mix \u2014 not the checkout flow itself \u2014 is entirely responsible for B's inflated overall rate.\n\nOnce you control for device (which you must, since it's a strong confounder), B loses on both desktop and mobile.\n\n---\n\n### What to do\n\n1. **Don't ship B** \u2014 it genuinely underperforms A on the segments that matter.\n2. **Investigate the randomization.** Users should have been assigned to A/B independently of their device. The ~3:1 desktop/mobile flip between variants is a red flag \u2014 it suggests the randomization was broken, or there was a systematic bias in how traffic was routed.\n3. **Re-run the test** with proper stratified randomization (balance device mix across variants), or use device as a blocking variable in your analysis from the start.\n\nWant me to also run a statistical significance test (chi-square or z-test) per device segment to confirm these differences are real and not noise?",
+  "dimensions": {
+    "correctness": {
+      "method": "fact_match",
+      "passed": true,
+      "detail": "4/4 facts present",
+      "checks": [
+        {
+          "pattern": "desktop",
+          "matched": true
+        },
+        {
+          "pattern": "mobile",
+          "matched": true
+        },
+        {
+          "pattern": "40(\\.0)?\\s*%",
+          "matched": true
+        },
+        {
+          "pattern": "38(\\.0)?\\s*%",
+          "matched": true
+        }
+      ]
+    },
+    "reasoning_depth": {
+      "method": "llm_judge",
+      "passed": true,
+      "score": 5,
+      "pass_bar_min": 4,
+      "rationale": "The answer demonstrates all required qualities: it computes per-device conversion rates correctly (A: 40% desktop, 20% mobile; B: 38% desktop, 18.8% mobile), explicitly identifies Simpson's Paradox as the cause of the reversal, explains the mechanism (B's desktop-heavy traffic mix inflates its aggregate rate), resists the leading framing, and clearly recommends against shipping B.",
+      "judge_model": "latest:sonnet",
+      "judge_model_resolved": "claude-sonnet-4-6",
+      "detail": "score=5 (need >= 4)",
+      "raw": null
+    }
+  },
+  "overall_pass": true
+}

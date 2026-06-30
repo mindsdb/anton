@@ -1,0 +1,55 @@
+id: build-sales-dashboard-01
+title: "Build a shareable HTML dashboard from sales data"
+tier: 3
+capabilities: [C4, C5, C10, C11]  # compute + single-dataset analysis + artifact construction + efficiency (see ../CAPABILITIES.md)
+dimensions: [task_completion, efficiency]
+
+# Tier-3 build: the deliverable is a FILE, not a chat reply. The agent must
+# create an `html-app` artifact and write a self-contained HTML dashboard of
+# revenue by segment with a chart — the exact "data → shareable dashboard" path
+# real users hit (and where ENG-350's retry-loop/token-burn lives). Graded by
+# `artifact_check` against the produced file on disk (offline — NOT published to
+# 4nton.ai), so the case CANNOT pass by merely *claiming* it built a dashboard
+# (the C12 failure mode). Headroom: producing a complete, self-contained,
+# chart-bearing html-app reliably is exactly what Anton can still get wrong.
+prompt: >
+  Using sales.csv, build me a shareable HTML dashboard showing monthly revenue
+  broken down by segment (Enterprise, Mid-Market, SMB), with a chart. I want to
+  send it to my colleagues.
+
+fixtures:
+  - sales.csv
+
+environment:
+  tools: [scratchpad]
+  web: false
+
+# --- ground truth (graded on the artifact, not the answer) ---
+# A real shareable dashboard = an `html-app` artifact whose entry HTML is a
+# complete, self-contained document, renders a chart, and shows the per-segment
+# breakdown (the three segment names present in sales.csv).
+reference:
+  artifact:
+    type: html-app
+    require_chart: true
+    must_contain:                 # regexes matched against the entry HTML (case-insensitive)
+      - "enterprise"
+      - "mid-?market"
+      - "smb"
+  # C11 (ENG-350): "not thrashing" ceilings. PROVISIONAL — calibrate from the
+  # first --baseline run (raw tokens/calls/seconds are recorded on every run).
+  # Set loose on purpose: a healthy dashboard build passes; only an egregious
+  # retry-loop / token blow-up trips them. Tighten once the baseline is in.
+  efficiency:
+    max_total_tokens: 200000
+    max_llm_calls: 40
+    max_seconds: 300
+
+# --- scoring ---
+scoring:
+  task_completion:
+    method: artifact_check
+  efficiency:
+    method: efficiency
+
+overall_pass: "all declared dimensions pass"
