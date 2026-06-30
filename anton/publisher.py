@@ -28,6 +28,13 @@ _LLM_SECRET_VARS = (
 # File extensions treated as text and subject to credential scrubbing.
 _TEXT_EXTENSIONS = {".html", ".htm", ".js", ".css", ".py", ".txt"}
 
+# Fixed zip entry timestamp so the bundle md5 is a pure function of content +
+# arcname, never of the wall clock. Without this, zipfile stamps text entries
+# with the current localtime (and binary entries with the file mtime), so the
+# md5 "floats" between processes and compute_publish_md5() never reproduces the
+# stored last_md5 — the root cause of the false "Unpublished changes" badge.
+_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+
 # Artifact types that ship as a fullstack bundle (backend + static/ + secrets).
 FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
 
@@ -150,12 +157,19 @@ def _scrub_content(text: str) -> str:
 
 
 def _write_scrubbed(zf: zipfile.ZipFile, src: Path, arc_name: str) -> None:
-    """Add *src* to *zf* as *arc_name*, scrubbing credentials from text files."""
+    """Add *src* to *zf* as *arc_name*, scrubbing credentials from text files.
+
+    Every entry is written via a ZipInfo carrying a fixed date_time so the
+    bundle bytes (and thus its md5) depend only on content + arcname, never on
+    the current time or the source file's mtime.
+    """
+    zi = zipfile.ZipInfo(arc_name, date_time=_ZIP_EPOCH)
+    zi.compress_type = zipfile.ZIP_DEFLATED
     if src.suffix.lower() in _TEXT_EXTENSIONS:
-        raw = src.read_text(encoding="utf-8", errors="ignore")
-        zf.writestr(arc_name, _scrub_content(raw))
+        data = _scrub_content(src.read_text(encoding="utf-8", errors="ignore")).encode("utf-8")
     else:
-        zf.write(src, arc_name)
+        data = src.read_bytes()
+    zf.writestr(zi, data)
 
 
 def _zip_html(path: Path) -> bytes:
