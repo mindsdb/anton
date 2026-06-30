@@ -592,6 +592,19 @@ class OpenAIProvider(LLMProvider):
             return {"web_search", "web_fetch"}
         return set()
 
+    @staticmethod
+    def _sanitize_langfuse_tag(tag: str) -> str:
+        """Clean a caller-supplied langfuse tag so it survives the wire intact.
+
+        Tags are comma-joined into the ``Langfuse-Tags`` header and the MindsHub
+        router splits that header on commas — so an embedded comma would
+        silently split one tag into two — while control chars (CR/LF/…) would
+        make httpx reject the outbound request. Drop both and trim surrounding
+        whitespace. Returns "" when nothing usable remains, so the caller can
+        filter the tag out.
+        """
+        return "".join(c for c in tag if c.isprintable() and c != ",").strip()
+
     def _build_trace_headers(self) -> dict[str, str] | None:
         """Return langfuse-style headers for the active trace, or None.
 
@@ -610,9 +623,21 @@ class OpenAIProvider(LLMProvider):
         headers: dict[str, str] = {}
         if ctx.session_id:
             headers["Langfuse-Session-Id"] = ctx.session_id
+        # Langfuse-Tags: the harness identity plus any caller-supplied tags
+        # (e.g. an eval harness adding "eval", "eval_run:<id>"). Comma-joined;
+        # the MindsHub router splits, trims and de-dupes them. Caller tags are
+        # untrusted, so sanitize each (drop commas/control chars, trim) and
+        # skip any that end up empty before joining.
+        tags: list[str] = []
         if ctx.harness:
-            headers["Langfuse-Tags"] = ctx.harness
-        extra: dict[str, object] = {}
+            tags.append(ctx.harness)
+        tags.extend(ctx.tags)
+        tags = [t for t in (self._sanitize_langfuse_tag(s) for s in tags) if t]
+        if tags:
+            headers["Langfuse-Tags"] = ",".join(tags)
+        # Langfuse-Metadata: caller-supplied metadata first, then the built-in
+        # turn/harness keys so identity always wins on collision.
+        extra: dict[str, object] = dict(ctx.metadata or {})
         if ctx.turn_id is not None:
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:

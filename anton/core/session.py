@@ -1523,6 +1523,8 @@ class ChatSession:
         user_input: str | list[dict],
         *,
         turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive.
 
@@ -1531,6 +1533,12 @@ class ChatSession:
         calls + tool spans made during this turn. Stored on
         `self._current_turn_id` so the provider layer can read it
         without threading the arg through every internal call.
+
+        `trace_tags` / `trace_metadata` are optional, opaque annotations the
+        host can attach to this turn's trace (forwarded to the MindsHub
+        langfuse headers — see the provider's `_build_trace_headers`). They
+        are deliberately generic: hosts can add arbitrary correlation data
+        (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
         self._append_history({"role": "user", "content": user_input})
@@ -1568,6 +1576,8 @@ class ChatSession:
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                tags=tuple(trace_tags or ()),
+                metadata=trace_metadata or None,
             )
         )
 
