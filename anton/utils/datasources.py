@@ -138,11 +138,58 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         slug = f"{c['engine']}-{c['name']}"
         if active_only and slug != active_only:
             continue
-        fields = vault.load(c["engine"], c["name"]) or {}
+        # read_record gives fields + secure_keys in one call; fall back to load
+        # for any vault backend that doesn't implement it.
+        if hasattr(vault, "read_record"):
+            record = vault.read_record(c["engine"], c["name"]) or {}
+            fields = record.get("fields", {}) or {}
+            secure_keys = record.get("secure_keys")
+        else:
+            fields = vault.load(c["engine"], c["name"]) or {}
+            secure_keys = None
         prefix = _slug_env_prefix(c["engine"], c["name"])
-        var_names = ", ".join(f"{prefix}__{k.upper()}" for k in fields)
-        lines.append(f"- `{slug}` ({c['engine']}) → {var_names}")
+        # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`) —
+        # they're not credential env vars the agent should reference.
+        var_names = ", ".join(
+            f"{prefix}__{k.upper()}" for k in fields if not k.startswith("_")
+        )
+        # Prefer a user/agent-assigned label ("Support"); otherwise the derived
+        # non-secret identity (email / host).
+        identity = str(fields.get("_label", "")).strip() or _connection_identity(
+            fields, secure_keys
+        )
+        head = f"`{slug}` ({c['engine']})"
+        if identity:
+            head += f" — {identity}"
+        lines.append(f"- {head} → {var_names}")
     return "\n".join(lines)
+
+
+def _connection_identity(fields: dict, secure_keys: list | None = None) -> str | None:
+    """A short, non-secret label so the LLM can tell connections apart — the
+    account email, or the database host (+ name).
+
+    Scoped to these inherently non-secret fields on purpose: it is NOT a dump of
+    every field (which would surface opaque ``client_id`` / config like
+    ``ssl_mode``) and never a secret. Lets the agent pick the right account
+    ("send from my support email") even when the connection slug is an old random
+    one. Any field a record explicitly marks secret via ``secure_keys`` is
+    skipped, defensively, even though email/host are not normally secret.
+    """
+    secure = set(secure_keys or [])
+    # `email` is collected by credential forms; `account_email` is stored by the
+    # OAuth flows (from userinfo). Either identifies the account.
+    for key in ("email", "account_email"):
+        val = str(fields.get(key, "")).strip()
+        if val and key not in secure:
+            return val
+    host = str(fields.get("host", "")).strip()
+    if host and "host" not in secure:
+        database = str(fields.get("database", "")).strip()
+        if database and "database" not in secure:
+            return f"{host}/{database}"
+        return host
+    return None
 
 
 def restore_namespaced_env(vault: DataVault) -> None:
