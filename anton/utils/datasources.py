@@ -148,7 +148,11 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
             fields = vault.load(c["engine"], c["name"]) or {}
             secure_keys = None
         prefix = _slug_env_prefix(c["engine"], c["name"])
-        var_names = ", ".join(f"{prefix}__{k.upper()}" for k in fields)
+        # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`) —
+        # they're not credential env vars the agent should reference.
+        var_names = ", ".join(
+            f"{prefix}__{k.upper()}" for k in fields if not k.startswith("_")
+        )
         # Prefer a user/agent-assigned label ("Support"); otherwise the derived
         # non-secret identity (email / host).
         identity = str(fields.get("_label", "")).strip() or _connection_identity(

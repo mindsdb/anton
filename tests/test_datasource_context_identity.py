@@ -59,6 +59,20 @@ class TestBuildContext:
     def test_empty_vault_returns_empty(self, tmp_path):
         assert build_datasource_context(LocalDataVault(tmp_path)) == ""
 
+    def test_meta_fields_not_listed_as_env_vars(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save(
+            "gmail", "support",
+            {"email": "u@x.com", "app_password": "p", "_connector_id": "gmail",
+             "_method": "app-password", "_label": "Support"},
+        )
+        ctx = build_datasource_context(v)
+        # `_`-prefixed bookkeeping must not appear as DS_* env vars.
+        assert "__CONNECTOR_ID" not in ctx
+        assert "__METHOD" not in ctx
+        assert "__LABEL" not in ctx
+        assert "DS_GMAIL_SUPPORT__EMAIL" in ctx  # real fields still listed
+
     def test_label_preferred_over_email(self, tmp_path):
         v = LocalDataVault(tmp_path)
         v.save(
