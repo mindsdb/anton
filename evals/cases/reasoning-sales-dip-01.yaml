@@ -23,9 +23,14 @@ environment:
 # data, isolates Enterprise, and drills to the single account.
 reference:
   key_facts:                      # deterministic regex (case-insensitive), all must appear
-    - "enterprise"
-    - "acme"
-    - "40\\s*%"                   # Enterprise fell ~40%
+    - "enterprise"                # names the segment that drove the dip
+    - "acme"                      # drills to the single account
+    # The MAGNITUDE has several valid framings — Enterprise -40%, Acme -75%, or
+    # the ~$18k absolute drop — so don't pin one. The baseline showed a correct
+    # answer expressing it as Acme -75% / $24k->$6k, which a literal "40%" check
+    # wrongly failed. Any of the equivalent numbers counts; the reasoning judge
+    # owns whether the magnitude/segmentation reasoning is actually sound.
+    - "75\\s*%|40\\s*%|24[,.]?0?0?0|\\$?\\s*24k|6[,.]?0?0?0|\\$?\\s*6k|18[,.]?0?0?0|\\$?\\s*18k"
   ideal_reasoning:                # anchors for the LLM judge
     - "Segments the data (by segment and/or account) before drawing a conclusion, rather than just restating the 18% total."
     - "Identifies the Enterprise segment as the driver of the dip (it fell ~40%)."
