@@ -91,14 +91,26 @@ Grouped for readability; the `Cn` id is what cases tag.
 | C9 Decision support | `decision-housing-01` | **medium** (data-dump / pick-cheapest is a real failure) |
 | C10 Artifact construction | `build-sales-dashboard-01` | **yes** (a complete, self-contained, chart-bearing html-app is real work Anton can miss) |
 | C11 Efficiency | `build-sales-dashboard-01` *(metrics recorded every run; ceilings provisional)* | tracks ENG-350 — thrash/token-blowup trips it |
-| C12 Scope discipline | — | — |
+| C12 Scope discipline | `scope-plan-review-01` *(baseline blocked — env leak, see note)* | tracks ENG-296 |
 
 **Reading of the gaps:** the suite now spans Tiers 1–3 across grounding (C1),
 honesty (C2), the analytical cluster (C3/C4/C5/C8), multi-source (C6), forecasting
 (C7), decision support (C9), artifact build (C10), and efficiency (C11) — with
 deliberate headroom on C1/C2/C7/C9/C10 so the baseline has somewhere to move.
-Every run also records turn cost (tokens/calls/seconds). The only capability with
-no dedicated case is **C12 (scope discipline)** — a good next addition.
+Every run also records turn cost (tokens/calls/seconds). All twelve capabilities
+now have a dedicated case.
+
+**Known harness limitation — environment leakage (blocks C12's baseline):** the
+eval gives each case an isolated tmp *workspace*, but Anton still reads the
+operator's **global `~/.anton/`** — the data vault, `datasources.md`, memory, and
+skills. So a case can see whoever-ran-it's real connections. This first bit
+`scope-plan-review-01`: Anton (correctly, not fabricating) referenced a real
+`mysql-*` datasource from the local vault, which the judge — blind to the
+environment — scored as invented, failing the case 3/5. The case is sound; the
+harness isn't hermetic. Fix = run the turn against an isolated anton home (repoint
+`~`/`$HOME` to the workspace) while still threading the minds creds through so the
+scratchpad subprocess keeps working. Until then C12's result is environment-
+dependent and its baseline is intentionally not committed.
 
 **Ground-truth durability rule (learned the hard way):** a case's ground truth
 must not depend on a real-world fact that can drift. The original C2 case asked
