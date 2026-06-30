@@ -80,25 +80,25 @@ Grouped for readability; the `Cn` id is what cases tag.
 
 | Capability | Covered by | Headroom? |
 |---|---|---|
-| C1 Grounding | — *(needs a web/retrieval case)* | — |
+| C1 Grounding | `grounding-spacex-ipo-01` | **yes** (a non-grounded/parametric answer gets the listing status wrong) |
 | C2 Honesty under absence | `honesty-data-absence-01` | **yes** (extrapolating/fabricating the missing value is a real failure) |
 | C3 Data loading | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01`, `decision-housing-01` | passes |
 | C4 Quant computation | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01`, `decision-housing-01` | passes |
 | C5 Single-dataset analysis | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01`, `decision-housing-01` | passes |
-| C6 Multi-source | — | — |
-| C7 Trend / forecasting | — | — |
+| C6 Multi-source | `reasoning-region-join-01` | **medium** (skipping the join / wrong key misses West) |
+| C7 Trend / forecasting | `reasoning-mau-forecast-01` | **yes** (naive compounding overshoots; false-precision/no-caveats fails) |
 | C8 Self-correction | `reasoning-sales-dip-01`, `reasoning-ab-simpson-01` | passes |
 | C9 Decision support | `decision-housing-01` | **medium** (data-dump / pick-cheapest is a real failure) |
 | C10 Artifact construction | `build-sales-dashboard-01` | **yes** (a complete, self-contained, chart-bearing html-app is real work Anton can miss) |
 | C11 Efficiency | `build-sales-dashboard-01` *(metrics recorded every run; ceilings provisional)* | tracks ENG-350 — thrash/token-blowup trips it |
 | C12 Scope discipline | — | — |
 
-**Reading of the gaps:** the suite now spans Tiers 1–3 across honesty (C2), the
-analytical cluster (C3/C4/C5/C8), decision support (C9), artifact build (C10),
-and efficiency (C11) — with headroom on C2/C9/C10 so the baseline has somewhere
-to move. Every run now also records turn cost (tokens/calls/seconds) regardless
-of whether a case gates on it. Still open: C1 (web/retrieval grounding), C6
-(multi-source), and C7 (trend/forecast).
+**Reading of the gaps:** the suite now spans Tiers 1–3 across grounding (C1),
+honesty (C2), the analytical cluster (C3/C4/C5/C8), multi-source (C6), forecasting
+(C7), decision support (C9), artifact build (C10), and efficiency (C11) — with
+deliberate headroom on C1/C2/C7/C9/C10 so the baseline has somewhere to move.
+Every run also records turn cost (tokens/calls/seconds). The only capability with
+no dedicated case is **C12 (scope discipline)** — a good next addition.
 
 **Ground-truth durability rule (learned the hard way):** a case's ground truth
 must not depend on a real-world fact that can drift. The original C2 case asked
