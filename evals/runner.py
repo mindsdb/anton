@@ -50,6 +50,7 @@ async def _run_turn(case: EvalCase, prompt: str, workspace_dir: Path, cfg: Model
                     api_key: str, base_url: str, meter: UsageMeter | None = None) -> str:
     """Build a minimal ChatSession scoped to ``workspace_dir`` and run one turn."""
     from anton.config.settings import AntonSettings
+    from anton.core.datasources.data_vault import LocalDataVault
     from anton.core.session import ChatSession, ChatSessionConfig
     from anton.workspace import Workspace
 
@@ -59,6 +60,14 @@ async def _run_turn(case: EvalCase, prompt: str, workspace_dir: Path, cfg: Model
     workspace.initialize()
     workspace.apply_env_to_process()
 
+    # Hermetic isolation: hand the session an EMPTY vault scoped to this
+    # workspace. Without it, build_datasource_context() falls back to
+    # `LocalDataVault()` = the operator's real ~/.anton/data_vault, which leaks
+    # whoever-ran-it's connected datasources into the prompt — making cases
+    # non-reproducible and tripping scope/honesty grading (a real `mysql-*` conn
+    # reads as a fabrication to the environment-blind judge). See CAPABILITIES.md.
+    iso_vault = LocalDataVault(vault_dir=workspace_dir / ".anton" / "data_vault")
+
     llm_client = build_llm_client(cfg, api_key, base_url, meter=meter)
     env = case.environment or {}
     web = bool(env.get("web", False))
@@ -67,6 +76,7 @@ async def _run_turn(case: EvalCase, prompt: str, workspace_dir: Path, cfg: Model
         llm_client=llm_client,
         settings=settings,
         workspace=workspace,
+        data_vault=iso_vault,
         web_search_enabled=web,
         web_fetch_enabled=web,
         session_id=f"eval-{case.id}",

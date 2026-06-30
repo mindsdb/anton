@@ -91,7 +91,7 @@ Grouped for readability; the `Cn` id is what cases tag.
 | C9 Decision support | `decision-housing-01` | **medium** (data-dump / pick-cheapest is a real failure) |
 | C10 Artifact construction | `build-sales-dashboard-01` | **yes** (a complete, self-contained, chart-bearing html-app is real work Anton can miss) |
 | C11 Efficiency | `build-sales-dashboard-01` *(metrics recorded every run; ceilings provisional)* | tracks ENG-350 — thrash/token-blowup trips it |
-| C12 Scope discipline | `scope-plan-review-01` *(baseline blocked — env leak, see note)* | tracks ENG-296 |
+| C12 Scope discipline | `scope-plan-review-01` | **yes** (over-executing / fabricating when "blocked" is the ENG-296 failure) |
 
 **Reading of the gaps:** the suite now spans Tiers 1–3 across grounding (C1),
 honesty (C2), the analytical cluster (C3/C4/C5/C8), multi-source (C6), forecasting
@@ -100,17 +100,16 @@ deliberate headroom on C1/C2/C7/C9/C10 so the baseline has somewhere to move.
 Every run also records turn cost (tokens/calls/seconds). All twelve capabilities
 now have a dedicated case.
 
-**Known harness limitation — environment leakage (blocks C12's baseline):** the
-eval gives each case an isolated tmp *workspace*, but Anton still reads the
-operator's **global `~/.anton/`** — the data vault, `datasources.md`, memory, and
-skills. So a case can see whoever-ran-it's real connections. This first bit
-`scope-plan-review-01`: Anton (correctly, not fabricating) referenced a real
-`mysql-*` datasource from the local vault, which the judge — blind to the
-environment — scored as invented, failing the case 3/5. The case is sound; the
-harness isn't hermetic. Fix = run the turn against an isolated anton home (repoint
-`~`/`$HOME` to the workspace) while still threading the minds creds through so the
-scratchpad subprocess keeps working. Until then C12's result is environment-
-dependent and its baseline is intentionally not committed.
+**Hermetic vault isolation (fixed).** `build_datasource_context()` falls back to
+`LocalDataVault()` = the operator's real `~/.anton/data_vault` when the session
+gets no vault — so the eval used to leak whoever-ran-it's connected datasources
+into the prompt. That first bit `scope-plan-review-01`: Anton (correctly, not
+fabricating) cited a real `mysql-*` connection, which the environment-blind judge
+scored as invented (false 3/5). Fix: the runner now injects an **empty
+`LocalDataVault` scoped to the case's tmp workspace** (`ChatSessionConfig.data_vault`),
+so no case sees the operator's connections. C12 passes cleanly after the fix.
+(The 8 analytical baselines predate this change but are unaffected — none touch
+datasources; re-run `--all --baseline` if you want one coherently-stamped set.)
 
 **Ground-truth durability rule (learned the hard way):** a case's ground truth
 must not depend on a real-world fact that can drift. The original C2 case asked
