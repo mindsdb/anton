@@ -728,6 +728,36 @@ Yellow Pages, Shopify, Bing, and general web scraping.
 
 Base URL: `https://api.hasdata.com` · Auth: `x-api-key` header.
 
+**⚠️ Two-step async pattern — ALWAYS follow this:**
+1. `GET /scrape/<endpoint>?<params>` → response contains `requestMetadata.resultUrl` (a CDN URL)
+2. Wait 2–3 s, then `GET <resultUrl>` → actual JSON results
+
+Never try to read results from the first response body — it only contains metadata.
+Never hit the API root (`/`) — there is no handler there.
+
+```python
+# Canonical usage pattern
+import httpx, os, time
+
+key = os.environ.get('DS_API_KEY')
+base = os.environ.get('DS_BASE_URL', 'https://api.hasdata.com')
+headers = {"x-api-key": key}
+
+# Step 1 — trigger the scrape
+r = httpx.get(f"{base}/scrape/google/serp", headers=headers, params={"q": "your query", "gl": "us"})
+r.raise_for_status()
+result_url = r.json()["requestMetadata"]["resultUrl"]
+
+# Step 2 — wait for CDN, then fetch results
+time.sleep(3)
+data = httpx.get(result_url).json()
+
+# Guard sitelinks — can be a dict OR a list depending on the result
+sitelinks = data.get("sitelinks", [])
+if isinstance(sitelinks, list):
+    sitelinks = sitelinks[:3]
+```
+
 ```yaml
 engine: hasdata
 display_name: HasData
@@ -737,11 +767,17 @@ fields:
   - { name: api_key,  required: true,  secret: true,  description: "HasData API key from hasdata.com dashboard" }
   - { name: base_url, required: false, secret: false, description: "API base URL", default: "https://api.hasdata.com" }
 test_snippet: |
-  import httpx, os
+  import httpx, os, time
   key = os.environ['DS_API_KEY']
   base = os.environ.get('DS_BASE_URL', 'https://api.hasdata.com')
-  r = httpx.get(f"{base}/scrape/google/serp", headers={"x-api-key": key}, params={"q": "test"})
+  headers = {"x-api-key": key}
+  r = httpx.get(f"{base}/scrape/google/serp", headers=headers, params={"q": "test", "num": "1"})
   assert r.status_code == 200, f"unexpected status {r.status_code}: {r.text[:200]}"
+  meta = r.json().get("requestMetadata", {})
+  assert "resultUrl" in meta, f"missing resultUrl in response: {list(meta.keys())}"
+  time.sleep(3)
+  results = httpx.get(meta["resultUrl"]).json()
+  assert isinstance(results, dict), f"unexpected results type: {type(results)}"
   print("ok")
 ```
 
