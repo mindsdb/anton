@@ -732,8 +732,8 @@ Base URL: `https://api.hasdata.com` · Auth: `x-api-key` header.
 1. `GET /scrape/<endpoint>?<params>` → response contains `requestMetadata.resultUrl` (a CDN URL)
 2. Wait 2–3 s, then `GET <resultUrl>` → actual JSON results
 
-Never try to read results from the first response body — it only contains metadata.
-Never hit the API root (`/`) — there is no handler there.
+Do not try to read results from the first response body — it only contains metadata.
+Do not hit the API root (`/`) — there is no handler there.
 
 ```python
 # Canonical usage pattern
