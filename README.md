@@ -1,39 +1,51 @@
+<div align = center>
+ 
+# Anton - a self-improving agent
 
+[![Stars](https://img.shields.io/github/stars/mindsdb/anton?logo=github)](https://github.com/mindsdb/anton/stargazers)
+[![License](https://img.shields.io/github/license/mindsdb/anton)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://mindshub.ai/discord)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mindsdb/anton)
 
-# Meet Anton
+[MindsHub Cowork](https://mindshub.ai/?utm_source=github&utm_medium=repo-readme&utm_campaign=anton-readme) ·
+[Docs](https://docs.mindshub.ai/?utm_source=github&utm_medium=repo-readme&utm_campaign=anton-readme) ·
+[Discord](https://mindshub.ai/discord)
 
 <img width="760" height="466" alt="anton-promo" src="https://github.com/user-attachments/assets/27cf65eb-1819-4a7e-b410-a17c5478838b" />
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mindsdb/anton)
+---
 
+</div>
 
-Anton is a self-improving AI agent you can hand off any task to; Create and send reports, clear your inbox, send emails, manage your calendar, CRM,  book flights, etc. An open, powerful alternative to Claude-Cowork that you can run anywhere and use with any model you want — OpenAI, Anthropic, OpenRouter (200+ models), NVIDIA Nemotron, z.ai/GLM, Kimi/Moonshot, MiniMax, or your own endpoint.
+Anton is the open-source agentic harness that powers **[MindsHub Cowork](https://mindshub.ai/?utm_source=github&utm_medium=repo-readme&utm_campaign=anton-readme)** — a self-improving AI agent you can hand any task to. Built and maintained by the MindsHub team, Anton runs as the **default agent** inside Cowork, and just as well **standalone** in your terminal — anywhere, with any model.
 
+Hand it real work: create and send reports, clear your inbox, manage your calendar and CRM, book flights, and more. You describe the outcome — Anton figures out the steps.
 
-## Quick Install
-Anton can be installed as a desktop application or as a command-line tool.
+## Get started
 
-### Desktop App:
+Anton is the default agent in **MindsHub Cowork**, the unified workspace with data connectors, a model router, and artifacts. Get the full experience, or run Anton on its own from the terminal.
 
-- **macOS**: Click [here to download](https://downloads.mindshub.ai/anton/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
+### MindsHub Cowork app
 
-- **Windows**: Click [here to download](https://downloads.mindshub.ai/anton/windows/anton-latest.exe) the Anton Desktop App for Windows.
- 
-### or - Command-Line App:
+- **Web** — nothing to install: open **[console.mindshub.ai](https://console.mindshub.ai/?utm_source=github&utm_medium=repo-readme&utm_campaign=anton-readme)**.
+- **macOS** — [download the desktop app](https://downloads.mindsdb.com/mindshub-cowork/mac/mindshub-cowork-latest.pkg) (`.pkg`).
+- **Windows** — [download the desktop app](https://downloads.mindsdb.com/mindshub-cowork/windows/mindshub-cowork-latest.exe) (`.exe`).
 
-Open your terminal and use the following command to install
+### Anton CLI (standalone)
 
-- **macOS/Linux**: 
+Run Anton directly in your terminal:
+
+- **macOS/Linux**
 ```bash
-curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" 
+curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh && export PATH="$HOME/.local/bin:$PATH"
 ```
 
-- **Windows** (PowerShell):
+- **Windows** (PowerShell)
 ```powershell
 irm https://raw.githubusercontent.com/mindsdb/anton/main/install.ps1 | iex
 ```
 
-That's it, you can now run it by simply typing the command.
+That's it — now run it by typing:
 
 ```
 anton
@@ -43,53 +55,48 @@ anton
 
 ### 🔧 Ask for anything that requires action
 
-- **Send emails** - connect accounts, draft messages or even send them on your behalf.
-- **Manage Calendarss** - Summarize your day, create meetings, block time, etc. All just by asking.
-- **Automated reporting** - pull from multiple databases, crunch numbers, deliver a report on a schedule.
-- **Workflow automation** - monitor a source, react to changes, take action.
-- **Research & synthesis** - scrape the web, summarize findings, build a reference document.
-- **Data pipeline prototyping** - connect sources, transform data, load into a destination.
-- **System administration** - audit configurations, generate reports, fix issues.
+- **Send emails** — connect accounts, draft messages, or even send them on your behalf.
+- **Manage calendars** — summarize your day, create meetings, block time, and more, all just by asking.
+- **Automated reporting** — pull from multiple databases, crunch numbers, deliver a report on a schedule.
+- **Workflow automation** — monitor a source, react to changes, take action.
+- **Research & synthesis** — scrape the web, summarize findings, build a reference document.
+- **Data pipeline prototyping** — connect sources, transform data, load into a destination.
+- **System administration** — audit configurations, generate reports, fix issues.
 
 The pattern is always the same: you describe the outcome, Anton figures out the steps. From one-off tasks to scheduled workflows — Anton handles it. Here are a few examples:
 
-### 📊 Data analysis & Reports
+### 📊 Data analysis & reports
 ```
 I hold 50 AAPL, 200 NVDA, and 10 AMZN. Get today's prices, calculate my
 total portfolio value, show me the 30-day performance of each stock, and
 any other information that might be useful. Give me a complete dashboard.
 ```
 
-What happens next is the interesting part. At first, Anton doesn't have any particular skill related to this question. However, it figures it out live: scrapes live prices, writes code on the fly, crunches the numbers, and builds you a full dashboard - all in one conversation, with no setup.
-
+What happens next is the interesting part. At first, Anton doesn't have any particular skill related to this question. However, it figures it out live: scrapes live prices, writes code on the fly, crunches the numbers, and builds you a full dashboard — all in one conversation, with no setup.
 
 ![ezgif-24b9e7c74652f0dc](https://github.com/user-attachments/assets/c92f87c1-ff30-4272-92ba-49a8585d5954)
-
 
 ### 📬 Email cleanup
 ```
 Dear Anton, please help me clear unwanted emails...
 ```
 
-Anton scans your inbox, classifies emails by signal vs. noise, identifies unsubscribable marketing, cold outreach, and internal tool notifications - then surfaces a breakdown and handles the cleanup. One user ran it on ~1,000 emails and found ~35% were un-subscribable. Anton surfaced everything AND handled the cleanup.
+Anton scans your inbox, classifies emails by signal vs. noise, identifies unsubscribable marketing, cold outreach, and internal tool notifications — then surfaces a breakdown and handles the cleanup. One user ran it on ~1,000 emails and found ~35% were unsubscribable. Anton surfaced everything AND handled the cleanup.
 
 ### 💬 Build its own integrations
 ```
 Set up a WhatsApp integration so I can message you from my phone.
 ```
 
-Anton doesn't wait for someone to build a connector. It writes the integration code itself, sets it up, and gets it running - so you can chat with it from WhatsApp, Telegram, or whatever channel you need.
-
-
-
+Anton doesn't wait for someone to build a connector. It writes the integration code itself, sets it up, and gets it running — so you can chat with it from WhatsApp, Telegram, or whatever channel you need.
 
 ---
 
 ## Key features
-- **Credential vault** - prevents secrets from being exposed to LLMs.
-- **Isolated code execution** - protected, reproducible "show your work" environment.
-- **Multi-layer memory & continuous learning** - session, semantic and long-term knowledge. Anton remembers what it learned and gets better at your specific workflows over time.
-- **Web search & fetch** - the agent can query the live web and retrieve URL contents. Routed natively through your LLM provider when possible (no extra setup), with a transparent fallback for third-party endpoints. See below.
+- **Credential vault** — prevents secrets from being exposed to LLMs.
+- **Isolated code execution** — protected, reproducible "show your work" environment.
+- **Multi-layer memory & continuous learning** — session, semantic, and long-term knowledge. Anton remembers what it learned and gets better at your specific workflows over time.
+- **Web search & fetch** — the agent can query the live web and retrieve URL contents. Routed natively through your LLM provider when possible (no extra setup), with a transparent fallback for third-party endpoints. See below.
 
 ---
 
@@ -101,7 +108,7 @@ Anton exposes two web tools to the agent — `web_search` and `web_fetch` — bo
 | --- | --- | --- | --- |
 | Anthropic BYOK | Anthropic native server tool | Anthropic native server tool | None — billed on your Anthropic key |
 | OpenAI BYOK | OpenAI Responses API native | covered by `web_search` | None — billed on your OpenAI key |
-| Minds-Enterprise-Cloud (mdb.ai) | mdb.ai passthrough | mdb.ai passthrough | None — billed on your Minds key |
+| MindsHub Model Router | passthrough | passthrough | None — billed on your MindsHub API key |
 | Generic OpenAI-compatible (Together, Groq, Ollama, vLLM, …) | Exa.ai or Brave (you choose at setup) | stdlib HTTP GET (no key) | Run `anton setup-search` once |
 
 For the first three rows there's nothing to configure — the LLM provider executes the tools server-side and the results are folded directly into its response. For the fourth row, after `anton setup` finishes configuring a custom OpenAI-compatible endpoint Anton will offer to set up Exa or Brave; you can also (re)run that step at any time with `anton setup-search`. The chosen search-provider key is persisted to `~/.anton/.env` so it carries across sessions and workspaces, exactly like your LLM key.
@@ -113,7 +120,7 @@ Caveats: provider rate limits apply; `web_fetch` has a 30-second timeout and str
 ---
 
 #### Connect your data and apps
-Anton can connect an interact with files, databases, applications, APIs,... etc..
+Anton can connect to and interact with files, databases, applications, APIs, and more.
 
 ```powershell
 /connect
@@ -125,7 +132,7 @@ Anton can connect an interact with files, databases, applications, APIs,... etc.
 Tell Anton to connect and ask questions about your data. It will find credentials in the vault, fetch the schema, and retrieve what it needs.
 
 ```terminal
-YOU> Connect to my Gmail and find emails from potential customers that haven’t been handled.
+YOU> Connect to my Gmail and find emails from potential customers that haven't been handled.
 
 ANTON>
 ⎿ Connecting and fetching emails...
@@ -136,22 +143,22 @@ ANTON>
 
 ## What's inside
 
-A big part of what makes Anton work is that it doesn’t need a huge collection of separate tools for web, DB, files etc. Most of the work is done through one core harness: The execution scratchpad, which can dynamically become whatever Anton needs for the task.
+A big part of what makes Anton work is that it doesn't need a huge collection of separate tools for web, DB, files, etc. Most of the work is done through one core harness: the execution scratchpad, which can dynamically become whatever Anton needs for the task.
 
-For the full architecture of Anton, and developer guide, see **[anton/README.md](anton/README.md)**.
+For the full architecture of Anton, and the developer guide, see **[anton/README.md](anton/README.md)**.
 
 ---
 
 ## Workspace layout
 When you run `anton` in a directory:
 
-- `.anton/` - workspace folder containing scratchpad state, episodic memory, and local secrets.  
-- `.anton/anton.md` - optional project context (Anton reads this at conversation start).  
-- `.anton/.env` - workspace configuration variables file (local file). 
-- `.anton/episodes/*` - episodic memories, one file per session.
-- `.anton/memory/rules.md` - behavioral rules: Always/never/when rules (e.g., never hardcode credentials, how to build HTML)     
-- `.anton/memory/lessons.md` - factual knowledge: Things I've learned (stock API quirks, dashboard patterns, data fetching notes)   
-- `.anton/memory/topics/*` - topic-specific lessons:  Deeper notes organized by subject (dashboard-visualization, stock-data-api, etc.) 
+- `.anton/` — workspace folder containing scratchpad state, episodic memory, and local secrets.
+- `.anton/anton.md` — optional project context (Anton reads this at conversation start).
+- `.anton/.env` — workspace configuration variables file (local file).
+- `.anton/episodes/*` — episodic memories, one file per session.
+- `.anton/memory/rules.md` — behavioral rules: always/never/when rules (e.g., never hardcode credentials, how to build HTML).
+- `.anton/memory/lessons.md` — factual knowledge: things I've learned (stock API quirks, dashboard patterns, data fetching notes).
+- `.anton/memory/topics/*` — topic-specific lessons: deeper notes organized by subject (dashboard-visualization, stock-data-api, etc.).
 
 Override the working folder:
 ```bash
@@ -170,15 +177,29 @@ netsh advfirewall firewall add rule name="Anton Scratchpad" dir=out action=allow
 ---
 
 ## How Anton differs from coding agents
-Anton is a *doing* agent: code is a means, not the end. Where coding agents focus on producing code for a codebase, Anton focuses on delivering the outcome - a cleaned inbox, a live dashboard, a working integration, an automated workflow - and will write whatever code is necessary to achieve that goal.
+Anton is a *doing* agent: code is a means, not the end. Where coding agents focus on producing code for a codebase, Anton focuses on delivering the outcome — a cleaned inbox, a live dashboard, a working integration, an automated workflow — and will write whatever code is necessary to achieve that goal.
+
+---
+
+## 💬 Help & community
+
+- **Chat with us** — join the [Discord community](https://mindshub.ai/discord).
+- **Report a bug or request a feature** — open a [GitHub issue](https://github.com/mindsdb/anton/issues) with reproduction steps.
+- **Read the docs** — guides and setup at [docs.mindshub.ai](https://docs.mindshub.ai/?utm_source=github&utm_medium=repo-readme&utm_campaign=anton-readme).
+
+## 🤝 Contributing
+
+Anton is open source (MIT) and contributions are welcome — new capabilities, integrations, docs, and bug reports. Non-hotfix PRs target the `dev` branch (see [Dev guidelines](#dev-guidelines)). Say hi in the **#contributors** space on [Discord](https://mindshub.ai/discord).
+
+**Security:** Found a vulnerability? Please don't open a public issue — report it privately via our [security policy](https://github.com/mindsdb/anton/security).
 
 ---
 
 ## Is "Anton" a Mind?
-Yes, at MindsDB we build AI systems that collaborate with people to accomplish tasks, inspired by the culture series books, so yes, Anton is a Mind :)
+Yes. At MindsHub we build AI systems that collaborate with people to accomplish tasks, inspired by the *Culture* series of books — so yes, Anton is a Mind :)
 
 ## Why the name "Anton"?
-We really enjoyed the show *Silicon Valley*. Gilfoyle's AI - Son of Anton - was an autonomous system that wrote code, made its own decisions, and occasionally went rogue. We thought it was was great name for an AI that can learn on its own, so we kept Anton, dropped the "Son of".
+We really enjoyed the show *Silicon Valley*. Gilfoyle's AI — Son of Anton — was an autonomous system that wrote code, made its own decisions, and occasionally went rogue. We thought it was a great name for an AI that can learn on its own, so we kept Anton and dropped the "Son of".
 
 ---
 
@@ -309,8 +330,3 @@ Anything under [`.github/`](.github/) is owned by `@mindsdb/devops` via [CODEOWN
 ### Hotfixes / out-of-band releases
 
 If you genuinely need to release outside the normal flow (e.g. an admin hotfix), coordinate with `@mindsdb/devops` to bypass the tag ruleset. The e2e workflow's version-match guard will still verify the release tag matches `anton.__version__` and fail loudly on mismatch.
-
----
-
-## License
-AGPL-3.0 license
