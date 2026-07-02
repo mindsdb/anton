@@ -308,7 +308,7 @@ def publish(
                   passes its own vault so published secrets match where the
                   connection credentials were actually saved.
 
-    Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
+    Response keys (HTML path): user_prefix, report_id, md5, view_url, edit_url, version, files
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Path not found: {file_path}")
