@@ -7,6 +7,7 @@ from anton.core.tools.tool_handlers import (
     handle_read_image,
     handle_recall,
     handle_scratchpad,
+    handle_select_path,
     handle_update_artifact_metadata,
 )
 
@@ -421,4 +422,72 @@ READ_IMAGE_TOOL = ToolDef(
         "required": ["file_path"],
     },
     handler=handle_read_image,
+)
+
+
+SELECT_PATH_TOOL = ToolDef(
+    name="select_path",
+    description=(
+        "Show the user an inline picker to choose a file or folder, and get back "
+        "the absolute path. Two modes, chosen by what you pass:\n\n"
+        "• BROWSE — the location is unknown or the user only referred to it vaguely "
+        "(e.g. 'a folder somewhere', 'my downloads', 'the project I mentioned'). Call "
+        "with just a `prompt` (and `kind`); the user navigates a picker to locate it. "
+        "Use this INSTEAD of asking the user to type or paste a path. Optionally set "
+        "`start_dir` to seed the starting folder.\n"
+        "• PICK — you already found several matches and need the user to disambiguate. "
+        "Pass an explicit `candidates` list, OR a glob `pattern` (optionally under "
+        "`base_dir`) to find matches within the project. Exactly one match resolves "
+        "immediately with no prompt; zero matches tells you to refine.\n\n"
+        'On selection the tool returns {"status":"resolved","path":"<absolute path>"} '
+        "— use that path directly and keep going. Other statuses: 'cancelled' (user "
+        "dismissed), 'no_matches', 'invalid'. Never re-ask in plain text after a "
+        "resolved selection."
+    ),
+    # Injected into the system prompt: bias the model toward the picker over a
+    # type-the-path request, which is the whole point of the tool.
+    prompt=(
+        "When the user refers to a file or folder without giving a path you can "
+        "confidently resolve, call the `select_path` tool to let them pick it — do "
+        "NOT ask them to paste or type a path, and do not guess. Browse mode (no "
+        "candidates/pattern) is the right choice when you don't know where it is."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "One short line telling the user what to choose, "
+                "e.g. 'Pick the folder to check' or 'Which \"report.csv\" did you mean?'.",
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["file", "folder", "any"],
+                "description": "What the user should choose. Default 'any'.",
+            },
+            "start_dir": {
+                "type": "string",
+                "description": "BROWSE mode only: directory to open the picker at "
+                "(absolute, or relative to the project root). Defaults to the project root.",
+            },
+            "candidates": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "PICK mode: explicit candidate paths (absolute, or "
+                "relative to the project root) you have already identified.",
+            },
+            "pattern": {
+                "type": "string",
+                "description": "PICK mode: glob to find candidates within the project "
+                "(e.g. '**/config.json'). Used when `candidates` is omitted.",
+            },
+            "base_dir": {
+                "type": "string",
+                "description": "PICK mode: directory to resolve `pattern` against, "
+                "relative to the project root. Defaults to the project root.",
+            },
+        },
+        "required": ["prompt"],
+    },
+    handler=handle_select_path,
 )

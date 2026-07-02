@@ -20,6 +20,31 @@ _DS_SECRET_VARS: set[str] = set()
 # DS_* var names for **ALL** fields of registered engines.
 _DS_KNOWN_VARS: set[str] = set()
 
+# Provider credential env vars injected into the scratchpad execution env for
+# the code to USE. Their values must never reach the LLM (ENG-463): a model can
+# only emit a secret it can see, and the agent was caught writing a raw `mdb_`
+# key into generated code. Scrubbed by exact value (labeled) from anything that
+# re-enters model context.
+_PROVIDER_SECRET_VARS: tuple[str, ...] = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "ANTON_OPENAI_API_KEY",
+    "ANTON_ANTHROPIC_API_KEY",
+    "ANTON_GEMINI_API_KEY",
+    "ANTON_MINDS_API_KEY",
+)
+
+# Well-known provider key formats — scrubbed by shape so a key is redacted even
+# when it didn't come from one of our env vars (e.g. the model already emitted
+# it, or it arrived via an unexpected path). Length floors keep this from
+# matching short incidental `sk-`/`mdb_` strings.
+_SECRET_KEY_PATTERN = re.compile(
+    r"mdb_[A-Za-z0-9._-]{10,}"   # MindsHub
+    r"|sk-[A-Za-z0-9_-]{20,}"    # OpenAI / Anthropic (sk-, sk-proj-, sk-ant-)
+    r"|AIza[A-Za-z0-9_-]{30,}"   # Google / Gemini
+)
+
 
 def _reset_registered_ds_vars() -> None:
     """Clear the DS_* var registries so they can be rebuilt from current vault state."""
@@ -80,14 +105,19 @@ def register_secret_vars(
 
 
 def scrub_credentials(text: str) -> str:
-    """Remove secret DS_* values from scratchpad output before it reaches the LLM.
+    """Remove secret values from scratchpad/tool output before it reaches the LLM.
 
-    Only redacts vars registered as secret via _register_secret_vars (driven by
-    DatasourceField.secret=true in datasources.md).  Non-secret fields of known
-    engines (DS_HOST, DS_PORT, DS_BASE_URL, …) are left readable so the LLM can
-    reason about connection errors.  For truly unknown DS_* vars (custom engines
-    not yet in the registry) the fallback scrubs any long value — conservative
-    but safe.
+    Redacts, in order:
+      * DS_* values registered as secret via register_secret_vars (driven by
+        DatasourceField.secret=true). Non-secret fields of known engines
+        (DS_HOST, DS_PORT, DS_BASE_URL, …) stay readable so the LLM can reason
+        about connection errors.
+      * Unknown DS_* vars (custom engines not yet in the registry) — any long
+        value, conservatively.
+      * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS,
+        then anything matching a well-known key shape (_SECRET_KEY_PATTERN), so
+        a raw `mdb_`/`sk-`/`AIza` key can't reach model context via a tool
+        result, traceback, or settings echo.
     """
     for key in _DS_SECRET_VARS:
         value = os.environ.get(key, "")
@@ -104,6 +134,14 @@ def scrub_credentials(text: str) -> str:
         if not value or len(value) <= 8:
             continue
         text = text.replace(value, f"[{key}]")
+    # Provider keys: exact-value first (informative label), then by shape to
+    # catch any that didn't originate from one of our env vars.
+    for key in _PROVIDER_SECRET_VARS:
+        value = os.environ.get(key, "")
+        if not value or len(value) <= 8:
+            continue
+        text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
+    text = _SECRET_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     return text
 
 
@@ -138,11 +176,58 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         slug = f"{c['engine']}-{c['name']}"
         if active_only and slug != active_only:
             continue
-        fields = vault.load(c["engine"], c["name"]) or {}
+        # read_record gives fields + secure_keys in one call; fall back to load
+        # for any vault backend that doesn't implement it.
+        if hasattr(vault, "read_record"):
+            record = vault.read_record(c["engine"], c["name"]) or {}
+            fields = record.get("fields", {}) or {}
+            secure_keys = record.get("secure_keys")
+        else:
+            fields = vault.load(c["engine"], c["name"]) or {}
+            secure_keys = None
         prefix = _slug_env_prefix(c["engine"], c["name"])
-        var_names = ", ".join(f"{prefix}__{k.upper()}" for k in fields)
-        lines.append(f"- `{slug}` ({c['engine']}) → {var_names}")
+        # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`) —
+        # they're not credential env vars the agent should reference.
+        var_names = ", ".join(
+            f"{prefix}__{k.upper()}" for k in fields if not k.startswith("_")
+        )
+        # Prefer a user/agent-assigned label ("Support"); otherwise the derived
+        # non-secret identity (email / host).
+        identity = str(fields.get("_label", "")).strip() or _connection_identity(
+            fields, secure_keys
+        )
+        head = f"`{slug}` ({c['engine']})"
+        if identity:
+            head += f" — {identity}"
+        lines.append(f"- {head} → {var_names}")
     return "\n".join(lines)
+
+
+def _connection_identity(fields: dict, secure_keys: list | None = None) -> str | None:
+    """A short, non-secret label so the LLM can tell connections apart — the
+    account email, or the database host (+ name).
+
+    Scoped to these inherently non-secret fields on purpose: it is NOT a dump of
+    every field (which would surface opaque ``client_id`` / config like
+    ``ssl_mode``) and never a secret. Lets the agent pick the right account
+    ("send from my support email") even when the connection slug is an old random
+    one. Any field a record explicitly marks secret via ``secure_keys`` is
+    skipped, defensively, even though email/host are not normally secret.
+    """
+    secure = set(secure_keys or [])
+    # `email` is collected by credential forms; `account_email` is stored by the
+    # OAuth flows (from userinfo). Either identifies the account.
+    for key in ("email", "account_email"):
+        val = str(fields.get(key, "")).strip()
+        if val and key not in secure:
+            return val
+    host = str(fields.get("host", "")).strip()
+    if host and "host" not in secure:
+        database = str(fields.get("database", "")).strip()
+        if database and "database" not in secure:
+            return f"{host}/{database}"
+        return host
+    return None
 
 
 def restore_namespaced_env(vault: DataVault) -> None:

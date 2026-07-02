@@ -720,6 +720,111 @@ password if your provider requires it.
 
 ---
 
+## HasData
+
+Single API key for 25+ structured web data APIs: Google SERP/Maps/Trends/News/Shopping/Flights/Hotels,
+Amazon, Airbnb, Booking.com, Zillow, Redfin, YouTube, Instagram, Indeed, Glassdoor, Yelp,
+Yellow Pages, Shopify, Bing, and general web scraping.
+
+Base URL: `https://api.hasdata.com` · Auth: `x-api-key` header.
+
+**⚠️ Two-step async pattern — ALWAYS follow this:**
+1. `GET /scrape/<endpoint>?<params>` → response contains `requestMetadata.resultUrl` (a CDN URL)
+2. Wait 2–3 s, then `GET <resultUrl>` → actual JSON results
+
+Do not try to read results from the first response body — it only contains metadata.
+Do not hit the API root (`/`) — there is no handler there.
+
+```python
+# Canonical usage pattern
+import httpx, os, time
+
+key = os.environ.get('DS_API_KEY')
+base = os.environ.get('DS_BASE_URL', 'https://api.hasdata.com')
+headers = {"x-api-key": key}
+
+# Step 1 — trigger the scrape
+r = httpx.get(f"{base}/scrape/google/serp", headers=headers, params={"q": "your query", "gl": "us"})
+r.raise_for_status()
+result_url = r.json()["requestMetadata"]["resultUrl"]
+
+# Step 2 — wait for CDN, then fetch results
+time.sleep(3)
+data = httpx.get(result_url).json()
+
+# Guard sitelinks — can be a dict OR a list depending on the result
+sitelinks = data.get("sitelinks", [])
+if isinstance(sitelinks, list):
+    sitelinks = sitelinks[:3]
+```
+
+```yaml
+engine: hasdata
+display_name: HasData
+name_from: api_key
+popular: true
+fields:
+  - { name: api_key,  required: true,  secret: true,  description: "HasData API key from hasdata.com dashboard" }
+  - { name: base_url, required: false, secret: false, description: "API base URL", default: "https://api.hasdata.com" }
+test_snippet: |
+  import httpx, os, time
+  key = os.environ['DS_API_KEY']
+  base = os.environ.get('DS_BASE_URL', 'https://api.hasdata.com')
+  headers = {"x-api-key": key}
+  r = httpx.get(f"{base}/scrape/google/serp", headers=headers, params={"q": "test", "num": "1"})
+  assert r.status_code == 200, f"unexpected status {r.status_code}: {r.text[:200]}"
+  meta = r.json().get("requestMetadata", {})
+  assert "resultUrl" in meta, f"missing resultUrl in response: {list(meta.keys())}"
+  time.sleep(3)
+  results = httpx.get(meta["resultUrl"]).json()
+  assert isinstance(results, dict), f"unexpected results type: {type(results)}"
+  print("ok")
+```
+
+Endpoints (all GET, auth via `x-api-key` header):
+
+| API | Path | Key params |
+|---|---|---|
+| Google SERP | `/scrape/google/serp` | `q`, `gl`, `hl`, `location`, `num`, `start`, `deviceType` |
+| Google AI Mode | `/scrape/google/ai-overview` | `pageToken` (from SERP aiOverview block) |
+| Google Maps Search | `/scrape/google-maps/search` | `q`, `gl`, `hl`, `ll`, `start` |
+| Google Maps Reviews | `/scrape/google-maps/reviews` | `placeId`, `hl` |
+| Google Maps Photos | `/scrape/google-maps/photos` | `placeId` |
+| Google Maps Posts | `/scrape/google-maps/posts` | `placeId` |
+| Google Trends | `/scrape/google/trends` | `q`, `geo`, `date` |
+| Google News | `/scrape/google/news` | `q`, `gl`, `hl` |
+| Google Shopping | `/scrape/google/shopping` | `q`, `gl`, `hl` |
+| Google Images | `/scrape/google/images` | `q`, `gl`, `hl` |
+| Google Flights | `/scrape/google/flights` | `departureId`, `arrivalId`, `outboundDate`, `returnDate`, `type` |
+| Google Hotels | `/scrape/google/hotels` | `q`, `checkIn`, `checkOut`, `adults`, `gl`, `hl` |
+| Google Rank Checker | `/scrape/google/rank-checker` | `q`, `website`, `gl`, `hl` |
+| Bing Search | `/scrape/bing/serp` | `q`, `count`, `offset`, `mkt` |
+| Amazon Product | `/scrape/amazon/product` | `asin`, `domain`, `deliveryZip` |
+| Amazon Search | `/scrape/amazon/search` | `q`, `domain`, `page` |
+| Airbnb Listings | `/scrape/airbnb/search` | `location`, `checkIn`, `checkOut`, `adults` |
+| Airbnb Property | `/scrape/airbnb/listing` | `listingId`, `checkIn`, `checkOut` |
+| Booking.com Search | `/scrape/booking/search` | `location`, `checkIn`, `checkOut`, `adults` |
+| Google Hotels (Booking) | `/scrape/booking/place` | `placeId` |
+| Glassdoor Jobs | `/scrape/glassdoor/jobs` | `q`, `location` |
+| Indeed Jobs | `/scrape/indeed/jobs` | `q`, `location`, `start` |
+| Instagram Profile | `/scrape/instagram/profile` | `username` |
+| YouTube Search | `/scrape/youtube/search` | `q` |
+| YouTube Video | `/scrape/youtube/video` | `videoId` |
+| YouTube Channel | `/scrape/youtube/channel` | `channelId` |
+| YouTube Transcript | `/scrape/youtube/transcript` | `videoId`, `lang` |
+| Redfin Listings | `/scrape/redfin/search` | `location` |
+| Redfin Property | `/scrape/redfin/property` | `url` |
+| Zillow Listings | `/scrape/zillow/search` | `location` |
+| Zillow Property | `/scrape/zillow/property` | `zpid` |
+| Shopify Products | `/scrape/shopify/products` | `domain` |
+| Yelp Search | `/scrape/yelp/search` | `q`, `location` |
+| Yelp Place | `/scrape/yelp/place` | `alias` |
+| Yellow Pages Search | `/scrape/yellowpages/search` | `q`, `location` |
+| Yellow Pages Place | `/scrape/yellowpages/place` | `url` |
+| Web Scraper | `/scrape/web` | `url`, `extractRules`, `screenshot` |
+
+---
+
 ## Adding a new data source
 
 Follow the YAML format above. Add to `~/.anton/datasources.md` (user overrides).

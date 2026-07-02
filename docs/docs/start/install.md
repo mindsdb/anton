@@ -47,8 +47,8 @@ The Windows installer additionally:
 
 Anton is also available as a desktop application wrapping the same engine:
 
-- **macOS**: [anton-latest.pkg](https://downloads.mindsdb.com/anton/mac/anton-latest.pkg)
-- **Windows**: [anton-latest.exe](https://downloads.mindsdb.com/anton/windows/anton-latest.exe)
+- **macOS**: [anton-latest.pkg](https://downloads.mindshub.ai/anton/mac/anton-latest.pkg)
+- **Windows**: [anton-latest.exe](https://downloads.mindshub.ai/anton/windows/anton-latest.exe)
 
 See [Desktop app](/use/desktop) for more.
 

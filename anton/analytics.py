@@ -35,6 +35,7 @@ enough to be a readable query parameter.
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import time
 import urllib.parse
@@ -50,6 +51,34 @@ _TIMEOUT = 3  # seconds
 # Cached after first computation — the fingerprint never changes within
 # a process, so computing it once is sufficient.
 _cached_aid: str | None = None
+
+# Cached CI detection. Env-derived (no PII), consistent with this module's
+# anonymous design. CI/automation traffic is dropped entirely (see send_event)
+# rather than tagged, so it can't pollute the product funnel. Driven by an
+# explicit Anton-owned signal (ANTON_IS_CI) with known provider markers as a
+# convenience fallback; the bare ``CI`` var is intentionally not consulted —
+# it's frequently set to "false" or leaks into local dev shells (ENG-385).
+_cached_is_ci: bool | None = None
+
+
+def _env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_ci() -> bool:
+    """Return True for Anton automation/CI traffic (cached, env-only)."""
+    global _cached_is_ci
+    if _cached_is_ci is None:
+        _cached_is_ci = (
+            _env_true("ANTON_IS_CI")
+            or _env_true("GITHUB_ACTIONS")
+            or _env_true("GITLAB_CI")
+            or _env_true("BUILDKITE")
+            or _env_true("CIRCLECI")
+            or _env_true("TF_BUILD")
+            or bool(os.environ.get("JENKINS_URL"))
+        )
+    return _cached_is_ci
 
 
 def get_installation_id() -> str:
@@ -97,9 +126,16 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
         settings: Resolved AntonSettings (checked for analytics_enabled / analytics_url).
         action: Event name, e.g. ``"anton_started"``.
         **extra: Additional key=value pairs appended as query parameters.
+
+    CI/automation traffic (ANTON_IS_CI, or a known CI provider) is dropped
+    rather than sent, so it can't pollute the product funnel (no PII either way).
     """
     try:
         if not settings.analytics_enabled:
+            return
+        # Drop CI/automation traffic entirely — no value in product analytics
+        # from CI runs, and dropping avoids a per-query exclusion filter.
+        if _is_ci():
             return
         url = settings.analytics_url
         if not url:
