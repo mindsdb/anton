@@ -105,6 +105,21 @@ class StreamContextCompacted:
     message: str
 
 
+@dataclass
+class StreamUsageSummary:
+    """Emitted once at the end of a turn with aggregated LLM token counts.
+
+    Accumulates across all planning/tool-loop calls within the turn so the
+    caller sees a single per-turn figure rather than per-call fragments.
+    cache_* fields are zero when the provider does not support caching.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -114,6 +129,7 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamUsageSummary
 )
 
 

@@ -138,6 +138,7 @@ class ChatSystemPromptBuilder:
         self_awareness_context: str = "",
         datasource_context: str = "",
         skill_store: "SkillStore | None" = None,
+        include_backend_prompt: bool = False,
     ) -> str:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
@@ -163,7 +164,8 @@ class ChatSystemPromptBuilder:
             conversation_started=conversation_started,
         )
 
-        prompt += "\n\n" + BACKEND_GENERATION_PROMPT.format(output_dir=output_dir)
+        if include_backend_prompt:
+            prompt += "\n\n" + BACKEND_GENERATION_PROMPT.format(output_dir=output_dir)
 
         tool_prompts = self._build_tool_prompts_section(tool_defs)
         if tool_prompts:

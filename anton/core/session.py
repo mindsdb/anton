@@ -31,6 +31,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StreamUsageSummary,
     TokenLimitExceeded,
     ToolCall,
 )
@@ -599,6 +600,68 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    # Keywords that signal backend/fullstack intent when combined with a build verb.
+    _BACKEND_NOUNS: frozenset[str] = frozenset({
+        "app", "application", "api", "backend", "server", "website", "web app",
+        "webapp", "endpoint", "route", "fastapi", "flask", "django", "express",
+        "fullstack", "full stack", "full-stack", "service", "microservice",
+    })
+    # These alone are strong enough — no verb required.
+    _BACKEND_STRONG: frozenset[str] = frozenset({
+        "fastapi", "flask", "django", "backend", "fullstack", "full stack",
+        "full-stack", "web app", "webapp", "api endpoint", "rest api",
+    })
+    _BUILD_VERBS: frozenset[str] = frozenset({
+        "build", "create", "make", "generate", "write", "develop", "code", "implement",
+    })
+
+    def _needs_backend_prompt(self, user_message: str) -> bool:
+        """Return True when the BACKEND_GENERATION_PROMPT should be included.
+
+        Three signals, any one is sufficient:
+        1. Workspace already has a fullstack artifact (ongoing build/edit).
+        2. Current user message indicates backend/app-building intent.
+        3. Conversation history contains a prior fullstack-artifact build
+           (the user is continuing a multi-turn backend session).
+        """
+        # 1. Existing artifact in workspace.
+        if self._workspace is not None:
+            try:
+                from anton.core.artifacts import ArtifactStore
+                store = ArtifactStore(self._workspace.artifacts_dir)
+                if any(
+                    a.type in ("fullstack-stateless-app", "fullstack-stateful-app")
+                    for a in store.list()
+                ):
+                    return True
+            except Exception:
+                pass
+
+        # 2. Current message intent.
+        if self._message_suggests_backend(user_message):
+            return True
+
+        # 3. Conversation history: any prior user turn that triggered backend work.
+        for msg in self._history:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                text = content if isinstance(content, str) else " ".join(
+                    b.get("text", "") for b in content if isinstance(b, dict)
+                )
+                if self._message_suggests_backend(text):
+                    return True
+
+        return False
+
+    def _message_suggests_backend(self, message: str) -> bool:
+        """Lightweight keyword heuristic — no LLM call."""
+        m = message.lower()
+        if any(s in m for s in self._BACKEND_STRONG):
+            return True
+        has_verb = any(v in m for v in self._BUILD_VERBS)
+        has_noun = any(n in m for n in self._BACKEND_NOUNS)
+        return has_verb and has_noun
+
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
@@ -631,6 +694,11 @@ class ChatSession:
         # Inject connected datasource context without credentials
         ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
+        # Inject backend generation prompt only when there is evidence the
+        # session involves backend/fullstack work: an existing artifact, the
+        # current message, or any prior turn in the conversation history.
+        include_backend = self._needs_backend_prompt(user_message)
+
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
 
@@ -648,6 +716,7 @@ class ChatSession:
             self_awareness_context=sa_section,
             datasource_context=ds_ctx,
             skill_store=self._skill_store,
+            include_backend_prompt=include_backend,
         )
 
         return prompt
@@ -1541,6 +1610,11 @@ class ChatSession:
         (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
+        # Per-turn token accumulator — summed across every LLM call in the turn.
+        _turn_input = 0
+        _turn_output = 0
+        _turn_cache_read = 0
+        _turn_cache_creation = 0
         self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
@@ -1587,6 +1661,12 @@ class ChatSession:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):
                             assistant_text_parts.append(event.text)
+                        elif isinstance(event, StreamComplete):
+                            u = event.response.usage
+                            _turn_input += u.input_tokens
+                            _turn_output += u.output_tokens
+                            _turn_cache_read += u.cache_read_input_tokens
+                            _turn_cache_creation += u.cache_creation_input_tokens
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
@@ -1645,12 +1725,37 @@ class ChatSession:
                             ):
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
+                                elif isinstance(event, StreamComplete):
+                                    u = event.response.usage
+                                    _turn_input += u.input_tokens
+                                    _turn_output += u.output_tokens
+                                    _turn_cache_read += u.cache_read_input_tokens
+                                    _turn_cache_creation += u.cache_creation_input_tokens
                                 yield event
                         except Exception as e:
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break
+
+            if _turn_input or _turn_output:
+                import logging as _logging_usage
+                _logging_usage.getLogger(__name__).info(
+                    "turn_tokens session=%s turn=%d in=%d out=%d cache_read=%d cache_write=%d",
+                    self._session_id,
+                    self._turn_count + 1,
+                    _turn_input,
+                    _turn_output,
+                    _turn_cache_read,
+                    _turn_cache_creation,
+                )
+                yield StreamUsageSummary(
+                    input_tokens=_turn_input,
+                    output_tokens=_turn_output,
+                    cache_read_input_tokens=_turn_cache_read,
+                    cache_creation_input_tokens=_turn_cache_creation,
+                )
+
         finally:
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
