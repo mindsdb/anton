@@ -379,3 +379,39 @@ def unpublish(
     url = f"{publish_url.rstrip('/')}/delete/{md5}"
     raw = minds_request(url, api_key, method="DELETE", verify=ssl_verify)
     return json.loads(raw)
+
+
+def list_versions(
+    report_id: str,
+    *,
+    api_key: str,
+    publish_url: str = DEFAULT_PUBLISH_URL,
+    ssl_verify: bool = True,
+) -> dict:
+    """List a published report's version history. User is derived from the token.
+
+    Returns dict with keys: report_id, current_md5, artifact_type, title,
+    versions (list of {md5, published_at, title}).
+    """
+    url = f"{publish_url.rstrip('/')}/versions/{report_id}"
+    raw = minds_request(url, api_key, method="GET", verify=ssl_verify)
+    return json.loads(raw)
+
+
+def activate_version(
+    report_id: str,
+    md5: str,
+    *,
+    api_key: str,
+    publish_url: str = DEFAULT_PUBLISH_URL,
+    ssl_verify: bool = True,
+) -> dict:
+    """Make an existing version live (rollback): flip current_md5 to `md5`.
+
+    Static reports only — the service rejects fullstack apps with HTTP 409.
+    Returns dict with keys: report_id, current_md5, view_url.
+    """
+    url = f"{publish_url.rstrip('/')}/activate/{report_id}"
+    payload = json.dumps({"md5": md5}).encode()
+    raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    return json.loads(raw)
