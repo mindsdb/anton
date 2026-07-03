@@ -220,6 +220,72 @@ class TestTranslateMessages:
         assert tool_msg["tool_call_id"] == "tool_1"
         assert tool_msg["content"] == "file contents here"
 
+    def test_multi_tool_with_image_result_keeps_tools_contiguous(self):
+        """Regression: when a non-final tool_result carries image content, the
+        extracted role:user image message must NOT be inserted between role:tool
+        messages — that breaks the Anthropic contract (every tool_use must have
+        a tool_result immediately after the assistant turn) and the OpenAI
+        contract (no role:user between tool responses).
+
+        Expected layout after translation:
+          system → assistant (2 tool_calls) → tool(toolu_RENDER) →
+          tool(toolu_FINDPATH) → user(images)
+        """
+        img_block = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "abc123"},
+        }
+        msgs = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_RENDER", "name": "render_pdf", "input": {}},
+                    {"type": "tool_use", "id": "toolu_FINDPATH", "name": "find_path", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_RENDER",
+                        "content": [
+                            {"type": "text", "text": "Rendered page 1."},
+                            img_block,
+                        ],
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_FINDPATH",
+                        "content": "path/to/file.pdf",
+                    },
+                ],
+            },
+        ]
+        result = _translate_messages("sys", msgs, supports_vision=True, vision_format="anthropic")
+
+        roles = [m["role"] for m in result]
+        # system, assistant, tool(RENDER), tool(FINDPATH), user(images)
+        assert roles == ["system", "assistant", "tool", "tool", "user"], (
+            f"Expected tools contiguous before image user-msg, got: {roles}"
+        )
+
+        # Both tool messages must appear before any user message
+        tool_indices = [i for i, m in enumerate(result) if m["role"] == "tool"]
+        user_indices = [i for i, m in enumerate(result) if m["role"] == "user"]
+        assert all(t < u for t in tool_indices for u in user_indices), (
+            "role:user image message must come after all role:tool messages"
+        )
+
+        # The tool responses map to the right call ids
+        assert result[2]["tool_call_id"] == "toolu_RENDER"
+        assert result[3]["tool_call_id"] == "toolu_FINDPATH"
+
+        # The trailing user message carries the image
+        img_user = result[4]
+        assert isinstance(img_user["content"], list)
+        assert any(p.get("type") == "image" for p in img_user["content"])
+
 
 class TestFromSettingsOpenAI:
     def test_from_settings_openai(self):
