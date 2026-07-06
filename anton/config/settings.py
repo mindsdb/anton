@@ -8,7 +8,10 @@ from anton.core.settings import CoreSettings
 
 
 def _build_env_files() -> list[str]:
-    """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env"""
+    """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env
+    -> ~/.cowork/.env. Later files win, so the consolidated ~/.cowork/.env
+    takes precedence; ~/.anton/.env stays as a fallback for installs that
+    haven't migrated yet."""
     files: list[str] = [".env"]
     local_env = Path.cwd() / ".anton" / ".env"
     if local_env.is_file():
@@ -16,6 +19,9 @@ def _build_env_files() -> list[str]:
     user_env = Path("~/.anton/.env").expanduser()
     if user_env.is_file():
         files.append(str(user_env))
+    cowork_env = Path("~/.cowork/.env").expanduser()
+    if cowork_env.is_file():
+        files.append(str(cowork_env))
     return files
 
 
@@ -112,7 +118,7 @@ class AntonSettings(CoreSettings):
     minds_ssl_verify: bool = True
 
     # Publish service
-    publish_url: str = "https://4nton.ai"
+    publish_url: str = "https://view.mindshub.ai"
 
     backend: str = "local"  # local | remote
 
@@ -139,7 +145,18 @@ class AntonSettings(CoreSettings):
         ):
             self.openai_api_key = self.minds_api_key
             if not self.openai_base_url:
-                self.openai_base_url = f"{self.minds_url.rstrip('/')}/api/v1"
+                # Host-aware base URL: api.mindshub.ai serves the
+                # OpenAI-compatible API at /v1, the legacy mdb.ai host at
+                # /api/v1. The previous hardcoded /api/v1 was correct only
+                # for mdb.ai and produced a wrong endpoint for mindshub
+                # (ENG-436). Mirrors cowork-server's minds_chat_base_url.
+                base = self.minds_url.rstrip("/")
+                if base.endswith("/v1"):
+                    self.openai_base_url = base
+                elif "mdb.ai" in base:
+                    self.openai_base_url = f"{base}/api/v1"
+                else:
+                    self.openai_base_url = f"{base}/v1"
 
     _workspace: Path = PrivateAttr(default=None)
 

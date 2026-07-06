@@ -50,9 +50,11 @@ from anton.core.tools.tool_defs import (
     READ_IMAGE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
+    SELECT_PATH_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
+from anton.core.interaction.selection import SelectionElicitor
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -145,6 +147,7 @@ class ChatSessionConfig:
     # so resuming a conversation days later still reports the real "now".
     # None → fall back to today.
     started_at: datetime | None = None
+    selection_elicitor: SelectionElicitor | None = None
 
 
 class ChatSession:
@@ -195,6 +198,11 @@ class ChatSession:
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
+        # Strategy for mid-turn file/folder disambiguation (the `select_path`
+        # tool). Hosts inject a concrete elicitor — a streaming GUI picker in
+        # cowork-server, a terminal picker on the CLI. None falls back to the
+        # console picker (CLI) or a graceful no-op (headless).
+        self.selection_elicitor: SelectionElicitor | None = config.selection_elicitor
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -724,6 +732,9 @@ class ChatSession:
 
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
+        # Interactive file/folder disambiguation — always available; degrades
+        # to a plain-text prompt when no elicitor/console is present.
+        self.tool_registry.register_tool(SELECT_PATH_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -1512,6 +1523,8 @@ class ChatSession:
         user_input: str | list[dict],
         *,
         turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive.
 
@@ -1520,6 +1533,12 @@ class ChatSession:
         calls + tool spans made during this turn. Stored on
         `self._current_turn_id` so the provider layer can read it
         without threading the arg through every internal call.
+
+        `trace_tags` / `trace_metadata` are optional, opaque annotations the
+        host can attach to this turn's trace (forwarded to the MindsHub
+        langfuse headers — see the provider's `_build_trace_headers`). They
+        are deliberately generic: hosts can add arbitrary correlation data
+        (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
         self._append_history({"role": "user", "content": user_input})
@@ -1557,6 +1576,8 @@ class ChatSession:
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                tags=tuple(trace_tags or ()),
+                metadata=trace_metadata or None,
             )
         )
 
@@ -1922,9 +1943,13 @@ class ChatSession:
                                         (cell.stdout or ""),
                                         description=description,
                                     )
-                        elif tc.name == "connect_new_datasource" or (
-                            tc.name == "publish_or_preview"
-                            and tc.input.get("action") == "publish"
+                        elif (
+                            tc.name == "connect_new_datasource"
+                            or tc.name == "select_path"
+                            or (
+                                tc.name == "publish_or_preview"
+                                and tc.input.get("action") == "publish"
+                            )
                         ):
                             # Interactive tool — pause spinner AND escape watcher
                             yield StreamTaskProgress(
@@ -1933,11 +1958,13 @@ class ChatSession:
                             )
                             if self._escape_watcher:
                                 self._escape_watcher.pause()
-                            result_text = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
-                            )
-                            if self._escape_watcher:
-                                self._escape_watcher.resume()
+                            try:
+                                result_text = await self.tool_registry.dispatch_tool(
+                                    self, tc.name, tc.input
+                                )
+                            finally:
+                                if self._escape_watcher:
+                                    self._escape_watcher.resume()
                             yield StreamTaskProgress(
                                 phase="analyzing",
                                 message="Analyzing results...",
