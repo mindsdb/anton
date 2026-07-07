@@ -1591,8 +1591,12 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limit — don't retry, let the chat loop handle it
-                    if isinstance(_agent_exc, TokenLimitExceeded):
+                    # Token/billing limits and model-gate 403s are
+                    # deterministic — the auto-retry below would just re-send
+                    # the same doomed request (and burn its budget) before
+                    # failing anyway. Don't retry; let the chat loop / server
+                    # map them to their cards.
+                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
                         raise
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
