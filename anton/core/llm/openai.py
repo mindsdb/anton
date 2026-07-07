@@ -12,6 +12,7 @@ from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
+    ModelUnavailableError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -19,10 +20,67 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    TokenLimitExceeded,
     ToolCall,
     Usage,
     compute_context_pressure,
 )
+
+
+def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> None:
+    """Map a provider HTTP error onto anton's typed/curated exceptions.
+
+    The single mapper shared by all four call paths (chat/stream ×
+    completions/responses) so the mapping can't drift between them — the
+    previous four copy-pasted blocks had already diverged in wording.
+
+    Mapping policy:
+      - 401 → ConnectionError with the invalid-key copy (cowork-server's
+        provider_auth detection keys on this exact phrase).
+      - 403 with a structured gateway code (``error.code`` of
+        ``model_access_denied`` / ``model_disabled``) → ModelUnavailableError
+        carrying the code + model, with actionable copy. Detection is
+        code-exact on purpose: BYOK OpenAI 403s (region blocks), Anthropic
+        permission errors, and Cloudflare HTML 403s carry no such code and
+        must fall through to the generic message, never the plan copy.
+      - 429 with a quota detail → TokenLimitExceeded (checked before the 403
+        branch can't shadow it — quota keeps its own card downstream).
+      - anything else → the generic "temporarily unavailable" ConnectionError.
+    """
+    if exc.status_code == 401:
+        raise ConnectionError(
+            "Invalid API key — check your OpenAI API key configuration."
+        ) from exc
+
+    body = exc.body if isinstance(exc.body, dict) else {}
+    if exc.status_code == 429 and body.get("detail"):
+        msg = f"Server returned 429 — {body['detail']}"
+        msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
+        raise TokenLimitExceeded(msg) from exc
+
+    error = body.get("error") if isinstance(body.get("error"), dict) else {}
+    code = error.get("code")
+    if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
+        if code == "model_access_denied":
+            msg = (
+                f"The model '{model}' isn't included in your current MindsHub plan. "
+                "Visit https://console.mindshub.ai to upgrade, or switch models in Settings."
+            )
+        else:
+            # Hedged: until the gateway distinguishes tier locks from admin
+            # kill switches everywhere (ENG-596), model_disabled can mean
+            # either — don't promise that an upgrade fixes it.
+            msg = (
+                f"The model '{model}' isn't available right now — it may not be included "
+                "in your plan, or it's temporarily disabled. Switch models in Settings; "
+                "upgrading your plan may enable it."
+            )
+        raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    raise ConnectionError(
+        f"Server returned {exc.status_code} — the LLM endpoint may be "
+        "temporarily unavailable. Try again in a moment."
+    ) from exc
 
 
 def _translate_tools(tools: list[dict]) -> list[dict]:
@@ -709,22 +767,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -878,22 +921,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -996,22 +1024,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -1125,22 +1138,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."

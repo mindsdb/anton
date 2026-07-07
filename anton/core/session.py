@@ -25,6 +25,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    ModelUnavailableError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -1646,6 +1647,15 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
+                        except (TokenLimitExceeded, ModelUnavailableError):
+                            # Curated provider failures must FAIL the turn, not
+                            # get wrapped into assistant prose: the server maps
+                            # them to actionable error cards (token_limit /
+                            # model-unavailable), which can only fire when the
+                            # exception propagates. Wrapping them as text is
+                            # how "Server returned 403" ended up mid-chat with
+                            # "please rephrase your request" advice.
+                            raise
                         except Exception as e:
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
