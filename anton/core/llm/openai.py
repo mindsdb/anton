@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from typing import NoReturn
 
 import openai
 from openai import AsyncAzureOpenAI
@@ -27,7 +28,7 @@ from .provider import (
 )
 
 
-def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> None:
+def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
     """Map a provider HTTP error onto anton's typed/curated exceptions.
 
     The single mapper shared by all four call paths (chat/stream ×
@@ -43,8 +44,9 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> None:
         code-exact on purpose: BYOK OpenAI 403s (region blocks), Anthropic
         permission errors, and Cloudflare HTML 403s carry no such code and
         must fall through to the generic message, never the plan copy.
-      - 429 with a quota detail → TokenLimitExceeded (checked before the 403
-        branch can't shadow it — quota keeps its own card downstream).
+      - 429 with a quota detail → TokenLimitExceeded, checked first so a body
+        carrying both ``detail`` and ``error.code`` stays token_limit (quota
+        keeps its own card downstream).
       - anything else → the generic "temporarily unavailable" ConnectionError.
     """
     if exc.status_code == 401:
