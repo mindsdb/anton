@@ -23,9 +23,47 @@ class ToolCall:
 
 @dataclass
 class Usage:
+    """Token usage for one LLM call.
+
+    With prompt caching active, the provider's ``input_tokens`` counts only
+    the UNCACHED input; cached tokens are reported separately below. The
+    real context size of the call is the sum of all three, and
+    ``context_pressure`` is always computed on that sum so compaction
+    decisions see the true window occupancy.
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
     context_pressure: float = 0.0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
+class SystemPrompt(str):
+    """System prompt that carries its prompt-cache split point.
+
+    A real ``str`` — the full assembled prompt — so every existing consumer
+    that measures, substring-checks, or serializes the system prompt keeps
+    working untouched. Cache-aware providers additionally read the split:
+    ``stable`` is byte-identical across a session's calls (identity, tool
+    guidance, project context) and gets the cache marker; ``volatile``
+    changes per turn (live clock, memory snapshot) and rides after it.
+    ``stable + volatile`` is the string itself. A plain ``str`` anywhere a
+    SystemPrompt is accepted keeps the uncached behavior.
+    """
+
+    stable: str
+    volatile: str
+
+    def __new__(cls, stable: str, volatile: str = "") -> "SystemPrompt":
+        self = super().__new__(cls, stable + volatile)
+        self.stable = stable
+        self.volatile = volatile
+        return self
+
+    @property
+    def text(self) -> str:
+        return str(self)
 
 
 @dataclass
@@ -351,7 +389,7 @@ class LLMProvider(ABC):
         self,
         *,
         model: str,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
@@ -371,7 +409,7 @@ class LLMProvider(ABC):
         self,
         *,
         model: str,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,

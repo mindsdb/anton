@@ -17,6 +17,7 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    SystemPrompt,
     ToolCall,
     Usage,
     compute_context_pressure,
@@ -53,6 +54,79 @@ def _build_native_web_tools(
     return entries, beta
 
 
+_CACHE_MARKER = {"type": "ephemeral"}
+# Block types cache_control may legally sit on in a message's content array.
+_CACHEABLE_BLOCK_TYPES = {"text", "tool_result", "image"}
+
+
+def _system_param(system: str | SystemPrompt) -> str | list[dict]:
+    """SystemPrompt → content blocks with a cache marker on the stable prefix.
+
+    The marker caches everything before it in the request (tools + the stable
+    system block); the volatile tail rides after it, uncached, so the live
+    clock and memory snapshot never invalidate the prefix. Plain strings pass
+    through unchanged (uncached, pre-existing behavior).
+    """
+    if not isinstance(system, SystemPrompt):
+        return system
+    blocks = [{"type": "text", "text": system.stable, "cache_control": _CACHE_MARKER}]
+    if system.volatile:
+        blocks.append({"type": "text", "text": system.volatile})
+    return blocks
+
+
+def _mark_history_for_cache(messages: list[dict]) -> list[dict]:
+    """Cache marker on the final content block of the last message.
+
+    Each call marks its own last message; Anthropic still hits the entries
+    created at earlier boundaries, so history caches incrementally — only the
+    newest exchange is fresh each round. Copy-on-write: the caller's message
+    list (the session's live history) is never mutated. Anything unexpected →
+    return the input unchanged; caching is best-effort.
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    content = last.get("content") if isinstance(last, dict) else None
+    marked_content = None
+    if isinstance(content, str) and content:
+        marked_content = [
+            {"type": "text", "text": content, "cache_control": _CACHE_MARKER}
+        ]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        if content[-1].get("type") in _CACHEABLE_BLOCK_TYPES:
+            marked_content = content[:-1] + [
+                {**content[-1], "cache_control": _CACHE_MARKER}
+            ]
+    if marked_content is None:
+        return messages
+    return messages[:-1] + [{**last, "content": marked_content}]
+
+
+def _usage_from(model: str, api_usage, input_tokens: int, output_tokens: int) -> Usage:
+    """Build a Usage with cache stats; pressure uses the TOTAL context size.
+
+    With caching active the API's ``input_tokens`` excludes cached tokens, so
+    compaction decisions must add the cache read/write counts back in. Cache
+    fields are coerced through ``isinstance(int)`` — gateways may omit them,
+    return null, or (in tests) hand back mock objects.
+    """
+    def _int_or_zero(value) -> int:
+        return value if isinstance(value, int) else 0
+
+    cache_read = _int_or_zero(getattr(api_usage, "cache_read_input_tokens", 0))
+    cache_creation = _int_or_zero(getattr(api_usage, "cache_creation_input_tokens", 0))
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        context_pressure=compute_context_pressure(
+            model, (input_tokens or 0) + cache_read + cache_creation
+        ),
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=cache_creation,
+    )
+
+
 class AnthropicProvider(LLMProvider):
     name: str = "anthropic"
 
@@ -84,7 +158,7 @@ class AnthropicProvider(LLMProvider):
         self,
         *,
         model: str,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
@@ -94,11 +168,12 @@ class AnthropicProvider(LLMProvider):
         web_entries, beta_headers = _build_native_web_tools(native_web_tools)
         merged_tools = list(tools or []) + web_entries
 
+        use_cache = isinstance(system, SystemPrompt)
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
-            "messages": messages,
+            "system": _system_param(system),
+            "messages": _mark_history_for_cache(messages) if use_cache else messages,
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
@@ -150,14 +225,14 @@ class AnthropicProvider(LLMProvider):
                     ToolCall(id=block.id, name=block.name, input=block.input)
                 )
 
-        input_tokens = response.usage.input_tokens
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
-            usage=Usage(
-                input_tokens=input_tokens,
-                output_tokens=response.usage.output_tokens,
-                context_pressure=compute_context_pressure(model, input_tokens),
+            usage=_usage_from(
+                model,
+                response.usage,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
             ),
             stop_reason=response.stop_reason,
         )
@@ -166,7 +241,7 @@ class AnthropicProvider(LLMProvider):
         self,
         *,
         model: str,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
@@ -175,11 +250,12 @@ class AnthropicProvider(LLMProvider):
         web_entries, beta_headers = _build_native_web_tools(native_web_tools)
         merged_tools = list(tools or []) + web_entries
 
+        use_cache = isinstance(system, SystemPrompt)
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
-            "messages": messages,
+            "system": _system_param(system),
+            "messages": _mark_history_for_cache(messages) if use_cache else messages,
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
@@ -193,6 +269,7 @@ class AnthropicProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
         stop_reason: str | None = None
+        start_usage = None
 
         # Track content blocks by index for tool correlation
         blocks: dict[int, dict] = {}
@@ -202,6 +279,7 @@ class AnthropicProvider(LLMProvider):
                 async for event in stream:
                     if event.type == "message_start":
                         usage = event.message.usage
+                        start_usage = usage
                         input_tokens = usage.input_tokens
                         output_tokens = getattr(usage, "output_tokens", 0)
 
@@ -290,11 +368,7 @@ class AnthropicProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
-                ),
+                usage=_usage_from(model, start_usage, input_tokens, output_tokens),
                 stop_reason=stop_reason,
             )
         )

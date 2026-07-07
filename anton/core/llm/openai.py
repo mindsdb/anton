@@ -19,6 +19,7 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    SystemPrompt,
     ToolCall,
     Usage,
     compute_context_pressure,
@@ -660,13 +661,17 @@ class OpenAIProvider(LLMProvider):
         self,
         *,
         model: str,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
+        # OpenAI-family endpoints cache stable prefixes automatically — no
+        # markers to place; send the assembled text.
+        if isinstance(system, SystemPrompt):
+            system = system.text
         if self._flavor == self.FLAVOR_OPENAI:
             return await self._complete_via_responses(
                 model=model,
@@ -770,12 +775,15 @@ class OpenAIProvider(LLMProvider):
         self,
         *,
         model: str,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        # See complete(): OpenAI-family prefix caching is automatic.
+        if isinstance(system, SystemPrompt):
+            system = system.text
         if self._flavor == self.FLAVOR_OPENAI:
             async for event in self._stream_via_responses(
                 model=model,

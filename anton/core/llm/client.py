@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from .provider import LLMProvider, LLMResponse, StreamEvent
+from .provider import LLMProvider, LLMResponse, StreamEvent, SystemPrompt
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -51,7 +51,7 @@ class LLMClient:
     async def plan(
         self,
         *,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
@@ -69,7 +69,7 @@ class LLMClient:
     async def plan_stream(
         self,
         *,
-        system: str,
+        system: str | SystemPrompt,
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,

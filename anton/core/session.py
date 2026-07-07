@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
 import re
@@ -31,6 +31,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    SystemPrompt,
     TokenLimitExceeded,
     ToolCall,
 )
@@ -166,6 +167,8 @@ class ChatSession:
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._token_status_cache_ttl = s.token_status_cache_ttl
+        # getattr: the host may pass a settings object predating this field.
+        self._prompt_caching = getattr(s, "prompt_caching", True)
         self._llm = config.llm_client
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
@@ -599,7 +602,7 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
-    async def _build_system_prompt(self, user_message: str = "") -> str:
+    async def _build_system_prompt(self, user_message: str = "") -> SystemPrompt | str:
         import datetime as _dt
 
         # Two stamps, deliberately split for cache-stability AND correctness:
@@ -635,7 +638,7 @@ class ChatSession:
         self._build_tools()
 
         prompt_builder = ChatSystemPromptBuilder()
-        prompt = prompt_builder.build(
+        stable, volatile = prompt_builder.build_parts(
             conversation_started=_conversation_started,
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
@@ -650,7 +653,12 @@ class ChatSession:
             skill_store=self._skill_store,
         )
 
-        return prompt
+        # SystemPrompt lets cache-aware providers mark the stable prefix;
+        # the assembled text is identical either way. ANTON_PROMPT_CACHING
+        # =false is the kill switch (gateways that reject cache markers).
+        if self._prompt_caching:
+            return SystemPrompt(stable=stable, volatile=volatile)
+        return stable + volatile
 
     # Packages the LLM is most likely to care about when writing scratchpad code.
     _NOTABLE_PACKAGES: set[str] = {
@@ -711,7 +719,12 @@ class ChatSession:
         return self.tool_registry.dump()
 
     def _build_core_tools(self) -> None:
-        scratchpad_tool = SCRATCHPAD_TOOL
+        # Per-session COPY. The bare module constant was mutated below, so the
+        # package list + wisdom appended by every session accumulated on the
+        # shared instance for the life of the process — growing the tool
+        # schema each session and churning the prompt-cache prefix. The copy
+        # keeps the description frozen for this session and pristine globally.
+        scratchpad_tool = replace(SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)

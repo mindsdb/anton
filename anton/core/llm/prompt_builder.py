@@ -123,7 +123,7 @@ class ChatSystemPromptBuilder:
         )
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
-    def build(
+    def build_parts(
         self,
         *,
         conversation_started: str,
@@ -138,7 +138,14 @@ class ChatSystemPromptBuilder:
         self_awareness_context: str = "",
         datasource_context: str = "",
         skill_store: "SkillStore | None" = None,
-    ) -> str:
+    ) -> tuple[str, str]:
+        """Build the prompt as ``(stable, volatile)`` parts.
+
+        ``stable + volatile`` is byte-identical to what ``build`` returns.
+        The split point is the prompt-cache boundary: everything through the
+        suffix is per-session stable; the live clock and the memory snapshot
+        change per turn and form the volatile tail.
+        """
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
@@ -190,15 +197,19 @@ class ChatSystemPromptBuilder:
         # clock and the relevance-filtered memory snapshot both change every
         # turn, so they sit after the cache-stable prefix and never invalidate
         # it. (The prefix carries only the fixed "conversation started" stamp.)
-        prompt += (
+        volatile = (
             f"\n\nCurrent date and time: {current_datetime}\n"
             "(Earlier messages are prefixed with the time they were sent; that "
             "bracketed timestamp is metadata, not part of the message text.)"
         )
         if memory_context:
-            prompt += memory_context
+            volatile += memory_context
 
-        return prompt
+        return prompt, volatile
+
+    def build(self, **kwargs) -> str:
+        stable, volatile = self.build_parts(**kwargs)
+        return stable + volatile
 
 
 __all__ = ["ChatSystemPromptBuilder", "SystemPromptContext"]

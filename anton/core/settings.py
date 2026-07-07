@@ -9,6 +9,10 @@ class CoreSettings(BaseSettings):
     max_tool_rounds: int = 25
     max_continuations: int = 3
     context_pressure_threshold: float = 0.7
+    # Prompt caching (Anthropic cache_control on the stable prompt prefix +
+    # last history message). Kill switch for gateways that reject or strip
+    # cache markers: ANTON_PROMPT_CACHING=false falls back to plain strings.
+    prompt_caching: bool = True
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
     token_status_cache_ttl: float = 60.0
