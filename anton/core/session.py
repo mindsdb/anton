@@ -99,6 +99,26 @@ def _extract_datasources(tool_call: ToolCall) -> List[str]:
         seen.add(m.group(1).lower())
     return list(seen)
 
+
+def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
+    """Scrub credential values from an inbound user message.
+
+    Applied at the `turn`/`turn_stream` entry, before the first
+    `_append_history`, so a secret pasted into chat never reaches model
+    context, episodic memory, or the trace sinks downstream of the LLM
+    gateway (Langfuse). Only text blocks are scrubbed; image and file
+    blocks carry no scrubbable text.
+    """
+    if isinstance(user_input, str):
+        return scrub_credentials(user_input)
+    return [
+        {**b, "text": scrub_credentials(b.get("text", ""))}
+        if b.get("type") == "text"
+        else b
+        for b in user_input
+    ]
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -1379,6 +1399,7 @@ class ChatSession:
             cb.reset()
 
     async def turn(self, user_input: str | list[dict]) -> str:
+        user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
         user_msg_str = (
@@ -1541,6 +1562,7 @@ class ChatSession:
         (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
+        user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
