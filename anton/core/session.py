@@ -1407,6 +1407,8 @@ class ChatSession:
         router existed" — on any router failure. Routing must never be
         able to break a turn; it can only save one.
         """
+        from anton.core.llm.builtin_skills import builtin_skill_summaries
+
         try:
             summaries = (
                 self._skill_store.list_summaries()
@@ -1415,6 +1417,7 @@ class ChatSession:
             )
         except Exception:
             summaries = []
+        summaries = builtin_skill_summaries() + summaries
         try:
             return await route_turn(
                 self._llm,
@@ -1440,9 +1443,10 @@ class ChatSession:
         none), unknown labels are dropped silently, and at most 3 skills
         load per turn.
         """
-        store = self._skill_store
-        if store is None or not labels:
+        if not labels:
             return
+        store = self._skill_store
+        from anton.core.llm.builtin_skills import get_builtin_skill
         from anton.core.tools.recall_skill import format_skill_response
 
         tool_uses: list[dict] = []
@@ -1455,32 +1459,43 @@ class ChatSession:
             seen.add(label)
             if len(tool_uses) >= 3:
                 break
-            try:
-                skill = store.load(label)
-            except Exception:
-                skill = None
-            if skill is None:
-                continue
+            # Built-ins first, mirroring handle_recall_skill's resolution
+            # order (built-ins shadow same-labelled user skills).
+            builtin = get_builtin_skill(label)
+            if builtin is not None:
+                resolved_label = builtin.label
+                content = builtin.format_response(output_dir=self._output_dir)
+            else:
+                if store is None:
+                    continue
+                try:
+                    skill = store.load(label)
+                except Exception:
+                    skill = None
+                if skill is None:
+                    continue
+                resolved_label = skill.label
+                content = format_skill_response(skill)
+                try:
+                    store.increment_recommended(skill.label, stage=1)
+                except Exception:
+                    pass
             tu_id = f"router_recall_{self._turn_count + 1}_{len(tool_uses)}"
             tool_uses.append(
                 {
                     "type": "tool_use",
                     "id": tu_id,
                     "name": "recall_skill",
-                    "input": {"label": skill.label},
+                    "input": {"label": resolved_label},
                 }
             )
             results.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": tu_id,
-                    "content": format_skill_response(skill),
+                    "content": content,
                 }
             )
-            try:
-                store.increment_recommended(skill.label, stage=1)
-            except Exception:
-                pass
         if tool_uses:
             self._append_history({"role": "assistant", "content": tool_uses})
             self._append_history({"role": "user", "content": results})

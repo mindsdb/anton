@@ -95,6 +95,15 @@ per-conversation cost visibility. Only Langfuse trace passthrough.
 - Expected effect: ~90% input-price reduction on the static ~15K-token prefix for
   every call after the first, compounding across ≤25 rounds/turn.
 
+> **Status (2026-07-07):** Phase 3 (router) and Phase 2 (prompts→skills) are
+> implemented in this PR — measured base prompt: 45,511 → 18,847 chars
+> (~11,377 → ~4,711 tokens, −59%) in dashboards mode. Router prompt is
+> ~1.7K chars (~420 tokens), no tool schemas. Phase 1 (caching) is pending a
+> design decision with the `mindshub_inference` gateway (client-driven
+> `cache_control` passthrough vs the gateway's existing `cache_align`
+> heuristic); Phase 0 metrics will ride with that work. Phase 4 tracked
+> separately in cowork-server.
+
 ### Phase 2 — Prompts → skills (built-in skills, loaded on demand)
 - Move `BACKEND_GENERATION_PROMPT`, `VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT`, and
   the public-data-source catalog into **built-in skills** shipped with anton,

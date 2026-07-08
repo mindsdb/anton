@@ -76,13 +76,25 @@ def format_skill_response(skill, *, warning: str = "") -> str:
 
 
 async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
-    """Look up a skill by label and return its declarative procedure."""
+    """Look up a skill by label and return its declarative procedure.
+
+    Built-in skills (the big how-to-build tutorials moved out of the
+    always-on system prompt — ENG-648) resolve first and shadow any
+    same-labelled user skill; everything else goes through the store.
+    """
     label_in = (tc_input.get("label") or "").strip()
     if not label_in:
         return (
             "ERROR: recall_skill requires a non-empty 'label' parameter. "
             "Pick one from the procedural memory list in your system prompt."
         )
+
+    from anton.core.llm.builtin_skills import get_builtin_skill
+
+    builtin = get_builtin_skill(label_in)
+    if builtin is not None:
+        output_dir = getattr(session, "_output_dir", ".anton/output")
+        return builtin.format_response(output_dir=output_dir)
 
     store = getattr(session, "_skill_store", None)
     if store is None:

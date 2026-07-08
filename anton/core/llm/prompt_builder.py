@@ -3,15 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .builtin_skills import builtin_skill_summaries
 from .prompts import (
     ARTIFACTS_PROMPT,
     BASE_VISUALIZATIONS_PROMPT,
-    BACKEND_GENERATION_PROMPT,
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
-    VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    VISUALIZATIONS_HTML_POINTER_PROMPT,
 )
 
 if TYPE_CHECKING:
@@ -67,19 +67,25 @@ class ChatSystemPromptBuilder:
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
-        Lists each skill as `- label: description` (one line) plus a short
-        instruction telling the LLM to call `recall_skill(label)` to load
-        the full procedure. Returns an empty string if no store is wired
-        or no skills are saved — the caller skips the section entirely.
+        Two groups: built-in procedures (the big how-to-build tutorials
+        that used to ride inline in every system prompt — ENG-648) and
+        the user's learned skills from the store. Each is one line; the
+        full procedure loads on demand via `recall_skill(label)`. The
+        built-ins are always listed, so the section is always present.
         """
-        if skill_store is None:
-            return ""
-        try:
-            summaries = skill_store.list_summaries()
-        except Exception:
-            return ""
-        if not summaries:
-            return ""
+        summaries: list[dict] = []
+        if skill_store is not None:
+            try:
+                summaries = skill_store.list_summaries()
+            except Exception:
+                summaries = []
+
+        def _entry(s: dict) -> str | None:
+            label = s.get("label", "")
+            if not label:
+                return None
+            when = s.get("description", "").strip()
+            return f"- `{label}` — {when}" if when else f"- `{label}`"
 
         lines: list[str] = [
             "",
@@ -87,24 +93,28 @@ class ChatSystemPromptBuilder:
             "## Procedural memory (skills available)",
             "",
             (
-                "These are reusable procedures you've previously refined for "
-                "recurring tasks. When the user's request matches one of "
-                "them, call `recall_skill(label)` to load the full step-by-"
-                "step procedure into your context. You may recall multiple "
-                "skills if the task spans several. If none apply, proceed "
-                "with normal reasoning."
+                "Reusable procedures, loaded on demand. When the user's "
+                "request matches one, call `recall_skill(label)` BEFORE "
+                "starting the work — the one-line summaries below are not "
+                "enough to build from. You may recall multiple skills if "
+                "the task spans several. If none apply, proceed with "
+                "normal reasoning."
             ),
             "",
+            (
+                "Built-in procedures (recalling the matching one is "
+                "REQUIRED before that kind of task):"
+            ),
         ]
-        for s in summaries:
-            label = s.get("label", "")
-            when = s.get("description", "").strip()
-            if not label:
-                continue
-            if when:
-                lines.append(f"- `{label}` — {when}")
-            else:
-                lines.append(f"- `{label}`")
+        for s in builtin_skill_summaries():
+            entry = _entry(s)
+            if entry:
+                lines.append(entry)
+        user_entries = [e for e in (_entry(s) for s in summaries) if e]
+        if user_entries:
+            lines.append("")
+            lines.append("Procedures you've previously refined:")
+            lines.extend(user_entries)
         return "\n".join(lines)
 
     def _build_visualizations_section(
@@ -113,8 +123,11 @@ class ChatSystemPromptBuilder:
         proactive_dashboards: bool,
         output_dir: str,
     ) -> str:
+        # HTML mode points at the `html-dashboards` built-in skill instead
+        # of inlining the ~2.7K-token build discipline (ENG-648); markdown
+        # mode is small and stays inline.
         visualizations_output_format_prompt = (
-            VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT
+            VISUALIZATIONS_HTML_POINTER_PROMPT
             if proactive_dashboards
             else VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT
         )
@@ -163,7 +176,8 @@ class ChatSystemPromptBuilder:
             conversation_started=conversation_started,
         )
 
-        prompt += "\n\n" + BACKEND_GENERATION_PROMPT.format(output_dir=output_dir)
+        # BACKEND_GENERATION_PROMPT (~3.8K tokens) now ships as the
+        # `backend-apps` built-in skill, recalled on demand (ENG-648).
 
         tool_prompts = self._build_tool_prompts_section(tool_defs)
         if tool_prompts:

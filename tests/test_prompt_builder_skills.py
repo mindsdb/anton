@@ -49,15 +49,21 @@ def _build_prompt(builder: ChatSystemPromptBuilder, **overrides) -> str:
 
 
 class TestProceduralMemorySection:
-    def test_no_store_omits_section(self):
+    def test_no_store_lists_only_builtins(self):
+        # ENG-648: built-in skills are always listed, so the section is
+        # always present; without a store there are no learned entries.
         builder = ChatSystemPromptBuilder()
         prompt = _build_prompt(builder, skill_store=None)
-        assert "Procedural memory" not in prompt
+        assert "## Procedural memory" in prompt
+        assert "`html-dashboards`" in prompt
+        assert "Procedures you've previously refined" not in prompt
 
-    def test_empty_store_omits_section(self, empty_store: SkillStore):
+    def test_empty_store_lists_only_builtins(self, empty_store: SkillStore):
         builder = ChatSystemPromptBuilder()
         prompt = _build_prompt(builder, skill_store=empty_store)
-        assert "Procedural memory" not in prompt
+        assert "## Procedural memory" in prompt
+        assert "`backend-apps`" in prompt
+        assert "Procedures you've previously refined" not in prompt
 
     def test_populated_store_renders_section(self, populated_store: SkillStore):
         builder = ChatSystemPromptBuilder()
@@ -110,8 +116,9 @@ class TestProceduralMemorySection:
         prompt = _build_prompt(builder, skill_store=populated_store)
         section_start = prompt.find("## Procedural memory")
         section = prompt[section_start:]
-        # Three skills, header + intro + bullets — keep it under ~600 chars
-        assert len(section) < 1000
+        # Header + intro + 3 built-in entries + 3 learned entries — an
+        # index, not the procedures themselves (ENG-648 moved those out).
+        assert len(section) < 2200
 
     def test_handles_skill_without_description(self, tmp_path: Path):
         s = SkillStore(root=tmp_path / "skills_partial")
@@ -140,4 +147,6 @@ class TestProceduralMemorySection:
         monkeypatch.setattr(SkillStore, "list_summaries", boom)
         builder = ChatSystemPromptBuilder()
         prompt = _build_prompt(builder, skill_store=s)
-        assert "Procedural memory" not in prompt
+        # Built-ins still render; the broken store just contributes nothing.
+        assert "## Procedural memory" in prompt
+        assert "Procedures you've previously refined" not in prompt

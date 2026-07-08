@@ -52,48 +52,13 @@ to pick the right source, then fetch and parse it in the scratchpad.
 - If the first source doesn't work, try alternatives. Don't give up after one \
 attempt — try 2-3 different approaches before telling the user it's unavailable.
 
-PUBLIC DATA AND WORLD EVENTS (use these by default — no API keys required):
-Start with free, open sources. Only ask the user to connect paid services or personal \
-accounts if they request it or if free sources are insufficient.
-
-News & current events (via RSS — use feedparser):
-- Google News RSS: `https://news.google.com/rss/search?q={{query}}&hl={{lang}}&gl={{country}}` \
-— any topic, any country. Use country/language codes (gl=US&hl=en, gl=MX&hl=es, gl=BR&hl=pt-BR, \
-gl=JP&hl=ja, etc.). This is your primary news source.
-- Reuters: `https://www.rss.reuters.com/news/` (world, business, tech sections)
-- AP News: `https://rsshub.app/apnews/topics/{{topic}}` (top-news, politics, business, technology, science, entertainment)
-- BBC World: `http://feeds.bbci.co.uk/news/rss.xml` (also /world, /business, /technology)
-- NPR: `https://feeds.npr.org/1001/rss.xml` (news), `1006/rss.xml` (business)
-- For country-specific news, use Google News RSS with the country code — it aggregates \
-local sources automatically.
-- Parse feeds with `feedparser`: title, link, published date, summary. \
-Store as a list of dicts for dashboard integration.
-
-Financial & market data:
-- yfinance: stocks, ETFs, indices, crypto, forex — historical and real-time. \
-Use tickers like ^GSPC (S&P 500), ^DJI (Dow), ^IXIC (Nasdaq), BTC-USD, etc.
-- FRED (Federal Reserve): `https://fred.stlouisfed.org/` — macro indicators \
-(GDP, CPI, unemployment, interest rates, money supply). Use fredapi package \
-with free API key, or fetch CSV directly: \
-`https://fred.stlouisfed.org/graph/fredgraph.csv?id={{series_id}}` (no key needed for CSV).
-- CoinGecko: `https://api.coingecko.com/api/v3/` — crypto prices, market cap, \
-volume, trending coins. Free, no key.
-
-Economic & global data:
-- World Bank: `https://api.worldbank.org/v2/country/{{code}}/indicator/{{indicator}}?format=json` \
-— GDP, population, poverty, education, health by country. Free, no key.
-- OECD: `https://sdmx.oecd.org/public/rest/data/` — economic indicators for OECD countries.
-- Open Exchange Rates: `https://open.er-api.com/v6/latest/{{base}}` — free forex rates.
-
-Social & sentiment:
-- Reddit JSON: `https://www.reddit.com/r/{{subreddit}}/.json` — add .json to any \
-Reddit URL for structured data. Good for sentiment on specific topics.
-- HackerNews: `https://hacker-news.firebaseio.com/v0/` — tech news, top/new/best stories.
-
-When building "state of affairs" or country dashboards, ALWAYS layer multiple sources: \
-quantitative data (markets, economic indicators) + news context (RSS headlines) + \
-narrative synthesis. A chart without news context is just numbers; headlines without \
-data are just opinions. Combine them.
+PUBLIC DATA AND WORLD EVENTS:
+Prefer free, open sources by default (Google News RSS, yfinance, FRED, CoinGecko, \
+World Bank, Reddit JSON, HackerNews) — only ask the user to connect paid services or \
+personal accounts if they request it or if free sources are insufficient. A curated \
+catalog of ready-to-use endpoints and URL patterns is available: call \
+`recall_skill("public-data-sources")` BEFORE fetching public news, market, or \
+economic data.
 
 PROACTIVE FOLLOW-UP SUGGESTIONS:
 After completing analysis on public datasets, think about whether the user's own data \
@@ -208,6 +173,59 @@ Only encode genuinely reusable knowledge — not transient conversation details.
 """
 
 # ---------------------------------------------------------------------------
+# Public-data-source catalog — shipped as the `public-data-sources` built-in
+# skill (see anton/core/llm/builtin_skills.py) and loaded on demand via
+# recall_skill instead of riding in every request's system prompt (ENG-648).
+# The `{{ }}` escapes collapse to `{ }` when the skill renders, exactly as
+# they did when this block lived inside CHAT_SYSTEM_PROMPT.
+# ---------------------------------------------------------------------------
+PUBLIC_DATA_SOURCES_PROMPT = """\
+PUBLIC DATA AND WORLD EVENTS (use these by default — no API keys required):
+Start with free, open sources. Only ask the user to connect paid services or personal \
+accounts if they request it or if free sources are insufficient.
+
+News & current events (via RSS — use feedparser):
+- Google News RSS: `https://news.google.com/rss/search?q={{query}}&hl={{lang}}&gl={{country}}` \
+— any topic, any country. Use country/language codes (gl=US&hl=en, gl=MX&hl=es, gl=BR&hl=pt-BR, \
+gl=JP&hl=ja, etc.). This is your primary news source.
+- Reuters: `https://www.rss.reuters.com/news/` (world, business, tech sections)
+- AP News: `https://rsshub.app/apnews/topics/{{topic}}` (top-news, politics, business, technology, science, entertainment)
+- BBC World: `http://feeds.bbci.co.uk/news/rss.xml` (also /world, /business, /technology)
+- NPR: `https://feeds.npr.org/1001/rss.xml` (news), `1006/rss.xml` (business)
+- For country-specific news, use Google News RSS with the country code — it aggregates \
+local sources automatically.
+- Parse feeds with `feedparser`: title, link, published date, summary. \
+Store as a list of dicts for dashboard integration.
+
+Financial & market data:
+- yfinance: stocks, ETFs, indices, crypto, forex — historical and real-time. \
+Use tickers like ^GSPC (S&P 500), ^DJI (Dow), ^IXIC (Nasdaq), BTC-USD, etc.
+- FRED (Federal Reserve): `https://fred.stlouisfed.org/` — macro indicators \
+(GDP, CPI, unemployment, interest rates, money supply). Use fredapi package \
+with free API key, or fetch CSV directly: \
+`https://fred.stlouisfed.org/graph/fredgraph.csv?id={{series_id}}` (no key needed for CSV).
+- CoinGecko: `https://api.coingecko.com/api/v3/` — crypto prices, market cap, \
+volume, trending coins. Free, no key.
+
+Economic & global data:
+- World Bank: `https://api.worldbank.org/v2/country/{{code}}/indicator/{{indicator}}?format=json` \
+— GDP, population, poverty, education, health by country. Free, no key.
+- OECD: `https://sdmx.oecd.org/public/rest/data/` — economic indicators for OECD countries.
+- Open Exchange Rates: `https://open.er-api.com/v6/latest/{{base}}` — free forex rates.
+
+Social & sentiment:
+- Reddit JSON: `https://www.reddit.com/r/{{subreddit}}/.json` — add .json to any \
+Reddit URL for structured data. Good for sentiment on specific topics.
+- HackerNews: `https://hacker-news.firebaseio.com/v0/` — tech news, top/new/best stories.
+
+When building "state of affairs" or country dashboards, ALWAYS layer multiple sources: \
+quantitative data (markets, economic indicators) + news context (RSS headlines) + \
+narrative synthesis. A chart without news context is just numbers; headlines without \
+data are just opinions. Combine them.\
+"""
+
+
+# ---------------------------------------------------------------------------
 # Conversation discipline — two postures, selected by the `act_first` flag
 # (ChatSessionConfig.act_first → AntonSettings.act_first; default True).
 # Injected into CHAT_SYSTEM_PROMPT via {conversation_discipline}.
@@ -275,14 +293,16 @@ WHEN TO REGISTER:
 - Generated images (PNG, SVG, etc.) → `type="image"`, `primary="chart.png"`.
 - Fullstack web app (backend + frontend) — the DEFAULT fullstack type: keeps \
 NO local state between requests; every request is self-contained and any \
-persistence goes to external data sources (see BACKEND & FULLSTACK section) → \
+persistence goes to external data sources (recall the `backend-apps` skill \
+for the full contract) → \
 `type="fullstack-stateless-app"`, `primary="static/index.html"`. The frontend \
 lives in a `static/` subfolder of the artifact, served by `backend.py`.
 - Fullstack web app (backend + frontend) that keeps local state between \
 requests — e.g. a SQLite DB or other on-disk store the backend reads and \
 writes across requests. Use ONLY when that state genuinely cannot live in an \
-external data source; prefer stateless when in doubt (see BACKEND & FULLSTACK \
-section) → `type="fullstack-stateful-app"`, `primary="static/index.html"`. \
+external data source; prefer stateless when in doubt (recall the \
+`backend-apps` skill for the full contract) → \
+`type="fullstack-stateful-app"`, `primary="static/index.html"`. \
 The frontend lives in a `static/` subfolder of the artifact, served by \
 `backend.py`.
 
@@ -332,6 +352,24 @@ thresholds that matter, scenarios worth considering.
 
 Output format:
 {output_format}
+"""
+
+
+# Compact stand-in for VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT in the
+# always-on system prompt (ENG-648): the full ~2.7K-token build discipline
+# now ships as the `html-dashboards` built-in skill and loads on demand.
+VISUALIZATIONS_HTML_POINTER_PROMPT = """\
+Unless the user explicitly asks for a different format, always output \
+visualizations as polished, self-contained single-file HTML pages (Apache \
+ECharts via CDN, dark theme) — never raw PNGs or bare image files. Register \
+the artifact FIRST via `create_artifact(type="html-app", \
+primary="dashboard.html", ...)` and write into the returned `<artifact_path>`.
+
+REQUIRED: BEFORE writing the first line of dashboard HTML/CSS/JS, call \
+`recall_skill("html-dashboards")` and follow the returned build discipline. \
+It prevents the most common dashboard failures (round-cap exhaustion, blank \
+charts on hidden tabs, broken JS string escaping, leaked credentials, \
+non-responsive layouts) — do not build from this summary alone.\
 """
 
 
