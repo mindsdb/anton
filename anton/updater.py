@@ -180,7 +180,13 @@ def _read_installed_anton_version():
         return None
 
     tool_list = verify.stdout.decode()
-    installed_match = re.search(r"anton\s+(\S+)", tool_list)
+    # Match the `anton-agent` tool specifically (line-anchored). A bare
+    # `anton\s+` also matches a leftover legacy `anton` tool (from before the
+    # package was renamed anton -> anton-agent) — which is listed first, so the
+    # verification read the WRONG tool's version and "Update skipped" fired
+    # forever even after a correct install (ENG-655, confirmed on a real
+    # machine that had both `anton` and `anton-agent` uv tools).
+    installed_match = re.search(r"^anton-agent\s+v?(\S+)", tool_list, re.MULTILINE)
     if not installed_match:
         return None
 

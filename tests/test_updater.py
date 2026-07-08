@@ -79,3 +79,31 @@ def test_skip_marker_written_on_version_mismatch(monkeypatch, tmp_path):
     marker = tmp_path / ".update_skip_tag"
     assert marker.is_file() and marker.read_text().strip() == "v9.9.9.9.9"
     assert "new_version" not in result
+
+
+def test_read_installed_version_picks_anton_agent_not_legacy_anton(monkeypatch):
+    """Real dual-tool state (confirmed on a live machine): a leftover legacy
+    `anton` tool is listed BEFORE `anton-agent`. `_read_installed_anton_version`
+    must read anton-agent's version, not the legacy tool's (ENG-655)."""
+    class _Proc:
+        returncode = 0
+        stdout = (
+            b"anton v2.26.5.13.1\n- anton\n"
+            b"anton-agent v2.26.7.6.2\n- anton\n"
+            b"cowork-server v0.26.7.6.4\n- cowork-server\n"
+        )
+
+    monkeypatch.setattr(updater.subprocess, "run", lambda *a, **k: _Proc())
+    ver = updater._read_installed_anton_version()
+    assert str(ver) == "2.26.7.6.2"
+
+
+def test_read_installed_version_none_when_anton_agent_absent(monkeypatch):
+    # Only the legacy tool present → no anton-agent to verify → None (safe;
+    # caller treats it as "could not verify" and bails without corruption).
+    class _Proc:
+        returncode = 0
+        stdout = b"anton v2.26.5.13.1\n- anton\n"
+
+    monkeypatch.setattr(updater.subprocess, "run", lambda *a, **k: _Proc())
+    assert updater._read_installed_anton_version() is None
