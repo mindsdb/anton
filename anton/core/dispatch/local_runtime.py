@@ -442,6 +442,12 @@ class LocalScratchpadOrchestrator(RuntimeOrchestrator):
         """Render an exception as a user-facing error with API keys redacted."""
         try:
             from anton.core.runtime import safe_redact_error
+            from anton.core.llm.provider import TokenLimitExceeded
+            # A spent token allowance isn't a crash — surface anton's
+            # already-friendly quota message as-is, without the
+            # `[agent error]` prefix that reads like something broke.
+            if isinstance(exc, TokenLimitExceeded):
+                return safe_redact_error(exc)
             return f"[agent error] {safe_redact_error(exc)}"
         except Exception:
             return f"[agent error] {exc!r}"

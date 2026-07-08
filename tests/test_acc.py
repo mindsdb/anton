@@ -244,12 +244,16 @@ class TestDetectKillLoop:
         assert lesson is not None
         assert lesson.detector == "detect_kill_loop"
 
-    def test_silent_when_kills_are_for_different_names(self):
+    def test_fires_on_kills_across_different_names(self):
+        # Renaming the scratchpad between failed attempts must NOT hide the
+        # loop — two kills in a turn fire regardless of name.
         events = [
             Event("scratchpad_killed", 6, {"name": "a", "reason": "timeout"}, 1),
             Event("scratchpad_killed", 6, {"name": "b", "reason": "timeout"}, 2),
         ]
-        assert detect_kill_loop(events) is None
+        lesson = detect_kill_loop(events)
+        assert lesson is not None
+        assert lesson.detector == "detect_kill_loop"
 
     def test_silent_on_single_kill(self):
         events = [Event("scratchpad_killed", 6, {"name": "compute"}, 3)]

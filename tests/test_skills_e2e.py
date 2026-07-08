@@ -121,6 +121,7 @@ async def test_full_skills_loop(console, store_root):
     fresh_store = SkillStore(root=store_root)
     builder = ChatSystemPromptBuilder()
     prompt = builder.build(
+        conversation_started="2026-04-10T12:00:00+00:00",
         current_datetime="2026-04-10T13:00:00+00:00",
         system_prompt_context=SystemPromptContext(runtime_context="test"),
         proactive_dashboards=False,

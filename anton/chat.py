@@ -1271,6 +1271,7 @@ async def _chat_loop(
         history_store=history_store,
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,
+        act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
         tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
         web_search_enabled=settings.web_search_enabled,

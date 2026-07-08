@@ -185,6 +185,7 @@ async def build_chat_session(
         history_store=history_store,
         session_id=session_id,
         proactive_dashboards=settings.proactive_dashboards,
+        act_first=settings.act_first,
         tools=list(extra_tools) if extra_tools else [],
     )
     return ChatSession(config)

@@ -116,6 +116,7 @@ def rebuild_session(
         history_store=history_store,
         session_id=session_id,
         proactive_dashboards=settings.proactive_dashboards,
+        act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,

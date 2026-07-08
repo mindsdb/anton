@@ -11,8 +11,8 @@ workspaces — behind a graphical UI.
 
 ## Download
 
-- **macOS**: [anton-latest.pkg](https://downloads.mindsdb.com/anton/mac/anton-latest.pkg)
-- **Windows**: [anton-latest.exe](https://downloads.mindsdb.com/anton/windows/anton-latest.exe)
+- **macOS**: [anton-latest.pkg](https://downloads.mindshub.ai/anton/mac/anton-latest.pkg)
+- **Windows**: [anton-latest.exe](https://downloads.mindshub.ai/anton/windows/anton-latest.exe)
 
 Run the installer and launch Anton like any other app. On first launch you
 pick an LLM provider, just like the terminal flow — see

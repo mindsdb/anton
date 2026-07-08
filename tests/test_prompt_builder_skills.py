@@ -38,6 +38,7 @@ def populated_store(tmp_path: Path) -> SkillStore:
 
 def _build_prompt(builder: ChatSystemPromptBuilder, **overrides) -> str:
     defaults = dict(
+        conversation_started="2026-04-10T12:00:00+00:00",
         current_datetime="2026-04-10T12:00:00+00:00",
         system_prompt_context=SystemPromptContext(runtime_context="test runtime"),
         proactive_dashboards=False,
@@ -97,7 +98,7 @@ class TestProceduralMemorySection:
         assert ds_pos != -1
         assert proc_pos != -1
         assert proc_pos > ds_pos
-        assert proc_pos > memory_pos
+        assert proc_pos < memory_pos
 
     def test_section_is_compact(self, populated_store: SkillStore):
         """Sanity check: ~50 tokens per skill or less.

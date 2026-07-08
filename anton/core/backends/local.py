@@ -352,7 +352,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             and "ANTON_MINDS_URL" in env
             and self._coding_provider == "openai-compatible"
         ):
-            env["OPENAI_BASE_URL"] = f"{env['ANTON_MINDS_URL'].rstrip('/')}/api/v1"
+            # Host-aware (ENG-436): api.mindshub.ai serves /v1, legacy
+            # mdb.ai serves /api/v1. The previous hardcoded /api/v1 was
+            # wrong for mindshub. Mirrors config/settings.py +
+            # cowork-server minds_chat_base_url.
+            _minds_base = env["ANTON_MINDS_URL"].rstrip("/")
+            if _minds_base.endswith("/v1"):
+                env["OPENAI_BASE_URL"] = _minds_base
+            elif "mdb.ai" in _minds_base:
+                env["OPENAI_BASE_URL"] = f"{_minds_base}/api/v1"
+            else:
+                env["OPENAI_BASE_URL"] = f"{_minds_base}/v1"
         if self._coding_api_key:
             sdk_key = {
                 "anthropic": "ANTHROPIC_API_KEY",

@@ -8,6 +8,8 @@ from .prompts import (
     BASE_VISUALIZATIONS_PROMPT,
     BACKEND_GENERATION_PROMPT,
     CHAT_SYSTEM_PROMPT,
+    CONVERSATION_DISCIPLINE_ACT_FIRST,
+    CONVERSATION_DISCIPLINE_ASK_FIRST,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
 )
@@ -124,10 +126,12 @@ class ChatSystemPromptBuilder:
     def build(
         self,
         *,
+        conversation_started: str,
         current_datetime: str,
         system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
         output_dir: str,
+        act_first: bool = True,
         tool_defs: list["ToolDef"] | None = None,
         memory_context: str = "",
         project_context: str = "",
@@ -146,11 +150,17 @@ class ChatSystemPromptBuilder:
         if prefix:
             prompt += f"{prefix}\n\n"
 
+        conversation_discipline = (
+            CONVERSATION_DISCIPLINE_ACT_FIRST if act_first
+            else CONVERSATION_DISCIPLINE_ASK_FIRST
+        )
+
         prompt += CHAT_SYSTEM_PROMPT.format(
             runtime_context=system_prompt_context.runtime_context,
             artifacts_section=ARTIFACTS_PROMPT,
             visualizations_section=visualizations_section,
-            current_datetime=current_datetime,
+            conversation_discipline=conversation_discipline,
+            conversation_started=conversation_started,
         )
 
         prompt += "\n\n" + BACKEND_GENERATION_PROMPT.format(output_dir=output_dir)
@@ -159,8 +169,8 @@ class ChatSystemPromptBuilder:
         if tool_prompts:
             prompt += tool_prompts
 
-        if memory_context:
-            prompt += memory_context
+        # Stable, per-session content goes before the volatile tail so the
+        # prefix stays cache-stable across turns.
         if project_context:
             prompt += project_context
         if self_awareness_context:
@@ -175,6 +185,18 @@ class ChatSystemPromptBuilder:
         suffix = system_prompt_context.suffix.strip()
         if suffix:
             prompt += f"\n\n{suffix}"
+
+        # Volatile tail — LAST so everything above can be cached. The live
+        # clock and the relevance-filtered memory snapshot both change every
+        # turn, so they sit after the cache-stable prefix and never invalidate
+        # it. (The prefix carries only the fixed "conversation started" stamp.)
+        prompt += (
+            f"\n\nCurrent date and time: {current_datetime}\n"
+            "(Earlier messages are prefixed with the time they were sent; that "
+            "bracketed timestamp is metadata, not part of the message text.)"
+        )
+        if memory_context:
+            prompt += memory_context
 
         return prompt
 

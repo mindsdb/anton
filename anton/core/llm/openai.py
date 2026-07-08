@@ -135,6 +135,14 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
     """
     result: list[dict] = []
     content_parts: list[dict] = []  # Accumulates text + image blocks
+    # Images extracted from tool_results are deferred here and flushed as a
+    # single role:user message AFTER all role:tool messages.  Emitting them
+    # inline (immediately after each role:tool) breaks the multi-tool case:
+    # when an assistant turn contains N tool_use blocks and a non-final one
+    # returns images, the inline role:user message lands between role:tool
+    # responses, leaving the remaining tool_use ids without a corresponding
+    # tool_result immediately after → Anthropic 400.
+    deferred_img_parts: list[dict] = []
 
     for block in blocks:
         if block.get("type") == "tool_result":
@@ -145,7 +153,8 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
             # tool_result -> role:tool message. The Chat Completions API only
             # accepts a string in `tool` messages, so when the tool returned
             # multimodal blocks (image + text), we split them: text → tool
-            # message, image → a follow-up role:user message right after.
+            # message, images → a deferred role:user message emitted after
+            # ALL role:tool messages to keep tool responses contiguous.
             raw = block.get("content", "")
             extra_images: list[dict] = []
             if isinstance(raw, list):
@@ -173,21 +182,19 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
             )
 
             if extra_images:
-                img_parts: list[dict] = [
-                    {
-                        "type": "text",
-                        "text": "Image(s) returned by previous tool call:",
-                    }
-                ]
+                if not deferred_img_parts:
+                    deferred_img_parts.append(
+                        {"type": "text", "text": "Image(s) returned by previous tool call:"}
+                    )
                 for img in extra_images:
                     if vision_format == "anthropic":
-                        img_parts.append(img)
+                        deferred_img_parts.append(img)
                         continue
                     source = img.get("source", {})
                     if source.get("type") == "base64":
                         media_type = source.get("media_type", "image/png")
                         data = source.get("data", "")
-                        img_parts.append(
+                        deferred_img_parts.append(
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -195,7 +202,6 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
                                 },
                             }
                         )
-                result.append({"role": "user", "content": img_parts})
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
         elif block.get("type") == "image" and supports_vision:
@@ -240,6 +246,10 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
             else:
                 # Already OpenAI format — pass through.
                 content_parts.append(block)
+
+    # Flush deferred images after all role:tool messages.
+    if deferred_img_parts:
+        result.append({"role": "user", "content": deferred_img_parts})
 
     if content_parts:
         # If only text parts, flatten to a simple string for compatibility
@@ -592,6 +602,19 @@ class OpenAIProvider(LLMProvider):
             return {"web_search", "web_fetch"}
         return set()
 
+    @staticmethod
+    def _sanitize_langfuse_tag(tag: str) -> str:
+        """Clean a caller-supplied langfuse tag so it survives the wire intact.
+
+        Tags are comma-joined into the ``Langfuse-Tags`` header and the MindsHub
+        router splits that header on commas — so an embedded comma would
+        silently split one tag into two — while control chars (CR/LF/…) would
+        make httpx reject the outbound request. Drop both and trim surrounding
+        whitespace. Returns "" when nothing usable remains, so the caller can
+        filter the tag out.
+        """
+        return "".join(c for c in tag if c.isprintable() and c != ",").strip()
+
     def _build_trace_headers(self) -> dict[str, str] | None:
         """Return langfuse-style headers for the active trace, or None.
 
@@ -610,9 +633,21 @@ class OpenAIProvider(LLMProvider):
         headers: dict[str, str] = {}
         if ctx.session_id:
             headers["Langfuse-Session-Id"] = ctx.session_id
+        # Langfuse-Tags: the harness identity plus any caller-supplied tags
+        # (e.g. an eval harness adding "eval", "eval_run:<id>"). Comma-joined;
+        # the MindsHub router splits, trims and de-dupes them. Caller tags are
+        # untrusted, so sanitize each (drop commas/control chars, trim) and
+        # skip any that end up empty before joining.
+        tags: list[str] = []
         if ctx.harness:
-            headers["Langfuse-Tags"] = ctx.harness
-        extra: dict[str, object] = {}
+            tags.append(ctx.harness)
+        tags.extend(ctx.tags)
+        tags = [t for t in (self._sanitize_langfuse_tag(s) for s in tags) if t]
+        if tags:
+            headers["Langfuse-Tags"] = ",".join(tags)
+        # Langfuse-Metadata: caller-supplied metadata first, then the built-in
+        # turn/harness keys so identity always wins on collision.
+        extra: dict[str, object] = dict(ctx.metadata or {})
         if ctx.turn_id is not None:
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:
@@ -683,7 +718,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or to top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc
@@ -852,7 +887,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc
@@ -970,7 +1005,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or to top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc
@@ -1099,7 +1134,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc

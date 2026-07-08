@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import json
 import re
 from typing import TYPE_CHECKING, List
@@ -17,7 +18,11 @@ from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
-from anton.core.llm.prompts import RESILIENCE_NUDGE
+from anton.core.llm.prompts import (
+    RESILIENCE_NUDGE,
+    SCRATCHPAD_SIZE_NUDGE,
+    SCRATCHPAD_TIMEOUT_NUDGE,
+)
 from anton.core.llm.provider import (
     ContextOverflowError,
     StreamComplete,
@@ -46,10 +51,16 @@ from anton.core.tools.tool_defs import (
     READ_IMAGE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
+    SELECT_PATH_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
-from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
+from anton.core.interaction.selection import SelectionElicitor
+from anton.core.utils.scratchpad import (
+    prepare_scratchpad_exec,
+    format_cell_result,
+    observe_scratchpad_cell,
+)
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
@@ -58,6 +69,11 @@ from anton.utils.datasources import (
     scrub_credentials,
 )
 from anton.core.settings import CoreSettings
+
+
+# Sentinel prefixing a compacted-history summary so later compactions can
+# recognize and update it in place rather than summarize a summary.
+_COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
 
 
 if TYPE_CHECKING:
@@ -113,6 +129,10 @@ class ChatSessionConfig:
     # host didn't identify itself.
     harness: str | None = None
     proactive_dashboards: bool = False
+    # When True (default), Anton acts on reasonable defaults and surfaces its
+    # assumptions inline instead of stopping to ask ("do first, ask later").
+    # When False, it falls back to the cautious ask-first discipline.
+    act_first: bool = True
     tools: list[ToolDef] = field(default_factory=list)
     output_dir: str = ".anton/output"
     # Web tools — on by default. Each is independently resolved at session
@@ -121,6 +141,14 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # When the task (conversation) was created. Rendered as a fixed
+    # "Conversation started: …" line in the cache-stable prompt prefix — it
+    # never changes across turns, so it doesn't bust the prefix cache. The
+    # LIVE current time goes in the volatile tail instead (see _build_system_prompt),
+    # so resuming a conversation days later still reports the real "now".
+    # None → fall back to today.
+    started_at: datetime | None = None
+    selection_elicitor: SelectionElicitor | None = None
 
 
 class ChatSession:
@@ -146,6 +174,8 @@ class ChatSession:
         self._system_prompt_context = config.system_prompt_context
         self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
+        self._act_first = config.act_first
+        self._started_at = config.started_at
         self._extra_tools = config.tools
         self._workspace = config.workspace
         self._data_vault = config.data_vault
@@ -169,6 +199,11 @@ class ChatSession:
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
+        # Strategy for mid-turn file/folder disambiguation (the `select_path`
+        # tool). Hosts inject a concrete elicitor — a streaming GUI picker in
+        # cowork-server, a terminal picker on the CLI. None falls back to the
+        # console picker (CLI) or a graceful no-op (headless).
+        self.selection_elicitor: SelectionElicitor | None = config.selection_elicitor
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -226,16 +261,17 @@ class ChatSession:
         # turn. Mirrors ANTON_MEMORY_MODE for shape consistency:
         #   "off"     — ACC observes nothing (skipped at every emit site).
         #   "passive" — Layer 1: lessons drain to memory at end-of-turn,
-        #               next turn's system prompt picks them up. SAFE
-        #               DEFAULT — adds no surface-area to the turn loop.
-        #   "active"  — Layer 2: ALSO inject lessons inline as text
-        #               blocks in tool_results so the LLM sees them on
-        #               the very next round. Stronger learning signal,
-        #               but more invasive — the LLM has to handle the
-        #               nudge gracefully without confusing it for a
-        #               user instruction.
-        _mode_raw = os.environ.get("ANTON_ACC_MODE", "passive").strip().lower()
-        self._acc_mode = _mode_raw if _mode_raw in ("off", "passive", "active") else "passive"
+        #               next turn's system prompt picks them up. No
+        #               surface-area on the turn loop.
+        #   "active"  — Layer 2 (DEFAULT): ALSO inject lessons inline as
+        #               text blocks in tool_results so the LLM sees them on
+        #               the very next round and can self-correct mid-task.
+        #               Stronger signal; the nudge is clearly labelled as an
+        #               automatic self-check (not a user instruction). Set
+        #               ANTON_ACC_MODE=passive to revert to learn-next-turn,
+        #               or =off to disable, if it ever causes trouble.
+        _mode_raw = os.environ.get("ANTON_ACC_MODE", "active").strip().lower()
+        self._acc_mode = _mode_raw if _mode_raw in ("off", "passive", "active") else "active"
         # Scratchpad observers — list of objects with on_pre_execute /
         # on_post_execute. Fired by handle_scratchpad around pad.execute.
         # The runtime never sees this list; observation lives at the
@@ -304,8 +340,10 @@ class ChatSession:
 
         streak = error_streak.get(tool_name, 0)
         if streak >= self._resilience_nudge_at and tool_name not in resilience_nudged:
-            result_text += RESILIENCE_NUDGE
-            resilience_nudged.add(tool_name)
+            nudge = self._select_resilience_nudge(tool_name, result_text)
+            if nudge:
+                result_text += nudge
+                resilience_nudged.add(tool_name)
 
         if streak >= self._max_consecutive_errors:
             result_text += (
@@ -315,6 +353,34 @@ class ChatSession:
             )
 
         return result_text
+
+    @staticmethod
+    def _select_resilience_nudge(tool_name: str, result_text: str) -> str:
+        """Pick the right soft-nudge for a repeated failure.
+
+        The generic RESILIENCE_NUDGE is scrape/fetch advice ("try a public
+        API / archive.org / different headers"). That actively misdirects a
+        scratchpad failure: a cell that's too big or too slow doesn't need a
+        different data source, it needs to be chunked or scoped down. Route
+        scratchpad failures to size/timeout-specific guidance by inspecting
+        the error text; a generic scratchpad error (e.g. a SyntaxError) and
+        every non-scratchpad tool keep the generic nudge.
+        """
+        if tool_name != "scratchpad":
+            return RESILIENCE_NUDGE
+        low = result_text.lower()
+        if "timed out" in low or "inactivity" in low:
+            return SCRATCHPAD_TIMEOUT_NUDGE
+        # Match the empty-code dispatcher message specifically — generic
+        # phrases like "too large"/"truncated" appear in unrelated errors
+        # (e.g. a MySQL "Data truncated for column" warning) and would
+        # misfire the chunking advice.
+        if "argument was empty" in low:
+            return SCRATCHPAD_SIZE_NUDGE
+        # Other scratchpad failures (syntax/runtime errors): the generic
+        # "you've failed twice, change approach" nudge still applies — only
+        # the size/timeout cases get specialised advice.
+        return RESILIENCE_NUDGE
 
     def repair_history(self) -> None:
         """Fix dangling tool_use blocks left by mid-stream cancellation.
@@ -537,8 +603,16 @@ class ChatSession:
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
-        _now = _dt.datetime.now()
-        _current_datetime = _now.strftime("%A, %B %d, %Y at %I:%M %p")
+        # Two stamps, deliberately split for cache-stability AND correctness:
+        #  • conversation_started — the task's creation time (self._started_at),
+        #    a FIXED fact rendered in the cache-stable prefix; identical every
+        #    turn so it never busts the prefix cache.
+        #  • current_datetime — the real wall clock, rendered in the VOLATILE
+        #    tail (after the cached prefix) so it's always accurate even when a
+        #    conversation is resumed days/weeks later, without touching the cache.
+        _started = self._started_at or _dt.datetime.now()
+        _conversation_started = _started.strftime("%A, %B %d, %Y")
+        _current_datetime = _dt.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
@@ -563,9 +637,11 @@ class ChatSession:
 
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
+            conversation_started=_conversation_started,
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
+            act_first=self._act_first,
             output_dir=self._output_dir,
             tool_defs=self.tool_registry.get_tool_defs(),
             memory_context=memory_section,
@@ -657,6 +733,9 @@ class ChatSession:
 
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
+        # Interactive file/folder disambiguation — always available; degrades
+        # to a plain-text prompt when no elicitor/console is present.
+        self.tool_registry.register_tool(SELECT_PATH_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -765,12 +844,18 @@ class ChatSession:
         old_turns = self._history[:split]
         recent_turns = self._history[split:]
 
-        # Serialize old turns into text for summarization
+        # Serialize old turns. Pull out any prior compacted summary so we
+        # UPDATE it in place rather than summarize a summary (which compounds
+        # loss every compaction).
+        prior_summary = ""
         lines: list[str] = []
         for msg in old_turns:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if isinstance(content, str):
+                if content.lstrip().startswith(_COMPACTED_MARKER):
+                    prior_summary = content
+                    continue
                 lines.append(f"[{role}]: {content[:2000]}")
             elif isinstance(content, list):
                 for block in content:
@@ -791,17 +876,43 @@ class ChatSession:
         if len(old_text) > 8000:
             old_text = old_text[:8000] + "\n... (truncated)"
 
+        if prior_summary:
+            user_content = (
+                "PREVIOUS SUMMARY (update this in place — merge the new turns into it, "
+                "don't restate it verbatim):\n"
+                f"{prior_summary}\n\n"
+                "NEW TURNS TO FOLD IN:\n"
+                f"{old_text}"
+            )
+        else:
+            user_content = old_text
+
         try:
+            # 3b-full: a structured, in-place-updated STATE RECORD rather than a
+            # freeform blob — so "Remaining" work survives compaction instead of
+            # being flattened into prose.
             summary_response = await self._llm.code(
                 system=(
-                    "Summarize this conversation history concisely. Preserve:\n"
-                    "- Key decisions and conclusions\n"
-                    "- Important data/results discovered\n"
-                    "- Variable names and values that are still relevant\n"
-                    "- Errors encountered and how they were resolved\n"
-                    "Keep it under 2000 tokens. Use bullet points."
+                    "You compact an agent's earlier conversation into a terse, factual "
+                    "STATE RECORD (not prose). Output only these sections, omitting any "
+                    "that are empty:\n"
+                    "## Goal — what the user ultimately wants\n"
+                    "## Constraints — explicit requirements / preferences / do-nots\n"
+                    "## Completed — work already done, each as `action → outcome`\n"
+                    "## Active state — variables, data, files/artifacts in play and their "
+                    "current values or paths\n"
+                    "## Blocked — anything stuck and why\n"
+                    "## Decisions — choices made and the reason\n"
+                    "## Remaining — what is still left to do\n\n"
+                    "Preserve the date/time of key events when it matters (e.g. "
+                    "`Completed (2026-06-05): …`) — the raw per-message timestamps are "
+                    "gone after compaction, so keep the ones that anchor the timeline.\n"
+                    "If a PREVIOUS SUMMARY is provided, update it with the new turns "
+                    "instead of starting over. If the user changed direction, narrowed "
+                    "scope, or cancelled something, reflect that — drop superseded items "
+                    "from Remaining, don't keep them. Keep it under ~2000 tokens."
                 ),
-                messages=[{"role": "user", "content": old_text}],
+                messages=[{"role": "user", "content": user_content}],
                 max_tokens=2048,
             )
             summary = summary_response.content or "(summary unavailable)"
@@ -809,17 +920,26 @@ class ChatSession:
             # If summarization fails, just do a simple truncation
             summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
 
-        summary_msg = {
-            "role": "user",
-            "content": f"[Context summary of earlier conversation]\n{summary}",
-        }
+        # 3b-light: reference-only framing so the model treats this as compacted
+        # history, not a fresh instruction, and never resumes superseded/cancelled
+        # work after a compaction (which Anton's auto-continue verifier would
+        # otherwise be nudged to do).
+        summary_body = (
+            f"{_COMPACTED_MARKER}\n"
+            "Compacted record of earlier conversation, for REFERENCE ONLY — not a new "
+            "request. The most recent user message takes priority; if the user changed "
+            "direction, narrowed scope, or cancelled something, follow that and do NOT "
+            "resume superseded work described below.\n\n"
+            f"{summary}"
+        )
+        summary_msg = {"role": "user", "content": summary_body}
 
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
             self._history = [
                 summary_msg,
-                {"role": "assistant", "content": "Understood."},
+                {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
             ]
         else:
@@ -1405,6 +1525,8 @@ class ChatSession:
         user_input: str | list[dict],
         *,
         turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive.
 
@@ -1413,6 +1535,12 @@ class ChatSession:
         calls + tool spans made during this turn. Stored on
         `self._current_turn_id` so the provider layer can read it
         without threading the arg through every internal call.
+
+        `trace_tags` / `trace_metadata` are optional, opaque annotations the
+        host can attach to this turn's trace (forwarded to the MindsHub
+        langfuse headers — see the provider's `_build_trace_headers`). They
+        are deliberately generic: hosts can add arbitrary correlation data
+        (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
         self._append_history({"role": "user", "content": user_input})
@@ -1450,6 +1578,8 @@ class ChatSession:
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                tags=tuple(trace_tags or ()),
+                metadata=trace_metadata or None,
             )
         )
 
@@ -1793,6 +1923,15 @@ class ChatSession:
                                         description=description,
                                         cell=cell,
                                     )
+                                    # Same post-execute ACC event as the CLI
+                                    # path (handle_scratchpad) — this inline
+                                    # streaming exec bypasses that handler, so
+                                    # without this scratchpad_killed/result
+                                    # would never fire here and detect_kill_loop
+                                    # would be blind in the streaming product.
+                                    observe_scratchpad_cell(
+                                        self, tc.input.get("name", ""), cell
+                                    )
                                     yield StreamToolResult(
                                         name=tc.name,
                                         action="exec",
@@ -1806,9 +1945,13 @@ class ChatSession:
                                         (cell.stdout or ""),
                                         description=description,
                                     )
-                        elif tc.name == "connect_new_datasource" or (
-                            tc.name == "publish_or_preview"
-                            and tc.input.get("action") == "publish"
+                        elif (
+                            tc.name == "connect_new_datasource"
+                            or tc.name == "select_path"
+                            or (
+                                tc.name == "publish_or_preview"
+                                and tc.input.get("action") == "publish"
+                            )
                         ):
                             # Interactive tool — pause spinner AND escape watcher
                             yield StreamTaskProgress(
@@ -1817,11 +1960,13 @@ class ChatSession:
                             )
                             if self._escape_watcher:
                                 self._escape_watcher.pause()
-                            result_text = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
-                            )
-                            if self._escape_watcher:
-                                self._escape_watcher.resume()
+                            try:
+                                result_text = await self.tool_registry.dispatch_tool(
+                                    self, tc.name, tc.input
+                                )
+                            finally:
+                                if self._escape_watcher:
+                                    self._escape_watcher.resume()
                             yield StreamTaskProgress(
                                 phase="analyzing",
                                 message="Analyzing results...",
