@@ -36,10 +36,10 @@ from anton.core.llm.provider import (
     TokenLimitExceeded,
     ToolCall,
 )
-from anton.core.llm.router import (
-    ROUTE_RESPOND,
-    RouterDecision,
-    route_turn,
+from anton.core.llm.thalamus import (
+    ACTION_RESPOND,
+    ThalamicDecision,
+    gate_turn,
 )
 from anton.core.llm.tracing import (
     TraceContext,
@@ -158,9 +158,9 @@ class ChatSessionConfig:
     started_at: datetime | None = None
     selection_elicitor: SelectionElicitor | None = None
     # Cheap front-model routing (ENG-648). None (default) defers to the
-    # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
+    # settings' `thalamus_enabled` (ANTON_THALAMUS_ENABLED); hosts pass an
     # explicit bool to override per session.
-    router_enabled: bool | None = None
+    thalamus_enabled: bool | None = None
 
 
 class ChatSession:
@@ -181,14 +181,14 @@ class ChatSession:
         self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
         # Router (ENG-648): explicit host override wins; otherwise the
-        # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
+        # settings flag (ANTON_THALAMUS_ENABLED). getattr-guarded because
         # tests pass bare CoreSettings-shaped objects.
-        self._router_enabled = (
-            config.router_enabled
-            if config.router_enabled is not None
-            else bool(getattr(s, "router_enabled", False))
+        self._thalamus_enabled = (
+            config.thalamus_enabled
+            if config.thalamus_enabled is not None
+            else bool(getattr(s, "thalamus_enabled", False))
         )
-        self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
+        self._thalamus_max_tokens = int(getattr(s, "thalamus_max_tokens", 1024))
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -1400,11 +1400,11 @@ class ChatSession:
             # Cerebellum learning is best-effort, so just drop the buffer.
             cb.reset()
 
-    async def _route_turn(self) -> RouterDecision | None:
+    async def _gate_turn(self) -> ThalamicDecision | None:
         """Run the cheap routing call for the turn just appended to history.
 
         Returns None — meaning "proceed to the planning model as if no
-        router existed" — on any router failure. Routing must never be
+        thalamus existed" — on any thalamus failure. Routing must never be
         able to break a turn; it can only save one.
         """
         from anton.core.llm.builtin_skills import builtin_skill_summaries
@@ -1419,11 +1419,11 @@ class ChatSession:
             summaries = []
         summaries = builtin_skill_summaries() + summaries
         try:
-            return await route_turn(
+            return await gate_turn(
                 self._llm,
                 history=self._history,
                 skill_summaries=summaries,
-                max_tokens=self._router_max_tokens,
+                max_tokens=self._thalamus_max_tokens,
             )
         except Exception as exc:
             logger.warning(
@@ -1433,7 +1433,7 @@ class ChatSession:
             return None
 
     def _inject_recalled_skills(self, labels: list[str]) -> None:
-        """Preload router-named skills as a synthetic recall_skill exchange.
+        """Preload thalamus-named skills as a synthetic recall_skill exchange.
 
         Appends an assistant `tool_use` + user `tool_result` pair to
         history, byte-identical in payload to what the planning model
@@ -1480,7 +1480,7 @@ class ChatSession:
                     store.increment_recommended(skill.label, stage=1)
                 except Exception:
                     pass
-            tu_id = f"router_recall_{self._turn_count + 1}_{len(tool_uses)}"
+            tu_id = f"thalamus_recall_{self._turn_count + 1}_{len(tool_uses)}"
             tool_uses.append(
                 {
                     "type": "tool_use",
@@ -1510,13 +1510,13 @@ class ChatSession:
         )
 
         # Cheap front-model routing (ENG-648). Text-only turns first hit
-        # the router model, which either answers trivial/from-context
+        # the thalamus model, which either answers trivial/from-context
         # requests directly (skipping the full prompt + tools + planning
         # model entirely) or delegates, optionally preloading skills.
-        # Image turns skip the router — attachments imply real work.
-        if self._router_enabled and isinstance(user_input, str):
-            decision = await self._route_turn()
-            if decision is not None and decision.action == ROUTE_RESPOND:
+        # Image turns skip the thalamus — attachments imply real work.
+        if self._thalamus_enabled and isinstance(user_input, str):
+            decision = await self._gate_turn()
+            if decision is not None and decision.action == ACTION_RESPOND:
                 self._append_history(
                     {"role": "assistant", "content": decision.text}
                 )
@@ -1725,19 +1725,19 @@ class ChatSession:
 
         try:
             # Cheap front-model routing (ENG-648). Text-only turns first
-            # hit the router model, which either answers trivial/from-
+            # hit the thalamus model, which either answers trivial/from-
             # context requests directly (skipping the full prompt + tool
             # schemas + planning model entirely) or delegates, optionally
             # preloading skills into history so the planning model doesn't
-            # spend a round on recall_skill. Image turns skip the router —
-            # attachments imply real work. The router buffers rather than
+            # spend a round on recall_skill. Image turns skip the thalamus —
+            # attachments imply real work. The thalamus buffers rather than
             # streams: direct answers are short by construction
-            # (router_max_tokens), and a delegate decision must never leak
+            # (thalamus_max_tokens), and a delegate decision must never leak
             # preamble text to the user.
             routed_direct = False
-            if self._router_enabled and isinstance(user_input, str):
-                decision = await self._route_turn()
-                if decision is not None and decision.action == ROUTE_RESPOND:
+            if self._thalamus_enabled and isinstance(user_input, str):
+                decision = await self._gate_turn()
+                if decision is not None and decision.action == ACTION_RESPOND:
                     self._append_history(
                         {"role": "assistant", "content": decision.text}
                     )

@@ -11,7 +11,7 @@ They now ship as built-in skills: one-line summaries appear in the
 full text loads through the same two paths user skills use:
 
   • the model calls ``recall_skill(label)`` when it recognizes the task, or
-  • the router names the label at delegation time and the session preloads
+  • the thalamus names the label at delegation time and the session preloads
     it (``ChatSession._inject_recalled_skills``).
 
 Built-ins resolve BEFORE the on-disk ``SkillStore`` in ``recall_skill``,
@@ -37,7 +37,7 @@ from anton.core.llm.prompts import (
 class BuiltinSkill:
     label: str
     # When-to-use line, shown in the system prompt's procedural memory
-    # section and in the router's skill list.
+    # section and in the thalamus's skill list.
     description: str
     # Prompt template; rendered with `output_dir` at recall time so the
     # doubled-brace escapes collapse exactly as they did when the prompt

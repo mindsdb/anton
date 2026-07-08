@@ -66,13 +66,13 @@ class AntonSettings(CoreSettings):
     planning_reasoning_effort: str | None = None
     coding_reasoning_effort: str | None = None
 
-    # Router role (ENG-648) — the cheap front-model that answers trivial
-    # turns directly or delegates to the planning model. Unset falls back
-    # to the coding provider/model. The on/off switch (`router_enabled`)
-    # and output budget (`router_max_tokens`) live in CoreSettings so the
-    # session can read them.
-    router_provider: str | None = None
-    router_model: str | None = None
+    # Thalamus role (ENG-648) — the cheap front-model that gates each turn,
+    # answering trivial turns directly or delegating to the planning model.
+    # Unset falls back to the coding provider/model. The on/off switch
+    # (`thalamus_enabled`) and output budget (`thalamus_max_tokens`) live in
+    # CoreSettings so the session can read them.
+    thalamus_provider: str | None = None
+    thalamus_model: str | None = None
 
     max_tokens: int = 8192  # max output tokens per LLM call
 

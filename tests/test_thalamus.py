@@ -1,7 +1,7 @@
-"""Tests for the cheap front-model router (ENG-648).
+"""Tests for the cheap front-model thalamus (ENG-648).
 
 Covers the three layers: history condensation, decision parsing in
-`route_turn`, and the ChatSession integration (direct answer, delegation
+`gate_turn`, and the ChatSession integration (direct answer, delegation
 with skill preload, fail-open fallback, and the off-by-default flag).
 """
 
@@ -18,11 +18,11 @@ from anton.core.llm.provider import (
     ToolCall,
     Usage,
 )
-from anton.core.llm.router import (
-    ROUTE_DELEGATE,
-    ROUTE_RESPOND,
+from anton.core.llm.thalamus import (
+    ACTION_DELEGATE,
+    ACTION_RESPOND,
     condense_history,
-    route_turn,
+    gate_turn,
 )
 from tests.conftest import make_mock_llm
 
@@ -102,56 +102,56 @@ class TestCondenseHistory:
         assert condense_history([{"role": "system", "content": "x"}]) == []
 
 
-class TestRouteTurn:
+class TestGateTurn:
     async def test_direct_answer(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(return_value=_response("Four."))
-        decision = await route_turn(llm, history=[{"role": "user", "content": "2+2?"}])
-        assert decision.action == ROUTE_RESPOND
+        llm.gate = AsyncMock(return_value=_response("Four."))
+        decision = await gate_turn(llm, history=[{"role": "user", "content": "2+2?"}])
+        assert decision.action == ACTION_RESPOND
         assert decision.text == "Four."
 
     async def test_delegate_tool_call_with_skills(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(
+        llm.gate = AsyncMock(
             return_value=_response(
                 tool_calls=[_delegate_call(skills=["csv-summary", "  ", 42, "other"])]
             )
         )
-        decision = await route_turn(llm, history=[{"role": "user", "content": "analyze data.csv"}])
-        assert decision.action == ROUTE_DELEGATE
+        decision = await gate_turn(llm, history=[{"role": "user", "content": "analyze data.csv"}])
+        assert decision.action == ACTION_DELEGATE
         assert decision.skills == ["csv-summary", "other"]
         assert decision.reason == "needs tools"
 
     async def test_truncated_answer_delegates(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(
+        llm.gate = AsyncMock(
             return_value=_response("a very long answer that got cut", stop_reason="max_tokens")
         )
-        decision = await route_turn(llm, history=[{"role": "user", "content": "explain X"}])
-        assert decision.action == ROUTE_DELEGATE
+        decision = await gate_turn(llm, history=[{"role": "user", "content": "explain X"}])
+        assert decision.action == ACTION_DELEGATE
 
     async def test_empty_answer_delegates(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(return_value=_response(""))
-        decision = await route_turn(llm, history=[{"role": "user", "content": "hm"}])
-        assert decision.action == ROUTE_DELEGATE
+        llm.gate = AsyncMock(return_value=_response(""))
+        decision = await gate_turn(llm, history=[{"role": "user", "content": "hm"}])
+        assert decision.action == ACTION_DELEGATE
 
     async def test_unroutable_history_delegates_without_llm_call(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock()
-        decision = await route_turn(llm, history=[{"role": "system", "content": "x"}])
-        assert decision.action == ROUTE_DELEGATE
-        llm.route.assert_not_called()
+        llm.gate = AsyncMock()
+        decision = await gate_turn(llm, history=[{"role": "system", "content": "x"}])
+        assert decision.action == ACTION_DELEGATE
+        llm.gate.assert_not_called()
 
     async def test_skill_summaries_listed_in_prompt(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(return_value=_response("hi"))
-        await route_turn(
+        llm.gate = AsyncMock(return_value=_response("hi"))
+        await gate_turn(
             llm,
             history=[{"role": "user", "content": "hi"}],
             skill_summaries=[{"label": "csv-summary", "description": "Summarize CSVs"}],
         )
-        system = llm.route.call_args.kwargs["system"]
+        system = llm.gate.call_args.kwargs["system"]
         assert "`csv-summary` — Summarize CSVs" in system
 
 
@@ -170,21 +170,21 @@ def _mock_skill_store():
     return store
 
 
-class TestSessionRouting:
-    async def test_router_off_by_default(self):
+class TestSessionThalamus:
+    async def test_thalamus_off_by_default(self):
         llm = make_mock_llm()
         llm.plan = AsyncMock(return_value=_response("Hey!"))
-        llm.route = AsyncMock()
+        llm.gate = AsyncMock()
         session = ChatSession(ChatSessionConfig(llm_client=llm))
         reply = await session.turn("hi")
         assert reply == "Hey!"
-        llm.route.assert_not_called()
+        llm.gate.assert_not_called()
 
     async def test_direct_answer_skips_planning(self):
         llm = make_mock_llm()
         llm.plan = AsyncMock()
-        llm.route = AsyncMock(return_value=_response("Four."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        llm.gate = AsyncMock(return_value=_response("Four."))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         reply = await session.turn("what is 2+2?")
         assert reply == "Four."
         llm.plan.assert_not_called()
@@ -195,14 +195,14 @@ class TestSessionRouting:
 
     async def test_direct_answer_streaming(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(return_value=_response("Four."))
+        llm.gate = AsyncMock(return_value=_response("Four."))
 
         async def _plan_stream(**kwargs):
             raise AssertionError("planning model must not be called")
             yield  # pragma: no cover
 
         llm.plan_stream = _plan_stream
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         events = [e async for e in session.turn_stream("what is 2+2?")]
         deltas = [e for e in events if isinstance(e, StreamTextDelta)]
         completes = [e for e in events if isinstance(e, StreamComplete)]
@@ -212,13 +212,13 @@ class TestSessionRouting:
 
     async def test_delegate_preloads_skills_then_plans(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(
+        llm.gate = AsyncMock(
             return_value=_response(
                 tool_calls=[_delegate_call(skills=["csv-summary", "nonexistent"])]
             )
         )
         llm.plan = AsyncMock(return_value=_response("Here's the summary."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         session._skill_store = _mock_skill_store()
 
         reply = await session.turn("summarize data.csv")
@@ -244,33 +244,33 @@ class TestSessionRouting:
 
     async def test_delegate_streaming_reaches_planning(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(return_value=_response(tool_calls=[_delegate_call()]))
+        llm.gate = AsyncMock(return_value=_response(tool_calls=[_delegate_call()]))
 
         async def _plan_stream(**kwargs):
             yield StreamTextDelta(text="Working on it.")
             yield StreamComplete(response=_response("Working on it."))
 
         llm.plan_stream = _plan_stream
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         events = [e async for e in session.turn_stream("analyze data.csv")]
         assert any(
             isinstance(e, StreamTextDelta) and e.text == "Working on it." for e in events
         )
 
-    async def test_router_failure_falls_back_to_planning(self):
+    async def test_thalamus_failure_falls_back_to_planning(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(side_effect=RuntimeError("router down"))
+        llm.gate = AsyncMock(side_effect=RuntimeError("thalamus down"))
         llm.plan = AsyncMock(return_value=_response("Handled anyway."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         reply = await session.turn("hi")
         assert reply == "Handled anyway."
         llm.plan.assert_called_once()
 
-    async def test_image_turns_skip_router(self):
+    async def test_image_turns_skip_thalamus(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock()
+        llm.gate = AsyncMock()
         llm.plan = AsyncMock(return_value=_response("Nice chart."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         reply = await session.turn(
             [
                 {"type": "text", "text": "what's in this image?"},
@@ -278,10 +278,10 @@ class TestSessionRouting:
             ]
         )
         assert reply == "Nice chart."
-        llm.route.assert_not_called()
+        llm.gate.assert_not_called()
 
 
-class TestLLMClientRouterRole:
+class TestLLMClientThalamusRole:
     async def test_route_defaults_to_coding_role(self):
         from anton.core.llm.client import LLMClient
 
@@ -294,26 +294,26 @@ class TestLLMClientRouterRole:
             coding_provider=coding,
             coding_model="small-model",
         )
-        assert client.router_model == "small-model"
-        await client.route(system="s", messages=[{"role": "user", "content": "x"}])
+        assert client.thalamus_model == "small-model"
+        await client.gate(system="s", messages=[{"role": "user", "content": "x"}])
         assert coding.complete.call_args.kwargs["model"] == "small-model"
         planning.complete.assert_not_called()
 
-    async def test_route_uses_explicit_router_role(self):
+    async def test_route_uses_explicit_thalamus_role(self):
         from anton.core.llm.client import LLMClient
 
         planning = AsyncMock()
         coding = AsyncMock()
-        router = AsyncMock()
-        router.complete = AsyncMock(return_value=_response("ok"))
+        thalamus = AsyncMock()
+        thalamus.complete = AsyncMock(return_value=_response("ok"))
         client = LLMClient(
             planning_provider=planning,
             planning_model="big-model",
             coding_provider=coding,
             coding_model="small-model",
-            router_provider=router,
-            router_model="tiny-model",
+            thalamus_provider=thalamus,
+            thalamus_model="tiny-model",
         )
-        await client.route(system="s", messages=[{"role": "user", "content": "x"}])
-        assert router.complete.call_args.kwargs["model"] == "tiny-model"
+        await client.gate(system="s", messages=[{"role": "user", "content": "x"}])
+        assert thalamus.complete.call_args.kwargs["model"] == "tiny-model"
         coding.complete.assert_not_called()

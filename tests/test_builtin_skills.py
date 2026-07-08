@@ -1,10 +1,10 @@
 """Tests for built-in skills (ENG-648 Phase 2).
 
 The big how-to-build tutorials moved out of the always-on system prompt
-into built-in skills loaded via recall_skill (or router preload). These
+into built-in skills loaded via recall_skill (or thalamus preload). These
 tests pin the three load-bearing properties: the base prompt no longer
 carries the tutorials but does list the built-ins, recall resolves
-built-ins (shadowing the store), and the router preload path injects
+built-ins (shadowing the store), and the thalamus preload path injects
 built-in content.
 """
 
@@ -101,10 +101,10 @@ class TestRecallBuiltin:
         assert "NO MATCH" in result or "closest" in result.lower()
 
 
-class TestRouterBuiltinPreload:
+class TestThalamusBuiltinPreload:
     async def test_delegation_preloads_builtin(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(
+        llm.gate = AsyncMock(
             return_value=LLMResponse(
                 content="",
                 tool_calls=[
@@ -125,22 +125,22 @@ class TestRouterBuiltinPreload:
                 stop_reason="end_turn",
             )
         )
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         reply = await session.turn("build me a sales dashboard")
         assert reply == "Building it."
         tool_use = session.history[1]["content"][0]
         assert tool_use["input"] == {"label": "html-dashboards"}
         assert "REROUND DISCIPLINE" in session.history[2]["content"][0]["content"]
 
-    async def test_router_prompt_lists_builtins(self):
+    async def test_thalamus_prompt_lists_builtins(self):
         llm = make_mock_llm()
-        llm.route = AsyncMock(
+        llm.gate = AsyncMock(
             return_value=LLMResponse(
                 content="hi", usage=Usage(), stop_reason="end_turn"
             )
         )
-        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
         await session.turn("hello")
-        system = llm.route.call_args.kwargs["system"]
+        system = llm.gate.call_args.kwargs["system"]
         for label in BUILTIN_SKILLS:
             assert f"`{label}`" in system

@@ -54,11 +54,11 @@ _INPUT_SCHEMA = {
 def format_skill_response(skill, *, warning: str = "") -> str:
     """Render the recall payload sent back to the LLM as a tool result.
 
-    Public because the router's delegation path (see
+    Public because the thalamus's delegation path (see
     ``ChatSession._inject_recalled_skills``) synthesizes the exact same
     tool-result shape when it preloads skills, so the planning model
     sees an identical payload whether it recalled the skill itself or
-    the router preloaded it.
+    the thalamus preloaded it.
     """
     parts: list[str] = []
     if warning:

@@ -40,20 +40,20 @@ class LLMClient:
         planning_model: str,
         coding_provider: LLMProvider,
         coding_model: str,
-        router_provider: LLMProvider | None = None,
-        router_model: str | None = None,
+        thalamus_provider: LLMProvider | None = None,
+        thalamus_model: str | None = None,
         max_tokens: int = 8192,
     ) -> None:
         self._planning_provider = planning_provider
         self._planning_model = planning_model
         self._coding_provider = coding_provider
         self._coding_model = coding_model
-        # Router role (ENG-648): the cheap front-model that decides
-        # respond-vs-delegate per turn. Defaults to the coding role so
-        # hosts that construct LLMClient directly (cowork-server) get a
-        # working router with no changes.
-        self._router_provider = router_provider or coding_provider
-        self._router_model = router_model or coding_model
+        # Thalamus role (ENG-648): the cheap front-model that gates each
+        # turn — respond-vs-delegate. Defaults to the coding role so hosts
+        # that construct LLMClient directly (cowork-server) get a working
+        # thalamus with no changes. See `anton.core.llm.thalamus`.
+        self._thalamus_provider = thalamus_provider or coding_provider
+        self._thalamus_model = thalamus_model or coding_model
         self._max_tokens = max_tokens
 
     async def plan(
@@ -104,16 +104,16 @@ class LLMClient:
         return self._coding_provider
 
     @property
-    def router_provider(self) -> LLMProvider:
-        """The LLM provider used for per-turn respond-vs-delegate routing."""
-        return self._router_provider
+    def thalamus_provider(self) -> LLMProvider:
+        """The LLM provider used for per-turn gating (respond-vs-delegate)."""
+        return self._thalamus_provider
 
     @property
-    def router_model(self) -> str:
-        """The model name used for per-turn respond-vs-delegate routing."""
-        return self._router_model
+    def thalamus_model(self) -> str:
+        """The model name used for per-turn gating (respond-vs-delegate)."""
+        return self._thalamus_model
 
-    async def route(
+    async def gate(
         self,
         *,
         system: str,
@@ -122,13 +122,13 @@ class LLMClient:
         tool_choice: dict | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
-        """One cheap routing call — see `anton.core.llm.router`.
+        """One cheap gating call — see `anton.core.llm.thalamus`.
 
-        No ``native_web_tools``: the router must never do work itself,
+        No ``native_web_tools``: the thalamus must never do work itself,
         only answer from context or delegate.
         """
-        return await self._router_provider.complete(
-            model=self._router_model,
+        return await self._thalamus_provider.complete(
+            model=self._thalamus_model,
             system=system,
             messages=messages,
             tools=tools,
@@ -342,16 +342,16 @@ class LLMClient:
         if coding_factory is None:
             raise ValueError(f"Unknown coding provider: {settings.coding_provider}")
 
-        # Router role — optional overrides; unset falls back to the coding
-        # provider/model inside __init__. No reasoning effort: routing is a
-        # single cheap classification-or-short-answer call.
-        router_provider = None
-        router_provider_name = getattr(settings, "router_provider", None)
-        if router_provider_name:
-            router_factory = providers.get(router_provider_name)
-            if router_factory is None:
-                raise ValueError(f"Unknown router provider: {router_provider_name}")
-            router_provider = router_factory(None)
+        # Thalamus role — optional overrides; unset falls back to the
+        # coding provider/model inside __init__. No reasoning effort:
+        # gating is a single cheap classification-or-short-answer call.
+        thalamus_provider = None
+        thalamus_provider_name = getattr(settings, "thalamus_provider", None)
+        if thalamus_provider_name:
+            thalamus_factory = providers.get(thalamus_provider_name)
+            if thalamus_factory is None:
+                raise ValueError(f"Unknown thalamus provider: {thalamus_provider_name}")
+            thalamus_provider = thalamus_factory(None)
 
         return cls(
             planning_provider=planning_factory(
@@ -362,7 +362,7 @@ class LLMClient:
                 getattr(settings, "coding_reasoning_effort", None)
             ),
             coding_model=settings.coding_model,
-            router_provider=router_provider,
-            router_model=getattr(settings, "router_model", None),
+            thalamus_provider=thalamus_provider,
+            thalamus_model=getattr(settings, "thalamus_model", None),
             max_tokens=getattr(settings, "max_tokens", 8192),
         )

@@ -95,11 +95,11 @@ per-conversation cost visibility. Only Langfuse trace passthrough.
 - Expected effect: ~90% input-price reduction on the static ~15K-token prefix for
   every call after the first, compounding across ≤25 rounds/turn.
 
-> **Status (2026-07-07):** Phase 3 (router) and Phase 2 (prompts→skills) are
-> implemented in this PR — measured base prompt: 45,511 → 18,847 chars
-> (~11,377 → ~4,711 tokens, −59%) in dashboards mode. Router prompt is
-> ~1.7K chars (~420 tokens), no tool schemas. Phase 1 (caching) is pending a
-> design decision with the `mindshub_inference` gateway (client-driven
+> **Status (2026-07-07):** Phase 3 (the **thalamus** gate) and Phase 2
+> (prompts→skills) are implemented in this PR — measured base prompt: 45,511 →
+> 18,847 chars (~11,377 → ~4,711 tokens, −59%) in dashboards mode. The thalamus
+> prompt is ~1.7K chars (~420 tokens), no tool schemas. Phase 1 (caching) is
+> pending a design decision with the `mindshub_inference` gateway (client-driven
 > `cache_control` passthrough vs the gateway's existing `cache_align`
 > heuristic); Phase 0 metrics will ride with that work. Phase 4 tracked
 > separately in cowork-server.
@@ -114,20 +114,35 @@ per-conversation cost visibility. Only Langfuse trace passthrough.
   `SCRATCHPAD_TOOL` singleton.
 - Expected effect: base system prompt ~11.4K → ~4.5K tokens.
 
-### Phase 3 — Cheap front-model tier (router/responder)
-- New LLM role in `LLMClient` (e.g. `router`) on a very cost-effective model
-  (Haiku-class). On each user turn it runs first with a minimal prompt (no
-  tutorials, no tool schemas) and decides:
-  1. **Respond directly** — the answer is derivable from conversation context, no
-     scratchpad/tools needed (greetings, follow-up questions about prior results,
-     rephrase/summarize asks).
-  2. **Delegate** — task needs tools/reasoning → hand off to the planning model,
-     including which built-in skills to preload (so the big model doesn't spend a
-     round calling `recall_skill`).
-- Escalation guard: if the cheap model's direct answer path hits anything requiring
-  tools, it must delegate rather than guess; user-visible behavior stays identical.
-- Also use this tier for classification/summarization jobs currently on the coding
-  role where appropriate.
+### Phase 3 — The thalamus (cheap front-model gate)
+
+Named after the brain's central relay: nearly every signal passes through the
+thalamus on the way to the cortex, and it *gates* what gets relayed up versus
+handled by a fast subcortical path — exactly the respond-vs-delegate decision.
+anton already names its subsystems after brain regions (Cortex, Cerebellum,
+Anterior Cingulate); the thalamus joins them. Lives in
+`anton/core/llm/thalamus.py`.
+
+- New `thalamus` role on `LLMClient` (`.gate(...)`), a very cost-effective model
+  (Haiku-class, defaults to the coding role). On each text turn it runs first
+  with a minimal prompt (no tutorials, no tool schemas) over a condensed
+  text-only history view and decides:
+  1. **Respond directly** (*tonic relay*) — the answer is derivable from
+     conversation context, no scratchpad/tools needed (greetings, follow-ups
+     about prior results, rephrase/summarize asks).
+  2. **Delegate** (*burst — alert the cortex*) — task needs tools/reasoning →
+     forced `delegate` tool call hands off to the planning model, naming which
+     built-in skills to preload (so the big model doesn't spend a round calling
+     `recall_skill`).
+- **Default-inhibit (the TRN gate):** every ambiguity resolves to delegate —
+  empty response, an answer over the output budget, any error, image turns.
+  Fails *open* so a mis-gate never drops a signal; user-visible behavior with
+  the gate on is identical to off, minus latency/cost on trivial turns.
+- **Corticothalamic feedback (future):** today the only top-down signal is the
+  skill list. The principled next step is letting recent cortical outcomes
+  (per-project delegation rate, last-turn tool usage) bias the gate. Seam is
+  documented at `thalamus.gate_turn`, not yet built.
+- Off by default (`ANTON_THALAMUS_ENABLED`) pending eval on a transcript corpus.
 
 ### Phase 4 — cowork-server diet (separate PR in cowork-server)
 - Cap/trim the per-turn suffix and attachment listing; bound hermes memory/datasource
