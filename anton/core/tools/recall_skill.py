@@ -51,8 +51,15 @@ _INPUT_SCHEMA = {
 }
 
 
-def _format_skill_response(skill, *, warning: str = "") -> str:
-    """Render the recall payload sent back to the LLM as a tool result."""
+def format_skill_response(skill, *, warning: str = "") -> str:
+    """Render the recall payload sent back to the LLM as a tool result.
+
+    Public because the router's delegation path (see
+    ``ChatSession._inject_recalled_skills``) synthesizes the exact same
+    tool-result shape when it preloads skills, so the planning model
+    sees an identical payload whether it recalled the skill itself or
+    the router preloaded it.
+    """
     parts: list[str] = []
     if warning:
         parts.append(warning.strip())
@@ -116,7 +123,7 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
     # input. If the LLM typo'd 'csv-sumary', we credit 'csv-summary'.
     store.increment_recommended(skill.label, stage=1)
 
-    return _format_skill_response(skill, warning=warning)
+    return format_skill_response(skill, warning=warning)
 
 
 RECALL_SKILL_TOOL = ToolDef(
@@ -127,4 +134,4 @@ RECALL_SKILL_TOOL = ToolDef(
 )
 
 
-__all__ = ["RECALL_SKILL_TOOL", "handle_recall_skill"]
+__all__ = ["RECALL_SKILL_TOOL", "format_skill_response", "handle_recall_skill"]

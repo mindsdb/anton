@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, List
 import os
@@ -25,6 +26,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    LLMResponse,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -33,6 +35,11 @@ from anton.core.llm.provider import (
     StreamToolResult,
     TokenLimitExceeded,
     ToolCall,
+)
+from anton.core.llm.router import (
+    ROUTE_RESPOND,
+    RouterDecision,
+    route_turn,
 )
 from anton.core.llm.tracing import (
     TraceContext,
@@ -73,6 +80,8 @@ from anton.core.settings import CoreSettings
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
 _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
+
+logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
@@ -148,6 +157,10 @@ class ChatSessionConfig:
     # None → fall back to today.
     started_at: datetime | None = None
     selection_elicitor: SelectionElicitor | None = None
+    # Cheap front-model routing (ENG-648). None (default) defers to the
+    # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
+    # explicit bool to override per session.
+    router_enabled: bool | None = None
 
 
 class ChatSession:
@@ -167,6 +180,15 @@ class ChatSession:
         self._resilience_nudge_at = s.resilience_nudge_at
         self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
+        # Router (ENG-648): explicit host override wins; otherwise the
+        # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
+        # tests pass bare CoreSettings-shaped objects.
+        self._router_enabled = (
+            config.router_enabled
+            if config.router_enabled is not None
+            else bool(getattr(s, "router_enabled", False))
+        )
+        self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -1378,6 +1400,91 @@ class ChatSession:
             # Cerebellum learning is best-effort, so just drop the buffer.
             cb.reset()
 
+    async def _route_turn(self) -> RouterDecision | None:
+        """Run the cheap routing call for the turn just appended to history.
+
+        Returns None — meaning "proceed to the planning model as if no
+        router existed" — on any router failure. Routing must never be
+        able to break a turn; it can only save one.
+        """
+        try:
+            summaries = (
+                self._skill_store.list_summaries()
+                if self._skill_store is not None
+                else []
+            )
+        except Exception:
+            summaries = []
+        try:
+            return await route_turn(
+                self._llm,
+                history=self._history,
+                skill_summaries=summaries,
+                max_tokens=self._router_max_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Router call failed (%s) — falling through to the planning model.",
+                exc,
+            )
+            return None
+
+    def _inject_recalled_skills(self, labels: list[str]) -> None:
+        """Preload router-named skills as a synthetic recall_skill exchange.
+
+        Appends an assistant `tool_use` + user `tool_result` pair to
+        history, byte-identical in payload to what the planning model
+        would have gotten by calling `recall_skill` itself — but without
+        spending a full-context planning round on the fetch. Labels must
+        match exactly (no fuzzy fallback: a wrong preload is worse than
+        none), unknown labels are dropped silently, and at most 3 skills
+        load per turn.
+        """
+        store = self._skill_store
+        if store is None or not labels:
+            return
+        from anton.core.tools.recall_skill import format_skill_response
+
+        tool_uses: list[dict] = []
+        results: list[dict] = []
+        seen: set[str] = set()
+        for label in labels:
+            label = (label or "").strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            if len(tool_uses) >= 3:
+                break
+            try:
+                skill = store.load(label)
+            except Exception:
+                skill = None
+            if skill is None:
+                continue
+            tu_id = f"router_recall_{self._turn_count + 1}_{len(tool_uses)}"
+            tool_uses.append(
+                {
+                    "type": "tool_use",
+                    "id": tu_id,
+                    "name": "recall_skill",
+                    "input": {"label": skill.label},
+                }
+            )
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tu_id,
+                    "content": format_skill_response(skill),
+                }
+            )
+            try:
+                store.increment_recommended(skill.label, stage=1)
+            except Exception:
+                pass
+        if tool_uses:
+            self._append_history({"role": "assistant", "content": tool_uses})
+            self._append_history({"role": "user", "content": results})
+
     async def turn(self, user_input: str | list[dict]) -> str:
         self._append_history({"role": "user", "content": user_input})
 
@@ -1386,6 +1493,26 @@ class ChatSession:
             if isinstance(user_input, str)
             else next((b["text"] for b in user_input if b.get("type") == "text"), "")
         )
+
+        # Cheap front-model routing (ENG-648). Text-only turns first hit
+        # the router model, which either answers trivial/from-context
+        # requests directly (skipping the full prompt + tools + planning
+        # model entirely) or delegates, optionally preloading skills.
+        # Image turns skip the router — attachments imply real work.
+        if self._router_enabled and isinstance(user_input, str):
+            decision = await self._route_turn()
+            if decision is not None and decision.action == ROUTE_RESPOND:
+                self._append_history(
+                    {"role": "assistant", "content": decision.text}
+                )
+                if self._cortex is not None and self._cortex.mode != "off":
+                    self._cortex.maybe_vacuum()
+                self._schedule_cerebellum_flush()
+                self._schedule_acc_flush()
+                return decision.text
+            if decision is not None and decision.skills:
+                self._inject_recalled_skills(decision.skills)
+
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
@@ -1582,7 +1709,34 @@ class ChatSession:
         )
 
         try:
-            while True:
+            # Cheap front-model routing (ENG-648). Text-only turns first
+            # hit the router model, which either answers trivial/from-
+            # context requests directly (skipping the full prompt + tool
+            # schemas + planning model entirely) or delegates, optionally
+            # preloading skills into history so the planning model doesn't
+            # spend a round on recall_skill. Image turns skip the router —
+            # attachments imply real work. The router buffers rather than
+            # streams: direct answers are short by construction
+            # (router_max_tokens), and a delegate decision must never leak
+            # preamble text to the user.
+            routed_direct = False
+            if self._router_enabled and isinstance(user_input, str):
+                decision = await self._route_turn()
+                if decision is not None and decision.action == ROUTE_RESPOND:
+                    self._append_history(
+                        {"role": "assistant", "content": decision.text}
+                    )
+                    assistant_text_parts.append(decision.text)
+                    yield StreamTextDelta(text=decision.text)
+                    yield StreamComplete(
+                        response=decision.response
+                        or LLMResponse(content=decision.text)
+                    )
+                    routed_direct = True
+                elif decision is not None and decision.skills:
+                    self._inject_recalled_skills(decision.skills)
+
+            while not routed_direct:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):

@@ -5,6 +5,17 @@ from pydantic_settings import BaseSettings
 class CoreSettings(BaseSettings):
     model_config = {"env_prefix": "ANTON_", "extra": "ignore"}
 
+    # Cheap front-model routing (ENG-648) — when enabled, every turn first
+    # hits the router model, which either answers trivial/from-context
+    # requests directly or delegates to the planning model (optionally
+    # preloading skills). Off by default until evaluated; flip with
+    # ANTON_ROUTER_ENABLED=true.
+    router_enabled: bool = False
+    # Output budget for the routing call. Deliberately small: a direct
+    # answer that doesn't fit here is evidence the turn wasn't trivial,
+    # and the router treats truncation as "delegate".
+    router_max_tokens: int = 1024
+
     # Session orchestration tuning
     max_tool_rounds: int = 25
     max_continuations: int = 3
