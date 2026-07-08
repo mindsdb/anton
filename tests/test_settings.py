@@ -215,3 +215,27 @@ class TestMindsCloudProviderNormalization:
         # Should build without raising; creds derived from the minds_* fields.
         LLMClient.from_settings(s)
         assert s.openai_base_url == "https://api.mindshub.ai/v1"
+
+    def test_minds_cloud_router_maps_to_openai_compatible(self, monkeypatch):
+        # ENG-660: the router role is validated by from_settings identically to
+        # planning/coding, so it must be normalized too — else a shared
+        # minds-cloud config re-crashes with "Unknown router provider".
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(router_provider="minds_cloud", _env_file=None)
+        assert s.router_provider == "openai-compatible"
+
+    def test_from_settings_does_not_crash_on_minds_cloud_router(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        from anton.core.llm.client import LLMClient
+        s = AntonSettings(
+            planning_provider="minds-cloud",
+            coding_provider="minds-cloud",
+            router_provider="minds-cloud",
+            minds_api_key="mdb_dummy",
+            minds_url="https://api.mindshub.ai/v1",
+            _env_file=None,
+        )
+        # Must build without "Unknown router provider: minds-cloud".
+        LLMClient.from_settings(s)

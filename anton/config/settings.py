@@ -36,7 +36,9 @@ class AntonSettings(CoreSettings):
     coding_provider: str = "anthropic"
     coding_model: str = "claude-haiku-4-5-20251001"
 
-    @field_validator("planning_provider", "coding_provider", mode="before")
+    @field_validator(
+        "planning_provider", "coding_provider", "router_provider", mode="before"
+    )
     @classmethod
     def _map_minds_cloud_to_openai_compatible(cls, v: object) -> object:
         """MindsHub is an OpenAI-compatible endpoint, so the CLI serves it via
@@ -48,6 +50,12 @@ class AntonSettings(CoreSettings):
         Normalise it here so both names resolve to the same working provider
         (ENG-655). Tolerant of case, surrounding whitespace, and the underscore
         spelling.
+
+        Covers ``router_provider`` too (ENG-660): ``LLMClient.from_settings``
+        validates the router role identically, so without this a shared
+        ``minds-cloud`` config would re-crash with ``Unknown router provider:
+        minds-cloud`` — the same ENG-655 bug for the routing role. Keep every
+        provider field in this decorator's list.
         """
         if isinstance(v, str) and v.strip().lower().replace("_", "-") == "minds-cloud":
             return "openai-compatible"
