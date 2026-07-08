@@ -136,6 +136,29 @@ class LLMClient:
             max_tokens=max_tokens or self._max_tokens,
         )
 
+    async def summarize(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """History-compaction call — runs on the thalamus (routing) role.
+
+        The cheap front-model that gates turns also owns conversation
+        summarization, so a host can expose a single "routing and
+        summarization" model choice. Falls back to the coding role when
+        no thalamus model is configured (the thalamus_* kwargs default to
+        the coding role in __init__), so this is behavior-preserving
+        unless a distinct model is selected.
+        """
+        return await self._thalamus_provider.complete(
+            model=self._thalamus_model,
+            system=system,
+            messages=messages,
+            max_tokens=max_tokens or self._max_tokens,
+        )
+
     @property
     def coding_model(self) -> str:
         """The model name used for coding/skill execution."""

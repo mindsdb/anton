@@ -819,11 +819,13 @@ class ChatSession:
         self._tracked_backends.clear()
 
     async def _summarize_history(self) -> None:
-        """Compress old conversation turns into a summary using the coding model.
+        """Compress old conversation turns into a summary.
 
         Splits history into old (first 60%) and recent (last 40%), keeping at
-        least 4 recent turns.  The old portion is summarized by the fast coding
-        model and replaced with a single user message.
+        least 4 recent turns. The old portion is summarized by the routing/
+        summarization model (the thalamus role, which falls back to the coding
+        model when no distinct one is configured) and replaced with a single
+        user message.
         """
         if len(self._history) < 6:
             return  # Too short to summarize
@@ -911,7 +913,7 @@ class ChatSession:
             # 3b-full: a structured, in-place-updated STATE RECORD rather than a
             # freeform blob — so "Remaining" work survives compaction instead of
             # being flattened into prose.
-            summary_response = await self._llm.code(
+            summary_response = await self._llm.summarize(
                 system=(
                     "You compact an agent's earlier conversation into a terse, factual "
                     "STATE RECORD (not prose). Output only these sections, omitting any "

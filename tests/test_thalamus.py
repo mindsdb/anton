@@ -317,3 +317,35 @@ class TestLLMClientThalamusRole:
         await client.gate(system="s", messages=[{"role": "user", "content": "x"}])
         assert thalamus.complete.call_args.kwargs["model"] == "tiny-model"
         coding.complete.assert_not_called()
+
+    async def test_summarize_runs_on_thalamus_role(self):
+        from anton.core.llm.client import LLMClient
+
+        coding = AsyncMock()
+        thalamus = AsyncMock()
+        thalamus.complete = AsyncMock(return_value=_response("summary"))
+        client = LLMClient(
+            planning_provider=AsyncMock(),
+            planning_model="big-model",
+            coding_provider=coding,
+            coding_model="small-model",
+            thalamus_provider=thalamus,
+            thalamus_model="tiny-model",
+        )
+        await client.summarize(system="s", messages=[{"role": "user", "content": "x"}])
+        assert thalamus.complete.call_args.kwargs["model"] == "tiny-model"
+        coding.complete.assert_not_called()
+
+    async def test_summarize_defaults_to_coding_when_no_thalamus(self):
+        from anton.core.llm.client import LLMClient
+
+        coding = AsyncMock()
+        coding.complete = AsyncMock(return_value=_response("summary"))
+        client = LLMClient(
+            planning_provider=AsyncMock(),
+            planning_model="big-model",
+            coding_provider=coding,
+            coding_model="small-model",
+        )
+        await client.summarize(system="s", messages=[{"role": "user", "content": "x"}])
+        assert coding.complete.call_args.kwargs["model"] == "small-model"
