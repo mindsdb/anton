@@ -7,9 +7,18 @@ import shutil
 import subprocess
 import threading
 import urllib.request
+from pathlib import Path
 
 
 _TOTAL_TIMEOUT = 10  # Hard ceiling — update check never blocks startup longer than this
+
+# Records the last release tag whose force-reinstall did NOT take (the installed
+# version never matched the tag). A fresh terminal would otherwise re-run
+# `uv tool install --force` for that same doomed tag on every launch — which can
+# corrupt the running tool env (partial rich/typer, or the package vanishing),
+# especially on Windows (ENG-655). We suppress re-attempting the SAME tag until a
+# newer one appears.
+_SKIP_MARKER = Path("~/.anton/.update_skip_tag").expanduser()
 
 _RELEASES_LATEST_URL = "https://api.github.com/repos/mindsdb/anton/releases/latest"
 _GITHUB_API_HEADERS = {"Accept": "application/vnd.github+json"}
@@ -85,6 +94,17 @@ def _check_and_update(result: dict, settings) -> None:
     if remote_ver <= local_ver:
         return
 
+    # Anti-thrash: if a previous run already force-reinstalled this exact tag and
+    # it didn't take (installed version never matched — e.g. a tag/metadata
+    # mismatch), don't reinstall it again. Re-running `uv tool install --force`
+    # of the running tool every launch is what corrupts the env (ENG-655); wait
+    # for a genuinely newer tag instead.
+    try:
+        if _SKIP_MARKER.is_file() and _SKIP_MARKER.read_text().strip() == latest_tag:
+            return
+    except Exception:
+        pass
+
     # Newer version available — reinstall from the specific release tag
     messages.append(f"  Updating anton {local_ver} \u2192 {remote_ver}...")
 
@@ -110,11 +130,23 @@ def _check_and_update(result: dict, settings) -> None:
         messages.append("  [dim]Update could not be verified, continuing...[/]")
         return
     if installed_ver != remote_ver:
+        # Remember this tag so we don't force-reinstall it again next launch
+        # (see _SKIP_MARKER) \u2014 that repeated reinstall is what bricks installs.
+        try:
+            _SKIP_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            _SKIP_MARKER.write_text(latest_tag)
+        except Exception:
+            pass
         messages.append(
             "  [dim]Update skipped: installed Anton version does not match the latest release tag.[/]"
         )
         return
 
+    # Success \u2014 clear any stale skip marker so a future re-install isn't blocked.
+    try:
+        _SKIP_MARKER.unlink(missing_ok=True)
+    except Exception:
+        pass
     messages.append("  \u2713 Updated!")
     result["new_version"] = remote_version_str
 
