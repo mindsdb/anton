@@ -308,6 +308,34 @@ class TestNonInteractiveSave:
         assert "api_key" in printed
 
     @pytest.mark.asyncio
+    async def test_redacted_and_env_label_markers_are_dropped(self, vault_dir):
+        """User-message scrub markers ([REDACTED_*], [<ENV_VAR>]) must not be vaulted."""
+        session = _make_session(vault_dir)
+        interactive = _fake_interactive(session)
+        with patch(
+            "anton.commands.datasource.handle_connect_datasource", new=interactive
+        ):
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "posthog",
+                    "known_variables": {
+                        "api_key": "[REDACTED_API_KEY]",
+                        "host": "[OPENAI_API_KEY]",
+                    },
+                },
+            )
+
+        interactive.assert_called_once()
+        assert session._data_vault.list_connections() == []
+        printed = " ".join(
+            str(c.args[0])
+            for c in session._console.print.call_args_list
+            if c.args
+        )
+        assert "scrubbed-placeholder" in printed
+
+    @pytest.mark.asyncio
     async def test_mixed_real_and_scrubbed_values(self, vault_dir, tmp_path):
         """Real values are saved; scrubbed placeholders are dropped with a warning."""
         session = _make_session(vault_dir)
