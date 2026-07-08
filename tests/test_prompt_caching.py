@@ -11,6 +11,7 @@ Invariants that matter:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from anton.core.llm.anthropic import (
@@ -18,6 +19,7 @@ from anton.core.llm.anthropic import (
     _system_param,
     _usage_from,
 )
+from anton.core.llm.openai import _usage_from_openai
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.llm.provider import SystemPrompt
 from anton.core.session import ChatSession, ChatSessionConfig
@@ -126,6 +128,45 @@ class TestCacheAwareUsage:
         assert usage.cache_read_input_tokens == 0
         assert usage.cache_creation_input_tokens == 0
         assert abs(usage.context_pressure - 0.01) < 1e-9
+
+
+class TestOpenAIUsageMapping:
+    """OpenAI-envelope usage → Usage, with gateway cache fields split out.
+
+    OpenAI semantics: prompt_tokens is the TOTAL prompt. Gateways that proxy
+    Anthropic (mdb.ai) report cache reads in prompt_tokens_details.cached_tokens
+    and cache writes in a cache_creation_input_tokens extension.
+    """
+
+    def test_gateway_cache_fields_split_out(self):
+        usage = SimpleNamespace(
+            prompt_tokens=140_000,
+            completion_tokens=50,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=130_000),
+            cache_creation_input_tokens=2_000,
+        )
+        u = _usage_from_openai("claude-sonnet-4-6", usage)
+        assert u.input_tokens == 8_000  # fresh portion only
+        assert u.cache_read_input_tokens == 130_000
+        assert u.cache_creation_input_tokens == 2_000
+        # Pressure on the TOTAL (140k / 200k window) — compaction correctness.
+        assert abs(u.context_pressure - 0.7) < 1e-9
+
+    def test_plain_usage_without_cache_fields(self):
+        usage = SimpleNamespace(prompt_tokens=1_000, completion_tokens=10)
+        u = _usage_from_openai("gpt-5", usage)
+        assert u.input_tokens == 1_000
+        assert u.cache_read_input_tokens == 0
+        assert u.cache_creation_input_tokens == 0
+
+    def test_missing_usage_is_zeroes(self):
+        u = _usage_from_openai("gpt-5", None)
+        assert (u.input_tokens, u.output_tokens, u.context_pressure) == (0, 0, 0.0)
+
+    def test_mock_or_null_fields_coerce_to_zero(self):
+        u = _usage_from_openai("gpt-5", MagicMock(prompt_tokens=100, completion_tokens=1))
+        assert u.input_tokens == 100  # mock cache fields coerce to 0, not garbage
+        assert u.cache_read_input_tokens == 0
 
 
 class TestSessionSystemPrompt:

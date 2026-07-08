@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from typing import Any
 
 import openai
 from openai import AsyncAzureOpenAI
@@ -510,6 +511,36 @@ def build_chat_completion_kwargs(
     return kwargs
 
 
+def _usage_from_openai(model: str, usage_obj: Any) -> Usage:
+    """chat.completions usage → Usage with prompt-cache components split out.
+
+    OpenAI semantics: ``prompt_tokens`` is the TOTAL prompt (cached included),
+    with the cached-read portion in ``prompt_tokens_details.cached_tokens``
+    (reported by OpenAI's automatic caching and by gateways that proxy
+    Anthropic, e.g. mdb.ai) and cache writes in the non-standard
+    ``cache_creation_input_tokens`` extension some gateways add. To match the
+    Anthropic provider's field semantics, ``input_tokens`` is reduced to the
+    FRESH portion while ``context_pressure`` uses the total — compaction must
+    see the real window occupancy.
+    """
+
+    def _int(value: Any) -> int:
+        return value if isinstance(value, int) else 0
+
+    prompt_total = _int(getattr(usage_obj, "prompt_tokens", 0)) if usage_obj else 0
+    completion = _int(getattr(usage_obj, "completion_tokens", 0)) if usage_obj else 0
+    details = getattr(usage_obj, "prompt_tokens_details", None) if usage_obj else None
+    cache_read = _int(getattr(details, "cached_tokens", 0)) if details else 0
+    cache_creation = _int(getattr(usage_obj, "cache_creation_input_tokens", 0)) if usage_obj else 0
+    return Usage(
+        input_tokens=max(prompt_total - cache_read - cache_creation, 0),
+        output_tokens=completion,
+        context_pressure=compute_context_pressure(model, prompt_total),
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=cache_creation,
+    )
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -758,16 +789,10 @@ class OpenAIProvider(LLMProvider):
                     )
                 )
 
-        usage_obj = response.usage
-        input_tokens = usage_obj.prompt_tokens if usage_obj else 0
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
-            usage=Usage(
-                input_tokens=input_tokens,
-                output_tokens=usage_obj.completion_tokens if usage_obj else 0,
-                context_pressure=compute_context_pressure(model, input_tokens),
-            ),
+            usage=_usage_from_openai(model, response.usage),
             stop_reason=choice.finish_reason,
         )
 
@@ -818,8 +843,7 @@ class OpenAIProvider(LLMProvider):
 
         content_text = ""
         tool_calls: list[ToolCall] = []
-        input_tokens = 0
-        output_tokens = 0
+        usage_obj = None
         stop_reason: str | None = None
 
         # Track tool call deltas by index
@@ -829,8 +853,7 @@ class OpenAIProvider(LLMProvider):
             stream = await self._client.chat.completions.create(**kwargs)
             async for chunk in stream:
                 if chunk.usage:
-                    input_tokens = chunk.usage.prompt_tokens
-                    output_tokens = chunk.usage.completion_tokens
+                    usage_obj = chunk.usage
 
                 if not chunk.choices:
                     continue
@@ -927,11 +950,7 @@ class OpenAIProvider(LLMProvider):
             response=LLMResponse(
                 content=content_text,
                 tool_calls=tool_calls,
-                usage=Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
-                ),
+                usage=_usage_from_openai(model, usage_obj),
                 stop_reason=stop_reason,
             )
         )
@@ -1052,6 +1071,7 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read = 0
         stop_reason: str | None = None
 
         # Map output_index → in-flight function-call state. Responses API uses
@@ -1126,6 +1146,12 @@ class OpenAIProvider(LLMProvider):
                         if usage is not None:
                             input_tokens = getattr(usage, "input_tokens", 0) or 0
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
+                            # Responses API: input_tokens is the TOTAL prompt;
+                            # OpenAI's automatic caching breaks the cached
+                            # portion out in input_tokens_details.
+                            _details = getattr(usage, "input_tokens_details", None)
+                            cache_read = getattr(_details, "cached_tokens", 0) if _details else 0
+                            cache_read = cache_read if isinstance(cache_read, int) else 0
                         stop_reason = getattr(final_response, "status", None)
         except openai.BadRequestError as exc:
             msg = str(exc).lower()
@@ -1159,9 +1185,13 @@ class OpenAIProvider(LLMProvider):
                 content=content_text,
                 tool_calls=tool_calls,
                 usage=Usage(
-                    input_tokens=input_tokens,
+                    # input_tokens = fresh portion; pressure uses the total —
+                    # same field semantics as the chat-completions and
+                    # Anthropic paths.
+                    input_tokens=max(input_tokens - cache_read, 0),
                     output_tokens=output_tokens,
                     context_pressure=compute_context_pressure(model, input_tokens),
+                    cache_read_input_tokens=cache_read,
                 ),
                 stop_reason=stop_reason,
             )
@@ -1204,14 +1234,20 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     # which a bare getattr default does NOT catch. Mirrors the streaming path.
     input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    _details = getattr(usage, "input_tokens_details", None) if usage else None
+    cache_read = getattr(_details, "cached_tokens", 0) if _details else 0
+    cache_read = cache_read if isinstance(cache_read, int) else 0
 
     return LLMResponse(
         content=content_text,
         tool_calls=tool_calls,
         usage=Usage(
-            input_tokens=input_tokens,
+            # input_tokens = fresh portion; pressure uses the total — same
+            # field semantics as the chat-completions and Anthropic paths.
+            input_tokens=max(input_tokens - cache_read, 0),
             output_tokens=output_tokens,
             context_pressure=compute_context_pressure(model, input_tokens),
+            cache_read_input_tokens=cache_read,
         ),
         stop_reason=getattr(response, "status", None),
     )
