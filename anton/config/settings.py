@@ -46,9 +46,10 @@ class AntonSettings(CoreSettings):
         which the CLI's ``LLMClient`` registry has no entry for — so a shared
         config crashed the CLI with ``Unknown planning provider: minds-cloud``.
         Normalise it here so both names resolve to the same working provider
-        (ENG-655). Accept the underscore spelling defensively too.
+        (ENG-655). Tolerant of case, surrounding whitespace, and the underscore
+        spelling.
         """
-        if isinstance(v, str) and v.replace("_", "-") == "minds-cloud":
+        if isinstance(v, str) and v.strip().lower().replace("_", "-") == "minds-cloud":
             return "openai-compatible"
         return v
 

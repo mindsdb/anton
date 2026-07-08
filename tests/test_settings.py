@@ -185,6 +185,13 @@ class TestMindsCloudProviderNormalization:
         s = AntonSettings(planning_provider="minds_cloud", _env_file=None)
         assert s.planning_provider == "openai-compatible"
 
+    def test_case_and_whitespace_tolerant(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        for variant in ("MINDS-CLOUD", " Minds_Cloud ", "minds_cloud"):
+            s = AntonSettings(planning_provider=variant, _env_file=None)
+            assert s.planning_provider == "openai-compatible", variant
+
     def test_other_providers_pass_through(self, monkeypatch):
         for k in _ANTON_MODEL_KEYS:
             monkeypatch.delenv(k, raising=False)
