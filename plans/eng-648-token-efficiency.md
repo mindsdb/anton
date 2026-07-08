@@ -142,7 +142,11 @@ Anterior Cingulate); the thalamus joins them. Lives in
   skill list. The principled next step is letting recent cortical outcomes
   (per-project delegation rate, last-turn tool usage) bias the gate. Seam is
   documented at `thalamus.gate_turn`, not yet built.
-- Off by default (`ANTON_THALAMUS_ENABLED`) pending eval on a transcript corpus.
+- Off by default (`ANTON_ROUTER_ENABLED`) pending eval on a transcript corpus.
+  Naming split: the mechanism is the **thalamus** (class, module, `gate()`),
+  but the configuration surface stays **`router_*`** (`router_enabled`,
+  `router_provider`, `router_model`) so it reads clearly and matches
+  cowork-server's settings 1:1.
 
 ### Phase 4 — cowork-server diet (separate PR in cowork-server)
 - Cap/trim the per-turn suffix and attachment listing; bound hermes memory/datasource

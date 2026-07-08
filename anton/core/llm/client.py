@@ -365,16 +365,17 @@ class LLMClient:
         if coding_factory is None:
             raise ValueError(f"Unknown coding provider: {settings.coding_provider}")
 
-        # Thalamus role — optional overrides; unset falls back to the
-        # coding provider/model inside __init__. No reasoning effort:
-        # gating is a single cheap classification-or-short-answer call.
-        thalamus_provider = None
-        thalamus_provider_name = getattr(settings, "thalamus_provider", None)
-        if thalamus_provider_name:
-            thalamus_factory = providers.get(thalamus_provider_name)
-            if thalamus_factory is None:
-                raise ValueError(f"Unknown thalamus provider: {thalamus_provider_name}")
-            thalamus_provider = thalamus_factory(None)
+        # Router role (settings vocabulary) → thalamus role (mechanism).
+        # Optional overrides; unset falls back to the coding provider/model
+        # inside __init__. No reasoning effort: gating is a single cheap
+        # classification-or-short-answer call.
+        router_provider = None
+        router_provider_name = getattr(settings, "router_provider", None)
+        if router_provider_name:
+            router_factory = providers.get(router_provider_name)
+            if router_factory is None:
+                raise ValueError(f"Unknown router provider: {router_provider_name}")
+            router_provider = router_factory(None)
 
         return cls(
             planning_provider=planning_factory(
@@ -385,7 +386,7 @@ class LLMClient:
                 getattr(settings, "coding_reasoning_effort", None)
             ),
             coding_model=settings.coding_model,
-            thalamus_provider=thalamus_provider,
-            thalamus_model=getattr(settings, "thalamus_model", None),
+            thalamus_provider=router_provider,
+            thalamus_model=getattr(settings, "router_model", None),
             max_tokens=getattr(settings, "max_tokens", 8192),
         )

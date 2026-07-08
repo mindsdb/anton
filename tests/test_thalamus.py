@@ -184,7 +184,7 @@ class TestSessionThalamus:
         llm = make_mock_llm()
         llm.plan = AsyncMock()
         llm.gate = AsyncMock(return_value=_response("Four."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         reply = await session.turn("what is 2+2?")
         assert reply == "Four."
         llm.plan.assert_not_called()
@@ -202,7 +202,7 @@ class TestSessionThalamus:
             yield  # pragma: no cover
 
         llm.plan_stream = _plan_stream
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         events = [e async for e in session.turn_stream("what is 2+2?")]
         deltas = [e for e in events if isinstance(e, StreamTextDelta)]
         completes = [e for e in events if isinstance(e, StreamComplete)]
@@ -218,7 +218,7 @@ class TestSessionThalamus:
             )
         )
         llm.plan = AsyncMock(return_value=_response("Here's the summary."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         session._skill_store = _mock_skill_store()
 
         reply = await session.turn("summarize data.csv")
@@ -251,7 +251,7 @@ class TestSessionThalamus:
             yield StreamComplete(response=_response("Working on it."))
 
         llm.plan_stream = _plan_stream
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         events = [e async for e in session.turn_stream("analyze data.csv")]
         assert any(
             isinstance(e, StreamTextDelta) and e.text == "Working on it." for e in events
@@ -261,7 +261,7 @@ class TestSessionThalamus:
         llm = make_mock_llm()
         llm.gate = AsyncMock(side_effect=RuntimeError("thalamus down"))
         llm.plan = AsyncMock(return_value=_response("Handled anyway."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         reply = await session.turn("hi")
         assert reply == "Handled anyway."
         llm.plan.assert_called_once()
@@ -270,7 +270,7 @@ class TestSessionThalamus:
         llm = make_mock_llm()
         llm.gate = AsyncMock()
         llm.plan = AsyncMock(return_value=_response("Nice chart."))
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         reply = await session.turn(
             [
                 {"type": "text", "text": "what's in this image?"},

@@ -158,9 +158,9 @@ class ChatSessionConfig:
     started_at: datetime | None = None
     selection_elicitor: SelectionElicitor | None = None
     # Cheap front-model routing (ENG-648). None (default) defers to the
-    # settings' `thalamus_enabled` (ANTON_THALAMUS_ENABLED); hosts pass an
+    # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
     # explicit bool to override per session.
-    thalamus_enabled: bool | None = None
+    router_enabled: bool | None = None
 
 
 class ChatSession:
@@ -181,14 +181,14 @@ class ChatSession:
         self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
         # Router (ENG-648): explicit host override wins; otherwise the
-        # settings flag (ANTON_THALAMUS_ENABLED). getattr-guarded because
+        # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
         # tests pass bare CoreSettings-shaped objects.
-        self._thalamus_enabled = (
-            config.thalamus_enabled
-            if config.thalamus_enabled is not None
-            else bool(getattr(s, "thalamus_enabled", False))
+        self._router_enabled = (
+            config.router_enabled
+            if config.router_enabled is not None
+            else bool(getattr(s, "router_enabled", False))
         )
-        self._thalamus_max_tokens = int(getattr(s, "thalamus_max_tokens", 1024))
+        self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -1425,7 +1425,7 @@ class ChatSession:
                 self._llm,
                 history=self._history,
                 skill_summaries=summaries,
-                max_tokens=self._thalamus_max_tokens,
+                max_tokens=self._router_max_tokens,
             )
         except Exception as exc:
             logger.warning(
@@ -1516,7 +1516,7 @@ class ChatSession:
         # requests directly (skipping the full prompt + tools + planning
         # model entirely) or delegates, optionally preloading skills.
         # Image turns skip the thalamus — attachments imply real work.
-        if self._thalamus_enabled and isinstance(user_input, str):
+        if self._router_enabled and isinstance(user_input, str):
             decision = await self._gate_turn()
             if decision is not None and decision.action == ACTION_RESPOND:
                 self._append_history(
@@ -1734,10 +1734,10 @@ class ChatSession:
             # spend a round on recall_skill. Image turns skip the thalamus —
             # attachments imply real work. The thalamus buffers rather than
             # streams: direct answers are short by construction
-            # (thalamus_max_tokens), and a delegate decision must never leak
+            # (router_max_tokens), and a delegate decision must never leak
             # preamble text to the user.
             routed_direct = False
-            if self._thalamus_enabled and isinstance(user_input, str):
+            if self._router_enabled and isinstance(user_input, str):
                 decision = await self._gate_turn()
                 if decision is not None and decision.action == ACTION_RESPOND:
                     self._append_history(

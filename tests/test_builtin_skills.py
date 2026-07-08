@@ -125,7 +125,7 @@ class TestThalamusBuiltinPreload:
                 stop_reason="end_turn",
             )
         )
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         reply = await session.turn("build me a sales dashboard")
         assert reply == "Building it."
         tool_use = session.history[1]["content"][0]
@@ -139,7 +139,7 @@ class TestThalamusBuiltinPreload:
                 content="hi", usage=Usage(), stop_reason="end_turn"
             )
         )
-        session = ChatSession(ChatSessionConfig(llm_client=llm, thalamus_enabled=True))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         await session.turn("hello")
         system = llm.gate.call_args.kwargs["system"]
         for label in BUILTIN_SKILLS:
