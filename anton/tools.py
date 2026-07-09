@@ -18,7 +18,11 @@ SECRET_NAME_TOKENS = (
     "password", "secret", "token", "api_key", "key",
     "auth", "credential", "private",
 )
-SCRUBBED_VALUE_RE = re.compile(r"^\[DS_\w+\]$")
+# All marker forms `scrub_credentials` emits: [DS_*] for vault secrets,
+# [<ENV_VAR>] labels for provider keys, [REDACTED_API_KEY] for shape matches.
+# User messages are scrubbed too, so the model may see these and echo them
+# back as known_variables — they must never be saved as real credentials.
+SCRUBBED_VALUE_RE = re.compile(r"^\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]$")
 
 
 def looks_secret(field_name: str) -> bool:
@@ -77,7 +81,7 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         console.print()
         console.print(
             f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
-            f"for {', '.join(dropped_scrubbed)} — those [DS_...] strings are "
+            f"for {', '.join(dropped_scrubbed)} — those bracketed strings are "
             f"scrub-markers, not real credentials. Pass the actual secret "
             f"values instead."
         )

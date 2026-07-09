@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from anton.core.session import _scrub_user_input
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
@@ -105,3 +106,36 @@ class TestScrubProviderKeys:
         result = scrub_credentials("sk-abc connecting to https://api.openai.com/v1")
         assert "sk-abc" in result
         assert "https://api.openai.com/v1" in result
+
+
+class TestScrubUserInput:
+    """User messages are scrubbed before entering session history (ENG-583)."""
+
+    def test_string_input_key_redacted(self):
+        result = _scrub_user_input(
+            "use this key: sk-ant-api03-abcdefghij1234567890XYZ"
+        )
+        assert "sk-ant-api03" not in result
+        assert "[REDACTED_API_KEY]" in result
+
+    def test_plain_string_unchanged(self):
+        text = "please connect me to my staging database"
+        assert _scrub_user_input(text) == text
+
+    def test_text_blocks_scrubbed_other_blocks_untouched(self):
+        blocks = [
+            {"type": "text", "text": "key is mdb_AAAAAAAAAA.BBBBBBBBBBBBCCCC"},
+            {"type": "image", "source": {"type": "base64", "data": "aGk="}},
+        ]
+        result = _scrub_user_input(blocks)
+        assert "mdb_AAAAAAAAAA" not in result[0]["text"]
+        assert "[REDACTED_API_KEY]" in result[0]["text"]
+        assert result[1] is blocks[1]
+
+    def test_known_secret_env_value_redacted_with_label(self, monkeypatch):
+        """A pasted value matching a stored provider secret gets its var label."""
+        key = "sk-proj-abcDEF1234567890abcDEF1234567890"
+        monkeypatch.setenv("OPENAI_API_KEY", key)
+        result = _scrub_user_input(f"my key is {key}")
+        assert key not in result
+        assert "[OPENAI_API_KEY]" in result
