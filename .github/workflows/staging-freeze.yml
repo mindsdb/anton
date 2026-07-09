@@ -1,80 +1,12 @@
 name: Staging Freeze
-
-# Locks the staging branch every Friday to begin the QA window.
-# The companion "Create staging to main release PR" workflow triggers
-# automatically after this workflow completes (via workflow_run).
-#
-# If staging has no unreleased changes (e.g. release was already shipped
-# earlier in the week), the freeze is skipped.
-#
-# Manual override: use the "Run workflow" button to freeze staging
-# at any time (e.g. early cutoff before a holiday).
-
 on:
   schedule:
-    # Friday 6am PST / 9am EST / 2pm UTC
-    - cron: '0 14 * * 5'
+    # Friday 13:47 UTC — off the top of the hour (GitHub's documented high-load
+    # slot) and off a DST-sensitive "6am PST" wording.
+    - cron: '47 13 * * 5'
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  freeze-staging:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check for unreleased changes
-        id: check
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          git fetch origin main staging
-          AHEAD=$(git rev-list --count origin/main..origin/staging)
-          SHOULD_FREEZE=true
-          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
-            if [ "$AHEAD" -eq 0 ] || git diff --quiet origin/main origin/staging; then
-              SHOULD_FREEZE=false
-            fi
-          fi
-          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
-          echo "should_freeze=$SHOULD_FREEZE" >> "$GITHUB_OUTPUT"
-          if [ "$SHOULD_FREEZE" != "true" ]; then
-            echo "staging is up to date with main — nothing to freeze."
-          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "manual freeze requested — freezing staging."
-          else
-            echo "staging is $AHEAD commit(s) ahead of main — freezing."
-          fi
-
-      - name: Validate release automation token
-        if: steps.check.outputs.should_freeze == 'true'
-        env:
-          RELEASE_AUTOMATION_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
-        run: |
-          if [ -z "$RELEASE_AUTOMATION_TOKEN" ]; then
-            echo "::error::RELEASE_AUTOMATION_TOKEN must be configured with Administration: write permission."
-            exit 1
-          fi
-
-      - name: Lock staging branch
-        if: steps.check.outputs.should_freeze == 'true'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
-          script: |
-            const branch = 'staging';
-            const setBranchLock = require('./.github/scripts/set-branch-lock');
-            await setBranchLock({ github, context, core, branch, locked: true });
-
-            core.summary.addRaw(
-              `## Staging branch FROZEN\n\n` +
-              `The \`${branch}\` branch has been **frozen** ` +
-              `at ${new Date().toISOString()}.`
-            );
-            await core.summary.write();
-            console.log('staging branch FROZEN');
+  freeze:
+    uses: mindsdb/github-actions/.github/workflows/staging-freeze.yml@main
+    secrets: inherit

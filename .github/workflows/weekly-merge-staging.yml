@@ -1,103 +1,14 @@
 name: Create staging to main release PR
-
 on:
-  # Triggers automatically after the Staging Freeze workflow completes
   workflow_run:
     workflows: ["Staging Freeze"]
     types: [completed]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   create-pr:
-    # Only run if the freeze succeeded (or if manually dispatched)
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate release automation token
-        env:
-          RELEASE_AUTOMATION_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
-        run: |
-          if [ -z "$RELEASE_AUTOMATION_TOKEN" ]; then
-            echo "::error::RELEASE_AUTOMATION_TOKEN must be configured with Pull requests: write permission."
-            exit 1
-          fi
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check for unreleased changes
-        id: check
-        run: |
-          set -euo pipefail
-          git fetch origin main staging
-          if git diff --quiet origin/main origin/staging; then
-            AHEAD=0
-          else
-            AHEAD=$(git rev-list --count origin/main..origin/staging)
-          fi
-          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
-          if [ "$AHEAD" -eq 0 ]; then
-            echo "staging is up to date with main — nothing to release."
-          else
-            echo "staging is $AHEAD commit(s) ahead of main."
-          fi
-
-      - name: Create or update PR
-        if: steps.check.outputs.ahead != '0'
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
-          AHEAD: ${{ steps.check.outputs.ahead }}
-        run: |
-          set -euo pipefail
-
-          # Check if a staging→main PR already exists
-          EXISTING=$(gh pr list --base main --head staging --state open --json number --jq '.[0].number // empty')
-
-          if [ -n "$EXISTING" ]; then
-            echo "PR #${EXISTING} already exists — skipping creation."
-            echo "::notice title=Weekly release PR::https://github.com/${{ github.repository }}/pull/${EXISTING}"
-            exit 0
-          fi
-
-          # Build commit list
-          COMMITS=$(git log --oneline --no-merges origin/main..origin/staging)
-          CONTRIBUTORS=$(git log --format='%an' origin/main..origin/staging | sort -u | sed 's/^/- /')
-
-          # Build PR body
-          BODY=$(cat <<EOF
-          ## Weekly release: staging → main
-
-          **${AHEAD} commit(s)** ready for production release.
-
-          ### Changes
-          \`\`\`
-          ${COMMITS}
-          \`\`\`
-
-          ### Contributors
-          ${CONTRIBUTORS}
-
-          ### Review checklist
-          - [ ] Staging has been validated
-          - [ ] No known blockers
-
-          > Created automatically at staging freeze time (Friday 6am PST / 9am EST). Merge on Sunday to release.
-          EOF
-          )
-
-          # Dedent (the heredoc inside the run block gets indented)
-          BODY=$(echo "$BODY" | sed 's/^          //')
-
-          PR_URL=$(gh pr create \
-            --base main \
-            --head staging \
-            --title "Weekly release: staging → main" \
-            --body "$BODY")
-          echo "::notice title=Weekly release PR::${PR_URL}"
+    uses: mindsdb/github-actions/.github/workflows/weekly-merge-staging.yml@main
+    secrets: inherit
