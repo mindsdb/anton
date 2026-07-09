@@ -51,6 +51,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SKILLS_ROOT = Path("~/.anton/skills").expanduser()
 
+# Read-only skills shipped inside the package. They appear in listings and
+# recall_skill lookups like user skills, but live in the codebase so every
+# install has them from the first session. A user/consolidator skill with the
+# same label shadows the built-in.
+_BUILTIN_SKILLS_ROOT = Path(__file__).parent / "builtin_skills"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
@@ -266,8 +272,16 @@ class SkillStore:
     on first access via check_migrate().
     """
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        builtin_root: Path | None = None,
+    ) -> None:
         self.root = Path(root) if root is not None else _DEFAULT_SKILLS_ROOT
+        # Resolved at construction so tests can monkeypatch the module default.
+        self.builtin_root = (
+            Path(builtin_root) if builtin_root is not None else _BUILTIN_SKILLS_ROOT
+        )
 
     # ── internal helpers ─────────────────────────────────────────────
 
@@ -311,18 +325,26 @@ class SkillStore:
     # ── reading ─────────────────────────────────────────────────────
 
     def load(self, label: str) -> Skill | None:
-        """Read a single skill by label. Returns None if absent or unreadable."""
-        if not self.root.is_dir():
-            return None
-        d = self._find_dir(label)
-        if d is None:
-            return None
+        """Read a single skill by label. Returns None if absent or unreadable.
 
-        d = check_migrate(d, self.root)
-        if d is None:
-            return None
+        User skills (under `root`) shadow built-in skills with the same label.
+        """
+        if self.root.is_dir():
+            d = self._find_dir(label)
+            if d is not None:
+                d = check_migrate(d, self.root)
+                if d is not None:
+                    return self._skill_from_dir(d)
+        return self._load_builtin(label)
 
-        return self._skill_from_dir(d)
+    def _load_builtin(self, label: str) -> Skill | None:
+        d = self.builtin_root / label.replace("_", "-")
+        if not d.is_dir():
+            return None
+        skill = self._skill_from_dir(d)
+        if skill is not None:
+            skill.provenance = "builtin"
+        return skill
 
     def _load_stats(self, label: str) -> SkillStats:
         path = self._skill_dir(label) / "stats.json"
@@ -340,23 +362,38 @@ class SkillStore:
         )
 
     def list_all(self) -> list[Skill]:
-        """Return every loadable skill, sorted by label."""
-        if not self.root.is_dir():
-            return []
+        """Return every loadable skill (built-ins included), sorted by label."""
         out: list[Skill] = []
-        for child in sorted(self.root.iterdir()):
-            if not child.is_dir():
-                continue
-            try:
-                child = check_migrate(child, self.root)
-                if child is None:
+        if self.root.is_dir():
+            for child in sorted(self.root.iterdir()):
+                if not child.is_dir():
                     continue
-            except OSError:
+                try:
+                    child = check_migrate(child, self.root)
+                    if child is None:
+                        continue
+                except OSError:
+                    continue
+                skill = self._skill_from_dir(child)
+                if skill is not None:
+                    out.append(skill)
+        seen = {s.label for s in out}
+        for child in self._builtin_dirs():
+            if child.name in seen:
                 continue
-            skill = self._skill_from_dir(child)
+            skill = self._load_builtin(child.name)
             if skill is not None:
                 out.append(skill)
+        out.sort(key=lambda s: s.label)
         return out
+
+    def _builtin_dirs(self) -> list[Path]:
+        if not self.builtin_root.is_dir():
+            return []
+        return sorted(
+            d for d in self.builtin_root.iterdir()
+            if d.is_dir() and (d / "SKILL.md").is_file()
+        )
 
     def list_summaries(self) -> list[dict]:
         """Lightweight listing for prompt-building.
@@ -364,27 +401,37 @@ class SkillStore:
         Returns dicts with keys: label, name, description.
         Reads only SKILL.md frontmatter, skips the body.
         """
-        if not self.root.is_dir():
-            return []
         out: list[dict] = []
-        for child in sorted(self.root.iterdir()):
-            if not child.is_dir():
-                continue
-            try:
-                child = check_migrate(child, self.root)
-                if child is None:
+        if self.root.is_dir():
+            for child in sorted(self.root.iterdir()):
+                if not child.is_dir():
                     continue
-            except OSError:
-                continue
-            fm = parse_skill_dir(child)
-            if fm is None:
-                continue
+                try:
+                    child = check_migrate(child, self.root)
+                    if child is None:
+                        continue
+                except OSError:
+                    continue
+                fm = parse_skill_dir(child)
+                if fm is None:
+                    continue
 
+                out.append({
+                    "label": fm.name,
+                    "name": fm.metadata.get("display_name", fm.name),
+                    "description": fm.description,
+                })
+        seen = {s["label"] for s in out}
+        for child in self._builtin_dirs():
+            fm = parse_skill_dir(child)
+            if fm is None or fm.name in seen:
+                continue
             out.append({
                 "label": fm.name,
                 "name": fm.metadata.get("display_name", fm.name),
                 "description": fm.description,
             })
+        out.sort(key=lambda s: s["label"])
         return out
 
     # ── writing ─────────────────────────────────────────────────────

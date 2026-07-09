@@ -47,3 +47,17 @@ def make_llm_response():
         )
 
     return _factory
+
+
+@pytest.fixture(autouse=True)
+def _no_builtin_skills(tmp_path_factory, monkeypatch):
+    """Point the built-in skills root at an empty dir for all tests.
+
+    Built-in skills (anton/core/memory/builtin_skills/) would otherwise appear
+    in every SkillStore listing and break empty-store assumptions. Tests that
+    exercise built-ins pass an explicit `builtin_root=` to SkillStore.
+    """
+    from anton.core.memory import skills as skills_mod
+
+    empty = tmp_path_factory.mktemp("no-builtin-skills")
+    monkeypatch.setattr(skills_mod, "_BUILTIN_SKILLS_ROOT", empty)
