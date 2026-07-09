@@ -312,6 +312,27 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+class ModelUnavailableError(ConnectionError):
+    """Raised when the gateway rejects the requested model with a structured 403.
+
+    The MindsHub gateway distinguishes two cases via ``error.code``:
+
+    - ``model_access_denied`` — the caller's plan tier doesn't include the
+      model (an upgrade fixes it).
+    - ``model_disabled`` — an admin kill switch (an upgrade does NOT fix it).
+
+    Subclasses ConnectionError so call sites that only know the legacy
+    ConnectionError mapping keep working unchanged; typed consumers
+    (cowork-server's turn-error mapping) read ``code``/``model`` to pick the
+    right user-facing remedy instead of string-matching.
+    """
+
+    def __init__(self, message: str, *, code: str, model: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.model = model
+
+
 @dataclass
 class ProviderConnectionInfo:
     """Serializable provider connection details.

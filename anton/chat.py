@@ -23,6 +23,7 @@ from anton.clipboard import (
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.core.llm.provider import (
+    ModelUnavailableError,
     TokenLimitExceeded,
     StreamComplete,
     StreamContextCompacted,
@@ -1886,7 +1887,15 @@ async def _chat_loop(
                     "  (anton) Switch LLM provider, update API key, or retry?",
                     choices=["setup", "retry", "s", "r"],
                     choices_display="setup/retry",
-                    default="retry" if isinstance(exc, ConnectionError) else "setup",
+                    # A ModelUnavailableError is a deterministic plan/kill-switch
+                    # gate — retrying re-sends the same doomed request — so steer
+                    # the default to "setup" (switch model / provider). Other
+                    # ConnectionErrors (transient) keep retry as the default.
+                    default=(
+                        "setup"
+                        if isinstance(exc, ModelUnavailableError)
+                        else ("retry" if isinstance(exc, ConnectionError) else "setup")
+                    ),
                 )
                 if choice in ("setup", "s"):
                     session = await handle_setup_models(

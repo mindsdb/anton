@@ -25,6 +25,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    ModelUnavailableError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -1612,8 +1613,12 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limit — don't retry, let the chat loop handle it
-                    if isinstance(_agent_exc, TokenLimitExceeded):
+                    # Token/billing limits and model-gate 403s are
+                    # deterministic — the auto-retry below would just re-send
+                    # the same doomed request (and burn its budget) before
+                    # failing anyway. Don't retry; let the chat loop / server
+                    # map them to their cards.
+                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
                         raise
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
@@ -1668,6 +1673,15 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
+                        except (TokenLimitExceeded, ModelUnavailableError):
+                            # Curated provider failures must FAIL the turn, not
+                            # get wrapped into assistant prose: the server maps
+                            # them to actionable error cards (token_limit /
+                            # model-unavailable), which can only fire when the
+                            # exception propagates. Wrapping them as text is
+                            # how "Server returned 403" ended up mid-chat with
+                            # "please rephrase your request" advice.
+                            raise
                         except Exception as e:
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
