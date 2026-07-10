@@ -61,8 +61,8 @@ class HippocampusProtocol(Protocol):
         """Return lessons tagged with the given topic slug."""
         ...
 
-    def recall_scratchpad_wisdom(self) -> str:
-        """Return procedural knowledge relevant to scratchpad execution."""
+    def recall_scratchpad_wisdom(self, token_budget: int = 2000) -> str:
+        """Return procedural knowledge relevant to scratchpad execution, within budget."""
         ...
 
     # --- read (Engrams, for inspection / CRUD UI) ---

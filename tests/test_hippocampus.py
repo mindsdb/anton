@@ -98,6 +98,36 @@ class TestRecallScratchpadWisdom:
         result = hc.recall_scratchpad_wisdom()
         assert "Always re-import" in result
 
+    def test_sorts_by_confidence_tier_then_recency(self, hc, mem_dir):
+        (mem_dir / "rules.md").write_text(
+            "# Rules\n\n## When\n"
+            "- HIGH_OLD_RULE <!-- confidence:high ts:2026-01-01 -->\n"
+            "- LOW_NEW_RULE <!-- confidence:low ts:2026-07-01 -->\n"
+            "- MEDIUM_MID_RULE <!-- confidence:medium ts:2026-04-01 -->\n"
+        )
+        (mem_dir / "lessons.md").write_text(
+            "# Lessons\n"
+            "- Scratchpad HIGH_NEW_LESSON fact <!-- confidence:high ts:2026-06-01 -->\n"
+        )
+        result = hc.recall_scratchpad_wisdom()
+
+        # High tier (newest first), then medium, then low last.
+        assert (
+            result.index("HIGH_NEW_LESSON")
+            < result.index("HIGH_OLD_RULE")
+            < result.index("MEDIUM_MID_RULE")
+            < result.index("LOW_NEW_RULE")
+        )
+
+    def test_budget_limits_output(self, hc, mem_dir):
+        entries = "\n".join(
+            f"- When rule number {i} with some extra padding words here" for i in range(30)
+        )
+        (mem_dir / "rules.md").write_text(f"# Rules\n\n## When\n{entries}\n")
+        result = hc.recall_scratchpad_wisdom(token_budget=150)
+        entry_count = result.count("- When rule")
+        assert 0 < entry_count < 30
+
 
 class TestEncodeRule:
     def test_creates_rules_file(self, hc, mem_dir):
