@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import json
+import logging
 from collections.abc import AsyncIterator
+from typing import NoReturn
 
 import anthropic
+
+from anton.utils.datasources import scrub_credentials
 
 from .provider import safe_parse_tool_input
 from .provider import (
@@ -17,10 +20,54 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    TokenLimitExceeded,
     ToolCall,
+    TransientProviderError,
     Usage,
+    classify_transient,
     compute_context_pressure,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _raise_for_status_error(exc: anthropic.APIStatusError, *, provider: str = "Anthropic") -> NoReturn:
+    """Map an Anthropic HTTP error onto anton's typed/curated exceptions.
+
+    Shared by ``complete`` and ``stream`` so the mapping can't drift (the two
+    were byte-identical copy-paste before ENG-673). Order matters — permanent
+    failures are classified first; only what's left is offered to the transient
+    classifier, and the generic "unavailable" copy is the last resort.
+
+    - 401 → ConnectionError (invalid-key copy; cowork-server keys on this phrase).
+    - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
+    - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, plain 429
+      → TransientProviderError (retryable — see ENG-673).
+    - anything else → the generic "temporarily unavailable" ConnectionError.
+    """
+    if exc.status_code == 401:
+        raise ConnectionError(
+            "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
+        ) from exc
+
+    body = exc.body if isinstance(exc.body, dict) else {}
+    if exc.status_code == 429 and body.get("detail"):
+        msg = f"Server returned 429 — {body['detail']}"
+        msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
+        raise TokenLimitExceeded(msg) from exc
+
+    transient = classify_transient(exc.status_code, body, provider=provider)
+    if transient is not None:
+        logger.warning(
+            "transient provider error (%s): status=%s body=%s",
+            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+        )
+        raise transient from exc
+
+    raise ConnectionError(
+        f"Server returned {exc.status_code} — the LLM endpoint may be "
+        "temporarily unavailable. Try again in a moment."
+    ) from exc
 
 # Native server-side web tool type strings exposed by the Anthropic Messages API.
 # The model invokes these inside the provider — Anton's tool-dispatch loop never
@@ -118,25 +165,14 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc)
         except anthropic.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — so classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach Anthropic — check your connection or try again in a moment.",
+                provider="Anthropic", code="connection_error", session_backoff=False,
             ) from exc
 
         content_text = ""
@@ -265,26 +301,28 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc)
         except anthropic.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Connection dropped mid-stream — transient, but the SDK retries
+            # connection errors at the transport layer, so fail fast rather than
+            # adding the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Lost the connection to Anthropic mid-response — try again in a moment.",
+                provider="Anthropic", code="connection_error", session_backoff=False,
             ) from exc
+
+        # A stream that ended without a stop_reason was cut off before the model
+        # finished (a silent truncation — no error event, no message_stop). Raise
+        # rather than yield a partial answer as if complete; classify transient so
+        # the honest message surfaces and the turn retries quickly, but NOT with
+        # the session budget — a persistently-malformed endpoint must fail fast,
+        # not loop for 30s (ENG-673).
+        if stop_reason is None:
+            logger.warning("Anthropic stream ended with no stop_reason — treating as truncated")
+            raise TransientProviderError(
+                "Anthropic ended the response early — try again in a moment.",
+                provider="Anthropic", code="truncated_stream", session_backoff=False,
+            )
 
         yield StreamComplete(
             response=LLMResponse(

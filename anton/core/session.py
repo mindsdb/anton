@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
@@ -26,6 +27,7 @@ from anton.core.llm.prompts import (
 from anton.core.llm.provider import (
     ContextOverflowError,
     ModelUnavailableError,
+    ProviderOverloadedError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -34,6 +36,7 @@ from anton.core.llm.provider import (
     StreamToolResult,
     TokenLimitExceeded,
     ToolCall,
+    TransientProviderError,
 )
 from anton.core.llm.tracing import (
     TraceContext,
@@ -173,6 +176,11 @@ class ChatSessionConfig:
 
 class ChatSession:
     """Manages a multi-turn conversation with tool-call delegation."""
+
+    # ENG-673: wall-clock budget for backing off + retrying transient provider
+    # failures within a single turn. Class attribute so it's tunable (a future
+    # per-surface / config knob) and injectable in tests.
+    _transient_budget_s: float = 30.0
 
     def __init__(self, config: ChatSessionConfig) -> None:
         s = config.settings or CoreSettings()
@@ -975,6 +983,34 @@ class ChatSession:
                 compacted = True
         return compacted
 
+    @staticmethod
+    def _transient_backoff_delay(attempt: int, retry_after: float | None = None) -> float:
+        """Backoff for a transient-provider retry (ENG-673).
+
+        Honors a provider `retry_after` when present (usually only on
+        request-time 429/529 — the mid-stream 200 case carries none). Otherwise
+        ~2s → ~10s → ~18s with ±20% jitter, so a fleet recovering from the same
+        incident doesn't retry in lockstep against an already-struggling provider.
+        """
+        if retry_after is not None and retry_after > 0:
+            return min(float(retry_after), 30.0)
+        base = (2.0, 10.0, 18.0)
+        d = base[attempt] if attempt < len(base) else base[-1]
+        return d * (0.8 + 0.4 * random.random())
+
+    async def _backoff_sleep(self, delay: float) -> bool:
+        """Sleep `delay` seconds, waking early if the turn is cancelled.
+
+        Returns True if cancelled during the wait, False if the full delay
+        elapsed — so a user hitting stop during backoff aborts immediately
+        instead of waiting out the incident (ENG-673).
+        """
+        try:
+            await asyncio.wait_for(self._cancel_event.wait(), timeout=delay)
+            return True  # _cancel_event fired
+        except asyncio.TimeoutError:
+            return False  # slept the full delay
+
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
         `tool_use` blocks in the last assistant message.
@@ -1584,6 +1620,14 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        # ENG-673: a mid-stream provider failure that had NO prior retry (an
+        # overload smuggled into an HTTP-200 stream) gets budget-bounded
+        # backoff-and-retry — separate from the instant, count-bounded recovery
+        # used for genuine errors. The clock starts on the first such error and
+        # is measured across the turn. Request-time transients (real 5xx/429,
+        # connection errors) carry session_backoff=False and skip this path.
+        _transient_deadline: float | None = None
+        _transient_attempt = 0
         self._active_explainability = ExplainabilityCollector(
             self._explainability_store,
             turn=self._turn_count + 1,
@@ -1623,6 +1667,46 @@ class ChatSession:
                     # map them to their cards.
                     if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
                         raise
+
+                    # ENG-673: a mid-stream transient failure that had NO prior
+                    # retry (overload smuggled into a 200, or a truncated stream).
+                    # Back off and retry the SAME step within a per-turn budget —
+                    # do NOT inject a "you errored, change approach" note (it was
+                    # a provider blip, not the model's fault) and do NOT spend the
+                    # count-based retry budget reserved for genuine errors.
+                    # Completed tool_results already sit in history and are never
+                    # re-executed on retry (idempotency); we only seal any
+                    # tool_use the interrupted stream left dangling so the retried
+                    # request is valid. Request-time transients (real 5xx/429,
+                    # connection errors) set session_backoff=False — the SDK
+                    # already retried them, so they fall through to the fast
+                    # count-based path below with their honest typed message.
+                    if isinstance(_agent_exc, TransientProviderError) and _agent_exc.session_backoff:
+                        now = asyncio.get_running_loop().time()
+                        if _transient_deadline is None:
+                            _transient_deadline = now + self._transient_budget_s
+                        self._seal_dangling_tool_uses("interrupted by a transient provider error")
+                        remaining = _transient_deadline - now
+                        if remaining > 0.5:
+                            delay = min(
+                                self._transient_backoff_delay(
+                                    _transient_attempt, _agent_exc.retry_after
+                                ),
+                                remaining,
+                            )
+                            _transient_attempt += 1
+                            if await self._backoff_sleep(delay):
+                                raise  # cancelled during backoff — abort the turn
+                            continue
+                        # Budget exhausted — fail with an actionable, honest error
+                        # the server renders as the provider_overloaded card.
+                        raise ProviderOverloadedError(
+                            f"{_agent_exc.provider or 'The model provider'} is experiencing an "
+                            "incident and didn't recover in time.",
+                            provider=getattr(_agent_exc, "provider", "") or "",
+                            model=getattr(self._llm, "planning_model", "") or "",
+                        ) from _agent_exc
+
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
                     # message after a `tool_use` lacks matching

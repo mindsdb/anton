@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from typing import NoReturn
 
 import openai
 from openai import AsyncAzureOpenAI
+
+from anton.utils.datasources import scrub_credentials
 
 from .provider import safe_parse_tool_input
 from .provider import (
@@ -23,9 +26,13 @@ from .provider import (
     StreamToolUseStart,
     TokenLimitExceeded,
     ToolCall,
+    TransientProviderError,
     Usage,
+    classify_transient,
     compute_context_pressure,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
@@ -102,6 +109,17 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
                 "upgrading your plan may enable it."
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
+    # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
+    # session loop rather than surfacing an instant, misleading failure (ENG-673).
+    transient = classify_transient(exc.status_code, body, provider="The model provider")
+    if transient is not None:
+        logger.warning(
+            "transient provider error (%s): status=%s body=%s",
+            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+        )
+        raise transient from exc
 
     raise ConnectionError(
         f"Server returned {exc.status_code} — the LLM endpoint may be "
@@ -795,8 +813,12 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error", session_backoff=False,
             ) from exc
 
         choice = response.choices[0]
@@ -949,8 +971,12 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error", session_backoff=False,
             ) from exc
 
         # Finalize tool calls. Same safe-parse protection as the
@@ -968,6 +994,19 @@ class OpenAIProvider(LLMProvider):
                 parse_error=parse_error,
             ))
             yield StreamToolUseEnd(id=info["id"])
+
+        # A stream that ended with no finish_reason was cut off before the model
+        # finished (silent truncation — no error chunk, no [DONE]). Raise rather
+        # than yield a partial answer as if complete; classify transient so the
+        # honest message surfaces and the turn retries quickly, but NOT with the
+        # session budget — a persistently-malformed endpoint must fail fast, not
+        # loop for 30s (ENG-673).
+        if stop_reason is None:
+            logger.warning("stream ended with no finish_reason — treating as truncated")
+            raise TransientProviderError(
+                "The model provider ended the response early — try again in a moment.",
+                provider="The model provider", code="truncated_stream", session_backoff=False,
+            )
 
         yield StreamComplete(
             response=LLMResponse(
@@ -1052,8 +1091,12 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error", session_backoff=False,
             ) from exc
 
         return _parse_response_object(response, model)
@@ -1166,8 +1209,12 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error", session_backoff=False,
             ) from exc
 
         yield StreamComplete(
