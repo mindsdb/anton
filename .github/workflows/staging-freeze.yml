@@ -11,5 +11,5 @@ permissions:
 
 jobs:
   freeze:
-    uses: mindsdb/github-actions/.github/workflows/staging-freeze.yml@main
+    uses: mindsdb/github-actions/.github/workflows/release-freeze.yml@main
     secrets: inherit
