@@ -86,6 +86,20 @@ def _filter_by_token_budget(engrams: list[Engram], token_budget: int) -> list[En
     return kept
 
 
+def _is_scratchpad_related(engram: Engram) -> bool:
+    """Whether an engram's text or topic mentions "scratchpad".
+
+    Used both to select entries INTO recall_scratchpad_wisdom() (the
+    scratchpad tool description) and to exclude the same entries FROM
+    get_rules()/get_lessons() when building the system prompt — keeping one
+    definition avoids the two call sites drifting apart and double-injecting
+    (or double-excluding) an entry.
+    """
+    if "scratchpad" in engram.text.lower():
+        return True
+    return bool(engram.topic and "scratchpad" in engram.topic.lower())
+
+
 class Hippocampus:
     """Reads and writes memory traces at a single scope (global OR project).
 
@@ -210,16 +224,16 @@ class Hippocampus:
 
     # ---------  lessons --------------
 
-    def recall_lessons(self, token_budget: int|None = 1000) -> str:
+    def recall_lessons(self, token_budget: int|None = 1000, exclude_scratchpad: bool = False) -> str:
         """Load semantic knowledge (lessons.md), most recent first, within budget.
 
         Brain analog: Anterior Temporal Lobe — the convergence hub for semantic
         facts distilled from many episodes. Budget enforced at ~4 chars/token.
         """
-        return self._lessons_to_text(self.get_lessons(token_budget))
+        return self._lessons_to_text(self.get_lessons(token_budget, exclude_scratchpad=exclude_scratchpad))
 
 
-    def get_lessons(self, token_budget: int = None) -> list[Engram]:
+    def get_lessons(self, token_budget: int = None, exclude_scratchpad: bool = False) -> list[Engram]:
         """Load semantic knowledge (lessons.md) as Engrams.
 
         When token_budget is None (default) returns all entries in file order.
@@ -251,6 +265,9 @@ class Hippocampus:
         for text in entry_lines:
             text, meta = _extract_metadata(text)
             entries.append(Engram(text=text.removeprefix("- "), **meta))
+
+        if exclude_scratchpad:
+            entries = [e for e in entries if not _is_scratchpad_related(e)]
 
         if token_budget is None:
             return entries
@@ -340,13 +357,11 @@ class Hippocampus:
         candidates: list[Engram] = []
 
         for rule in self.get_rules():
-            if rule.kind == "when" and (
-                "scratchpad" in rule.text.lower() or (rule.topic and "scratchpad" in rule.topic.lower())
-            ):
+            if rule.kind == "when" and _is_scratchpad_related(rule):
                 candidates.append(rule)
 
         for lesson in self.get_lessons():
-            if "scratchpad" in lesson.text.lower() or (lesson.topic and "scratchpad" in lesson.topic.lower()):
+            if _is_scratchpad_related(lesson):
                 candidates.append(lesson)
 
         confidence_rank = {"high": 0, "medium": 1, "low": 2}
@@ -387,8 +402,15 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    def get_rules(self) -> list[Engram]:
-        """Load behavioral rules (rules.md) as Engrams, grouped by kind."""
+    def get_rules(self, exclude_scratchpad_when: bool = False) -> list[Engram]:
+        """Load behavioral rules (rules.md) as Engrams, grouped by kind.
+
+        exclude_scratchpad_when drops "when" rules that mention "scratchpad"
+        — those are injected separately via recall_scratchpad_wisdom() into
+        the scratchpad tool description; including them in the system prompt
+        too would double their token cost. always/never rules are never
+        affected — those aren't part of that injection.
+        """
         if not self._rules_path.is_file():
             return []
         try:
@@ -409,6 +431,11 @@ class Hippocampus:
                     entries.append(Engram(text=text, kind=current_kind, **meta))
 
         entries.sort(key=lambda x: x.kind)
+
+        if exclude_scratchpad_when:
+            entries = [
+                e for e in entries if not (e.kind == "when" and _is_scratchpad_related(e))
+            ]
 
         return entries
 

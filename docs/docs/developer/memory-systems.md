@@ -165,7 +165,9 @@ injected *after* memory, giving user instructions higher priority.
 **Moment B — scratchpad tool description (procedural priming).** When
 scratchpads are active, `cortex.get_scratchpad_context()` appends relevant
 lessons to the scratchpad tool's description — the LLM sees them exactly when
-composing code.
+composing code. Moment A excludes anything scratchpad-related
+(`get_rules(exclude_scratchpad_when=True)`, `recall_lessons()`) so the same
+rule/lesson isn't billed twice per call.
 
 ### Context budget
 

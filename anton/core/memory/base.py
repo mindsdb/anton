@@ -53,8 +53,13 @@ class HippocampusProtocol(Protocol):
         """Return behavioral gates (rules.md equivalent)."""
         ...
 
-    def recall_lessons(self, token_budget: int = 1000) -> str:
-        """Return semantic facts within the given token budget."""
+    def recall_lessons(self, token_budget: int = 1000, exclude_scratchpad: bool = False) -> str:
+        """Return semantic facts within the given token budget.
+
+        exclude_scratchpad drops entries whose text/topic mentions
+        "scratchpad" — used by build_memory_context() to avoid double-billing
+        entries already injected via recall_scratchpad_wisdom().
+        """
         ...
 
     def recall_topic(self, slug: str) -> str:
@@ -71,12 +76,22 @@ class HippocampusProtocol(Protocol):
         """Return identity entries as Engrams."""
         ...
 
-    def get_rules(self) -> list[Engram]:
-        """Return behavioral rules as Engrams."""
+    def get_rules(self, exclude_scratchpad_when: bool = False) -> list[Engram]:
+        """Return behavioral rules as Engrams.
+
+        exclude_scratchpad_when drops "when" rules whose text/topic mentions
+        "scratchpad" — used by build_memory_context() to avoid double-billing
+        entries already injected via recall_scratchpad_wisdom(). always/never
+        rules are never affected.
+        """
         ...
 
-    def get_lessons(self, token_budget: int = None) -> list[Engram]:
-        """Return semantic facts as Engrams, optionally budget-limited."""
+    def get_lessons(self, token_budget: int = None, exclude_scratchpad: bool = False) -> list[Engram]:
+        """Return semantic facts as Engrams, optionally budget-limited.
+
+        exclude_scratchpad drops entries whose text/topic mentions
+        "scratchpad", applied before the budget cut.
+        """
         ...
 
     # --- write ---
