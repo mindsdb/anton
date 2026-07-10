@@ -268,16 +268,42 @@ async def test_turn_exhausts_budget_to_provider_overloaded():
     assert ei.value.model == "latest:sonnet"
 
 
+async def test_provider_overloaded_names_the_failing_model_not_planning():
+    # ENG-673 #4: the card must name the model that actually failed (which may be
+    # the coding model), not always the session's planning model.
+    s = _session()  # planning_model = latest:sonnet
+    s._transient_budget_s = 0.05
+
+    async def _always_fail(user_msg):
+        raise TransientProviderError(
+            "overloaded", provider="Anthropic", code="overloaded_error", model="latest:haiku",
+        )
+        yield  # pragma: no cover
+
+    s._stream_and_handle_tools = _always_fail
+    with pytest.raises(ProviderOverloadedError) as ei:
+        _ = [e async for e in s.turn_stream("do it")]
+    assert ei.value.model == "latest:haiku"   # the failing model, not planning
+
+
+def test_classify_transient_propagates_model():
+    err = classify_transient(200, {"error": {"type": "overloaded_error"}}, provider="X", model="latest:opus")
+    assert err.model == "latest:opus"
+
+
 async def test_turn_transient_backoff_cancels_on_stop():
     """User-stop during backoff aborts immediately rather than waiting out the
-    incident: _backoff_sleep reports cancellation and the turn stops retrying."""
+    incident — and stops CLEANLY (like a normal stop), not with a provider-error
+    card surfaced to the user."""
     s = _session()
     calls = {"n": 0}
     s._stream_and_handle_tools = _stream_that_fails_then_succeeds(5, calls)
     s._backoff_sleep = AsyncMock(return_value=True)  # cancelled during backoff
 
-    with pytest.raises(TransientProviderError):
-        _ = [e async for e in s.turn_stream("do it")]
+    events = [e async for e in s.turn_stream("do it")]  # no exception raised
 
     assert calls["n"] == 1                    # failed once, then cancelled — no further retries
     assert s._backoff_sleep.await_count == 1
+    # Clean cancel: no transient-error prose leaks into the transcript.
+    text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert "overloaded" not in text.lower()

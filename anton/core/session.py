@@ -1696,15 +1696,20 @@ class ChatSession:
                             )
                             _transient_attempt += 1
                             if await self._backoff_sleep(delay):
-                                raise  # cancelled during backoff — abort the turn
+                                # User cancelled during backoff — stop cleanly
+                                # (like a normal stop), not with an error card.
+                                break
                             continue
                         # Budget exhausted — fail with an actionable, honest error
                         # the server renders as the provider_overloaded card.
+                        # Name the model that actually failed (planning OR coding),
+                        # falling back to the session's planning model.
                         raise ProviderOverloadedError(
                             f"{_agent_exc.provider or 'The model provider'} is experiencing an "
                             "incident and didn't recover in time.",
                             provider=getattr(_agent_exc, "provider", "") or "",
-                            model=getattr(self._llm, "planning_model", "") or "",
+                            model=(getattr(_agent_exc, "model", "") or "")
+                            or getattr(self._llm, "planning_model", "") or "",
                         ) from _agent_exc
 
                     _retry_count += 1

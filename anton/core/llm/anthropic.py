@@ -31,7 +31,9 @@ from .provider import (
 logger = logging.getLogger(__name__)
 
 
-def _raise_for_status_error(exc: anthropic.APIStatusError, *, provider: str = "Anthropic") -> NoReturn:
+def _raise_for_status_error(
+    exc: anthropic.APIStatusError, *, provider: str = "Anthropic", model: str = "",
+) -> NoReturn:
     """Map an Anthropic HTTP error onto anton's typed/curated exceptions.
 
     Shared by ``complete`` and ``stream`` so the mapping can't drift (the two
@@ -56,7 +58,7 @@ def _raise_for_status_error(exc: anthropic.APIStatusError, *, provider: str = "A
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
-    transient = classify_transient(exc.status_code, body, provider=provider)
+    transient = classify_transient(exc.status_code, body, provider=provider, model=model)
     if transient is not None:
         logger.warning(
             "transient provider error (%s): status=%s body=%s",
@@ -165,7 +167,7 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            _raise_for_status_error(exc)
+            _raise_for_status_error(exc, model=model)
         except anthropic.APIConnectionError as exc:
             # Transient, but the SDK already retries connection errors at the
             # transport layer — so classify honestly and fail fast rather than
@@ -173,6 +175,7 @@ class AnthropicProvider(LLMProvider):
             raise TransientProviderError(
                 "Could not reach Anthropic — check your connection or try again in a moment.",
                 provider="Anthropic", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         content_text = ""
@@ -301,7 +304,7 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            _raise_for_status_error(exc)
+            _raise_for_status_error(exc, model=model)
         except anthropic.APIConnectionError as exc:
             # Connection dropped mid-stream — transient, but the SDK retries
             # connection errors at the transport layer, so fail fast rather than
@@ -309,20 +312,25 @@ class AnthropicProvider(LLMProvider):
             raise TransientProviderError(
                 "Lost the connection to Anthropic mid-response — try again in a moment.",
                 provider="Anthropic", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
-        # A stream that ended without a stop_reason was cut off before the model
-        # finished (a silent truncation — no error event, no message_stop). Raise
-        # rather than yield a partial answer as if complete; classify transient so
-        # the honest message surfaces and the turn retries quickly, but NOT with
-        # the session budget — a persistently-malformed endpoint must fail fast,
-        # not loop for 30s (ENG-673).
+        # Missing stop_reason is a genuine truncation only when the stream
+        # produced NOTHING. A content/tool-bearing stream that lacks it is almost
+        # always a provider that doesn't report one — treating THAT as truncated
+        # would discard a complete, good answer, so we log and pass it through.
+        # Only the truly-empty case is transient (fail-fast). (ENG-673)
         if stop_reason is None:
-            logger.warning("Anthropic stream ended with no stop_reason — treating as truncated")
-            raise TransientProviderError(
-                "Anthropic ended the response early — try again in a moment.",
-                provider="Anthropic", code="truncated_stream", session_backoff=False,
-            )
+            if content_text or tool_calls:
+                logger.warning("Anthropic stream ended with no stop_reason but produced output — "
+                               "passing through")
+            else:
+                logger.warning("Anthropic stream ended empty with no stop_reason — treating as truncated")
+                raise TransientProviderError(
+                    "Anthropic ended the response early — try again in a moment.",
+                    provider="Anthropic", code="truncated_stream",
+                    session_backoff=False, model=model,
+                )
 
         yield StreamComplete(
             response=LLMResponse(

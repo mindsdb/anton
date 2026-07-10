@@ -113,7 +113,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
     # session loop rather than surfacing an instant, misleading failure (ENG-673).
-    transient = classify_transient(exc.status_code, body, provider="The model provider")
+    transient = classify_transient(exc.status_code, body, provider="The model provider", model=model)
     if transient is not None:
         logger.warning(
             "transient provider error (%s): status=%s body=%s",
@@ -819,6 +819,7 @@ class OpenAIProvider(LLMProvider):
             raise TransientProviderError(
                 "Could not reach the model provider — check your connection or try again in a moment.",
                 provider="The model provider", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         choice = response.choices[0]
@@ -977,6 +978,7 @@ class OpenAIProvider(LLMProvider):
             raise TransientProviderError(
                 "Could not reach the model provider — check your connection or try again in a moment.",
                 provider="The model provider", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         # Finalize tool calls. Same safe-parse protection as the
@@ -995,18 +997,24 @@ class OpenAIProvider(LLMProvider):
             ))
             yield StreamToolUseEnd(id=info["id"])
 
-        # A stream that ended with no finish_reason was cut off before the model
-        # finished (silent truncation — no error chunk, no [DONE]). Raise rather
-        # than yield a partial answer as if complete; classify transient so the
-        # honest message surfaces and the turn retries quickly, but NOT with the
-        # session budget — a persistently-malformed endpoint must fail fast, not
-        # loop for 30s (ENG-673).
+        # Missing finish_reason is ambiguous: it's a genuine truncation only when
+        # the stream produced NOTHING (empty + no terminal marker). A stream that
+        # produced content/tool_calls but no finish_reason is almost always a
+        # provider that just doesn't report one (many OpenAI-compatible endpoints)
+        # — treating THAT as truncated would discard a complete, good answer, so
+        # we log and pass it through. Only the truly-empty case is transient
+        # (fail-fast: a persistently-malformed endpoint must not loop). (ENG-673)
         if stop_reason is None:
-            logger.warning("stream ended with no finish_reason — treating as truncated")
-            raise TransientProviderError(
-                "The model provider ended the response early — try again in a moment.",
-                provider="The model provider", code="truncated_stream", session_backoff=False,
-            )
+            if content_text or tool_calls:
+                logger.warning("stream ended with no finish_reason but produced output — "
+                               "passing through (provider likely omits finish_reason)")
+            else:
+                logger.warning("stream ended empty with no finish_reason — treating as truncated")
+                raise TransientProviderError(
+                    "The model provider ended the response early — try again in a moment.",
+                    provider="The model provider", code="truncated_stream",
+                    session_backoff=False, model=model,
+                )
 
         yield StreamComplete(
             response=LLMResponse(
@@ -1097,6 +1105,7 @@ class OpenAIProvider(LLMProvider):
             raise TransientProviderError(
                 "Could not reach the model provider — check your connection or try again in a moment.",
                 provider="The model provider", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         return _parse_response_object(response, model)
@@ -1215,6 +1224,7 @@ class OpenAIProvider(LLMProvider):
             raise TransientProviderError(
                 "Could not reach the model provider — check your connection or try again in a moment.",
                 provider="The model provider", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         yield StreamComplete(
