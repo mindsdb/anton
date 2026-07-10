@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from typing import NoReturn
 
 import openai
 from openai import AsyncAzureOpenAI
@@ -12,6 +13,7 @@ from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
+    ModelUnavailableError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -19,10 +21,68 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    TokenLimitExceeded,
     ToolCall,
     Usage,
     compute_context_pressure,
 )
+
+
+def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
+    """Map a provider HTTP error onto anton's typed/curated exceptions.
+
+    The single mapper shared by all four call paths (chat/stream ×
+    completions/responses) so the mapping can't drift between them — the
+    previous four copy-pasted blocks had already diverged in wording.
+
+    Mapping policy:
+      - 401 → ConnectionError with the invalid-key copy (cowork-server's
+        provider_auth detection keys on this exact phrase).
+      - 403 with a structured gateway code (``error.code`` of
+        ``model_access_denied`` / ``model_disabled``) → ModelUnavailableError
+        carrying the code + model, with actionable copy. Detection is
+        code-exact on purpose: BYOK OpenAI 403s (region blocks), Anthropic
+        permission errors, and Cloudflare HTML 403s carry no such code and
+        must fall through to the generic message, never the plan copy.
+      - 429 with a quota detail → TokenLimitExceeded, checked first so a body
+        carrying both ``detail`` and ``error.code`` stays token_limit (quota
+        keeps its own card downstream).
+      - anything else → the generic "temporarily unavailable" ConnectionError.
+    """
+    if exc.status_code == 401:
+        raise ConnectionError(
+            "Invalid API key — check your OpenAI API key configuration."
+        ) from exc
+
+    body = exc.body if isinstance(exc.body, dict) else {}
+    if exc.status_code == 429 and body.get("detail"):
+        msg = f"Server returned 429 — {body['detail']}"
+        msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
+        raise TokenLimitExceeded(msg) from exc
+
+    error = body.get("error") if isinstance(body.get("error"), dict) else {}
+    code = error.get("code")
+    if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
+        if code == "model_access_denied":
+            msg = (
+                f"The model '{model}' isn't included in your current MindsHub plan. "
+                "Visit https://console.mindshub.ai to upgrade, or switch models in Settings."
+            )
+        else:
+            # Hedged: until the gateway distinguishes tier locks from admin
+            # kill switches everywhere (ENG-596), model_disabled can mean
+            # either — don't promise that an upgrade fixes it.
+            msg = (
+                f"The model '{model}' isn't available right now — it may not be included "
+                "in your plan, or it's temporarily disabled. Switch models in Settings; "
+                "upgrading your plan may enable it."
+            )
+        raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    raise ConnectionError(
+        f"Server returned {exc.status_code} — the LLM endpoint may be "
+        "temporarily unavailable. Try again in a moment."
+    ) from exc
 
 
 def _translate_tools(tools: list[dict]) -> list[dict]:
@@ -135,6 +195,14 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
     """
     result: list[dict] = []
     content_parts: list[dict] = []  # Accumulates text + image blocks
+    # Images extracted from tool_results are deferred here and flushed as a
+    # single role:user message AFTER all role:tool messages.  Emitting them
+    # inline (immediately after each role:tool) breaks the multi-tool case:
+    # when an assistant turn contains N tool_use blocks and a non-final one
+    # returns images, the inline role:user message lands between role:tool
+    # responses, leaving the remaining tool_use ids without a corresponding
+    # tool_result immediately after → Anthropic 400.
+    deferred_img_parts: list[dict] = []
 
     for block in blocks:
         if block.get("type") == "tool_result":
@@ -145,7 +213,8 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
             # tool_result -> role:tool message. The Chat Completions API only
             # accepts a string in `tool` messages, so when the tool returned
             # multimodal blocks (image + text), we split them: text → tool
-            # message, image → a follow-up role:user message right after.
+            # message, images → a deferred role:user message emitted after
+            # ALL role:tool messages to keep tool responses contiguous.
             raw = block.get("content", "")
             extra_images: list[dict] = []
             if isinstance(raw, list):
@@ -173,21 +242,19 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
             )
 
             if extra_images:
-                img_parts: list[dict] = [
-                    {
-                        "type": "text",
-                        "text": "Image(s) returned by previous tool call:",
-                    }
-                ]
+                if not deferred_img_parts:
+                    deferred_img_parts.append(
+                        {"type": "text", "text": "Image(s) returned by previous tool call:"}
+                    )
                 for img in extra_images:
                     if vision_format == "anthropic":
-                        img_parts.append(img)
+                        deferred_img_parts.append(img)
                         continue
                     source = img.get("source", {})
                     if source.get("type") == "base64":
                         media_type = source.get("media_type", "image/png")
                         data = source.get("data", "")
-                        img_parts.append(
+                        deferred_img_parts.append(
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -195,7 +262,6 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
                                 },
                             }
                         )
-                result.append({"role": "user", "content": img_parts})
         elif block.get("type") == "text":
             content_parts.append({"type": "text", "text": block.get("text", "")})
         elif block.get("type") == "image" and supports_vision:
@@ -240,6 +306,10 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
             else:
                 # Already OpenAI format — pass through.
                 content_parts.append(block)
+
+    # Flush deferred images after all role:tool messages.
+    if deferred_img_parts:
+        result.append({"role": "user", "content": deferred_img_parts})
 
     if content_parts:
         # If only text parts, flatten to a simple string for compatibility
@@ -592,6 +662,19 @@ class OpenAIProvider(LLMProvider):
             return {"web_search", "web_fetch"}
         return set()
 
+    @staticmethod
+    def _sanitize_langfuse_tag(tag: str) -> str:
+        """Clean a caller-supplied langfuse tag so it survives the wire intact.
+
+        Tags are comma-joined into the ``Langfuse-Tags`` header and the MindsHub
+        router splits that header on commas — so an embedded comma would
+        silently split one tag into two — while control chars (CR/LF/…) would
+        make httpx reject the outbound request. Drop both and trim surrounding
+        whitespace. Returns "" when nothing usable remains, so the caller can
+        filter the tag out.
+        """
+        return "".join(c for c in tag if c.isprintable() and c != ",").strip()
+
     def _build_trace_headers(self) -> dict[str, str] | None:
         """Return langfuse-style headers for the active trace, or None.
 
@@ -610,9 +693,21 @@ class OpenAIProvider(LLMProvider):
         headers: dict[str, str] = {}
         if ctx.session_id:
             headers["Langfuse-Session-Id"] = ctx.session_id
+        # Langfuse-Tags: the harness identity plus any caller-supplied tags
+        # (e.g. an eval harness adding "eval", "eval_run:<id>"). Comma-joined;
+        # the MindsHub router splits, trims and de-dupes them. Caller tags are
+        # untrusted, so sanitize each (drop commas/control chars, trim) and
+        # skip any that end up empty before joining.
+        tags: list[str] = []
         if ctx.harness:
-            headers["Langfuse-Tags"] = ctx.harness
-        extra: dict[str, object] = {}
+            tags.append(ctx.harness)
+        tags.extend(ctx.tags)
+        tags = [t for t in (self._sanitize_langfuse_tag(s) for s in tags) if t]
+        if tags:
+            headers["Langfuse-Tags"] = ",".join(tags)
+        # Langfuse-Metadata: caller-supplied metadata first, then the built-in
+        # turn/harness keys so identity always wins on collision.
+        extra: dict[str, object] = dict(ctx.metadata or {})
         if ctx.turn_id is not None:
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:
@@ -674,22 +769,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -843,22 +923,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -961,22 +1026,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -1090,22 +1140,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your OpenAI API key configuration."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."

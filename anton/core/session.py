@@ -25,6 +25,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    ModelUnavailableError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -50,9 +51,11 @@ from anton.core.tools.tool_defs import (
     READ_IMAGE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
+    SELECT_PATH_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
+from anton.core.interaction.selection import SelectionElicitor
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -96,6 +99,26 @@ def _extract_datasources(tool_call: ToolCall) -> List[str]:
     for m in re.compile(r"\bDS_([A-Z0-9_]+?)__").finditer(code):
         seen.add(m.group(1).lower())
     return list(seen)
+
+
+def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
+    """Scrub credential values from an inbound user message.
+
+    Applied at the `turn`/`turn_stream` entry, before the first
+    `_append_history`, so a secret pasted into chat never reaches model
+    context, episodic memory, or the trace sinks downstream of the LLM
+    gateway (Langfuse). Only text blocks are scrubbed; image and file
+    blocks carry no scrubbable text.
+    """
+    if isinstance(user_input, str):
+        return scrub_credentials(user_input)
+    return [
+        {**b, "text": scrub_credentials(b.get("text", ""))}
+        if b.get("type") == "text"
+        else b
+        for b in user_input
+    ]
+
 
 @dataclass
 class ChatSessionConfig:
@@ -153,6 +176,7 @@ class ChatSessionConfig:
     # connections enabled in the current conversation, preventing unrelated
     # credentials from leaking into the scratchpad.
     scratchpad_env_keys: set[str] | None = None
+    selection_elicitor: SelectionElicitor | None = None
 
 
 class ChatSession:
@@ -203,6 +227,11 @@ class ChatSession:
         self._cancel_event = asyncio.Event()
         self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
+        # Strategy for mid-turn file/folder disambiguation (the `select_path`
+        # tool). Hosts inject a concrete elicitor — a streaming GUI picker in
+        # cowork-server, a terminal picker on the CLI. None falls back to the
+        # console picker (CLI) or a graceful no-op (headless).
+        self.selection_elicitor: SelectionElicitor | None = config.selection_elicitor
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -733,6 +762,9 @@ class ChatSession:
 
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
+        # Interactive file/folder disambiguation — always available; degrades
+        # to a plain-text prompt when no elicitor/console is present.
+        self.tool_registry.register_tool(SELECT_PATH_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -1377,6 +1409,7 @@ class ChatSession:
             cb.reset()
 
     async def turn(self, user_input: str | list[dict]) -> str:
+        user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
         user_msg_str = (
@@ -1521,6 +1554,8 @@ class ChatSession:
         user_input: str | list[dict],
         *,
         turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive.
 
@@ -1529,8 +1564,15 @@ class ChatSession:
         calls + tool spans made during this turn. Stored on
         `self._current_turn_id` so the provider layer can read it
         without threading the arg through every internal call.
+
+        `trace_tags` / `trace_metadata` are optional, opaque annotations the
+        host can attach to this turn's trace (forwarded to the MindsHub
+        langfuse headers — see the provider's `_build_trace_headers`). They
+        are deliberately generic: hosts can add arbitrary correlation data
+        (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
+        user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
@@ -1566,6 +1608,8 @@ class ChatSession:
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                tags=tuple(trace_tags or ()),
+                metadata=trace_metadata or None,
             )
         )
 
@@ -1578,8 +1622,12 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limit — don't retry, let the chat loop handle it
-                    if isinstance(_agent_exc, TokenLimitExceeded):
+                    # Token/billing limits and model-gate 403s are
+                    # deterministic — the auto-retry below would just re-send
+                    # the same doomed request (and burn its budget) before
+                    # failing anyway. Don't retry; let the chat loop / server
+                    # map them to their cards.
+                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
                         raise
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
@@ -1634,6 +1682,15 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
+                        except (TokenLimitExceeded, ModelUnavailableError):
+                            # Curated provider failures must FAIL the turn, not
+                            # get wrapped into assistant prose: the server maps
+                            # them to actionable error cards (token_limit /
+                            # model-unavailable), which can only fire when the
+                            # exception propagates. Wrapping them as text is
+                            # how "Server returned 403" ended up mid-chat with
+                            # "please rephrase your request" advice.
+                            raise
                         except Exception as e:
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
@@ -1931,9 +1988,13 @@ class ChatSession:
                                         (cell.stdout or ""),
                                         description=description,
                                     )
-                        elif tc.name == "connect_new_datasource" or (
-                            tc.name == "publish_or_preview"
-                            and tc.input.get("action") == "publish"
+                        elif (
+                            tc.name == "connect_new_datasource"
+                            or tc.name == "select_path"
+                            or (
+                                tc.name == "publish_or_preview"
+                                and tc.input.get("action") == "publish"
+                            )
                         ):
                             # Interactive tool — pause spinner AND escape watcher
                             yield StreamTaskProgress(
@@ -1942,11 +2003,13 @@ class ChatSession:
                             )
                             if self._escape_watcher:
                                 self._escape_watcher.pause()
-                            result_text = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
-                            )
-                            if self._escape_watcher:
-                                self._escape_watcher.resume()
+                            try:
+                                result_text = await self.tool_registry.dispatch_tool(
+                                    self, tc.name, tc.input
+                                )
+                            finally:
+                                if self._escape_watcher:
+                                    self._escape_watcher.resume()
                             yield StreamTaskProgress(
                                 phase="analyzing",
                                 message="Analyzing results...",

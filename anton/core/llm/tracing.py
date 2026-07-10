@@ -29,6 +29,14 @@ class TraceContext:
     session_id: str | None = None
     turn_id: int | None = None
     harness: str | None = None
+    # Optional, caller-supplied trace annotations forwarded verbatim to the
+    # langfuse-style headers (see ``OpenAIProvider._build_trace_headers``).
+    # `tags` are appended to ``Langfuse-Tags``; `metadata` is merged into
+    # ``Langfuse-Metadata`` (built-in keys win on collision). Kept generic so
+    # hosts can attach arbitrary correlation data — e.g. an eval harness adding
+    # an eval-run id — without changing this structure.
+    tags: tuple[str, ...] = ()
+    metadata: dict[str, str] | None = None
 
 
 _trace_ctx: ContextVar[TraceContext | None] = ContextVar(

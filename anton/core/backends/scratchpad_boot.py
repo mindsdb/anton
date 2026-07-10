@@ -80,23 +80,26 @@ if _scratchpad_model:
                 "ANTON_OPENAI_API_KEY"
             )
             _llm_api_version = os.environ.get("ANTON_OPENAI_API_VERSION") or None
-            # Mirror LLMClient.from_settings: openai-compatible endpoints
-            # (Minds/MindsHub) expect image blocks in Anthropic native format,
-            # not OpenAI image_url data-URLs.
             _llm_provider_kwargs: dict = {
                 "api_key": _llm_api_key or None,
                 "base_url": _llm_base_url or None,
                 "ssl_verify": _llm_ssl_verify,
                 "api_version": _llm_api_version,
             }
-            # Endpoints that proxy to Minds / MindsHub / MDB.AI
-            # speak Anthropic content format over the OpenAI HTTP envelope,
-            # so image blocks must be Anthropic-shaped, not OpenAI image_url.
+            # Only Minds / MindsHub / MDB.AI proxy Anthropic over the OpenAI HTTP
+            # envelope, so ONLY they need image blocks in Anthropic native format.
+            # Gate on the host, NOT on "openai-compatible" generally: other
+            # OpenAI-compatible endpoints (e.g. Gemini at
+            # generativelanguage.googleapis.com, or a generic proxy) expect
+            # standard OpenAI image_url blocks. Forcing anthropic format for all
+            # openai-compatible mangled images for Gemini. OpenAIProvider already
+            # defaults to supports_vision=True / vision_format="openai", so the
+            # non-proxy case needs no override.
             _llm_url_lower = (_llm_base_url or "").lower()
             _anthropic_proxy = any(
                 host in _llm_url_lower for host in ("mdb.ai", "mindshub.ai")
             )
-            if _scratchpad_provider_name == "openai-compatible" or _anthropic_proxy:
+            if _anthropic_proxy:
                 _llm_provider_kwargs["supports_vision"] = True
                 _llm_provider_kwargs["vision_format"] = "anthropic"
             # Resolve the OpenAI "flavor" so the injected web_search() helper can

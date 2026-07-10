@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -24,7 +24,7 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "typer>=0.12.4",
-    "rich>=13.0",
+    "rich>=13.0,<15",
     "prompt-toolkit>=3.0",
     "packaging>=21.0",
     "pyyaml>=6.0",
@@ -50,8 +50,8 @@ Issues = "https://github.com/mindsdb/anton/issues"
 anton = "anton.cli:app"
 
 [tool.hatch.version]
-source = "regex"
-path = "anton/__init__.py"
+source = "vcs"
+fallback-version = "2.0.0-dev"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

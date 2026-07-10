@@ -89,6 +89,29 @@ class TestLLMClientFromSettings:
             assert isinstance(client._planning_provider, AnthropicProvider)
             assert isinstance(client._coding_provider, AnthropicProvider)
 
+    def _oc_vision_format(self, base_url: str) -> str:
+        settings = AntonSettings(
+            planning_provider="openai-compatible",
+            coding_provider="openai-compatible",
+            openai_api_key="test-key",
+            openai_base_url=base_url,
+            planning_model="m",
+            coding_model="m",
+            _env_file=None,
+        )
+        return LLMClient.from_settings(settings)._planning_provider._vision_format
+
+    def test_openai_compatible_vision_format_gated_on_host(self):
+        # Minds/MindsHub proxy Anthropic → anthropic image blocks.
+        assert self._oc_vision_format("https://api.mindshub.ai/v1") == "anthropic"
+        assert self._oc_vision_format("https://mdb.ai/api/v1") == "anthropic"
+        # Gemini + generic OpenAI-compatible endpoints expect OpenAI image_url —
+        # NOT anthropic (the bug: unconditional anthropic mangled Gemini images).
+        assert self._oc_vision_format(
+            "https://generativelanguage.googleapis.com/v1beta/openai/"
+        ) == "openai"
+        assert self._oc_vision_format("https://my-proxy.example.com/v1") == "openai"
+
     def test_unknown_planning_provider_raises(self):
         settings = AntonSettings(
             planning_provider="unknown",
