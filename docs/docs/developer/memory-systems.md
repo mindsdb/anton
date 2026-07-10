@@ -56,7 +56,7 @@ it just reads and writes.
 | `recall_rules()` | `rules.md` | Basal Ganglia + OFC |
 | `recall_lessons(token_budget)` | `lessons.md` (budget-limited, most recent first) | Anterior Temporal Lobe |
 | `recall_topic(slug)` | `topics/{slug}.md` | Cortical Association Areas |
-| `recall_scratchpad_wisdom()` | "when" rules + scratchpad-related lessons + `topics/scratchpad-*.md` | Procedural priming |
+| `recall_scratchpad_wisdom(token_budget)` | "when" rules + scratchpad-related lessons (confidence tier + recency ordered, budget-limited) | Procedural priming |
 
 | Encoding method | Writes | Behavior |
 |---|---|---|
