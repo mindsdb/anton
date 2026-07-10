@@ -305,7 +305,7 @@ When scratchpads are active, relevant lessons are appended to the scratchpad too
 scratchpad_tool["description"] += f"\n\nLessons from past sessions:\n{wisdom}"
 ```
 
-This combines "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi.
+This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi.
 
 ## The `memorize` Tool
 
@@ -811,7 +811,7 @@ The Hippocampus handles one scope (global OR project) and is the canonical file-
 | `recall_rules()` | `rules.md` | Basal Ganglia + OFC |
 | `recall_lessons(token_budget)` | `lessons.md` (budget-limited, most recent first) | Anterior Temporal Lobe |
 | `recall_topic(slug)` | `topics/{slug}.md` | Cortical Association Areas |
-| `recall_scratchpad_wisdom(token_budget)` | "when" rules + scratchpad-related lessons (confidence tier + recency ordered, budget-limited) | Procedural memory |
+| `recall_scratchpad_wisdom(token_budget)` | scratchpad-related "when" rules + scratchpad-related lessons (confidence tier + recency ordered, budget-limited) | Procedural memory |
 
 **Encoding methods:**
 | Method | Writes | Behavior |

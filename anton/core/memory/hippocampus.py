@@ -331,16 +331,18 @@ class Hippocampus:
     def recall_scratchpad_wisdom(self, token_budget: int = 2000) -> str:
         """Retrieve procedural knowledge relevant to scratchpad execution.
 
-        Gathers all "when" rules + lessons whose text contains "scratchpad",
-        ordered by confidence tier (high, then medium/unset, then low) and by
-        recency within a tier, then trimmed to token_budget (~4 chars/token —
-        same convention as get_lessons). Injected into tool descriptions so
-        the LLM sees them when composing code.
+        Gathers "when" rules + lessons whose text or topic mentions
+        "scratchpad", ordered by confidence tier (high, then medium/unset,
+        then low) and by recency within a tier, then trimmed to token_budget
+        (~4 chars/token — same convention as get_lessons). Injected into tool
+        descriptions so the LLM sees them when composing code.
         """
         candidates: list[Engram] = []
 
         for rule in self.get_rules():
-            if rule.kind == "when":
+            if rule.kind == "when" and (
+                "scratchpad" in rule.text.lower() or (rule.topic and "scratchpad" in rule.topic.lower())
+            ):
                 candidates.append(rule)
 
         for lesson in self.get_lessons():

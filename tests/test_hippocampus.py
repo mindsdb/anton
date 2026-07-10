@@ -80,10 +80,13 @@ class TestRecallScratchpadWisdom:
 
     def test_extracts_when_rules(self, hc, mem_dir):
         (mem_dir / "rules.md").write_text(
-            "# Rules\n\n## Always\n- Be fast\n\n## When\n- If paginated → use progress()\n"
+            "# Rules\n\n## Always\n- Be fast\n\n## When\n"
+            "- If a scratchpad API is paginated → use progress()\n"
+            "- If the user writes in Spanish → respond in Spanish\n"
         )
         result = hc.recall_scratchpad_wisdom()
         assert "paginated" in result
+        assert "Spanish" not in result
 
     def test_includes_scratchpad_lessons(self, hc, mem_dir):
         (mem_dir / "lessons.md").write_text(
@@ -101,9 +104,9 @@ class TestRecallScratchpadWisdom:
     def test_sorts_by_confidence_tier_then_recency(self, hc, mem_dir):
         (mem_dir / "rules.md").write_text(
             "# Rules\n\n## When\n"
-            "- HIGH_OLD_RULE <!-- confidence:high ts:2026-01-01 -->\n"
-            "- LOW_NEW_RULE <!-- confidence:low ts:2026-07-01 -->\n"
-            "- MEDIUM_MID_RULE <!-- confidence:medium ts:2026-04-01 -->\n"
+            "- Scratchpad HIGH_OLD_RULE <!-- confidence:high ts:2026-01-01 -->\n"
+            "- Scratchpad LOW_NEW_RULE <!-- confidence:low ts:2026-07-01 -->\n"
+            "- Scratchpad MEDIUM_MID_RULE <!-- confidence:medium ts:2026-04-01 -->\n"
         )
         (mem_dir / "lessons.md").write_text(
             "# Lessons\n"
@@ -121,11 +124,12 @@ class TestRecallScratchpadWisdom:
 
     def test_budget_limits_output(self, hc, mem_dir):
         entries = "\n".join(
-            f"- When rule number {i} with some extra padding words here" for i in range(30)
+            f"- Scratchpad when-rule number {i} with some extra padding words here"
+            for i in range(30)
         )
         (mem_dir / "rules.md").write_text(f"# Rules\n\n## When\n{entries}\n")
         result = hc.recall_scratchpad_wisdom(token_budget=150)
-        entry_count = result.count("- When rule")
+        entry_count = result.count("- Scratchpad when-rule")
         assert 0 < entry_count < 30
 
 
