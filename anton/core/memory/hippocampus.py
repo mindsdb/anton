@@ -329,18 +329,11 @@ class Hippocampus:
         parts: list[str] = []
 
         # Extract "when" rules
-        rules = self.recall_rules()
-        if rules:
-            in_when = False
-            for line in rules.splitlines():
-                if line.strip().startswith("## When"):
-                    in_when = True
-                    continue
-                elif line.strip().startswith("## "):
-                    in_when = False
-                    continue
-                if in_when and line.strip().startswith("- "):
-                    parts.append(line.strip())
+        for rule in self.get_rules():
+            if rule.kind == "when":
+                entry = f"- {rule.text}"
+                if entry not in parts:
+                    parts.append(entry)
 
         # Extract scratchpad-related lessons
         for lesson in self.get_lessons():
