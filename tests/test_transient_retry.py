@@ -187,12 +187,64 @@ def test_provider_overloaded_error_carries_model_and_provider():
 # session turn loop — recovery, budget exhaustion, no-replay (idempotency)
 # --------------------------------------------------------------------------- #
 
-from unittest.mock import AsyncMock  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
 from anton.chat import ChatSession  # noqa: E402
-from anton.core.llm.provider import StreamTextDelta  # noqa: E402
+from anton.core.llm.openai import OpenAIProvider  # noqa: E402
+from anton.core.llm.provider import StreamComplete, StreamTextDelta  # noqa: E402
 from anton.core.session import ChatSessionConfig  # noqa: E402
 from tests.conftest import make_mock_llm  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# provider-level truncation — #1 fix regression guard
+# --------------------------------------------------------------------------- #
+
+def _chunk(content=None, finish_reason=None):
+    delta = MagicMock()
+    delta.content = content
+    delta.tool_calls = None
+    choice = MagicMock()
+    choice.delta = delta
+    choice.finish_reason = finish_reason
+    ch = MagicMock()
+    ch.choices = [choice]
+    ch.usage = None
+    return ch
+
+
+async def _run_openai_stream(chunks):
+    async def _aiter():
+        for c in chunks:
+            yield c
+    with patch("anton.core.llm.openai.openai") as mock_openai:
+        client = AsyncMock()
+        mock_openai.AsyncOpenAI.return_value = client
+        client.chat.completions.create = AsyncMock(return_value=_aiter())
+        prov = OpenAIProvider(api_key="k")
+        return [
+            ev async for ev in prov.stream(
+                model="latest:sonnet", system="s",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        ]
+
+
+async def test_stream_content_without_finish_reason_passes_through():
+    # #1 regression: a COMPLETE answer with no finish_reason (common on
+    # OpenAI-compatible endpoints) must complete, NOT be discarded as truncated.
+    events = await _run_openai_stream([_chunk(content="Hello "), _chunk(content="world")])
+    completes = [e for e in events if isinstance(e, StreamComplete)]
+    assert len(completes) == 1
+    assert completes[0].response.content == "Hello world"
+
+
+async def test_stream_empty_without_finish_reason_is_truncated():
+    # Only the truly-empty no-terminal-marker stream is a genuine truncation.
+    with pytest.raises(TransientProviderError) as ei:
+        await _run_openai_stream([])
+    assert ei.value.code == "truncated_stream"
+    assert ei.value.session_backoff is False
 
 
 def _session() -> ChatSession:
