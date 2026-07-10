@@ -242,6 +242,28 @@ class TestSessionThalamus:
         planned_messages = llm.plan.call_args.kwargs["messages"]
         assert planned_messages[1]["content"][0]["name"] == "recall_skill"
 
+    async def test_preload_ids_unique_across_non_streaming_turns(self):
+        # turn() (unlike turn_stream()) never increments _turn_count, so an
+        # id derived from it would repeat on every call — regression guard
+        # for that.
+        llm = make_mock_llm()
+        llm.gate = AsyncMock(
+            return_value=_response(
+                tool_calls=[_delegate_call(skills=["csv-summary"])]
+            )
+        )
+        llm.plan = AsyncMock(return_value=_response("ok"))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session._skill_store = _mock_skill_store()
+
+        await session.turn("summarize data.csv")
+        first_id = session.history[1]["content"][0]["id"]
+
+        await session.turn("summarize data.csv again")
+        second_id = session.history[5]["content"][0]["id"]
+
+        assert first_id != second_id
+
     async def test_delegate_streaming_reaches_planning(self):
         llm = make_mock_llm()
         llm.gate = AsyncMock(return_value=_response(tool_calls=[_delegate_call()]))

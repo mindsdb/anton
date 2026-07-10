@@ -210,6 +210,11 @@ class ChatSession:
             else bool(getattr(s, "router_enabled", False))
         )
         self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
+        # Monotonic counter for thalamus-preloaded tool_use ids. Deliberately
+        # separate from `_turn_count`, which only increments in turn_stream()
+        # — using it here would emit the same id on every call made through
+        # the non-streaming turn() API.
+        self._thalamus_recall_counter = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -1472,6 +1477,7 @@ class ChatSession:
         from anton.core.llm.builtin_skills import get_builtin_skill
         from anton.core.tools.recall_skill import format_skill_response
 
+        self._thalamus_recall_counter += 1
         tool_uses: list[dict] = []
         results: list[dict] = []
         seen: set[str] = set()
@@ -1503,7 +1509,7 @@ class ChatSession:
                     store.increment_recommended(skill.label, stage=1)
                 except Exception:
                     pass
-            tu_id = f"thalamus_recall_{self._turn_count + 1}_{len(tool_uses)}"
+            tu_id = f"thalamus_recall_{self._thalamus_recall_counter}_{len(tool_uses)}"
             tool_uses.append(
                 {
                     "type": "tool_use",
