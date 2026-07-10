@@ -1725,18 +1725,27 @@ class ChatSession:
                     # and we get the same 400 forever.
                     self._seal_dangling_tool_uses("interrupted by error")
                     if _retry_count <= _max_auto_retries:
-                        # Inject the error into history and let the LLM try to recover
-                        self._append_history(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
-                                    "If you can diagnose and fix the issue, continue working on the task. "
-                                    "Adjust your approach to avoid the same error. "
-                                    "If this is unrecoverable, summarize what you accomplished and suggest next steps."
-                                ),
-                            }
-                        )
+                        # Inject the error into history and let the LLM try to
+                        # recover. A TransientProviderError reaching here is a
+                        # request-time provider blip (5xx / rate-limit / dropped
+                        # connection) — NOT the model's fault, so don't tell it to
+                        # "adjust your approach" (that misattributes the failure
+                        # and can degrade the next attempt during an incident);
+                        # just note it was transient and continue as planned (ENG-673).
+                        if isinstance(_agent_exc, TransientProviderError):
+                            recovery_note = (
+                                f"SYSTEM: A temporary provider error interrupted execution: {_agent_exc}\n\n"
+                                "This was a transient service issue, not a problem with your approach — "
+                                "continue the task as planned."
+                            )
+                        else:
+                            recovery_note = (
+                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                "If you can diagnose and fix the issue, continue working on the task. "
+                                "Adjust your approach to avoid the same error. "
+                                "If this is unrecoverable, summarize what you accomplished and suggest next steps."
+                            )
+                        self._append_history({"role": "user", "content": recovery_note})
                         # Continue the while loop — _stream_and_handle_tools will be called
                         # again with the error context now in history
                         continue

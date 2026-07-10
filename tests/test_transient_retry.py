@@ -338,6 +338,30 @@ async def test_provider_overloaded_names_the_failing_model_not_planning():
     assert ei.value.model == "latest:haiku"   # the failing model, not planning
 
 
+async def test_request_time_transient_does_not_tell_model_to_adjust_approach():
+    # ENG-673 #6: a request-time provider blip (session_backoff=False) recovers
+    # via the count-based path, but must NOT inject "adjust your approach" — that
+    # misattributes a service hiccup to the model.
+    s = _session()
+    calls = {"n": 0}
+
+    async def _gen(user_msg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientProviderError(
+                "Server returned 500.", provider="X", code="http_500", session_backoff=False,
+            )
+        yield StreamTextDelta(text="ok done")
+
+    s._stream_and_handle_tools = _gen
+    events = [e async for e in s.turn_stream("do it")]
+
+    assert "ok done" in "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    history = json.dumps(s._history).lower()
+    assert "transient service issue" in history
+    assert "adjust your approach" not in history
+
+
 def test_classify_transient_propagates_model():
     err = classify_transient(200, {"error": {"type": "overloaded_error"}}, provider="X", model="latest:opus")
     assert err.model == "latest:opus"
