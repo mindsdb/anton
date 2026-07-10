@@ -27,6 +27,7 @@ from anton.core.llm.prompts import (
 from anton.core.llm.provider import (
     ContextOverflowError,
     LLMResponse,
+    ModelUnavailableError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -107,6 +108,26 @@ def _extract_datasources(tool_call: ToolCall) -> List[str]:
     for m in re.compile(r"\bDS_([A-Z0-9_]+?)__").finditer(code):
         seen.add(m.group(1).lower())
     return list(seen)
+
+
+def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
+    """Scrub credential values from an inbound user message.
+
+    Applied at the `turn`/`turn_stream` entry, before the first
+    `_append_history`, so a secret pasted into chat never reaches model
+    context, episodic memory, or the trace sinks downstream of the LLM
+    gateway (Langfuse). Only text blocks are scrubbed; image and file
+    blocks carry no scrubbable text.
+    """
+    if isinstance(user_input, str):
+        return scrub_credentials(user_input)
+    return [
+        {**b, "text": scrub_credentials(b.get("text", ""))}
+        if b.get("type") == "text"
+        else b
+        for b in user_input
+    ]
+
 
 @dataclass
 class ChatSessionConfig:
@@ -1503,6 +1524,7 @@ class ChatSession:
             self._append_history({"role": "user", "content": results})
 
     async def turn(self, user_input: str | list[dict]) -> str:
+        user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
         user_msg_str = (
@@ -1685,6 +1707,7 @@ class ChatSession:
         (e.g. an eval-run id) without any change to Anton.
         """
         self._current_turn_id = turn_id
+        user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
         # Log user input to episodic memory
@@ -1761,8 +1784,12 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limit — don't retry, let the chat loop handle it
-                    if isinstance(_agent_exc, TokenLimitExceeded):
+                    # Token/billing limits and model-gate 403s are
+                    # deterministic — the auto-retry below would just re-send
+                    # the same doomed request (and burn its budget) before
+                    # failing anyway. Don't retry; let the chat loop / server
+                    # map them to their cards.
+                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
                         raise
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
@@ -1817,6 +1844,15 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
+                        except (TokenLimitExceeded, ModelUnavailableError):
+                            # Curated provider failures must FAIL the turn, not
+                            # get wrapped into assistant prose: the server maps
+                            # them to actionable error cards (token_limit /
+                            # model-unavailable), which can only fire when the
+                            # exception propagates. Wrapping them as text is
+                            # how "Server returned 403" ended up mid-chat with
+                            # "please rephrase your request" advice.
+                            raise
                         except Exception as e:
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
