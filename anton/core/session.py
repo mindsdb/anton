@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
 import re
@@ -732,7 +732,10 @@ class ChatSession:
         return self.tool_registry.dump()
 
     def _build_core_tools(self) -> None:
-        scratchpad_tool = SCRATCHPAD_TOOL
+        # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
+        # .description in place would leak across every session/user sharing
+        # this process instead of resetting per session.
+        scratchpad_tool = replace(SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
