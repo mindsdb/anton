@@ -51,12 +51,25 @@ _INPUT_SCHEMA = {
 }
 
 
+def _recall_marker(label: str) -> str:
+    """Stable marker embedded in every recall payload.
+
+    Used to detect whether a skill's body is still present in the current
+    history: repeat recalls return a short stub instead of re-appending the
+    full body (which would be re-sent on every subsequent call), but if
+    compaction summarized the payload away the marker disappears with it and
+    the next recall re-sends the full procedure.
+    """
+    return f"# Skill recalled: `{label}`"
+
+
 def _format_skill_response(skill, *, warning: str = "") -> str:
     """Render the recall payload sent back to the LLM as a tool result."""
     parts: list[str] = []
     if warning:
         parts.append(warning.strip())
         parts.append("")  # blank line before the procedure
+    parts.append(_recall_marker(skill.label))
     parts.append(f"# Skill: {skill.name}")
     parts.append("")
     if skill.description:
@@ -66,6 +79,23 @@ def _format_skill_response(skill, *, warning: str = "") -> str:
     parts.append("")
     parts.append(skill.declarative_md.strip())
     return "\n".join(parts)
+
+
+def _already_in_history(session, label: str) -> bool:
+    """True if a prior recall of `label` is still visible in the history."""
+    history = getattr(session, "history", None)
+    if not isinstance(history, list):
+        return False
+    marker = _recall_marker(label)
+    try:
+        import json as _json
+
+        return any(
+            marker in (m if isinstance(m, str) else _json.dumps(m, default=str))
+            for m in history
+        )
+    except Exception:  # noqa: BLE001 - never let the guard break a recall
+        return False
 
 
 async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
@@ -110,6 +140,14 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
             f"⚠ No skill named '{label_in}'. Returning the closest match: "
             f"'{skill.label}'. If that's not what you wanted, ignore the "
             f"procedure below and proceed without a recalled skill."
+        )
+
+    if _already_in_history(session, skill.label):
+        return (
+            f"Skill '{skill.label}' was already recalled in this conversation "
+            "— its full procedure is in your context above (look for "
+            f"'{_recall_marker(skill.label)}') and still applies. Not "
+            "re-sending the body."
         )
 
     # Increment the recommended counter for the *resolved* label, not the

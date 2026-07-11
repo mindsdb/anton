@@ -14,6 +14,13 @@ Each skill lives at `~/.anton/skills/<label>/` as a directory:
     ├── scripts/           # Stage 3 — optional
     └── stats.json         # per-stage usage counters (internal sidecar)
 
+A second, read-only root ships inside the package (`builtin_skills/` next to
+this module) for skills every install must carry from the first session (e.g.
+the backend/fullstack and HTML-dashboard contracts). Built-ins appear in
+listings and `recall_skill` lookups like user skills; a user skill with the
+same label shadows the built-in (logged), and an unreadable user dir falls
+back to the built-in.
+
 Legacy format (meta.json + declarative.md) is migrated transparently on first
 read via check_migrate().
 
@@ -95,7 +102,7 @@ class Skill:
     description: str
     declarative_md: str
     created_at: str
-    provenance: str  # "manual" | "consolidator"
+    provenance: str  # "manual" | "consolidator" | "builtin"
     when_to_use: str = ""
     stage_1_present: bool = True
     stage_2_present: bool = False
@@ -327,14 +334,34 @@ class SkillStore:
     def load(self, label: str) -> Skill | None:
         """Read a single skill by label. Returns None if absent or unreadable.
 
-        User skills (under `root`) shadow built-in skills with the same label.
+        User skills (under `root`) shadow built-in skills with the same label;
+        the shadow is logged so a silent swap of a built-in contract is at
+        least visible. A user dir that exists but cannot be parsed falls back
+        to the built-in rather than dead-ending the label.
         """
         if self.root.is_dir():
             d = self._find_dir(label)
             if d is not None:
-                d = check_migrate(d, self.root)
-                if d is not None:
-                    return self._skill_from_dir(d)
+                try:
+                    migrated = check_migrate(d, self.root)
+                except OSError:
+                    migrated = None
+                skill = self._skill_from_dir(migrated) if migrated is not None else None
+                if skill is not None:
+                    if (self.builtin_root / skill.label).is_dir():
+                        logger.info(
+                            "skill %r: user skill shadows the built-in skill "
+                            "of the same label", skill.label,
+                        )
+                    return skill
+                fallback = self._load_builtin(label)
+                if fallback is not None:
+                    logger.warning(
+                        "skill dir %r exists but is unreadable; falling back "
+                        "to the built-in skill", label,
+                    )
+                    return fallback
+                return None
         return self._load_builtin(label)
 
     def _load_builtin(self, label: str) -> Skill | None:
@@ -364,27 +391,32 @@ class SkillStore:
     def list_all(self) -> list[Skill]:
         """Return every loadable skill (built-ins included), sorted by label."""
         out: list[Skill] = []
-        if self.root.is_dir():
-            for child in sorted(self.root.iterdir()):
-                if not child.is_dir():
-                    continue
-                try:
-                    child = check_migrate(child, self.root)
-                    if child is None:
-                        continue
-                except OSError:
-                    continue
-                skill = self._skill_from_dir(child)
-                if skill is not None:
-                    out.append(skill)
-        seen = {s.label for s in out}
-        for child in self._builtin_dirs():
-            if child.name in seen:
-                continue
-            skill = self._load_builtin(child.name)
+        for child in self._iter_skill_dirs():
+            skill = self._skill_from_dir(child)
             if skill is not None:
+                if child.parent == self.builtin_root:
+                    skill.provenance = "builtin"
                 out.append(skill)
         out.sort(key=lambda s: s.label)
+        return out
+
+    def list_summaries(self) -> list[dict]:
+        """Lightweight listing for prompt-building.
+
+        Returns dicts with keys: label, name, description.
+        Reads only SKILL.md frontmatter, skips the body.
+        """
+        out: list[dict] = []
+        for child in self._iter_skill_dirs():
+            fm = parse_skill_dir(child)
+            if fm is None:
+                continue
+            out.append({
+                "label": fm.name,
+                "name": fm.metadata.get("display_name", fm.name),
+                "description": fm.description,
+            })
+        out.sort(key=lambda s: s["label"])
         return out
 
     def _builtin_dirs(self) -> list[Path]:
@@ -395,44 +427,28 @@ class SkillStore:
             if d.is_dir() and (d / "SKILL.md").is_file()
         )
 
-    def list_summaries(self) -> list[dict]:
-        """Lightweight listing for prompt-building.
+    def _iter_skill_dirs(self) -> list[Path]:
+        """User skill dirs (migrated) plus built-in dirs not shadowed by one.
 
-        Returns dicts with keys: label, name, description.
-        Reads only SKILL.md frontmatter, skips the body.
+        Shared walk for list_all()/list_summaries(); load() resolves single
+        labels itself so it can fall back when a user dir is unreadable.
         """
-        out: list[dict] = []
+        dirs: list[Path] = []
+        seen: set[str] = set()
         if self.root.is_dir():
             for child in sorted(self.root.iterdir()):
                 if not child.is_dir():
                     continue
                 try:
                     child = check_migrate(child, self.root)
-                    if child is None:
-                        continue
                 except OSError:
                     continue
-                fm = parse_skill_dir(child)
-                if fm is None:
+                if child is None:
                     continue
-
-                out.append({
-                    "label": fm.name,
-                    "name": fm.metadata.get("display_name", fm.name),
-                    "description": fm.description,
-                })
-        seen = {s["label"] for s in out}
-        for child in self._builtin_dirs():
-            fm = parse_skill_dir(child)
-            if fm is None or fm.name in seen:
-                continue
-            out.append({
-                "label": fm.name,
-                "name": fm.metadata.get("display_name", fm.name),
-                "description": fm.description,
-            })
-        out.sort(key=lambda s: s["label"])
-        return out
+                dirs.append(child)
+                seen.add(child.name)
+        dirs.extend(d for d in self._builtin_dirs() if d.name not in seen)
+        return dirs
 
     # ── writing ─────────────────────────────────────────────────────
 

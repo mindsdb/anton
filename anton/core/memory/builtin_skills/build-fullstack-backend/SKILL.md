@@ -138,7 +138,7 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
-  - Apply the HTML build guidance from the `VISUALIZATIONS` section above (single self-contained HTML file; Apache ECharts via CDN for charts; dark theme #0d1117; responsive layout with a viewport meta tag). If that section is not present in this prompt, follow these same defaults regardless.
+  - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML. Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Apache ECharts via CDN for charts; dark theme #0d1117; responsive layout with a viewport meta tag.
   - Save the entry-point to `<artifact_path>/static/index.html` (create the `static/` subfolder if needed). ANY additional frontend assets (separate CSS, JS, images, fonts, large data .js payloads) MUST also live under `<artifact_path>/static/` — never at the artifact root, since the backend only serves files from `static/`.
   - All backend endpoints MUST be called under the `/api/*` prefix (matches the backend route convention from step 4). The frontend never calls bare paths like `/items` — always `/api/items`.
   - API base URL is supplied via a `<meta>` tag so the same HTML works locally AND when deployed with frontend and backend on different origins (e.g. CloudFront/S3 + API Gateway/Lambda). Include this line in `<head>`:

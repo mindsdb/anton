@@ -120,3 +120,52 @@ class TestHintLabelDrift:
         assert referenced
         for label in referenced:
             assert store.load(label) is not None, f"hinted skill missing: {label}"
+
+
+class TestBrokenShadowFallback:
+    def test_unreadable_user_dir_falls_back_to_builtin(self, store):
+        bad = store.root / "build-fullstack-backend"
+        bad.mkdir(parents=True)
+        (bad / "SKILL.md").write_text("not: [valid: yaml\nno frontmatter fence")
+        loaded = store.load("build-fullstack-backend")
+        assert loaded is not None
+        assert loaded.provenance == "builtin"
+        assert "Mangum" in loaded.declarative_md
+
+    def test_unreadable_dir_without_builtin_still_none(self, tmp_path):
+        s = SkillStore(root=tmp_path / "u", builtin_root=tmp_path / "nope")
+        bad = s.root / "some-skill"
+        bad.mkdir(parents=True)
+        (bad / "SKILL.md").write_text("garbage")
+        assert s.load("some-skill") is None
+
+
+class TestRecallIdempotence:
+    def _session(self, store, history):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(_skill_store=store, history=history)
+
+    @pytest.mark.asyncio
+    async def test_second_recall_returns_stub(self, store):
+        from anton.core.tools.recall_skill import handle_recall_skill
+
+        history: list = []
+        session = self._session(store, history)
+        first = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+        assert "## Procedure" in first
+        # simulate the tool result landing in history
+        history.append({"role": "user", "content": [{"type": "tool_result", "content": first}]})
+        second = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+        assert "already recalled" in second
+        assert "## Procedure" not in second
+
+    @pytest.mark.asyncio
+    async def test_compacted_history_resends_full_body(self, store):
+        from anton.core.tools.recall_skill import handle_recall_skill
+
+        # a summary that mentions the skill but lacks the recall marker
+        history = [{"role": "user", "content": "[compacted] recalled build-html-dashboard earlier"}]
+        session = self._session(store, history)
+        result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+        assert "## Procedure" in result
