@@ -52,75 +52,30 @@ async def generate(
     artifact_type: str,
     artifact_path: Path,
     context: str,
+    slug: str,
 ) -> dict | str:
-    """Drive the inner LLM(s) to populate ``artifact_path``.
+    """Drive the artifact-generation FSM to populate ``artifact_path``.
 
-    Returns either a result dict (on success) or a single error string.
-    The sub-generator reaches real data itself via the `scratchpad` sub-tool,
-    guided by the brief's free-form ``## Data`` section.
+    Returns a result dict (with a step ``trace``) on success, or a single
+    error string naming the node where the machine stopped.
     """
-    # --- html-app: single generation loop --------------------------------
-    if artifact_type == "html-app":
-        return await _run_loop(
-            session=session,
-            system=build_subagent_system_prompt("html-app", artifact_path),
-            kickoff=build_user_kickoff(context),
-            artifact_path=artifact_path,
-        )
+    from .orchestrator import run
+    from .state import GenState
 
-    # --- fullstack types: spec → parallel backend + frontend --------------
-    if artifact_type not in ("fullstack-stateless-app", "fullstack-stateful-app"):
+    if artifact_type not in (
+        "html-app", "fullstack-stateless-app", "fullstack-stateful-app"
+    ):
         return f"Error: unsupported artifact type: {artifact_type!r}"
 
-    stateless = artifact_type == "fullstack-stateless-app"
-
-    api_spec_or_err = await _generate_api_spec(session, context, stateless=stateless)
-    if api_spec_or_err.startswith("Error:"):
-        return api_spec_or_err
-    api_spec = api_spec_or_err
-
-    backend_result, frontend_result = await asyncio.gather(
-        _run_loop(
-            session=session,
-            system=build_backend_system_prompt(artifact_path, stateless=stateless),
-            kickoff=build_backend_kickoff(context, api_spec),
-            artifact_path=artifact_path,
-            # Two-step backend generation: write backend.py first so that
-            # requirements.txt can be based on its actual imports.
-            step_injections=[
-                (
-                    "backend.py",
-                    "backend.py written. Now write requirements.txt listing "
-                    "EVERY package imported in backend.py (one per line, no "
-                    "extras). Then call finish.",
-                ),
-            ],
-        ),
-        _run_loop(
-            session=session,
-            system=build_frontend_system_prompt(artifact_path),
-            kickoff=build_frontend_kickoff(context, api_spec),
-            artifact_path=artifact_path,
-        ),
+    state = GenState(
+        session=session,
+        artifact_type=artifact_type,
+        artifact_path=artifact_path,
+        slug=slug,
+        brief=context,
+        is_fullstack=artifact_type != "html-app",
     )
-
-    if isinstance(backend_result, str):
-        return f"Backend generation failed: {backend_result}"
-    if isinstance(frontend_result, str):
-        return f"Frontend generation failed: {frontend_result}"
-
-    return {
-        "files_written": (
-            backend_result["files_written"] + frontend_result["files_written"]
-        ),
-        "rounds_used": max(
-            backend_result["rounds_used"], frontend_result["rounds_used"]
-        ),
-        "summary": (
-            f"backend: {backend_result['summary']} | "
-            f"frontend: {frontend_result['summary']}"
-        ),
-    }
+    return await run(state)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +136,7 @@ async def _run_loop(
     kickoff: str,
     artifact_path: Path,
     step_injections: list[tuple[str, str]] | None = None,
+    require_files: bool = True,
 ) -> dict | str:
     """Run one bounded sub-agent tool-call loop.
 
@@ -322,7 +278,7 @@ async def _run_loop(
             f"{len(files_written)} file(s): {files_written}."
         )
 
-    if not files_written:
+    if require_files and not files_written:
         return "generator finished without writing any files."
 
     return {

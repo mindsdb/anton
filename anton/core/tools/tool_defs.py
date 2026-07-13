@@ -408,10 +408,12 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "must implement, backend file layout, or any other implementation "
         "detail — those belong in the generator's own planning step, not in "
         "this brief.\n\n"
-        "Returns `{slug, path, files_written, rounds_used, summary}` on success "
-        "or a plain error string on failure. The tool DOES NOT call "
-        "`launch_backend` — for `fullstack-stateful-app`, you still call it "
-        "yourself after this returns."
+        "For fullstack apps the tool launches the backend itself (health-checked "
+        "on `/api/health`) and records the port in metadata; you do NOT call "
+        "`launch_backend` yourself. On success it returns "
+        "`{slug, path, files_written, summary, trace}` (the `trace` lists the "
+        "generation steps and their outcomes); on failure a single error string "
+        "naming the node that stopped the run."
     ),
     input_schema={
         "type": "object",
@@ -448,17 +450,15 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
     },
     handler=handle_generate_artifact,
     prompt=(
-        "ARTIFACT GENERATION GATE (experimental):\n"
-        "You have access to `generate_artifact`, which produces every file "
-        "for an already-registered artifact in a single tool call (it runs "
-        "a dedicated sub-generator internally). ONLY use this tool when the "
-        "user's latest message contains the literal marker string `XTESTX`. "
-        "In that case:\n"
-        "  1. Call `create_artifact` as usual to register the slug and pick "
-        "the type (one of html-app, fullstack-stateless-app, "
-        "fullstack-stateful-app).\n"
-        "  2. Instead of writing files yourself in the scratchpad, call\n"
-        "     `generate_artifact(slug=<slug>, context=<markdown brief>)`.\n"
+        "ARTIFACT GENERATION:\n"
+        "`generate_artifact` produces every file for an already-registered "
+        "artifact by running a strict internal generation state machine "
+        "(data-sufficiency check → technical spec → REST API spec → backend & "
+        "frontend generation with verification → launch & health check). Use it "
+        "INSTEAD of writing artifact files yourself in the scratchpad.\n"
+        "  1. Call `create_artifact` to register the slug and pick the type "
+        "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
+        "  2. Call `generate_artifact(slug=<slug>, context=<markdown brief>)`.\n"
         "     - `context` MUST be a markdown document with these four sections:\n"
         "         ## User request\n"
         "         ## Conversation context\n"
@@ -502,11 +502,8 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "(`GET /api/...`),\n"
         "         • backend file layout, modules, or implementation details.\n"
         "       Those are the generator's job to design — not yours to dictate.\n"
-        "  3. For `fullstack-stateful-app`, after `generate_artifact` returns "
-        "you MUST still call `launch_backend(slug=...)` exactly as today.\n"
-        "When the user's latest message does NOT contain `XTESTX`, IGNORE this "
-        "tool entirely and build artifacts the conventional way (register, "
-        "then write files via the scratchpad)."
+        "For fullstack apps the tool launches the backend itself and records the "
+        "port — you do NOT need to call `launch_backend` afterwards."
     ),
 )
 

@@ -257,16 +257,13 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
 
 
 async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> str:
-    """Generate every file for an already-registered artifact via a sub-LLM.
+    """Generate every file for an already-registered artifact via the FSM.
 
-    Stage 1 (XTESTX-gated): the outer agent calls this only when the user's
-    message contains the literal marker `XTESTX`. The handler:
-      1. Loads artifact metadata to read its `type` (rejects types outside
-         the {html-app, fullstack-stateless-app, fullstack-stateful-app}).
-      2. Validates input shape (context required).
-      3. Hands off to `anton.core.tools.generate_artifact.generate`, which
-         runs an inner tool-call loop against `session._llm.code` and writes
-         files into the artifact folder.
+    The handler loads artifact metadata to read its `type` (rejects types
+    outside {html-app, fullstack-stateless-app, fullstack-stateful-app}),
+    validates input shape (context required), and hands off to
+    `anton.core.tools.generate_artifact.generate`, which runs the deterministic
+    generation state machine and writes files into the artifact folder.
     """
     import json
 
@@ -302,6 +299,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
             artifact_type=artifact.type,
             artifact_path=folder,
             context=context,
+            slug=slug,
         )
     except Exception as exc:  # last-resort: never escalate to the dispatcher
         return f"Error: generator failed: {exc}"

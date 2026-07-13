@@ -16,6 +16,50 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
+# Canonical FSM graph — embedded in decision/generation prompts so every LLM
+# call understands the whole pipeline and where its step sits. English only.
+# ---------------------------------------------------------------------------
+
+FSM_DIGRAPH = """\
+digraph artifact_generation {
+    rankdir=TB;
+    is_data_enough       [shape=diamond, label="Is there enough data to solve the task?"];
+    define_required_data [shape=box,     label="Determine the required data"];
+    is_possible_to_fetch [shape=diamond, label="Is it possible to fetch the data?"];
+    fetch_data_sample    [shape=box,     label="Fetch a data sample"];
+    not_enough_data      [shape=ellipse, label="Error: not enough data"];
+    make_tech_spec       [shape=box,     label="Write a detailed technical specification (spec.md)"];
+    is_fullstack         [shape=diamond, label="Is a backend required? (derived from artifact type)"];
+    make_api_spec        [shape=box,     label="Design the REST API specification (openapi.json)"];
+    generate_backend     [shape=box,     label="Generate backend in a subagent"];
+    verify_backend       [shape=box,     label="Verify and unit-test the backend"];
+    generate_frontend    [shape=box,     label="Generate frontend in a subagent"];
+    verify_frontend      [shape=box,     label="Verify the frontend"];
+    run_app              [shape=box,     label="Launch the application"];
+    verify_fullstack     [shape=box,     label="Verify the application is running"];
+
+    // entry node = is_data_enough
+    is_data_enough       -> make_tech_spec       [label="yes"];
+    is_data_enough       -> define_required_data [label="no"];
+    define_required_data -> is_possible_to_fetch;
+    is_possible_to_fetch -> fetch_data_sample    [label="yes"];
+    is_possible_to_fetch -> not_enough_data      [label="no"];
+    fetch_data_sample    -> is_data_enough;
+    make_tech_spec       -> is_fullstack;
+    is_fullstack         -> make_api_spec        [label="yes"];
+    is_fullstack         -> generate_frontend    [label="no"];
+    make_api_spec        -> generate_backend;
+    make_api_spec        -> generate_frontend;
+    generate_backend     -> verify_backend;
+    generate_frontend    -> verify_frontend;
+    verify_backend       -> run_app;
+    verify_frontend      -> run_app;
+    run_app              -> verify_fullstack;
+}
+"""
+
+
+# ---------------------------------------------------------------------------
 # Role / tool contract (shared across all artifact types)
 # ---------------------------------------------------------------------------
 
@@ -122,6 +166,10 @@ app.add_middleware(
 )
 
 # === API routes ===
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
 @app.get("/api/hello")
 async def hello():
     return {"hello": "world"}
@@ -144,6 +192,8 @@ CRITICAL RULES:
 - File MUST be named `backend.py`. The `handler` attribute MUST stay `handler`.
 - ALL API endpoints MUST use the `/api/*` prefix (e.g. `/api/items`, `/api/search`).
   Never expose routes at the root — they collide with the `StaticFiles` mount.
+- MUST expose a health-check endpoint `GET /api/health` returning
+  `200 {"status": "ok"}`. The launcher uses it as the readiness probe.
 - API routes MUST be registered BEFORE `app.mount("/", StaticFiles(...))`.
 - The backend MUST accept `--port` via argparse. NEVER hardcode a port.
 - Keep `Mangum(app, lifespan="off")`. Required for Lambda cold-start.
@@ -393,3 +443,111 @@ def build_frontend_kickoff(
         "`write_file`, and call `finish`."
     )
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Data-phase prompts (decisions + fetch loop)
+# ---------------------------------------------------------------------------
+
+_DATA_CONTEXT_HEADER = (
+    "You are one step of a strict artifact-generation state machine. The full "
+    "pipeline is this graph:\n\n"
+    f"{FSM_DIGRAPH}\n"
+)
+
+
+def _brief_and_notes(state) -> str:
+    parts = [f"## Brief\n{state.brief.strip()}"]
+    if state.data_notes.strip():
+        parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
+    else:
+        parts.append("## Data gathered so far\n(nothing gathered yet)")
+    return "\n\n".join(parts)
+
+
+def build_data_enough_prompt(state) -> tuple[str, str]:
+    system = (
+        _DATA_CONTEXT_HEADER
+        + "You are the `is_data_enough` decision node. Decide whether there is "
+        "ALREADY enough data to build the artifact. If the task needs no external "
+        "data at all (e.g. 'show the current time'), that counts as ENOUGH. "
+        "Otherwise it is enough only when the source, schema, and a concrete "
+        "sample of every needed dataset are known. Answer strictly."
+    )
+    user = _brief_and_notes(state) + "\n\nIs there enough data? Answer with the verdict."
+    return system, user
+
+
+def build_required_data_prompt(state) -> tuple[str, str]:
+    system = (
+        _DATA_CONTEXT_HEADER
+        + "You are the `define_required_data` node. List exactly which data is "
+        "missing and where each item can be obtained (user's connected data "
+        "sources or public/documented APIs). Be concrete and minimal."
+    )
+    user = _brief_and_notes(state) + "\n\nList the required data items."
+    return system, user
+
+
+def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
+    system = (
+        _DATA_CONTEXT_HEADER
+        + "You are the `is_possible_to_fetch` decision node. Given the required "
+        "data and the available sources, decide whether the data can actually be "
+        "obtained. If a needed source simply does not exist among the user's "
+        "connections or public sources, it is NOT possible."
+    )
+    user = (
+        _brief_and_notes(state)
+        + f"\n\n## Required data\n{required}\n\nIs it possible to fetch this data?"
+    )
+    return system, user
+
+
+def build_fetch_data_system_prompt(artifact_path) -> str:
+    return "\n\n".join(
+        [
+            _ROLE,
+            _DATA_CONTEXT_HEADER
+            + "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
+            "run Python that pulls a small SAMPLE of the required data (query the "
+            "DB, call the API, read the file). Confirm the shape and types. Do NOT "
+            "write any artifact files. When done, call `finish(summary=...)` with a "
+            "precise description of WHICH scratchpad(s)/cell(s) you used, what each "
+            "produced, and the observed schema/sample — this summary is handed to "
+            "the next steps.",
+            "## Output folder\n"
+            f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`",
+        ]
+    )
+
+
+def build_fetch_data_kickoff(state) -> str:
+    return (
+        _brief_and_notes(state)
+        + "\n\nUse the `scratchpad` tool to fetch a data sample, then call "
+        "`finish` with a precise summary of the scratchpads/cells and the "
+        "schema/sample you observed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tech-spec prompt (make_tech_spec → spec.md)
+# ---------------------------------------------------------------------------
+
+def build_tech_spec_prompt(state) -> tuple[str, str]:
+    system = (
+        _DATA_CONTEXT_HEADER
+        + "You are the `make_tech_spec` node. Write a detailed technical "
+        "specification for building this artifact — the backend behaviour (if a "
+        "backend is needed) and the frontend behaviour, screens, and data flow. "
+        "Base it on the brief and the gathered data. Output GitHub-flavoured "
+        "Markdown only (no code fences around the whole document). This document "
+        "will be saved to `spec.md` and handed to the backend and frontend "
+        "generators."
+    )
+    user = _brief_and_notes(state) + (
+        f"\n\n## Artifact type\n{state.artifact_type}\n\n"
+        "Write the technical specification now."
+    )
+    return system, user
