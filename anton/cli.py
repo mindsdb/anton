@@ -361,6 +361,10 @@ def main(
     resume: bool = typer.Option(
         False, "--resume", "-r", help="Resume a previous chat session"
     ),
+    no_update: bool = typer.Option(
+        False, "--no-update", help="Skip the auto-update check for this run "
+        "(same as ANTON_DISABLE_AUTOUPDATES=true)"
+    ),
 ) -> None:
     """Anton — a self-evolving autonomous system."""
     from anton.config.settings import AntonSettings
@@ -373,7 +377,7 @@ def main(
 
     from anton.updater import check_and_update
 
-    if check_and_update(console, settings):
+    if not no_update and check_and_update(console, settings):
         # Mark the env before replacing the process so the next invocation
         # skips the update check and doesn't loop.
         os.environ["_ANTON_UPDATED"] = "1"

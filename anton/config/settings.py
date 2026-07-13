@@ -36,6 +36,23 @@ class AntonSettings(CoreSettings):
     coding_provider: str = "anthropic"
     coding_model: str = "claude-haiku-4-5-20251001"
 
+    @field_validator("planning_provider", "coding_provider", mode="before")
+    @classmethod
+    def _map_minds_cloud_to_openai_compatible(cls, v: object) -> object:
+        """MindsHub is an OpenAI-compatible endpoint, so the CLI serves it via
+        the ``openai-compatible`` provider (creds/base derived from the minds_*
+        fields in ``model_post_init``). The desktop app and the consolidated
+        ``~/.cowork/.env`` use the first-class provider name ``minds-cloud``,
+        which the CLI's ``LLMClient`` registry has no entry for — so a shared
+        config crashed the CLI with ``Unknown planning provider: minds-cloud``.
+        Normalise it here so both names resolve to the same working provider
+        (ENG-655). Tolerant of case, surrounding whitespace, and the underscore
+        spelling.
+        """
+        if isinstance(v, str) and v.strip().lower().replace("_", "-") == "minds-cloud":
+            return "openai-compatible"
+        return v
+
     # Opaque reasoning-effort level (e.g. "low" | "medium" | "high" | "xhigh" |
     # "max"), forwarded to the provider in its native shape when set. None means
     # the provider's own default. The value is validated by the upstream
