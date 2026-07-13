@@ -110,9 +110,10 @@ def test_429_fastapi_detail_maps_to_token_limit():
 
 
 def test_429_enveloped_detail_also_maps_to_token_limit():
-    # The time bomb (ENG-747): if the gateway ever standardizes its 429 onto
-    # the OpenAI envelope, the SDK will unwrap it — the card must survive
-    # both dialects.
+    # If the gateway ever moves its 429 into the OpenAI envelope while keeping
+    # the `detail` field, the SDK unwraps it to top level — still classified.
+    # (An envelope carrying only `message` — OpenAI's own quota dialect —
+    # deliberately stays generic; see the mapper docstring's known limits.)
     exc = _sdk_error(429, json_body={"error": {"detail": "Monthly limit exceeded for tokens: 5/5"}})
     with pytest.raises(TokenLimitExceeded) as err:
         _raise_for_status_error(exc, "sonnet")
@@ -124,6 +125,16 @@ def test_bare_429_stays_generic():
     with pytest.raises(ConnectionError) as err:
         _raise_for_status_error(exc, "sonnet")
     assert "temporarily unavailable" in str(err.value)
+
+
+def test_429_list_detail_stays_generic():
+    # FastAPI validation errors put a LIST in detail — its Python repr must
+    # never reach user-facing copy with an upgrade CTA attached.
+    exc = _sdk_error(429, json_body={"detail": [{"loc": ["body", "x"], "msg": "field required"}]})
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert "field required" not in str(err.value)
+    assert not isinstance(err.value, TokenLimitExceeded)
 
 
 # ── 403 with structured gateway codes ────────────────────────────────
@@ -158,11 +169,30 @@ def test_model_unavailable_is_a_connection_error():
         _raise_for_status_error(_gateway_403("model_disabled"), "sonnet")
 
 
-def test_unwrapped_403_shape_also_maps():
-    # Defensive: a proxy or SDK version that does NOT unwrap would hand the
-    # mapper a top-level-code body directly; both shapes must classify.
-    exc = _sdk_error(403, json_body={"code": "model_access_denied", "message": "no"})
+def _wire_shaped_error(status_code, body):
+    """Real `openai.APIStatusError` constructed DIRECTLY with an explicit
+    body — bypassing the SDK's parse-and-unwrap on purpose. This is the only
+    way to hand the mapper an envelope-shaped ``exc.body``: the pinned SDK
+    always peels ``error`` (see test_sdk_unwraps_error_envelope), but
+    anton's pyproject allows ``openai>=1.0`` and proxies exist that re-wrap,
+    so the mapper's envelope fallback must stay pinned by a test that the
+    MockTransport route physically cannot produce."""
+    request = httpx.Request("POST", "http://gateway.test/v1/chat/completions")
+    response = httpx.Response(status_code, json=body if isinstance(body, dict) else None, request=request)
+    return openai.APIStatusError("wire-shaped", response=response, body=body)
+
+
+def test_envelope_shaped_403_maps_via_fallback():
+    # A client that does NOT unwrap delivers the wire envelope verbatim —
+    # the mapper's `envelope.get("code")` fallback is what classifies it.
+    exc = _wire_shaped_error(403, {"error": {"code": "model_access_denied", "message": "no"}})
     with pytest.raises(ModelUnavailableError):
+        _raise_for_status_error(exc, "sonnet")
+
+
+def test_envelope_shaped_429_detail_maps_via_fallback():
+    exc = _wire_shaped_error(429, {"error": {"detail": "Monthly limit exceeded for tokens: 5/5"}})
+    with pytest.raises(TokenLimitExceeded):
         _raise_for_status_error(exc, "sonnet")
 
 

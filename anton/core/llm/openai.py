@@ -55,11 +55,20 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     403 (``{"error": {"code": …}}``), ``exc.body`` is the INNER dict and
     ``code`` sits at top level. The gateway's 429 is FastAPI-style
     (``{"detail": …}``, no envelope) and passes through untouched. Both
-    fields are therefore read from the top level first with an envelope
-    fallback, so the mapping survives either dialect (and a future gateway
-    standardization of the 429 shape). The originally shipped ENG-598
-    mapper read only ``body["error"]["code"]`` — a key the SDK had already
-    peeled off — which left the model-403 card dead in production.
+    fields are therefore read from the top level first, with an envelope
+    fallback for clients that deliver the wire shape unmodified (anton's
+    pyproject allows ``openai>=1.0``, and proxies exist that re-wrap).
+    The originally shipped ENG-598 mapper read only
+    ``body["error"]["code"]`` — a key the SDK had already peeled off —
+    which left the model-403 card dead in production.
+
+    Known limits, on purpose: a wire body carrying BOTH a top-level
+    ``detail`` and an ``error`` envelope loses the detail inside the SDK
+    (the unwrap discards siblings of ``error``) — unrecoverable from
+    ``exc.body``, and no real dialect emits that shape. And a 429 whose
+    envelope carries only ``message`` (OpenAI's own quota dialect, e.g.
+    ``insufficient_quota``) stays generic: classifying arbitrary provider
+    messages as MindsHub quota would put an upsell CTA on BYOK errors.
     """
     if exc.status_code == 401:
         raise ConnectionError(
@@ -69,7 +78,9 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     body = exc.body if isinstance(exc.body, dict) else {}
     envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
     detail = body.get("detail") or envelope.get("detail")
-    if exc.status_code == 429 and detail:
+    # str-only: FastAPI validation errors put a LIST in detail — rendering
+    # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
+    if exc.status_code == 429 and isinstance(detail, str) and detail:
         msg = f"Server returned 429 — {detail}"
         msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
         raise TokenLimitExceeded(msg) from exc
