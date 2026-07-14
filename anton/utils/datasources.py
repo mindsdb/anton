@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -145,6 +146,20 @@ def scrub_credentials(text: str) -> str:
     return text
 
 
+def _parse_picked_files(raw: str | None) -> list[dict]:
+    """Parse a `_picked_files` JSON field, dropping malformed entries so they
+    can't crash a later f.get(...) call or embed "None" as a fileId."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [f for f in parsed if isinstance(f, dict) and f.get("id")]
+
+
 def build_datasource_context(vault: DataVault, active_only: str | None = None) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
 
@@ -172,6 +187,12 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         "it by name; never treat the bracket form as a literal credential "
         "or pass it back as a value to any tool.\n"
     )
+    # Google Drive's drive.file OAuth scope only covers files the app created
+    # itself, plus files explicitly granted via the Google Picker (persisted
+    # as a `_picked_files` vault field) — these must be named explicitly here
+    # since a plain files.list()/files.search() call won't return them.
+    google_drive_oauth_connected = False
+    google_drive_picked_files: dict[str, list[dict]] = {}
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"
         if active_only and slug != active_only:
@@ -200,6 +221,39 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         if identity:
             head += f" — {identity}"
         lines.append(f"- {head} → {var_names}")
+        if c["engine"] == "google_drive":
+            if fields.get("auth_type") == "oauth":
+                google_drive_oauth_connected = True
+            picked = _parse_picked_files(fields.get("_picked_files"))
+            if picked:
+                google_drive_picked_files[c["name"]] = picked
+    if google_drive_oauth_connected or google_drive_picked_files:
+        lines.append(
+            "\nConnected Google Drive accounts are available through Google OAuth credentials "
+            "in the injected `DS_GOOGLE_DRIVE_<CONNECTION>__...` environment variables. "
+            "Only claim Google Drive access if you can actually use those credentials successfully."
+        )
+    if google_drive_picked_files:
+        picked_lines = [
+            f"- {f.get('name', 'untitled')} (id: {f.get('id')}, connection: {conn_name})"
+            for conn_name, files in google_drive_picked_files.items()
+            for f in files
+        ]
+        # Imperative and structurally separate from the paragraph above — a
+        # softer prose mention got silently dropped by the agent when
+        # reporting files.list() results verbatim.
+        lines.append(
+            "\nIMPORTANT — additional Drive files the user has explicitly granted access to "
+            "via the Google Picker, which a plain files.list() or files.search() call will NOT "
+            "return (the google_drive scope only covers files this app created itself, plus "
+            "these specifically granted ones):\n"
+            + "\n".join(picked_lines)
+            + "\nWhenever you list, search, or enumerate Drive files for the user, you MUST "
+            "include every file above IN ADDITION to whatever files.list()/files.search() "
+            "returns — do not report only the API call's results. To read one of these files' "
+            "content, call files.get(fileId=...) directly with its id above; do not expect it "
+            "to appear in a files.list() response first."
+        )
     return "\n".join(lines)
 
 

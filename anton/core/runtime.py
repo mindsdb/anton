@@ -14,7 +14,6 @@ Public API:
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
@@ -142,14 +141,6 @@ async def build_chat_session(
     initial_history = history_store.load(session_id)
 
     data_vault = LocalDataVault() if LocalDataVault is not None else None
-    google_drive_oauth_connected = False
-    # {connection_name: [{"id": ..., "name": ...}, ...]} — files the user
-    # explicitly granted access to via the Google Picker. drive.file scope
-    # only covers files the app created itself, so without calling these
-    # out by name the agent has no way to know they're reachable at all;
-    # it isn't enough to just leave PICKED_FILES sitting in the env like
-    # any other DS_ credential field.
-    google_drive_picked_files: dict[str, list[dict]] = {}
     if data_vault is not None:
         try:
             connections = data_vault.list_connections()
@@ -157,13 +148,9 @@ async def build_chat_session(
             logger.debug("Could not list Anton data vault connections", exc_info=True)
             connections = []
         for conn in connections:
-            # Per-connection try/except — one bad record (a load() error, a
-            # malformed field) must not abort inject_env/picked_files
-            # processing for every connection after it in the list.
-            # engine/name are initialized before the try so the except
-            # handler's logging never re-calls conn.get(...) itself — if
-            # `conn` isn't a plain dict, that would raise a second,
-            # uncaught exception right here and abort the whole loop again.
+            # Per-connection try/except so one bad record can't abort
+            # injecting env for the rest; engine/name are set before the try
+            # so the except's own logging can't itself raise.
             engine = None
             name = None
             try:
@@ -172,81 +159,11 @@ async def build_chat_session(
                 if not (engine and name):
                     continue
                 data_vault.inject_env(engine, name)
-                if engine == "google_drive":
-                    fields = data_vault.load(engine, name) or {}
-                    if fields.get("auth_type") == "oauth":
-                        google_drive_oauth_connected = True
-                    # Fall back to the pre-rename key so a vault record
-                    # written before the _picked_files rename doesn't
-                    # silently lose its guidance.
-                    raw_picked = fields.get("_picked_files") or fields.get("picked_files")
-                    if raw_picked:
-                        try:
-                            parsed = json.loads(raw_picked)
-                        except (json.JSONDecodeError, TypeError):
-                            parsed = []
-                        # Only keep well-formed entries — anything else (a
-                        # bare string, a dict instead of a list, an entry
-                        # missing "id") would crash the f.get(...) calls
-                        # below or embed a literal "None" fileId in the
-                        # prompt instructions.
-                        files = (
-                            [f for f in parsed if isinstance(f, dict) and f.get("id")]
-                            if isinstance(parsed, list) else []
-                        )
-                        if files:
-                            google_drive_picked_files[name] = files
             except Exception:
                 logger.debug(
                     "Could not inject Anton data vault env for %s/%s",
                     engine, name, exc_info=True,
                 )
-
-    integration_guidance = ""
-    # Also shown whenever picked_files exist even if google_drive_oauth_connected
-    # is somehow False (fragile single-connection heuristic) — a connection
-    # can only have picked_files at all via the OAuth-based Picker flow, so
-    # its DS_ credentials necessarily exist; otherwise the IMPORTANT block
-    # below would tell the agent to fetch specific file IDs without ever
-    # mentioning the env vars that authenticate those calls.
-    if google_drive_oauth_connected or google_drive_picked_files:
-        integration_guidance = (
-            " Connected Google Drive accounts are available through Google OAuth credentials "
-            "in the injected `DS_GOOGLE_DRIVE_<CONNECTION>__...` environment variables. "
-            "Only claim Google Drive access if you can actually use those credentials successfully."
-        )
-    # Deliberately NOT gated behind google_drive_oauth_connected — that flag
-    # is a fragile, single-source heuristic (fields.get("auth_type") ==
-    # "oauth" on SOME connection). A connection whose record predates that
-    # field, or uses a different auth_type value, would otherwise have real
-    # picked_files data but no guidance telling the agent it exists —
-    # reproducing the exact bug this block was added to fix.
-    if google_drive_picked_files:
-        picked_lines = [
-            f"- {f.get('name', 'untitled')} (id: {f.get('id')}, connection: {conn_name})"
-            for conn_name, files in google_drive_picked_files.items()
-            for f in files
-        ]
-        # Deliberately imperative and structurally separate from the
-        # paragraph above — a soft prose mention was tested and the
-        # agent silently dropped these files whenever a user asked to
-        # "list" Drive files, because it just reported files.list()'s
-        # output verbatim without cross-referencing earlier context.
-        integration_guidance += (
-            "\n\nIMPORTANT — additional Drive files the user has explicitly granted access to "
-            "via the Google Picker, which a plain files.list() or files.search() call will NOT "
-            "return (the google_drive scope only covers files this app created itself, plus "
-            "these specifically granted ones):\n"
-            + "\n".join(picked_lines)
-            + "\nWhenever you list, search, or enumerate Drive files for the user, you MUST "
-            "include every file above IN ADDITION to whatever files.list()/files.search() "
-            "returns — do not report only the API call's results. To read one of these files' "
-            "content, call files.get(fileId=...) directly with its id above; do not expect it "
-            "to appear in a files.list() response first."
-        )
-
-    suffix_parts = [s for s in (system_prompt_suffix, integration_guidance) if s]
-    final_suffix = "".join(suffix_parts) if suffix_parts else None
 
     config = ChatSessionConfig(
         llm_client=llm_client,
@@ -256,7 +173,7 @@ async def build_chat_session(
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
-            suffix=final_suffix,
+            suffix=system_prompt_suffix,
         ),
         output_dir=str(output_dir),
         workspace=workspace,
