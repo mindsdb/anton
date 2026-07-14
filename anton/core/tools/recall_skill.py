@@ -81,8 +81,18 @@ def _format_skill_response(skill, *, warning: str = "") -> str:
     return "\n".join(parts)
 
 
+_PROCEDURE_HEADER = "## Procedure (Stage 1 — declarative)"
+
+
 def _already_in_history(session, label: str) -> bool:
-    """True if a prior recall of `label` is still visible in the history."""
+    """True if a prior FULL recall of `label` is still visible in the history.
+
+    Requires the marker AND the procedure header in the same message: only
+    the full payload carries both. The stub deliberately contains neither
+    (see below) — a stub that survives compaction while the body is evicted
+    must not keep suppressing re-sends, and a summary that merely quotes the
+    marker doesn't count as the contract being present.
+    """
     history = getattr(session, "history", None)
     if not isinstance(history, list):
         return False
@@ -90,10 +100,17 @@ def _already_in_history(session, label: str) -> bool:
     try:
         import json as _json
 
-        return any(
-            marker in (m if isinstance(m, str) else _json.dumps(m, default=str))
-            for m in history
-        )
+        for m in history:
+            # ensure_ascii=False: the header contains an em-dash, which
+            # default json.dumps would escape to — and never match.
+            text = (
+                m
+                if isinstance(m, str)
+                else _json.dumps(m, default=str, ensure_ascii=False)
+            )
+            if marker in text and _PROCEDURE_HEADER in text:
+                return True
+        return False
     except Exception:  # noqa: BLE001 - never let the guard break a recall
         return False
 
@@ -143,10 +160,14 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
         )
 
     if _already_in_history(session, skill.label):
+        # NOTE: this stub must never contain _recall_marker() or the
+        # procedure header — otherwise a stub surviving compaction would
+        # satisfy _already_in_history forever and the full contract would
+        # never be re-sent.
         return (
             f"Skill '{skill.label}' was already recalled in this conversation "
-            "— its full procedure is in your context above (look for "
-            f"'{_recall_marker(skill.label)}') and still applies. Not "
+            "— its full procedure is in your context above, under the "
+            f"'# Skill: {skill.name}' heading, and still applies. Not "
             "re-sending the body."
         )
 

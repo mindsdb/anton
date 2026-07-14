@@ -169,3 +169,33 @@ class TestRecallIdempotence:
         session = self._session(store, history)
         result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
         assert "## Procedure" in result
+
+    @pytest.mark.asyncio
+    async def test_surviving_stub_does_not_suppress_resend(self, store):
+        """Compaction can evict the full body while keeping a newer stub.
+        The stub must not satisfy the already-recalled check, or recall
+        returns stubs forever and the contract is never re-sent."""
+        from anton.core.tools.recall_skill import handle_recall_skill
+
+        history: list = []
+        session = self._session(store, history)
+        full = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+        history.append({"role": "user", "content": [{"type": "tool_result", "content": full}]})
+        stub = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+        assert "already recalled" in stub
+        # simulate compaction: full body evicted, stub survives
+        history.clear()
+        history.append({"role": "user", "content": [{"type": "tool_result", "content": stub}]})
+        result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+        assert "## Procedure" in result
+
+    @pytest.mark.asyncio
+    async def test_summary_quoting_marker_does_not_suppress_resend(self, store):
+        """A compaction summary that quotes the marker text (but not the
+        procedure) must not count as the contract being present."""
+        from anton.core.tools.recall_skill import _recall_marker, handle_recall_skill
+
+        history = [{"role": "user", "content": f"[compacted] earlier: {_recall_marker('build-html-dashboard')}"}]
+        session = self._session(store, history)
+        result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
+        assert "## Procedure" in result
