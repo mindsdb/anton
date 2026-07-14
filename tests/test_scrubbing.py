@@ -185,3 +185,25 @@ class TestCustomEngineRegistration:
         assert "https://legacy.acme-crm.example" in result
         assert "ak_1234567890abcdef" not in result
         assert "[DS_ACME_CRM_LEGACY__API_KEY]" in result
+
+    def test_custom_engine_legacy_passphrase_is_scrubbed(self, tmp_path):
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = self._vault(tmp_path)
+        passphrase = "correct horse battery staple"
+        vault.save(
+            "acme_crm",
+            "legacy",
+            {
+                "base_url": "https://legacy.acme-crm.example",
+                "passphrase": passphrase,
+            },
+        )
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials(
+            f"base https://legacy.acme-crm.example passphrase {passphrase}"
+        )
+        assert "https://legacy.acme-crm.example" in result
+        assert passphrase not in result
+        assert "[DS_ACME_CRM_LEGACY__PASSPHRASE]" in result

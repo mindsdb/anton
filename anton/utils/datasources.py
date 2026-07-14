@@ -7,7 +7,12 @@ import yaml
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from anton.core.datasources.data_vault import DataVault, LocalDataVault, _slug_env_prefix
+from anton.core.datasources.data_vault import (
+    DataVault,
+    LocalDataVault,
+    _slug_env_prefix,
+    is_secret_key,
+)
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
 
 if TYPE_CHECKING:
@@ -112,10 +117,8 @@ def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: 
     conservative unknown-DS_* scrub — so harmless values like base_url
     surfaced as `[DS_..._BASE_URL]` markers in user-facing output (ENG-688).
     Classification: the record's stored ``secure_keys`` when present, else
-    the secret-name heuristic.
+    the vault's canonical legacy secret-name heuristic.
     """
-    from anton.tools import looks_secret
-
     record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
     fields = (record or {}).get("fields") or vault.load(engine, name) or {}
     secure_keys = (record or {}).get("secure_keys")
@@ -123,10 +126,7 @@ def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: 
     for field_name in fields:
         key = f"{prefix}__{field_name.upper()}"
         _DS_KNOWN_VARS.add(key)
-        is_secret = (
-            field_name in secure_keys if secure_keys is not None else looks_secret(field_name)
-        )
-        if is_secret:
+        if is_secret_key(field_name, secure_keys):
             _DS_SECRET_VARS.add(key)
 
 
