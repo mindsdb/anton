@@ -70,6 +70,17 @@ def test_secret_copied_to_module_level_is_error():
 def test_missing_core_requirements_is_error():
     r, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, "fastapi\n")
     assert not r.ok and any("mangum" in e.lower() for e in r.errors)
+    # Self-evidencing message: shows what the parser actually saw.
+    assert any("Parsed package names: fastapi" in e for e in r.errors)
+
+
+def test_core_requirements_accept_extras_and_specifiers():
+    # uvicorn[standard], version ranges, spaces, case — all valid for pip and
+    # must all satisfy the core-requirement check (the trace.json regression:
+    # `uvicorn[standard]` was reported as missing `uvicorn`).
+    reqs = "FastAPI >= 0.100\nmangum~=0.17\nuvicorn[standard]==0.29.0  # ASGI server\n"
+    r, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, reqs)
+    assert r.ok, r.errors
 
 
 # ── verify_backend (async subprocess glue) ───────────────────────────────────

@@ -61,11 +61,21 @@ async def generate(
     """
     from .orchestrator import run
     from .state import GenState
+    from .debug_trace import make_trace
 
     if artifact_type not in (
         "html-app", "fullstack-stateless-app", "fullstack-stateful-app"
     ):
         return f"Error: unsupported artifact type: {artifact_type!r}"
+
+    trace = make_trace()
+    trace.run_start(
+        slug=slug,
+        artifact_type=artifact_type,
+        artifact_path=artifact_path,
+        brief=context,
+        is_fullstack=artifact_type != "html-app",
+    )
 
     state = GenState(
         session=session,
@@ -74,8 +84,14 @@ async def generate(
         slug=slug,
         brief=context,
         is_fullstack=artifact_type != "html-app",
+        trace_log=trace,
     )
-    return await run(state)
+    result = await run(state)
+    if isinstance(result, str):
+        trace.run_result(ok=False, error=result)
+    else:
+        trace.run_result(ok=True, result=result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +104,8 @@ async def _generate_api_spec(
     context: str,
     *,
     stateless: bool = False,
+    trace=None,
+    node_label: str = "make_api_spec",
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
 
@@ -100,6 +118,14 @@ async def _generate_api_spec(
         system=system,
         messages=[{"role": "user", "content": user}],
     )
+    if trace is not None:
+        trace.llm_call(
+            node=node_label,
+            method="plan",
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            response=response,
+        )
     spec = _strip_code_fence((response.content or "").strip())
     if not spec:
         return "Error: API spec generation returned empty response."
@@ -135,6 +161,9 @@ async def _run_loop(
     system: str,
     kickoff: str,
     artifact_path: Path,
+    node_label: str,
+    attempt: int | None = None,
+    trace=None,
     step_injections: list[tuple[str, str]] | None = None,
     require_files: bool = True,
 ) -> dict | str:
@@ -145,13 +174,17 @@ async def _run_loop(
     ``message`` is appended to the tool-result content so the model receives
     the next-step instruction in the same turn. Each trigger fires at most once.
 
-    Returns a result dict ``{files_written, rounds_used, summary}`` on
-    success, or a plain error string on failure.
+    Returns a result dict ``{files_written, rounds_used, summary,
+    scratchpad_execs}`` on success, or a plain error string on failure.
+    ``scratchpad_execs`` records every scratchpad ``exec`` the loop made —
+    ``{name, code, output}`` per call — so callers can hand the exact
+    data-access code that ran to later FSM steps.
     """
     tools = sub_tools.tool_schemas()
     messages: list[dict] = [{"role": "user", "content": kickoff}]
 
     files_written: list[str] = []
+    scratchpad_execs: list[dict] = []
     finished_summary: str | None = None
     injected: set[str] = set()
 
@@ -164,6 +197,17 @@ async def _run_loop(
             messages=messages,
             tools=tools,
         )
+
+        if trace is not None:
+            trace.llm_call(
+                node=node_label,
+                method="plan" if round_idx == 0 else "code",
+                system=system,
+                messages=messages,
+                response=response,
+                attempt=attempt,
+                round=round_idx,
+            )
 
         if not response.tool_calls:
             tail = (response.content or "").strip()
@@ -222,6 +266,8 @@ async def _run_loop(
                     written = res["written"]
                     if written not in files_written:
                         files_written.append(written)
+                    if trace is not None:
+                        trace.file_written(node=node_label, path=written)
                     for trigger, inject_msg in (step_injections or []):
                         if written == trigger and inject_msg not in injected:
                             injected.add(inject_msg)
@@ -249,6 +295,16 @@ async def _run_loop(
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
                 content = await handle_scratchpad(session, inp)
+                if inp.get("action") == "exec":
+                    scratchpad_execs.append(
+                        {
+                            "name": str(inp.get("name") or ""),
+                            "code": str(inp.get("code") or ""),
+                            "output": content if isinstance(content, str) else str(content),
+                        }
+                    )
+                if trace is not None:
+                    trace.scratchpad(node=node_label, input=inp, output=content)
                 result_blocks.append(
                     {
                         "type": "tool_result",
@@ -285,4 +341,5 @@ async def _run_loop(
         "files_written": files_written,
         "rounds_used": round_idx + 1,
         "summary": finished_summary,
+        "scratchpad_execs": scratchpad_execs,
     }

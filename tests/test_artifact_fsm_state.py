@@ -6,6 +6,7 @@ from pathlib import Path
 from anton.core.tools.generate_artifact.state import (
     DATA_LOOP_MAX,
     GEN_VERIFY_MAX_RETRIES,
+    JOURNAL_DETAIL_MAX,
     RUNAPP_MAX_RETRIES,
     DataVerdict,
     FetchVerdict,
@@ -53,3 +54,24 @@ def test_genstate_defaults():
     assert st.error is None
     st.trace.append(StepResult(node="is_data_enough", outcome="yes"))
     assert st.trace[0].node == "is_data_enough"
+
+
+def test_genstate_journal_is_compact_and_capped():
+    st = GenState(
+        session=object(),
+        artifact_type="html-app",
+        artifact_path=Path("/tmp/x"),
+        slug="x",
+        brief="b",
+        is_fullstack=False,
+    )
+    assert st.journal() == ""
+    st.record("is_data_enough", "no", "need orders\nand users")
+    st.record("make_tech_spec", "done")
+    st.record("fetch_data_sample", "done", "x" * (JOURNAL_DETAIL_MAX + 100))
+    lines = st.journal().splitlines()
+    assert lines[0] == "- is_data_enough: no — need orders and users"
+    assert lines[1] == "- make_tech_spec: done"
+    assert lines[2].startswith("- fetch_data_sample: done — ")
+    assert lines[2].endswith("…")
+    assert len(lines[2]) < JOURNAL_DETAIL_MAX + 50

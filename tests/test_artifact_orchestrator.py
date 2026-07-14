@@ -70,6 +70,53 @@ async def test_data_phase_budget_exhausted(tmp_path: Path, monkeypatch):
     assert st.data_iterations == 3
 
 
+# ── fetch_data_sample: exec-code record + journal handoff ────────────────────
+
+async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+
+    async def fake_run_loop(**kw):
+        return {
+            "files_written": [], "rounds_used": 2, "summary": "pulled 100 rows",
+            "scratchpad_execs": [
+                {"name": "pad", "code": "df = q('select 1')", "output": "ok  100 rows"}
+            ],
+        }
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    notes = await orchestrator._fetch_data_sample(st)
+    assert notes.startswith("pulled 100 rows")
+    assert "### Code executed while fetching" in notes
+    assert "df = q('select 1')" in notes
+    assert "Output: ok 100 rows" in notes
+
+
+def test_render_exec_notes_caps_and_drops_oldest():
+    assert orchestrator._render_exec_notes([]) == ""
+    # Cells with no code are skipped entirely.
+    assert orchestrator._render_exec_notes([{"name": "p", "code": " ", "output": "o"}]) == ""
+
+    execs = [
+        {"name": f"p{i}", "code": "x" * 3000, "output": "y" * 1000} for i in range(10)
+    ]
+    notes = orchestrator._render_exec_notes(execs)
+    assert "# … truncated …" in notes  # per-cell code cap applied
+    assert "p9" in notes and "p0" not in notes  # oldest cells dropped first
+    assert "omitted for size" in notes
+    assert len(notes) < orchestrator.EXEC_NOTES_MAX + 500
+
+
+def test_spec_context_includes_journal(tmp_path: Path):
+    st = _state(tmp_path)
+    st.data_notes = "sample data"
+    st.record("is_data_enough", "yes", "ok")
+    st.record("make_tech_spec", "done", "wrote spec.md")
+    ctx = orchestrator._spec_context(st)
+    assert "## Progress journal" in ctx
+    assert "- is_data_enough: yes — ok" in ctx
+    assert "- make_tech_spec: done — wrote spec.md" in ctx
+
+
 # ── Task 8: tech spec, api spec, gen+verify+retry, declare_datasources ────────
 
 async def test_gen_verify_backend_retries_once_then_succeeds(tmp_path: Path, monkeypatch):

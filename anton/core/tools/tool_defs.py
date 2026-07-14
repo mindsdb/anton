@@ -413,7 +413,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "`launch_backend` yourself. On success it returns "
         "`{slug, path, files_written, summary, trace}` (the `trace` lists the "
         "generation steps and their outcomes); on failure a single error string "
-        "naming the node that stopped the run."
+        "naming the node that stopped the run. If generation fails, report the "
+        "failure to the user and ask how to proceed — NEVER fall back to "
+        "building the artifact yourself via scratchpad or any other means."
     ),
     input_schema={
         "type": "object",

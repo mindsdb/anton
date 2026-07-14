@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
+
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
 
@@ -19,6 +21,10 @@ if TYPE_CHECKING:
 DATA_LOOP_MAX: int = 3
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
+
+# Per-line detail cap for GenState.journal() — keeps the journal compact when
+# a step's detail is long (full text still lives in data_notes / trace_log).
+JOURNAL_DETAIL_MAX: int = 300
 
 
 # ── Verdict schemas for diamond nodes (generate_object) ──────────────────────
@@ -82,6 +88,25 @@ class GenState:
     files_written: list[str] = field(default_factory=list)
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
+    trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
 
     def record(self, node: str, outcome: str, detail: str = "") -> None:
         self.trace.append(StepResult(node=node, outcome=outcome, detail=detail))
+        self.trace_log.node(node, outcome, detail)
+
+    def journal(self) -> str:
+        """Compact one-line-per-step log of everything the FSM did so far.
+
+        Injected into later steps' prompts (prompts._brief_and_notes,
+        orchestrator._spec_context) so every node sees the run's history —
+        including failed attempts — without sharing full transcripts.
+        """
+        lines: list[str] = []
+        for s in self.trace:
+            detail = " ".join(s.detail.split())
+            if len(detail) > JOURNAL_DETAIL_MAX:
+                detail = detail[:JOURNAL_DETAIL_MAX] + "…"
+            lines.append(
+                f"- {s.node}: {s.outcome}" + (f" — {detail}" if detail else "")
+            )
+        return "\n".join(lines)

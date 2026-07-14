@@ -189,6 +189,7 @@ if __name__ == "__main__":
 ```
 
 CRITICAL RULES:
+- Target Python >= 3.12 — that is the runtime the artifact is launched with.
 - File MUST be named `backend.py`. The `handler` attribute MUST stay `handler`.
 - ALL API endpoints MUST use the `/api/*` prefix (e.g. `/api/items`, `/api/search`).
   Never expose routes at the root — they collide with the `StaticFiles` mount.
@@ -462,6 +463,9 @@ def _brief_and_notes(state) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
+    journal = state.journal()
+    if journal:
+        parts.append(f"## Progress journal (steps completed so far)\n{journal}")
     return "\n\n".join(parts)
 
 
@@ -535,6 +539,24 @@ def build_fetch_data_kickoff(state) -> str:
 # Tech-spec prompt (make_tech_spec → spec.md)
 # ---------------------------------------------------------------------------
 
+# The spec writer never sees _BACKEND_RULES/_FRONTEND_RULES (those go to the
+# generator system prompts), so without this block it invents its own stack
+# (Node/Express, fixed ports, …) and spec.md contradicts what gets built.
+_TECH_SPEC_STACK = """\
+FIXED TECHNOLOGY STACK — already decided by the pipeline, NOT yours to choose.
+The spec MUST NOT contain a technology-selection section and MUST NOT propose
+any other stack. Describe behaviour, screens, data flow, and endpoints on top of:
+- Backend (fullstack types only): Python >= 3.12, FastAPI, everything in a
+  single `backend.py`, dependencies in `requirements.txt`. It runs both
+  locally and as an AWS Lambda.
+- All API endpoints live under the `/api/*` prefix.
+- The launcher assigns the port at run time: never mention a port number or
+  an absolute URL anywhere in the spec.
+- Frontend: one self-contained HTML file (`static/index.html` for fullstack
+  types) with inline CSS/JS — vanilla JavaScript, Apache ECharts for charts.\
+"""
+
+
 def build_tech_spec_prompt(state) -> tuple[str, str]:
     system = (
         _DATA_CONTEXT_HEADER
@@ -544,7 +566,8 @@ def build_tech_spec_prompt(state) -> tuple[str, str]:
         "Base it on the brief and the gathered data. Output GitHub-flavoured "
         "Markdown only (no code fences around the whole document). This document "
         "will be saved to `spec.md` and handed to the backend and frontend "
-        "generators."
+        "generators.\n\n"
+        + _TECH_SPEC_STACK
     )
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"

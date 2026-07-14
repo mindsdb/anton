@@ -94,6 +94,30 @@ import ast
 _DS_KEY = re.compile(r"DS_[A-Z0-9_]+__[A-Z0-9_]+")
 _CORE_REQS = ("fastapi", "mangum", "uvicorn")
 
+# PEP 508: the package name is the leading letters/digits/._- run; anything
+# after it (extras like `[standard]`, version specifiers, spaces) is not part
+# of the name.
+_REQ_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _requirement_names(requirements: str) -> set[str]:
+    """PEP 503-normalized package names from requirements.txt lines.
+
+    Accepts extras (`uvicorn[standard]`) and any version specifier
+    (`fastapi>=0.100`, `pkg ~= 1.2`): the verifier must never be stricter
+    than pip about valid input, or the generate→verify retry loop turns a
+    perfectly good file into a guaranteed terminal failure.
+    """
+    names: set[str] = set()
+    for raw in requirements.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        m = _REQ_NAME.match(line)
+        if m:
+            names.add(re.sub(r"[-_.]+", "-", m.group(0)).lower())
+    return names
+
 
 def _module_level_secret_copies(source: str) -> list[str]:
     """Return names of module-level vars assigned directly from SECRETS[...]."""
@@ -162,14 +186,15 @@ def evaluate_backend(
             "read SECRETS[...] at point of use inside the route instead."
         )
 
-    req_lines = {
-        ln.split("#", 1)[0].strip().split("==")[0].strip().lower()
-        for ln in requirements.splitlines()
-        if ln.split("#", 1)[0].strip() and not ln.strip().startswith("-")
-    }
+    req_names = _requirement_names(requirements)
     for core in _CORE_REQS:
-        if core not in req_lines:
-            errors.append(f"requirements.txt must list `{core}`.")
+        if core not in req_names:
+            # Self-evidencing message: show what WAS parsed, so a mismatch
+            # between the file and this parser is visible to the retry loop.
+            errors.append(
+                f"requirements.txt must list `{core}`. Parsed package names: "
+                + (", ".join(sorted(req_names)) or "(none)")
+            )
 
     ds_keys = sorted(set(_DS_KEY.findall(source)))
     return VerifyResult(errors=errors, warnings=warnings), ds_keys

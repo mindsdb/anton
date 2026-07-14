@@ -256,6 +256,25 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     )
 
 
+def _generation_failed(reason: str) -> str:
+    """Wrap an FSM failure so the outer agent reports it instead of DIY-ing.
+
+    Without this instruction the agent treats a pipeline failure as a cue to
+    build the artifact by hand (write_file/scratchpad fallback), silently
+    bypassing the whole verified pipeline. Input-validation errors are NOT
+    wrapped — those the agent should fix by correcting its call.
+    """
+    return (
+        "Error: artifact generation failed.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build or repair the artifact yourself — no "
+        "write_file / scratchpad fallback — and do not re-call "
+        "generate_artifact with the same input. Report this failure to the "
+        "user: state in plain language that artifact generation failed, quote "
+        "the reason above, and ask how they want to proceed."
+    )
+
+
 async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> str:
     """Generate every file for an already-registered artifact via the FSM.
 
@@ -264,6 +283,8 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
     validates input shape (context required), and hands off to
     `anton.core.tools.generate_artifact.generate`, which runs the deterministic
     generation state machine and writes files into the artifact folder.
+    Pipeline failures come back wrapped by `_generation_failed` so the agent
+    surfaces them to the user instead of hand-building the artifact.
     """
     import json
 
@@ -302,10 +323,10 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
             slug=slug,
         )
     except Exception as exc:  # last-resort: never escalate to the dispatcher
-        return f"Error: generator failed: {exc}"
+        return _generation_failed(f"generator crashed: {exc}")
 
     if isinstance(result, str):
-        return result
+        return _generation_failed(result)
 
     return json.dumps(
         {"slug": slug, "path": str(folder), **result},

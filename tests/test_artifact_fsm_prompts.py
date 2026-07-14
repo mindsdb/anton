@@ -43,6 +43,26 @@ def test_tech_spec_prompt_targets_spec_md():
     assert "spec.md" in system or "spec.md" in user
 
 
+def test_tech_spec_prompt_pins_the_stack():
+    system, _ = prompts.build_tech_spec_prompt(_state())
+    assert "FastAPI" in system
+    assert "Python >= 3.12" in system
+    assert "/api/*" in system
+    assert "never mention a port number" in system
+    # The generator rules must state the target runtime too.
+    assert "Python >= 3.12" in prompts._BACKEND_RULES
+
+
 def test_fetch_data_prompts_exist():
     assert isinstance(prompts.build_fetch_data_system_prompt(Path("/tmp/a")), str)
     assert "scratchpad" in prompts.build_fetch_data_kickoff(_state()).lower()
+
+
+def test_prompts_include_progress_journal():
+    st = _state()
+    _, user = prompts.build_data_enough_prompt(st)
+    assert "## Progress journal" not in user  # empty journal → no section
+    st.record("is_data_enough", "no", "need orders")
+    _, user = prompts.build_data_enough_prompt(st)
+    assert "## Progress journal" in user
+    assert "- is_data_enough: no — need orders" in user

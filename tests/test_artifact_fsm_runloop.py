@@ -24,6 +24,7 @@ async def test_run_loop_allows_no_files_when_not_required(tmp_path: Path):
         kickoff="k",
         artifact_path=tmp_path,
         require_files=False,
+        node_label="fetch_data_sample",
     )
     assert isinstance(result, dict)
     assert result["files_written"] == []
@@ -35,6 +36,38 @@ async def test_run_loop_still_requires_files_by_default(tmp_path: Path):
     session._llm.plan = AsyncMock(
         return_value=_resp([ToolCall(id="1", name="finish", input={"summary": "done"})])
     )
-    result = await _run_loop(session=session, system="s", kickoff="k", artifact_path=tmp_path)
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
     assert isinstance(result, str)
     assert "without writing any files" in result
+
+
+async def test_run_loop_records_scratchpad_execs(tmp_path: Path, monkeypatch):
+    import anton.core.tools.tool_handlers as tool_handlers
+
+    monkeypatch.setattr(
+        tool_handlers, "handle_scratchpad", AsyncMock(return_value="cell 1 ok: 100 rows")
+    )
+    session = AsyncMock()
+    session._llm.plan = AsyncMock(
+        return_value=_resp([
+            ToolCall(
+                id="1", name="scratchpad",
+                input={"action": "exec", "name": "pad", "code": "print(df.head())"},
+            ),
+            # Non-exec actions must not be recorded.
+            ToolCall(id="2", name="scratchpad", input={"action": "view", "name": "pad"}),
+            ToolCall(id="3", name="finish", input={"summary": "done"}),
+        ])
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k",
+        artifact_path=tmp_path, require_files=False,
+        node_label="fetch_data_sample",
+    )
+    assert isinstance(result, dict)
+    assert result["scratchpad_execs"] == [
+        {"name": "pad", "code": "print(df.head())", "output": "cell 1 ok: 100 rows"}
+    ]

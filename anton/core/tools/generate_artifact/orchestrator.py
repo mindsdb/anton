@@ -16,11 +16,60 @@ from .state import (
 )
 
 
-async def _decide(state: GenState, schema, prompt_pair) -> object:
+async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     system, user = prompt_pair
-    return await state.session._llm.generate_object(
+    result = await state.session._llm.generate_object(
         schema, system=system, messages=[{"role": "user", "content": user}]
     )
+    value = result.model_dump() if hasattr(result, "model_dump") else result
+    state.trace_log.llm_call(
+        node=node, method="generate_object",
+        system=system, messages=[{"role": "user", "content": user}],
+        value=value,
+    )
+    state.trace_log.verdict(node=node, schema=getattr(schema, "__name__", str(schema)), value=value)
+    return result
+
+
+# Caps for the exec-code record appended to data_notes: per-cell code, per-cell
+# output snippet, and the whole section. Oldest cells are dropped first — the
+# most recent ones are the ones that worked.
+EXEC_CODE_MAX = 2000
+EXEC_OUTPUT_MAX = 300
+EXEC_NOTES_MAX = 8000
+
+
+def _render_exec_notes(execs: list[dict]) -> str:
+    """Deterministic record of the Python the fetch step ran.
+
+    Appended to data_notes so later steps (tech spec, backend generation) see
+    the exact working data-access code instead of relying on the model's
+    `finish` summary to mention it.
+    """
+    blocks: list[str] = []
+    for e in execs:
+        code = (e.get("code") or "").strip()
+        if not code:
+            continue
+        if len(code) > EXEC_CODE_MAX:
+            code = code[:EXEC_CODE_MAX] + "\n# … truncated …"
+        out = " ".join((e.get("output") or "").split())
+        if len(out) > EXEC_OUTPUT_MAX:
+            out = out[:EXEC_OUTPUT_MAX] + " …"
+        block = f"Scratchpad `{e.get('name')}`:\n```python\n{code}\n```"
+        if out:
+            block += f"\nOutput: {out}"
+        blocks.append(block)
+    dropped = 0
+    while blocks and sum(len(b) for b in blocks) > EXEC_NOTES_MAX:
+        blocks.pop(0)
+        dropped += 1
+    if not blocks:
+        return ""
+    header = "### Code executed while fetching"
+    if dropped:
+        header += f" (first {dropped} cell(s) omitted for size)"
+    return header + "\n" + "\n\n".join(blocks)
 
 
 async def _fetch_data_sample(state: GenState) -> str:
@@ -31,11 +80,17 @@ async def _fetch_data_sample(state: GenState) -> str:
         kickoff=prompts.build_fetch_data_kickoff(state),
         artifact_path=state.artifact_path,
         require_files=False,
+        node_label="fetch_data_sample",
+        trace=state.trace_log,
     )
     if isinstance(result, str):
         # Loop failed — surface as a note so the next is_data_enough sees it.
         return f"(data fetch step reported: {result})"
-    return result.get("summary") or "(fetch produced no summary)"
+    summary = result.get("summary") or "(fetch produced no summary)"
+    exec_notes = _render_exec_notes(result.get("scratchpad_execs") or [])
+    if exec_notes:
+        summary += "\n\n" + exec_notes
+    return summary
 
 
 async def _data_phase(state: GenState) -> str | None:
@@ -43,7 +98,7 @@ async def _data_phase(state: GenState) -> str | None:
     last_reasoning = ""
     for _ in range(DATA_LOOP_MAX + 1):
         verdict: DataVerdict = await _decide(
-            state, DataVerdict, prompts.build_data_enough_prompt(state)
+            state, DataVerdict, prompts.build_data_enough_prompt(state), "is_data_enough"
         )
         if verdict.enough:
             state.record("is_data_enough", "yes", verdict.reasoning)
@@ -54,7 +109,7 @@ async def _data_phase(state: GenState) -> str | None:
             break
 
         required: RequiredData = await _decide(
-            state, RequiredData, prompts.build_required_data_prompt(state)
+            state, RequiredData, prompts.build_required_data_prompt(state), "define_required_data"
         )
         required_text = "\n".join(
             f"- {it.name} — from {it.where} ({it.why})" for it in required.items
@@ -63,7 +118,7 @@ async def _data_phase(state: GenState) -> str | None:
         last_reasoning = required.reasoning
 
         can: FetchVerdict = await _decide(
-            state, FetchVerdict, prompts.build_can_fetch_prompt(state, required_text)
+            state, FetchVerdict, prompts.build_can_fetch_prompt(state, required_text), "is_possible_to_fetch"
         )
         if not can.possible:
             state.record("is_possible_to_fetch", "no", can.reasoning)
@@ -97,6 +152,11 @@ async def _write_tech_spec(state: GenState) -> str | None:
     resp = await state.session._llm.plan(
         system=system, messages=[{"role": "user", "content": user}]
     )
+    state.trace_log.llm_call(
+        node="make_tech_spec", method="plan",
+        system=system, messages=[{"role": "user", "content": user}],
+        response=resp,
+    )
     body = (getattr(resp, "content", "") or "").strip()
     if not body:
         state.error = "make_tech_spec: model returned an empty specification."
@@ -117,13 +177,17 @@ def _spec_context(state: GenState) -> str:
     spec_path = state.artifact_path / "spec.md"
     if spec_path.is_file():
         parts.append("## Technical specification\n" + spec_path.read_text(encoding="utf-8"))
+    journal = state.journal()
+    if journal:
+        parts.append("## Progress journal (steps completed so far)\n" + journal)
     return "\n\n".join(parts)
 
 
 async def _make_api_spec(state: GenState) -> str | None:
     stateless = state.artifact_type == "fullstack-stateless-app"
     spec_or_err = await engine._generate_api_spec(
-        state.session, _spec_context(state), stateless=stateless
+        state.session, _spec_context(state), stateless=stateless,
+        trace=state.trace_log, node_label="make_api_spec",
     )
     if spec_or_err.startswith("Error:"):
         state.error = f"make_api_spec: {spec_or_err}"
@@ -191,6 +255,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         result = await engine._run_loop(
             session=state.session, system=system, kickoff=kickoff,
             artifact_path=state.artifact_path,
+            node_label="generate_backend", attempt=attempt, trace=state.trace_log,
             step_injections=[(
                 "backend.py",
                 "backend.py written. Now write requirements.txt listing EVERY "
@@ -209,6 +274,10 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         verdict, ds_keys = await verifiers.verify_backend(
             scratchpad_pool=state.session._scratchpads,
             slug=state.slug, artifact_path=state.artifact_path,
+        )
+        state.trace_log.verifier(
+            node="verify_backend", ok=verdict.ok,
+            errors=list(verdict.errors), warnings=list(verdict.warnings),
         )
         if verdict.ok:
             # Spec: DS_* keys with no matching vault connection are errors.
@@ -268,6 +337,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
         result = await engine._run_loop(
             session=state.session, system=system, kickoff=kickoff,
             artifact_path=state.artifact_path,
+            node_label="generate_frontend", attempt=attempt, trace=state.trace_log,
         )
         if isinstance(result, str):
             extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
@@ -285,6 +355,10 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             state.record("verify_frontend", "fail", "no html file")
             continue
         verdict = verifiers.verify_frontend(html, is_fullstack=state.is_fullstack)
+        state.trace_log.verifier(
+            node="verify_frontend", ok=verdict.ok,
+            errors=list(verdict.errors), warnings=list(verdict.warnings),
+        )
         if verdict.ok:
             state.record("verify_frontend", "ok", "; ".join(verdict.warnings))
             return None
