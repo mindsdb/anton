@@ -7,7 +7,12 @@ import yaml
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from anton.core.datasources.data_vault import DataVault, LocalDataVault, _slug_env_prefix
+from anton.core.datasources.data_vault import (
+    DataVault,
+    LocalDataVault,
+    _slug_env_prefix,
+    is_secret_key,
+)
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
 
 if TYPE_CHECKING:
@@ -101,6 +106,27 @@ def register_secret_vars(
             key = f"DS_{f.name.upper()}"
         _DS_KNOWN_VARS.add(key)
         if f.secret:
+            _DS_SECRET_VARS.add(key)
+
+
+def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: str) -> None:
+    """Register DS_* var names for a connection whose engine isn't in the
+    registry (custom engines, connector-spec saves).
+
+    Without this, every field of such a connection falls into the
+    conservative unknown-DS_* scrub — so harmless values like base_url
+    surfaced as `[DS_..._BASE_URL]` markers in user-facing output (ENG-688).
+    Classification: the record's stored ``secure_keys`` when present, else
+    the vault's canonical legacy secret-name heuristic.
+    """
+    record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
+    fields = (record or {}).get("fields") or vault.load(engine, name) or {}
+    secure_keys = (record or {}).get("secure_keys")
+    prefix = _slug_env_prefix(engine, name)
+    for field_name in fields:
+        key = f"{prefix}__{field_name.upper()}"
+        _DS_KNOWN_VARS.add(key)
+        if is_secret_key(field_name, secure_keys):
             _DS_SECRET_VARS.add(key)
 
 
@@ -240,6 +266,8 @@ def restore_namespaced_env(vault: DataVault) -> None:
         edef = dreg.get(conn["engine"])
         if edef is not None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
+        else:
+            _register_unregistered_connection_vars(vault, conn["engine"], conn["name"])
 
 
 def find_matching_connection(
