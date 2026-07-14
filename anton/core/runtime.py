@@ -173,7 +173,10 @@ async def build_chat_session(
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
-            suffix=system_prompt_suffix,
+            # SystemPromptContext.suffix is typed str (default ""), not
+            # Optional — pass "" rather than None when no suffix was given,
+            # or ChatSystemPromptBuilder.build()'s suffix.strip() crashes.
+            suffix=system_prompt_suffix or "",
         ),
         output_dir=str(output_dir),
         workspace=workspace,
