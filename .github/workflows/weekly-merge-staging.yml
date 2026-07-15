@@ -13,5 +13,5 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    uses: mindsdb/github-actions/.github/workflows/release-pr.yml@main
+    uses: mindsdb/github-actions/.github/workflows/release-pr.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
     secrets: inherit
