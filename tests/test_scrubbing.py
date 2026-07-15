@@ -139,3 +139,71 @@ class TestScrubUserInput:
         result = _scrub_user_input(f"my key is {key}")
         assert key not in result
         assert "[OPENAI_API_KEY]" in result
+
+
+class TestCustomEngineRegistration:
+    """ENG-688: connections of engines not in the registry (custom engines,
+    connector-spec saves) must register their fields so non-secret values
+    (base_url, host, ...) stay readable instead of leaking as markers."""
+
+    def _vault(self, tmp_path):
+        from anton.core.datasources.data_vault import LocalDataVault
+
+        return LocalDataVault(tmp_path / "vault")
+
+    def test_custom_engine_base_url_readable_secret_scrubbed(self, tmp_path):
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = self._vault(tmp_path)
+        vault.save(
+            "acme_crm", "prod",
+            {"base_url": "https://api.acme-crm.example", "token": "tok_1234567890abcdef"},
+            secure_keys=["token"],
+        )
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials(
+            "GET https://api.acme-crm.example failed with token tok_1234567890abcdef"
+        )
+        assert "https://api.acme-crm.example" in result
+        assert "tok_1234567890abcdef" not in result
+        assert "[DS_ACME_CRM_PROD__TOKEN]" in result
+
+    def test_custom_engine_without_secure_keys_uses_name_heuristic(self, tmp_path):
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = self._vault(tmp_path)
+        vault.save(
+            "acme_crm", "legacy",
+            {"base_url": "https://legacy.acme-crm.example", "api_key": "ak_1234567890abcdef"},
+        )
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials(
+            "base https://legacy.acme-crm.example key ak_1234567890abcdef"
+        )
+        assert "https://legacy.acme-crm.example" in result
+        assert "ak_1234567890abcdef" not in result
+        assert "[DS_ACME_CRM_LEGACY__API_KEY]" in result
+
+    def test_custom_engine_legacy_passphrase_is_scrubbed(self, tmp_path):
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = self._vault(tmp_path)
+        passphrase = "correct horse battery staple"
+        vault.save(
+            "acme_crm",
+            "legacy",
+            {
+                "base_url": "https://legacy.acme-crm.example",
+                "passphrase": passphrase,
+            },
+        )
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials(
+            f"base https://legacy.acme-crm.example passphrase {passphrase}"
+        )
+        assert "https://legacy.acme-crm.example" in result
+        assert passphrase not in result
+        assert "[DS_ACME_CRM_LEGACY__PASSPHRASE]" in result
