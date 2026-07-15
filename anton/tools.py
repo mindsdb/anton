@@ -423,10 +423,20 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     from rich.live import Live
     from rich.spinner import Spinner
 
+    from anton.publish_access import (
+        access_from_owner_side,
+        resolve_access,
+        resolve_publish_target,
+    )
+    from anton.utils.prompt import prompt_or_cancel
+
     # Check if this file was previously published — reuse report_id to
-    # update instead of creating a new report every time.
-    output_dir = file_path.parent
-    published_json = output_dir / ".published.json"
+    # update instead of creating a new report every time. Resolve the
+    # .published.json location with the unified convention (shared with
+    # /publish and cowork-server) so the two entry points never disagree.
+    artifacts_root = Path(settings.artifacts_dir)
+    _t, published_dir, published_key, _fs = resolve_publish_target(file_path, [artifacts_root])
+    published_json = published_dir / ".published.json"
     published_map: dict = {}
     try:
         if published_json.is_file():
@@ -434,9 +444,42 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     except Exception:
         pass
 
-    file_key = file_path.name
-    prev = published_map.get(file_key)
+    prev = published_map.get(published_key)
     report_id = prev.get("report_id") if isinstance(prev, dict) else None
+
+    # Resolve the access spec: explicit tool fields > preserve previous >
+    # public. NB: password input (when the user asked for a password but gave
+    # no value) is collected BEFORE the Live spinner below — prompt_toolkit
+    # and rich.Live must not run at the same time.
+    access_mode = tc_input.get("access_mode")
+    if access_mode:
+        req_access = {"mode": access_mode}
+        if access_mode == "password":
+            pw = (tc_input.get("password") or "").strip()
+            if not pw:
+                import sys
+                if sys.stdin.isatty():
+                    entered = await prompt_or_cancel("  Set a password for this report", password=True)
+                    if entered is None or not entered.strip():
+                        return "CANCELLED: publish aborted by user (no password entered)."
+                    pw = entered.strip()
+                else:
+                    return (
+                        "CANCELLED: password required but no TTY. Ask the user to run "
+                        "/publish to set a password interactively."
+                    )
+            req_access["password"] = pw
+        elif access_mode == "restricted":
+            from anton.publish_access import parse_emails
+            valid, _invalid = parse_emails(tc_input.get("emails") or [])
+            req_access["emails"] = valid
+            req_access["org_allowed"] = bool(tc_input.get("org_allowed"))
+    elif isinstance(prev, dict) and prev.get("report_id"):
+        req_access = access_from_owner_side(prev)  # preserve previous, do NOT reset to public
+    else:
+        req_access = {"mode": "public"}
+
+    eff_access, pwd_version, access_version, owner_side = resolve_access(None, req_access, prev)
 
     action_text = "  Updating..." if report_id else "  Publishing..."
     with Live(Spinner("dots", text=action_text, style="anton.cyan"), console=console, transient=True):
@@ -447,6 +490,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 report_id=report_id,
                 publish_url=settings.publish_url,
                 ssl_verify=settings.minds_ssl_verify,
+                access=eff_access,
+                pwd_version=pwd_version,
+                access_version=access_version,
             )
         except Exception as e:
             if report_id:
@@ -458,6 +504,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         api_key=settings.minds_api_key,
                         publish_url=settings.publish_url,
                         ssl_verify=settings.minds_ssl_verify,
+                        access=eff_access,
+                        pwd_version=pwd_version,
+                        access_version=access_version,
                     )
                 except Exception as e2:
                     console.print(f"  [anton.error]Publish failed: {e2}[/]")
@@ -483,13 +532,15 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     console.print()
 
     # Persist the mapping so future publishes of the same file update
-    # instead of creating a new report.
+    # instead of creating a new report (owner-side; unified location + key).
     if returned_report_id:
-        published_map[file_key] = {
+        entry = dict(owner_side)
+        entry.update({
             "report_id": returned_report_id,
             "url": view_url,
             "last_md5": result.get("md5", ""),
-        }
+        })
+        published_map[published_key] = entry
         try:
             published_json.write_text(_json.dumps(published_map, indent=2))
         except Exception:
@@ -528,6 +579,24 @@ PUBLISH_TOOL = ToolDef(
                 "enum": ["ask", "preview", "publish"],
                 "description": "What to do: 'ask' prompts user, 'preview' opens locally, 'publish' publishes to web",
             },
+            "access_mode": {
+                "type": "string",
+                "enum": ["public", "password", "restricted"],
+                "description": "Access level. ONLY set when the user explicitly asked for it.",
+            },
+            "password": {
+                "type": "string",
+                "description": "Password for access_mode='password'. ONLY if the user stated it verbatim; otherwise leave empty and it will be asked interactively. NEVER invent one.",
+            },
+            "emails": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Allowed viewer emails for access_mode='restricted'.",
+            },
+            "org_allowed": {
+                "type": "boolean",
+                "description": "Whether the whole organization may view (access_mode='restricted').",
+            },
         },
         "required": ["file_path"],
     },
@@ -539,6 +608,13 @@ PUBLISH_TOOL = ToolDef(
         "- services (paste sites, gists, CDNs, file hosts) via scratchpad code — unless the user \n"
         "- explicitly names the service and confirms. Reading from public APIs and writing to the \n"
         "- user's connected datasources (databases, CRMs, etc.) is fine — this rule only applies to \n"
-        "- sharing generated output with the public internet."
+        "- sharing generated output with the public internet.\n"
+        "ACCESS MODE:\n"
+        "- Pass access_mode/password/emails/org_allowed ONLY if the user explicitly asked "
+        "(e.g. 'publish with password', 'share only with a@x.com').\n"
+        "- NEVER invent a password. If the user wants a password but didn't state it, set "
+        "access_mode='password' and leave password empty — the app will prompt them.\n"
+        "- If the user says nothing about access, omit these fields (public, or the artifact's "
+        "previous access is preserved on re-publish)."
     ),
 )

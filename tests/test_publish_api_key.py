@@ -58,7 +58,7 @@ async def test_401_clears_api_key(tmp_path):
     )
 
     with (
-        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["y", "wrongkey", "1"])),
+        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["y", "wrongkey", "public"])),
         patch("anton.publisher.publish", side_effect=http_401),
     ):
         await _handle_publish(console, settings, workspace, file_arg=str(html))
@@ -91,7 +91,7 @@ async def test_successful_publish_persists_key(tmp_path):
     }
 
     with (
-        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["y", "goodkey", "1"])),
+        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["y", "goodkey", "public"])),
         patch("anton.publisher.publish", return_value=publish_result),
         patch("webbrowser.open"),
     ):
@@ -117,6 +117,9 @@ async def test_401_with_existing_key_clears_it(tmp_path):
     )
 
     with (
+        # /publish now asks for an access mode before publishing; the key is
+        # already set so no key prompts fire — just answer the Access prompt.
+        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
         patch("anton.publisher.publish", side_effect=http_401),
     ):
         await _handle_publish(console, settings, workspace, file_arg=str(html))
