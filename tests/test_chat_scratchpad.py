@@ -85,6 +85,38 @@ class TestScratchpadToolDefinition:
         finally:
             await session.close()
 
+    async def test_tool_build_does_not_mutate_shared_singleton(self, workspace):
+        """_build_core_tools() must not mutate the shared SCRATCHPAD_TOOL
+        singleton — otherwise memory-injected wisdom would leak across every
+        session sharing this process instead of resetting per session."""
+        original_description = SCRATCHPAD_TOOL.description
+
+        mock_llm = make_mock_llm()
+        cortex_a = MagicMock()
+        cortex_a.get_scratchpad_context.return_value = "WISDOM_FROM_SESSION_A"
+        session_a = ChatSession(
+            ChatSessionConfig(llm_client=mock_llm, workspace=workspace, cortex=cortex_a)
+        )
+        try:
+            tools_a = session_a._build_tools()
+            desc_a = next(t["description"] for t in tools_a if t["name"] == "scratchpad")
+            assert "WISDOM_FROM_SESSION_A" in desc_a
+            assert SCRATCHPAD_TOOL.description == original_description
+        finally:
+            await session_a.close()
+
+        cortex_b = MagicMock()
+        cortex_b.get_scratchpad_context.return_value = ""
+        session_b = ChatSession(
+            ChatSessionConfig(llm_client=mock_llm, workspace=workspace, cortex=cortex_b)
+        )
+        try:
+            tools_b = session_b._build_tools()
+            desc_b = next(t["description"] for t in tools_b if t["name"] == "scratchpad")
+            assert "WISDOM_FROM_SESSION_A" not in desc_b
+        finally:
+            await session_b.close()
+
 
 class TestScratchpadExecViaChat:
     async def test_scratchpad_exec_via_chat(self, workspace):

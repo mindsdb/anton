@@ -67,6 +67,39 @@ def _extract_metadata(text: str) -> tuple[str, dict]:
     return clean_text, meta
 
 
+def _filter_by_token_budget(engrams: list[Engram], token_budget: int) -> list[Engram]:
+    """Keep entries, in the given order, until token_budget is spent.
+
+    Callers must pass entries already sorted by priority (most important
+    first) — this stops at the first entry that would exceed the budget, it
+    does not repack for a tighter fit. Budget enforced at ~4 chars/token.
+    """
+    char_budget = token_budget * 4
+    used = 0
+    kept: list[Engram] = []
+    for engram in engrams:
+        length = len(engram.text) + 1
+        if used + length > char_budget:
+            break
+        kept.append(engram)
+        used += length
+    return kept
+
+
+def _is_scratchpad_related(engram: Engram) -> bool:
+    """Whether an engram's text or topic mentions "scratchpad".
+
+    Used both to select entries INTO recall_scratchpad_wisdom() (the
+    scratchpad tool description) and to exclude the same entries FROM
+    get_rules()/get_lessons() when building the system prompt — keeping one
+    definition avoids the two call sites drifting apart and double-injecting
+    (or double-excluding) an entry.
+    """
+    if "scratchpad" in engram.text.lower():
+        return True
+    return bool(engram.topic and "scratchpad" in engram.topic.lower())
+
+
 class Hippocampus:
     """Reads and writes memory traces at a single scope (global OR project).
 
@@ -191,16 +224,16 @@ class Hippocampus:
 
     # ---------  lessons --------------
 
-    def recall_lessons(self, token_budget: int|None = 1000) -> str:
+    def recall_lessons(self, token_budget: int|None = 1000, exclude_scratchpad: bool = False) -> str:
         """Load semantic knowledge (lessons.md), most recent first, within budget.
 
         Brain analog: Anterior Temporal Lobe — the convergence hub for semantic
         facts distilled from many episodes. Budget enforced at ~4 chars/token.
         """
-        return self._lessons_to_text(self.get_lessons(token_budget))
+        return self._lessons_to_text(self.get_lessons(token_budget, exclude_scratchpad=exclude_scratchpad))
 
 
-    def get_lessons(self, token_budget: int = None) -> list[Engram]:
+    def get_lessons(self, token_budget: int = None, exclude_scratchpad: bool = False) -> list[Engram]:
         """Load semantic knowledge (lessons.md) as Engrams.
 
         When token_budget is None (default) returns all entries in file order.
@@ -233,24 +266,16 @@ class Hippocampus:
             text, meta = _extract_metadata(text)
             entries.append(Engram(text=text.removeprefix("- "), **meta))
 
+        if exclude_scratchpad:
+            entries = [e for e in entries if not _is_scratchpad_related(e)]
+
         if token_budget is None:
             return entries
 
         # Reverse entries so most recent are first
         entries.reverse()
 
-        # Budget: ~4 chars per token
-        char_budget = token_budget * 4
-        result_lines = []
-        used = sum(len(ln) for ln in result_lines)
-
-        for ln in entries:
-            if used + len(ln.text) + 1 > char_budget:
-                break
-            result_lines.append(ln)
-            used += len(ln.text) + 1
-
-        return result_lines
+        return _filter_by_token_budget(entries, token_budget)
 
     def del_lesson(self, id):
         entries = self.get_lessons()
@@ -320,36 +345,46 @@ class Hippocampus:
 
         return self._lessons_to_text(items, header=slug)
 
-    def recall_scratchpad_wisdom(self) -> str:
+    def recall_scratchpad_wisdom(self, token_budget: int = 2000) -> str:
         """Retrieve procedural knowledge relevant to scratchpad execution.
 
-        Returns all "when" rules + lessons whose text contains "scratchpad".
-        Injected into tool descriptions so the LLM sees them when composing code.
+        Gathers "when" rules + lessons whose text or topic mentions
+        "scratchpad", ordered by confidence tier (high, then medium/unset,
+        then low) and by recency within a tier, then trimmed to token_budget
+        (~4 chars/token — same convention as get_lessons). Injected into tool
+        descriptions so the LLM sees them when composing code.
         """
-        parts: list[str] = []
+        candidates: list[Engram] = []
 
-        # Extract "when" rules
-        rules = self.recall_rules()
-        if rules:
-            in_when = False
-            for line in rules.splitlines():
-                if line.strip().startswith("## When"):
-                    in_when = True
-                    continue
-                elif line.strip().startswith("## "):
-                    in_when = False
-                    continue
-                if in_when and line.strip().startswith("- "):
-                    parts.append(line.strip())
+        for rule in self.get_rules():
+            if rule.kind == "when" and _is_scratchpad_related(rule):
+                candidates.append(rule)
 
-        # Extract scratchpad-related lessons
         for lesson in self.get_lessons():
-            if "scratchpad" in lesson.text.lower() or (lesson.topic and "scratchpad" in lesson.topic.lower()):
-                entry = f"- {lesson.text}"
-                if entry not in parts:
-                    parts.append(entry)
+            if _is_scratchpad_related(lesson):
+                candidates.append(lesson)
 
-        return "\n".join(parts)
+        confidence_rank = {"high": 0, "medium": 1, "low": 2}
+
+        def sort_key(engram: Engram) -> tuple[int, float]:
+            rank = confidence_rank.get(engram.confidence, 1)
+            recency = -engram.updated_at.timestamp() if engram.updated_at else float("inf")
+            return (rank, recency)
+
+        candidates.sort(key=sort_key)
+
+        # Dedup by text, keeping the higher-priority copy from the sort above
+        seen_texts: set[str] = set()
+        deduped: list[Engram] = []
+        for engram in candidates:
+            if engram.text in seen_texts:
+                continue
+            seen_texts.add(engram.text)
+            deduped.append(engram)
+
+        kept = _filter_by_token_budget(deduped, token_budget)
+
+        return "\n".join(f"- {engram.text}" for engram in kept)
 
     # ---------- rules -------------------
 
@@ -367,8 +402,15 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    def get_rules(self) -> list[Engram]:
-        """Load behavioral rules (rules.md) as Engrams, grouped by kind."""
+    def get_rules(self, exclude_scratchpad_when: bool = False) -> list[Engram]:
+        """Load behavioral rules (rules.md) as Engrams, grouped by kind.
+
+        exclude_scratchpad_when drops "when" rules that mention "scratchpad"
+        — those are injected separately via recall_scratchpad_wisdom() into
+        the scratchpad tool description; including them in the system prompt
+        too would double their token cost. always/never rules are never
+        affected — those aren't part of that injection.
+        """
         if not self._rules_path.is_file():
             return []
         try:
@@ -389,6 +431,11 @@ class Hippocampus:
                     entries.append(Engram(text=text, kind=current_kind, **meta))
 
         entries.sort(key=lambda x: x.kind)
+
+        if exclude_scratchpad_when:
+            entries = [
+                e for e in entries if not (e.kind == "when" and _is_scratchpad_related(e))
+            ]
 
         return entries
 
