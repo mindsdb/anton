@@ -22,6 +22,24 @@ from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
+
+
+def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
+    """A copy of ``base`` with Python UTF-8 mode forced for the scratchpad
+    subprocess.
+
+    The parent may run under a non-UTF-8 host locale (e.g. GBK/cp936 on
+    Chinese Windows). Without this, the child interpreter inherits that code
+    page and every ``open()``/``print()``/stdio defaults to it — so reading the
+    boot script or emitting non-ASCII output crashes (ENG-824). ``setdefault``
+    so an explicit operator override still wins.
+    """
+    env = dict(base)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
 _MAX_OUTPUT = 10_000
 
 
@@ -199,7 +217,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 capture_output=True,
                 timeout=5,
             )
-            return result.returncode == 0 and "ok" in result.stdout.decode()
+            return result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
         except Exception:
             return False
 
@@ -324,13 +342,18 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Write the boot script to a temp file and launch the subprocess."""
         self._ensure_venv()
 
-        boot_code = _BOOT_SCRIPT_PATH.read_text()
+        # Read/write the boot script as UTF-8 explicitly: it contains non-ASCII
+        # (…, —), so a host-locale-default read (e.g. GBK on Chinese Windows)
+        # crashes with a codec error before the scratchpad can start (ENG-824).
+        boot_code = _BOOT_SCRIPT_PATH.read_text(encoding="utf-8")
         fd, path = tempfile.mkstemp(suffix=".py", prefix="anton_scratchpad_")
-        os.write(fd, boot_code.encode())
+        os.write(fd, boot_code.encode("utf-8"))
         os.close(fd)
         self._boot_path = path
 
-        env = os.environ.copy()
+        # Force UTF-8 mode in the child so its I/O never depends on the host
+        # code page (ENG-824).
+        env = _utf8_env(os.environ)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:
@@ -490,7 +513,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
 
         payload = code + "\n" + CELL_DELIM + "\n"
-        self._proc.stdin.write(payload.encode())  # type: ignore[union-attr]
+        self._proc.stdin.write(payload.encode("utf-8"))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
         total_timeout, inactivity_timeout = compute_timeouts(estimated_seconds)
@@ -622,7 +645,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 }
                 return
 
-            line = raw.decode().rstrip("\r\n")
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
             if line.startswith(PROGRESS_MARKER):
                 current_inactivity = max(
@@ -685,7 +708,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             proc.kill()
             await proc.wait()
             return f"Install timed out after {_install_timeout}s."
-        output = stdout.decode()
+        output = stdout.decode("utf-8", errors="replace")
         if proc.returncode != 0:
             return f"Install failed (exit {proc.returncode}):\n{output}"
         for p in needed:
