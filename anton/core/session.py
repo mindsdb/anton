@@ -1823,11 +1823,17 @@ class ChatSession:
         # task isn't actually done yet.
         continuation = 0
         _max_rounds_hit = False
+        import logging as _logging
+        _verifier_log = _logging.getLogger(__name__)
 
         while True:  # Completion verification loop
             tool_round = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
+            # Compact per-tool outcome log for this iteration, so the completion
+            # verifier can cross-check the assistant's claims against what tools
+            # actually did without receiving the full transcript (ENG-716).
+            tool_outcomes: list[str] = []
 
             while llm_response.tool_calls:
                 tool_round += 1
@@ -2090,6 +2096,7 @@ class ChatSession:
                             severity=1,
                             round_idx=tool_round,
                         )
+                        tool_outcomes.append(f"{tc.name}=ok")
                         tool_results.append(
                             {
                                 "type": "tool_result",
@@ -2132,6 +2139,7 @@ class ChatSession:
                         severity=5 if _failed else 1,
                         round_idx=tool_round,
                     )
+                    tool_outcomes.append(f"{tc.name}={'error' if _failed else 'ok'}")
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -2263,6 +2271,7 @@ class ChatSession:
             # needs for the verdict, keeps the call cheap, and — being plain text
             # — avoids any tool_use/tool_result pairing constraints (ENG-716).
             request_text = (user_message or "").strip() or "(see the assistant's message)"
+            tools_summary = ", ".join(tool_outcomes) if tool_outcomes else "none"
             verify_messages = [
                 {"role": "user", "content": f"USER'S REQUEST:\n{request_text}"},
                 {
@@ -2272,8 +2281,11 @@ class ChatSession:
                 {
                     "role": "user",
                     "content": (
-                        "Based on the assistant's latest message above, which status "
-                        "applies to the user's request?"
+                        f"TOOLS RUN THIS TURN (name=outcome): {tools_summary}\n\n"
+                        "Based on the assistant's latest message and the tool outcomes "
+                        "above, which status applies to the user's request? If a tool the "
+                        "task depended on returned an error but the assistant implied "
+                        "success, that is INCOMPLETE or STUCK — not COMPLETE."
                     ),
                 },
             ]
@@ -2297,8 +2309,7 @@ class ChatSession:
                 # than forcing a continuation the user never asked for.
                 status, reason = "COMPLETE", "verifier unavailable"
 
-            import logging as _logging
-            _logging.getLogger(__name__).info(
+            _verifier_log.info(
                 "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d reason=%s",
                 status, continuation, self._max_continuations, tool_round, reason,
             )
