@@ -33,10 +33,15 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     page and every ``open()``/``print()``/stdio defaults to it — so reading the
     boot script or emitting non-ASCII output crashes (ENG-824). ``setdefault``
     so an explicit operator override still wins.
+
+    Only ``PYTHONUTF8`` is set: UTF-8 mode already makes open()/filesystem/stdio
+    UTF-8 with the lenient ``surrogateescape`` stdio handler. We deliberately do
+    NOT also set ``PYTHONIOENCODING`` — a bare value downgrades the stdio error
+    handler back to ``strict`` (verified), which would re-introduce a crash on
+    exotic output rather than round-tripping it.
     """
     env = dict(base)
     env.setdefault("PYTHONUTF8", "1")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
 
 

@@ -11,15 +11,16 @@ import anton.core.backends.local as local
 def test_utf8_env_forces_utf8_mode():
     env = local._utf8_env({"FOO": "bar"})
     assert env["PYTHONUTF8"] == "1"
-    assert env["PYTHONIOENCODING"] == "utf-8"
     assert env["FOO"] == "bar"  # base is preserved
+    # Deliberately NOT set — a bare PYTHONIOENCODING makes stdio strict, which
+    # would re-introduce a crash on exotic output (UTF-8 mode already covers it).
+    assert "PYTHONIOENCODING" not in env
 
 
 def test_utf8_env_respects_explicit_override():
-    # setdefault: an operator who deliberately set these keeps them.
-    env = local._utf8_env({"PYTHONUTF8": "0", "PYTHONIOENCODING": "latin-1"})
+    # setdefault: an operator who deliberately set UTF-8 mode off keeps it.
+    env = local._utf8_env({"PYTHONUTF8": "0"})
     assert env["PYTHONUTF8"] == "0"
-    assert env["PYTHONIOENCODING"] == "latin-1"
 
 
 def test_boot_script_must_be_read_as_utf8():
