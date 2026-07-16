@@ -1,0 +1,15 @@
+name: Staging Freeze
+on:
+  schedule:
+    # Friday 13:47 UTC — off the top of the hour (GitHub's documented high-load
+    # slot) and off a DST-sensitive "6am PST" wording.
+    - cron: '47 13 * * 5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freeze:
+    uses: mindsdb/github-actions/.github/workflows/release-freeze.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
+    secrets: inherit
