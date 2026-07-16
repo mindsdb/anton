@@ -38,16 +38,37 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     Mapping policy:
       - 401 → ConnectionError with the invalid-key copy (cowork-server's
         provider_auth detection keys on this exact phrase).
-      - 403 with a structured gateway code (``error.code`` of
-        ``model_access_denied`` / ``model_disabled``) → ModelUnavailableError
-        carrying the code + model, with actionable copy. Detection is
-        code-exact on purpose: BYOK OpenAI 403s (region blocks), Anthropic
-        permission errors, and Cloudflare HTML 403s carry no such code and
-        must fall through to the generic message, never the plan copy.
+      - 403 with a structured gateway code (``model_access_denied`` /
+        ``model_disabled``) → ModelUnavailableError carrying the code +
+        model, with actionable copy. Detection is code-exact on purpose:
+        BYOK OpenAI 403s (region blocks), Anthropic permission errors, and
+        Cloudflare HTML 403s carry no such code and must fall through to
+        the generic message, never the plan copy.
       - 429 with a quota detail → TokenLimitExceeded, checked first so a body
-        carrying both ``detail`` and ``error.code`` stays token_limit (quota
-        keeps its own card downstream).
+        carrying both ``detail`` and a structured code stays token_limit
+        (quota keeps its own card downstream).
       - anything else → the generic "temporarily unavailable" ConnectionError.
+
+    Body-shape tolerance (ENG-747): the OpenAI SDK UNWRAPS the error
+    envelope before storing it — ``openai/_client.py`` does
+    ``data = body.get("error", body)`` — so for the gateway's OpenAI-style
+    403 (``{"error": {"code": …}}``), ``exc.body`` is the INNER dict and
+    ``code`` sits at top level. The gateway's 429 is FastAPI-style
+    (``{"detail": …}``, no envelope) and passes through untouched. Both
+    fields are therefore read from the top level first, with an envelope
+    fallback for clients that deliver the wire shape unmodified (anton's
+    pyproject allows ``openai>=1.0``, and proxies exist that re-wrap).
+    The originally shipped ENG-598 mapper read only
+    ``body["error"]["code"]`` — a key the SDK had already peeled off —
+    which left the model-403 card dead in production.
+
+    Known limits, on purpose: a wire body carrying BOTH a top-level
+    ``detail`` and an ``error`` envelope loses the detail inside the SDK
+    (the unwrap discards siblings of ``error``) — unrecoverable from
+    ``exc.body``, and no real dialect emits that shape. And a 429 whose
+    envelope carries only ``message`` (OpenAI's own quota dialect, e.g.
+    ``insufficient_quota``) stays generic: classifying arbitrary provider
+    messages as MindsHub quota would put an upsell CTA on BYOK errors.
     """
     if exc.status_code == 401:
         raise ConnectionError(
@@ -55,13 +76,16 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         ) from exc
 
     body = exc.body if isinstance(exc.body, dict) else {}
-    if exc.status_code == 429 and body.get("detail"):
-        msg = f"Server returned 429 — {body['detail']}"
+    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+    detail = body.get("detail") or envelope.get("detail")
+    # str-only: FastAPI validation errors put a LIST in detail — rendering
+    # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
+    if exc.status_code == 429 and isinstance(detail, str) and detail:
+        msg = f"Server returned 429 — {detail}"
         msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
-    error = body.get("error") if isinstance(body.get("error"), dict) else {}
-    code = error.get("code")
+    code = body.get("code") or envelope.get("code")
     if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
         if code == "model_access_denied":
             msg = (
