@@ -1,0 +1,19 @@
+name: Staging Unfreeze
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unfreeze:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.head.ref == 'staging' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    uses: mindsdb/github-actions/.github/workflows/release-unfreeze.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
+    secrets: inherit
