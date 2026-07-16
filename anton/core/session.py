@@ -145,6 +145,49 @@ class _VerifierVerdict(BaseModel):
     reason: str = Field(description="One brief sentence explaining the verdict.")
 
 
+def _render_verify_transcript(
+    history: list[dict],
+    *,
+    max_messages: int = 16,
+    tool_cap: int = 400,
+    text_cap: int = 2000,
+) -> str:
+    """Render a compact, text-only view of the recent conversation for the
+    completion verifier.
+
+    Gives the verifier enough to judge reliably — prior turns (so referential
+    follow-ups keep their task context) and truncated tool-result *content* (so
+    a claimed-successful tool can be cross-checked, not just its ok/error flag)
+    — without shipping the full raw transcript or tripping the provider's
+    tool_use/tool_result pairing constraints (ENG-716). Internal ``SYSTEM:``
+    injections are omitted; they are directives, not conversation.
+    """
+    lines: list[str] = []
+    for msg in history[-max_messages:]:
+        role = msg.get("role")
+        content = msg.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+            if not text or (role == "user" and text.startswith("SYSTEM:")):
+                continue
+            speaker = "USER" if role == "user" else "ASSISTANT"
+            lines.append(f"{speaker}: {text[:text_cap]}")
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text" and (block.get("text") or "").strip():
+                    lines.append(f"ASSISTANT: {block['text'][:text_cap]}")
+                elif btype == "tool_use":
+                    lines.append(f"ASSISTANT called tool: {block.get('name')}")
+                elif btype == "tool_result":
+                    c = block.get("content")
+                    text = c if isinstance(c, str) else json.dumps(c)
+                    lines.append(f"TOOL RESULT: {text[:tool_cap]}")
+    return "\n".join(lines) or "(no conversation)"
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -1830,10 +1873,6 @@ class ChatSession:
             tool_round = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
-            # Compact per-tool outcome log for this iteration, so the completion
-            # verifier can cross-check the assistant's claims against what tools
-            # actually did without receiving the full transcript (ENG-716).
-            tool_outcomes: list[str] = []
 
             while llm_response.tool_calls:
                 tool_round += 1
@@ -2096,7 +2135,6 @@ class ChatSession:
                             severity=1,
                             round_idx=tool_round,
                         )
-                        tool_outcomes.append(f"{tc.name}=ok")
                         tool_results.append(
                             {
                                 "type": "tool_result",
@@ -2139,7 +2177,6 @@ class ChatSession:
                         severity=5 if _failed else 1,
                         round_idx=tool_round,
                     )
-                    tool_outcomes.append(f"{tc.name}={'error' if _failed else 'ok'}")
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -2265,27 +2302,23 @@ class ChatSession:
                 # Consolidation still runs after diagnosis
                 break
 
-            # Ask the cheap coding model to self-assess completion, using a
-            # compact text-only view (the user's request + the assistant's latest
-            # message) rather than the full transcript. That is all the verifier
-            # needs for the verdict, keeps the call cheap, and — being plain text
-            # — avoids any tool_use/tool_result pairing constraints (ENG-716).
-            request_text = (user_message or "").strip() or "(see the assistant's message)"
-            tools_summary = ", ".join(tool_outcomes) if tool_outcomes else "none"
+            # Ask the cheap coding model to self-assess completion over a compact,
+            # text-rendered view of the recent conversation: enough context for
+            # referential follow-ups plus truncated tool-result evidence to
+            # cross-check success claims, but far smaller than the raw transcript
+            # and free of tool_use/tool_result pairing constraints (ENG-716). The
+            # assistant's latest reply is already in history (appended above).
+            transcript = _render_verify_transcript(self._history)
             verify_messages = [
-                {"role": "user", "content": f"USER'S REQUEST:\n{request_text}"},
-                {
-                    "role": "assistant",
-                    "content": reply.strip() or "(the assistant produced no final text)",
-                },
                 {
                     "role": "user",
                     "content": (
-                        f"TOOLS RUN THIS TURN (name=outcome): {tools_summary}\n\n"
-                        "Based on the assistant's latest message and the tool outcomes "
-                        "above, which status applies to the user's request? If a tool the "
-                        "task depended on returned an error but the assistant implied "
-                        "success, that is INCOMPLETE or STUCK — not COMPLETE."
+                        "Assess the conversation below (tool results are truncated) and "
+                        "decide the status of the USER's most recent request.\n\n"
+                        f"{transcript}\n\n"
+                        "Which status applies? A tool the task depended on that returned "
+                        "an error — or returned no usable data while the assistant implied "
+                        "success — means INCOMPLETE or STUCK, not COMPLETE."
                     ),
                 },
             ]

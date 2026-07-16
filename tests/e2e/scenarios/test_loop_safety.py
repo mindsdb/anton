@@ -70,11 +70,12 @@ def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
         "Continue working on the original request" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "WAITING verdict must not trigger a continuation injection"
-    # The verifier must receive the compact per-tool outcome log (cross-check).
+    # The verifier must receive truncated tool-result evidence (not just a flag),
+    # so it can cross-check claimed success against what the tool actually did.
     assert any(
-        "TOOLS RUN THIS TURN" in json.dumps(r.get("messages", []))
+        "TOOL RESULT:" in json.dumps(r.get("messages", []))
         for r in stub.requests
-    ), "verifier did not receive the tool-outcome summary"
+    ), "verifier did not receive tool-result evidence"
 
 
 def test_session_exits_within_timeout(cfg, stub, tmp_path):
