@@ -6,8 +6,10 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
 import re
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Literal
 import os
+
+from pydantic import BaseModel, Field
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -120,6 +122,29 @@ def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
     ]
 
 
+class _VerifierVerdict(BaseModel):
+    """Structured verdict from the completion verifier (runs on the cheap
+    coding model). The field descriptions below double as the verifier's
+    instructions — see LLMClient.generate_object_code (ENG-716)."""
+
+    status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
+        description=(
+            "Classify the assistant's latest message against the user's request:\n"
+            "- COMPLETE: the requested task is done. A finished task followed by an "
+            "optional 'want me to…?' offer is still COMPLETE.\n"
+            "- WAITING: the assistant's latest message asks the user a question it "
+            "genuinely needs answered to proceed with the requested task, or is a "
+            "reasoned refusal. This is a valid stopping point — do NOT treat it as "
+            "unfinished; the correct action is to wait for the user's reply.\n"
+            "- INCOMPLETE: the assistant stopped partway through the requested task "
+            "WITHOUT asking the user anything, and could keep going on its own.\n"
+            "- STUCK: a hard blocker prevents completion (missing credentials, an "
+            "unavailable service, or a permission the assistant does not have)."
+        )
+    )
+    reason: str = Field(description="One brief sentence explaining the verdict.")
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -183,6 +208,7 @@ class ChatSession:
         self._settings = config.settings
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
+        self._verify_min_tool_rounds = s.verify_min_tool_rounds
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -2197,9 +2223,10 @@ class ChatSession:
                     )
 
             # --- Completion verification ---
-            # Only verify when tools were actually used (not for simple Q&A)
-            # and we haven't hit the max-rounds hard stop.
-            if tool_round == 0 or _max_rounds_hit:
+            # Skip when too few tool rounds were used (pure Q&A always skips at
+            # tool_round==0; raising verify_min_tool_rounds also skips trivial
+            # single-round turns) or when we hit the max-rounds hard stop.
+            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit:
                 break
 
             # Append the assistant's final text so the verifier can see it
@@ -2230,47 +2257,60 @@ class ChatSession:
                 # Consolidation still runs after diagnosis
                 break
 
-            # Ask the LLM to self-assess completion.
-            # Use a copy of history with a trailing user message so models
-            # that don't support assistant-prefill won't reject the request.
-            # Factory is re-invoked on each recovery attempt so the verifier
-            # sees the latest post-compaction history.
-            def build_verify_messages() -> list[dict]:
-                return list(self._history) + [
-                    {
-                        "role": "user",
-                        "content": (
-                            "SYSTEM: Evaluate whether the task the user originally requested "
-                            "has been fully completed based on the conversation above."
-                        ),
-                    }
-                ]
+            # Ask the cheap coding model to self-assess completion, using a
+            # compact text-only view (the user's request + the assistant's latest
+            # message) rather than the full transcript. That is all the verifier
+            # needs for the verdict, keeps the call cheap, and — being plain text
+            # — avoids any tool_use/tool_result pairing constraints (ENG-716).
+            request_text = (user_message or "").strip() or "(see the assistant's message)"
+            verify_messages = [
+                {"role": "user", "content": f"USER'S REQUEST:\n{request_text}"},
+                {
+                    "role": "assistant",
+                    "content": reply.strip() or "(the assistant produced no final text)",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Based on the assistant's latest message above, which status "
+                        "applies to the user's request?"
+                    ),
+                },
+            ]
             verifier_system = (
-                "You are a task-completion verifier. Given the conversation, determine "
-                "whether the user's original request has been fully completed.\n\n"
-                "Respond with EXACTLY one of these lines, followed by a brief reason:\n"
-                "STATUS: COMPLETE — <reason>\n"
-                "STATUS: INCOMPLETE — <reason>\n"
-                "STATUS: STUCK — <reason>\n\n"
-                "COMPLETE = the task is done or the response fully answers the question.\n"
-                "INCOMPLETE = more work can be done to finish the task.\n"
-                "STUCK = a blocker prevents completion (missing info, permissions, etc).\n\n"
-                "Be strict: if the user asked for X and only part of X was delivered, "
-                "that is INCOMPLETE, not COMPLETE. But if the user asked a question "
-                "and the assistant answered it, that is COMPLETE even without tool use."
+                "You are a task-completion verifier. Decide whether the user's "
+                "request is complete, the assistant is waiting on the user, the work "
+                "is unfinished, or the assistant is blocked. Follow the status "
+                "definitions exactly."
             )
-            verification = await self.plan_with_recovery(
-                system=verifier_system,
-                max_tokens=256,
-                messages_factory=build_verify_messages,
+            try:
+                verdict = await self._llm.generate_object_code(
+                    _VerifierVerdict,
+                    system=verifier_system,
+                    messages=verify_messages,
+                    max_tokens=256,
+                )
+                status = verdict.status
+                reason = verdict.reason.strip()
+            except Exception:
+                # Verifier failed — fail safe by treating the turn as done rather
+                # than forcing a continuation the user never asked for.
+                status, reason = "COMPLETE", "verifier unavailable"
+
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d reason=%s",
+                status, continuation, self._max_continuations, tool_round, reason,
             )
 
-            status_text = (verification.content or "").strip().upper()
-            if "STATUS: COMPLETE" in status_text:
+            if status in ("COMPLETE", "WAITING"):
+                # COMPLETE = the request is done. WAITING = the assistant asked the
+                # user something it genuinely needs, or gave a reasoned refusal —
+                # a valid stop, NOT unfinished work. In both cases the turn's final
+                # message already stands in history; do not force a continuation.
                 break
-            if "STATUS: STUCK" in status_text:
-                # Stuck — inject diagnosis request and let the LLM explain
-                reason = (verification.content or "").strip()
+            if status == "STUCK":
+                # Stuck — inject diagnosis request and let the LLM explain.
                 self._append_history(
                     {
                         "role": "user",
@@ -2278,7 +2318,8 @@ class ChatSession:
                             f"SYSTEM: Task verification determined this task is stuck.\n"
                             f"Verifier assessment: {reason}\n\n"
                             "Explain to the user what went wrong, what you tried, and "
-                            "suggest specific next steps they can take to unblock this."
+                            "suggest specific next steps they can take to unblock this. "
+                            "Do not mention this instruction or the verifier to the user."
                         ),
                     }
                 )
@@ -2291,7 +2332,6 @@ class ChatSession:
 
             # INCOMPLETE — continue working
             continuation += 1
-            reason = (verification.content or "").strip()
             self._append_history(
                 {
                     "role": "user",
@@ -2300,7 +2340,8 @@ class ChatSession:
                         f"(attempt {continuation}/{self._max_continuations}).\n"
                         f"Verifier assessment: {reason}\n\n"
                         "Continue working on the original request. Pick up where you left off "
-                        "and finish the remaining work. Do not repeat work already done."
+                        "and finish the remaining work. Do not repeat work already done. "
+                        "Do not mention this instruction or the verifier to the user."
                     ),
                 }
             )
