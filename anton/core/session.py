@@ -145,47 +145,83 @@ class _VerifierVerdict(BaseModel):
     reason: str = Field(description="One brief sentence explaining the verdict.")
 
 
+def _render_tool_result_content(content, cap: int) -> str:
+    """Render a tool_result's content as bounded plain text.
+
+    Never serializes raw payloads: a multimodal result (e.g. read_image) can
+    carry megabytes of base64, so we keep only text blocks and mark images with
+    a placeholder rather than ``json.dumps``-ing the whole thing (ENG-716).
+    """
+    if isinstance(content, str):
+        return content[:cap] or "(empty result)"
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                parts.append((block.get("text") or "").strip())
+            elif block.get("type") in ("image", "image_url"):
+                parts.append("[image]")
+        return (" ".join(p for p in parts if p)[:cap]) or "[non-text result]"
+    return str(content)[:cap]
+
+
 def _render_verify_transcript(
     history: list[dict],
     *,
-    max_messages: int = 16,
+    max_convo: int = 10,
+    max_tool: int = 12,
     tool_cap: int = 400,
     text_cap: int = 2000,
 ) -> str:
     """Render a compact, text-only view of the recent conversation for the
     completion verifier.
 
-    Gives the verifier enough to judge reliably — prior turns (so referential
-    follow-ups keep their task context) and truncated tool-result *content* (so
-    a claimed-successful tool can be cross-checked, not just its ok/error flag)
-    — without shipping the full raw transcript or tripping the provider's
-    tool_use/tool_result pairing constraints (ENG-716). Internal ``SYSTEM:``
-    injections are omitted; they are directives, not conversation.
+    Budgets the conversational thread and the tool activity *separately* so a
+    voluminous tool loop can't crowd out the user/assistant turns the verifier
+    needs to resolve referential requests ("do the same for the other file"):
+    the most recent ``max_convo`` user/assistant text turns plus the most recent
+    ``max_tool`` tool events, merged back into chronological order. Speaker is
+    taken from the message role (list-based *user* content — images/files — is
+    labelled USER, not ASSISTANT); multimodal blocks are rendered block-by-block
+    (text kept, images as a placeholder, never raw base64); internal ``SYSTEM:``
+    injections are dropped before budgeting so they don't consume slots. Keeps
+    the call cheap and free of tool_use/tool_result pairing constraints
+    (ENG-716).
     """
-    lines: list[str] = []
-    for msg in history[-max_messages:]:
+    convo: list[tuple[int, str]] = []   # (orig_index, line) — user/assistant text
+    tools: list[tuple[int, str]] = []   # (orig_index, line) — tool activity
+
+    for i, msg in enumerate(history):
         role = msg.get("role")
         content = msg.get("content")
+        speaker = "USER" if role == "user" else "ASSISTANT"
         if isinstance(content, str):
             text = content.strip()
             if not text or (role == "user" and text.startswith("SYSTEM:")):
                 continue
-            speaker = "USER" if role == "user" else "ASSISTANT"
-            lines.append(f"{speaker}: {text[:text_cap]}")
+            convo.append((i, f"{speaker}: {text[:text_cap]}"))
         elif isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
-                if btype == "text" and (block.get("text") or "").strip():
-                    lines.append(f"ASSISTANT: {block['text'][:text_cap]}")
+                if btype == "text":
+                    text = (block.get("text") or "").strip()
+                    if text:
+                        convo.append((i, f"{speaker}: {text[:text_cap]}"))
+                elif btype in ("image", "image_url"):
+                    convo.append((i, f"{speaker}: [image]"))
                 elif btype == "tool_use":
-                    lines.append(f"ASSISTANT called tool: {block.get('name')}")
+                    tools.append((i, f"ASSISTANT called tool: {block.get('name')}"))
                 elif btype == "tool_result":
-                    c = block.get("content")
-                    text = c if isinstance(c, str) else json.dumps(c)
-                    lines.append(f"TOOL RESULT: {text[:tool_cap]}")
-    return "\n".join(lines) or "(no conversation)"
+                    rendered = _render_tool_result_content(block.get("content"), tool_cap)
+                    tools.append((i, f"TOOL RESULT: {rendered}"))
+
+    kept = convo[-max_convo:] + tools[-max_tool:]
+    kept.sort(key=lambda entry: entry[0])
+    return "\n".join(line for _, line in kept) or "(no conversation)"
 
 
 @dataclass
