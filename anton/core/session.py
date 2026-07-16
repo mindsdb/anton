@@ -2008,6 +2008,39 @@ class ChatSession:
                                 phase="analyzing",
                                 message="Analyzing results...",
                             )
+                        elif (
+                            tc.name == "browser_control"
+                            and isinstance(tc.input, dict)
+                            and tc.input.get("progress_message")
+                        ):
+                            # Browser control tool — surface the agent-supplied
+                            # human-readable progress line ("Reading account
+                            # list", "Opening July report", …) instead of the
+                            # raw tool name. The browser_control tool itself is
+                            # injected by the host (cowork-server); anton-core
+                            # stays host-agnostic and keys only on the tool name
+                            # plus the presence of a `progress_message` input
+                            # field, mirroring how scratchpad surfaces its
+                            # `one_line_description`.
+                            # The elif guard already requires a truthy
+                            # progress_message, so no tool-name fallback is
+                            # needed here.
+                            _browser_msg = tc.input["progress_message"]
+                            yield StreamTaskProgress(
+                                phase="browser_action",
+                                message=_browser_msg,
+                                id=tc.id,
+                            )
+                            result_text = await self.tool_registry.dispatch_tool(
+                                self, tc.name, tc.input
+                            )
+                            _tool_elapsed = _time.monotonic() - _tool_t0
+                            yield StreamTaskProgress(
+                                phase="browser_action",
+                                message=_browser_msg,
+                                eta_seconds=_tool_elapsed,
+                                id=tc.id,
+                            )
                         else:
                             # Non-scratchpad, non-interactive tool — track elapsed
                             yield StreamTaskProgress(

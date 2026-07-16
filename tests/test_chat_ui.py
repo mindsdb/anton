@@ -224,3 +224,142 @@ class TestActivityTracking:
         assert display._initial_text == "Initial text"
         assert display._buffer == "Answer text"
         assert display._in_tool_phase
+
+
+class TestBrowserActionProgress:
+    """The browser_control streaming path emits phase="browser_action" instead
+    of tool_start/tool_done. update_progress must treat eta=None as a live
+    status update (surfacing the human progress_message) and eta-set as the
+    completion signal that marks the browser activity done with its elapsed —
+    mirroring tool_done, but keyed on the fixed "browser_control" name since
+    the message carries the human line, not the tool name."""
+
+    def _make_display(self):
+        console = MagicMock()
+        toolbar = {"stats": "", "status": ""}
+        return StreamDisplay(console, toolbar=toolbar), console
+
+    def _start_browser_activity(self, display):
+        display.on_tool_use_start("tool_b1", "browser_control")
+        display.on_tool_use_delta(
+            "tool_b1",
+            '{"action": "inspect", "reason": "no connector", '
+            '"progress_message": "Reading account list"}',
+        )
+        display.on_tool_use_end("tool_b1")  # prints the activity line
+
+    @patch("anton.chat_ui.Live")
+    def test_browser_action_without_eta_updates_status(self, MockLive):
+        display, _ = self._make_display()
+        display.start()
+        self._start_browser_activity(display)
+
+        display.update_progress("browser_action", "Reading account list")
+
+        act = display._activities[0]
+        assert not act.done
+        assert display._line2_status == "Reading account list"
+
+    @patch("anton.chat_ui.Live")
+    def test_browser_action_with_eta_marks_activity_done(self, MockLive):
+        display, _ = self._make_display()
+        display.start()
+        self._start_browser_activity(display)
+
+        display.update_progress("browser_action", "Reading account list")
+        display.update_progress("browser_action", "Reading account list", eta=2.5)
+
+        act = display._activities[0]
+        assert act.done
+        assert act.work_elapsed == 2.5
+
+    @patch("anton.chat_ui.Live")
+    def test_browser_action_done_line_printed_on_finish(self, MockLive):
+        """The completed browser activity gets its ✔ elapsed line (via
+        finish(), which flushes done-but-unprinted activities the same way
+        it does for tool_done-completed tools)."""
+        display, console = self._make_display()
+        display.start()
+        self._start_browser_activity(display)
+
+        display.update_progress("browser_action", "Reading account list", eta=1.9)
+        display.finish()
+
+        act = display._activities[0]
+        assert act.done
+        assert act.done_line_printed
+
+    @patch("anton.chat_ui.Live")
+    def test_browser_action_completion_via_reasoning_done(self, MockLive):
+        """reasoning_done after a completed browser action prints the combined
+        ✔ line, exactly as it does for tool_done-completed tools."""
+        display, _ = self._make_display()
+        display.start()
+        self._start_browser_activity(display)
+
+        display.update_progress("browser_action", "Reading account list", eta=1.2)
+        display.update_progress("reasoning_done", "", eta=3.4)
+
+        act = display._activities[0]
+        assert act.done
+        assert act.done_line_printed
+        assert act.reasoning_elapsed == 3.4
+
+    @patch("anton.chat_ui.Live")
+    def test_browser_action_does_not_complete_other_activities(self, MockLive):
+        """A browser_action completion only marks the browser_control
+        activity done — other pending tools are untouched."""
+        display, _ = self._make_display()
+        display.start()
+        display.on_tool_use_start("tool_x", "recall_skill")
+        display.on_tool_use_end("tool_x")
+        self._start_browser_activity(display)
+
+        display.update_progress("browser_action", "Reading account list", eta=2.0)
+
+        other = display._activities[0]
+        browser = display._activities[1]
+        assert not other.done
+        assert browser.done
+
+    @patch("anton.chat_ui.Live")
+    def test_browser_action_completion_matches_by_tool_use_id(self, MockLive):
+        """With two pending browser_control activities, a completion event
+        carrying the FIRST one's tool_use id marks that one done — not the
+        last pending one (which the name-only reversed scan would pick)."""
+        display, _ = self._make_display()
+        display.start()
+        # Two browser activities printed before either executes.
+        display.on_tool_use_start("tool_b1", "browser_control")
+        display.on_tool_use_end("tool_b1")
+        display.on_tool_use_start("tool_b2", "browser_control")
+        display.on_tool_use_end("tool_b2")
+
+        display.update_progress(
+            "browser_action", "Reading account list", eta=1.5, id="tool_b1"
+        )
+
+        first = next(a for a in display._activities if a.tool_id == "tool_b1")
+        second = next(a for a in display._activities if a.tool_id == "tool_b2")
+        assert first.done
+        assert first.work_elapsed == 1.5
+        assert not second.done
+
+    @patch("anton.chat_ui.Live")
+    def test_browser_action_completion_falls_back_to_name_without_id(self, MockLive):
+        """Without an id (older callers), completion falls back to the
+        reversed name scan — the last pending browser activity is marked."""
+        display, _ = self._make_display()
+        display.start()
+        display.on_tool_use_start("tool_b1", "browser_control")
+        display.on_tool_use_end("tool_b1")
+        display.on_tool_use_start("tool_b2", "browser_control")
+        display.on_tool_use_end("tool_b2")
+
+        display.update_progress("browser_action", "Reading account list", eta=2.0)
+
+        first = next(a for a in display._activities if a.tool_id == "tool_b1")
+        second = next(a for a in display._activities if a.tool_id == "tool_b2")
+        assert second.done
+        assert second.work_elapsed == 2.0
+        assert not first.done

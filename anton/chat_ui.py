@@ -352,9 +352,19 @@ class StreamDisplay:
                 return
 
     def update_progress(
-        self, phase: str, message: str, eta: float | None = None
+        self,
+        phase: str,
+        message: str,
+        eta: float | None = None,
+        id: str | None = None,
     ) -> None:
-        """Update progress — manages spinner and activity lines."""
+        """Update progress — manages spinner and activity lines.
+
+        ``id`` optionally carries the originating tool_use id (session-side
+        ``StreamTaskProgress.id``) so phases that complete a specific activity
+        (currently ``browser_action``) can match it exactly instead of by
+        name. All other phases ignore it.
+        """
         if not self._active:
             return
 
@@ -422,6 +432,37 @@ class StreamDisplay:
                 if act.name == message and act.printed and not act.done:
                     act.done = True
                     act.work_elapsed = elapsed
+                    break
+            return
+
+        if phase == "browser_action":
+            # Browser control action — the session emits this phase instead of
+            # tool_start/tool_done, carrying the agent-supplied human-readable
+            # progress line (e.g. "Reading account list") rather than the tool
+            # name. eta is None while the action runs (status update); eta set
+            # means the action finished — mark the browser activity done, the
+            # same way tool_done does (which keys on the tool name; here the
+            # message is the human line, so key on the tool's fixed name).
+            if eta is None:
+                self._line2_status = message
+                self._line3_peek = ""
+                self._update_spinner()
+                return
+            # Prefer an exact tool_use-id match (the session forwards tc.id on
+            # browser_action events) — with multiple pending browser
+            # activities, a name-only reversed scan would mark the LAST
+            # pending one instead of the one that actually finished. Fall
+            # back to the name scan when no id is available (older callers).
+            if id is not None:
+                for act in self._activities:
+                    if act.tool_id == id and act.printed and not act.done:
+                        act.done = True
+                        act.work_elapsed = eta if eta else 0
+                        return
+            for act in reversed(self._activities):
+                if act.name == "browser_control" and act.printed and not act.done:
+                    act.done = True
+                    act.work_elapsed = eta if eta else 0
                     break
             return
 

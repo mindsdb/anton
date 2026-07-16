@@ -1795,7 +1795,10 @@ async def _chat_loop(
                             display.on_tool_use_end(event.id)
                         elif isinstance(event, StreamTaskProgress):
                             display.update_progress(
-                                event.phase, event.message, event.eta_seconds
+                                event.phase,
+                                event.message,
+                                event.eta_seconds,
+                                id=event.id,
                             )
                         elif isinstance(event, StreamContextCompacted):
                             display.show_context_compacted(event.message)
