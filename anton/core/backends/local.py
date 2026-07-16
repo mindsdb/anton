@@ -704,6 +704,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # Same UTF-8 mode as the scratchpad process, so pip/uv output on a
+            # non-UTF-8 host locale doesn't come back as mojibake (ENG-824).
+            env=_utf8_env(os.environ),
         )
         try:
             stdout, _ = await asyncio.wait_for(
