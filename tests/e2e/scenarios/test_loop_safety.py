@@ -76,6 +76,12 @@ def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
         "TOOL RESULT:" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "verifier did not receive tool-result evidence"
+    # ...and the current request is always stated, even if a long turn evicts it
+    # from the transcript window.
+    assert any(
+        "USER'S CURRENT REQUEST" in json.dumps(r.get("messages", []))
+        for r in stub.requests
+    ), "verifier did not receive the current request header"
 
 
 def test_session_exits_within_timeout(cfg, stub, tmp_path):

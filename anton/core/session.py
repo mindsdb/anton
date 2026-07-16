@@ -2309,13 +2309,18 @@ class ChatSession:
             # and free of tool_use/tool_result pairing constraints (ENG-716). The
             # assistant's latest reply is already in history (appended above).
             transcript = _render_verify_transcript(self._history)
+            # Always state the current request explicitly: a long tool-heavy turn
+            # can push the turn's opening user message out of the transcript window,
+            # and the request is the anchor for the whole judgment (ENG-716).
+            request = (user_message or "").strip()
+            request_header = f"USER'S CURRENT REQUEST: {request}\n\n" if request else ""
             verify_messages = [
                 {
                     "role": "user",
                     "content": (
                         "Assess the conversation below (tool results are truncated) and "
                         "decide the status of the USER's most recent request.\n\n"
-                        f"{transcript}\n\n"
+                        f"{request_header}{transcript}\n\n"
                         "Which status applies? A tool the task depended on that returned "
                         "an error — or returned no usable data while the assistant implied "
                         "success — means INCOMPLETE or STUCK, not COMPLETE."
