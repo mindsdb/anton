@@ -6,8 +6,10 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
 import re
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Literal
 import os
+
+from pydantic import BaseModel, Field
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -120,6 +122,117 @@ def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
     ]
 
 
+class _VerifierVerdict(BaseModel):
+    """Structured verdict from the completion verifier (runs on the cheap
+    coding model). The field descriptions below double as the verifier's
+    instructions — see LLMClient.generate_object_code (ENG-716)."""
+
+    status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
+        description=(
+            "Classify the assistant's latest message against the user's request:\n"
+            "- COMPLETE: the requested task is done. A finished task followed by an "
+            "optional 'want me to…?' offer is still COMPLETE.\n"
+            "- WAITING: the assistant's latest message asks the user a question it "
+            "genuinely needs answered to proceed with the requested task, or is a "
+            "reasoned refusal. This is a valid stopping point — do NOT treat it as "
+            "unfinished; the correct action is to wait for the user's reply.\n"
+            "- INCOMPLETE: the assistant stopped partway through the requested task "
+            "WITHOUT asking the user anything, and could keep going on its own.\n"
+            "- STUCK: a hard blocker prevents completion (missing credentials, an "
+            "unavailable service, or a permission the assistant does not have)."
+        )
+    )
+    reason: str = Field(description="One brief sentence explaining the verdict.")
+
+
+def _render_tool_result_content(content, cap: int) -> str:
+    """Render a tool_result's content as bounded plain text.
+
+    Never serializes raw payloads: a multimodal result (e.g. read_image) can
+    carry megabytes of base64, so we keep only text blocks and mark images with
+    a placeholder rather than ``json.dumps``-ing the whole thing (ENG-716).
+    """
+    if isinstance(content, str):
+        return content[:cap] or "(empty result)"
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                parts.append((block.get("text") or "").strip())
+            elif block.get("type") in ("image", "image_url"):
+                parts.append("[image]")
+        return (" ".join(p for p in parts if p)[:cap]) or "[non-text result]"
+    return str(content)[:cap]
+
+
+def _render_verify_transcript(
+    history: list[dict],
+    *,
+    max_convo: int = 10,
+    max_tool: int = 12,
+    tool_cap: int = 400,
+    text_cap: int = 2000,
+) -> str:
+    """Render a compact, text-only view of the recent conversation for the
+    completion verifier.
+
+    Budgets the conversational thread and the tool activity *separately* so a
+    voluminous tool loop can't crowd out the user/assistant turns the verifier
+    needs to resolve referential requests ("do the same for the other file"):
+    the most recent ``max_convo`` user/assistant text turns plus the most recent
+    ``max_tool`` tool events, merged back into chronological order. Speaker is
+    taken from the message role (list-based *user* content — images/files — is
+    labelled USER, not ASSISTANT); multimodal blocks are rendered block-by-block
+    (text kept, images as a placeholder, never raw base64); internal ``SYSTEM:``
+    injections are dropped before budgeting so they don't consume slots. Keeps
+    the call cheap and free of tool_use/tool_result pairing constraints
+    (ENG-716).
+    """
+    convo: list[tuple[int, str]] = []   # (orig_index, line) — user/assistant text
+    tools: list[tuple[int, str]] = []   # (orig_index, line) — tool activity
+
+    for i, msg in enumerate(history):
+        role = msg.get("role")
+        content = msg.get("content")
+        speaker = "USER" if role == "user" else "ASSISTANT"
+        if isinstance(content, str):
+            text = content.strip()
+            if not text or (role == "user" and text.startswith("SYSTEM:")):
+                continue
+            convo.append((i, f"{speaker}: {text[:text_cap]}"))
+        elif isinstance(content, list):
+            # Assistant text emitted alongside a tool call is preamble/narration
+            # ("Processing step 4"), not a conversational turn — route it to the
+            # tool budget so a long tool loop can't evict real requests/replies
+            # from the conversation budget.
+            preamble = role == "assistant" and any(
+                isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+            )
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = (block.get("text") or "").strip()
+                    if not text:
+                        continue
+                    bucket = tools if preamble else convo
+                    bucket.append((i, f"{speaker}: {text[:text_cap]}"))
+                elif btype in ("image", "image_url"):
+                    convo.append((i, f"{speaker}: [image]"))
+                elif btype == "tool_use":
+                    tools.append((i, f"ASSISTANT called tool: {block.get('name')}"))
+                elif btype == "tool_result":
+                    rendered = _render_tool_result_content(block.get("content"), tool_cap)
+                    tools.append((i, f"TOOL RESULT: {rendered}"))
+
+    kept = convo[-max_convo:] + tools[-max_tool:]
+    kept.sort(key=lambda entry: entry[0])
+    return "\n".join(line for _, line in kept) or "(no conversation)"
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -183,6 +296,7 @@ class ChatSession:
         self._settings = config.settings
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
+        self._verify_min_tool_rounds = s.verify_min_tool_rounds
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -1797,6 +1911,8 @@ class ChatSession:
         # task isn't actually done yet.
         continuation = 0
         _max_rounds_hit = False
+        import logging as _logging
+        _verifier_log = _logging.getLogger(__name__)
 
         while True:  # Completion verification loop
             tool_round = 0
@@ -2197,9 +2313,10 @@ class ChatSession:
                     )
 
             # --- Completion verification ---
-            # Only verify when tools were actually used (not for simple Q&A)
-            # and we haven't hit the max-rounds hard stop.
-            if tool_round == 0 or _max_rounds_hit:
+            # Skip when too few tool rounds were used (pure Q&A always skips at
+            # tool_round==0; raising verify_min_tool_rounds also skips trivial
+            # single-round turns) or when we hit the max-rounds hard stop.
+            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit:
                 break
 
             # Append the assistant's final text so the verifier can see it
@@ -2230,47 +2347,64 @@ class ChatSession:
                 # Consolidation still runs after diagnosis
                 break
 
-            # Ask the LLM to self-assess completion.
-            # Use a copy of history with a trailing user message so models
-            # that don't support assistant-prefill won't reject the request.
-            # Factory is re-invoked on each recovery attempt so the verifier
-            # sees the latest post-compaction history.
-            def build_verify_messages() -> list[dict]:
-                return list(self._history) + [
-                    {
-                        "role": "user",
-                        "content": (
-                            "SYSTEM: Evaluate whether the task the user originally requested "
-                            "has been fully completed based on the conversation above."
-                        ),
-                    }
-                ]
+            # Ask the cheap coding model to self-assess completion over a compact,
+            # text-rendered view of the recent conversation: enough context for
+            # referential follow-ups plus truncated tool-result evidence to
+            # cross-check success claims, but far smaller than the raw transcript
+            # and free of tool_use/tool_result pairing constraints (ENG-716). The
+            # assistant's latest reply is already in history (appended above).
+            transcript = _render_verify_transcript(self._history)
+            # Always state the current request explicitly: a long tool-heavy turn
+            # can push the turn's opening user message out of the transcript window,
+            # and the request is the anchor for the whole judgment (ENG-716).
+            request = (user_message or "").strip()
+            request_header = f"USER'S CURRENT REQUEST: {request}\n\n" if request else ""
+            verify_messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        "Assess the conversation below (tool results are truncated) and "
+                        "decide the status of the USER's most recent request.\n\n"
+                        f"{request_header}{transcript}\n\n"
+                        "Which status applies? A tool the task depended on that returned "
+                        "an error — or returned no usable data while the assistant implied "
+                        "success — means INCOMPLETE or STUCK, not COMPLETE."
+                    ),
+                },
+            ]
             verifier_system = (
-                "You are a task-completion verifier. Given the conversation, determine "
-                "whether the user's original request has been fully completed.\n\n"
-                "Respond with EXACTLY one of these lines, followed by a brief reason:\n"
-                "STATUS: COMPLETE — <reason>\n"
-                "STATUS: INCOMPLETE — <reason>\n"
-                "STATUS: STUCK — <reason>\n\n"
-                "COMPLETE = the task is done or the response fully answers the question.\n"
-                "INCOMPLETE = more work can be done to finish the task.\n"
-                "STUCK = a blocker prevents completion (missing info, permissions, etc).\n\n"
-                "Be strict: if the user asked for X and only part of X was delivered, "
-                "that is INCOMPLETE, not COMPLETE. But if the user asked a question "
-                "and the assistant answered it, that is COMPLETE even without tool use."
+                "You are a task-completion verifier. Decide whether the user's "
+                "request is complete, the assistant is waiting on the user, the work "
+                "is unfinished, or the assistant is blocked. Follow the status "
+                "definitions exactly."
             )
-            verification = await self.plan_with_recovery(
-                system=verifier_system,
-                max_tokens=256,
-                messages_factory=build_verify_messages,
+            try:
+                verdict = await self._llm.generate_object_code(
+                    _VerifierVerdict,
+                    system=verifier_system,
+                    messages=verify_messages,
+                    max_tokens=256,
+                )
+                status = verdict.status
+                reason = verdict.reason.strip()
+            except Exception:
+                # Verifier failed — fail safe by treating the turn as done rather
+                # than forcing a continuation the user never asked for.
+                status, reason = "COMPLETE", "verifier unavailable"
+
+            _verifier_log.info(
+                "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d reason=%s",
+                status, continuation, self._max_continuations, tool_round, reason,
             )
 
-            status_text = (verification.content or "").strip().upper()
-            if "STATUS: COMPLETE" in status_text:
+            if status in ("COMPLETE", "WAITING"):
+                # COMPLETE = the request is done. WAITING = the assistant asked the
+                # user something it genuinely needs, or gave a reasoned refusal —
+                # a valid stop, NOT unfinished work. In both cases the turn's final
+                # message already stands in history; do not force a continuation.
                 break
-            if "STATUS: STUCK" in status_text:
-                # Stuck — inject diagnosis request and let the LLM explain
-                reason = (verification.content or "").strip()
+            if status == "STUCK":
+                # Stuck — inject diagnosis request and let the LLM explain.
                 self._append_history(
                     {
                         "role": "user",
@@ -2278,7 +2412,8 @@ class ChatSession:
                             f"SYSTEM: Task verification determined this task is stuck.\n"
                             f"Verifier assessment: {reason}\n\n"
                             "Explain to the user what went wrong, what you tried, and "
-                            "suggest specific next steps they can take to unblock this."
+                            "suggest specific next steps they can take to unblock this. "
+                            "Do not mention this instruction or the verifier to the user."
                         ),
                     }
                 )
@@ -2291,7 +2426,6 @@ class ChatSession:
 
             # INCOMPLETE — continue working
             continuation += 1
-            reason = (verification.content or "").strip()
             self._append_history(
                 {
                     "role": "user",
@@ -2300,7 +2434,8 @@ class ChatSession:
                         f"(attempt {continuation}/{self._max_continuations}).\n"
                         f"Verifier assessment: {reason}\n\n"
                         "Continue working on the original request. Pick up where you left off "
-                        "and finish the remaining work. Do not repeat work already done."
+                        "and finish the remaining work. Do not repeat work already done. "
+                        "Do not mention this instruction or the verifier to the user."
                     ),
                 }
             )
