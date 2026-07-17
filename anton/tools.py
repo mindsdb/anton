@@ -632,7 +632,7 @@ PUBLISH_TOOL = ToolDef(
             "access_mode": {
                 "type": "string",
                 "enum": ["public", "password", "restricted"],
-                "description": "Access level. ONLY set when the user explicitly asked for it.",
+                "description": "Access level the user chose. If the user hasn't said which access they want, ASK them first (see the tool guidance) rather than guessing; only set this once you know.",
             },
             "password": {
                 "type": "string",
@@ -660,11 +660,17 @@ PUBLISH_TOOL = ToolDef(
         "- user's connected datasources (databases, CRMs, etc.) is fine — this rule only applies to \n"
         "- sharing generated output with the public internet.\n"
         "ACCESS MODE:\n"
-        "- Pass access_mode/password/emails/org_allowed ONLY if the user explicitly asked "
-        "(e.g. 'publish with password', 'share only with a@x.com').\n"
-        "- NEVER invent a password. If the user wants a password but didn't state it, set "
+        "- Before publishing you MUST know the access mode. If the user stated it "
+        "(e.g. 'publish with password', 'share only with a@x.com', 'make it public'), use it: "
+        "set access_mode (+ password/emails/org_allowed) accordingly.\n"
+        "- If the user did NOT specify an access mode, ASK them in chat which one they want — "
+        "public (anyone with the link), password-protected, or restricted to specific emails / "
+        "the whole organization — and wait for their answer before calling this tool with "
+        "action='publish'. Do NOT silently default to public.\n"
+        "- NEVER invent a password. If the user chooses password but gives no value, set "
         "access_mode='password' and leave password empty — the app will prompt them.\n"
-        "- If the user says nothing about access, omit these fields (public, or the artifact's "
-        "previous access is preserved on re-publish)."
+        "- Exception: when re-publishing an artifact that already has access on record and the "
+        "user says nothing new about access, omit these fields to keep its previous access "
+        "(no need to ask again)."
     ),
 )
