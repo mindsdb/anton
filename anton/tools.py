@@ -376,35 +376,84 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
 )
 
 
+def _previewable_html(path: "Path"):
+    """Best-effort HTML file to open for local preview.
+
+    For a file, returns it as-is; for a folder (e.g. a fullstack artifact),
+    prefers index.html / static/index.html, else the first ``*.html`` found."""
+    from pathlib import Path
+
+    path = Path(path)
+    if path.is_file():
+        return path
+    for cand in (path / "index.html", path / "static" / "index.html"):
+        if cand.is_file():
+            return cand
+    try:
+        htmls = sorted(path.rglob("*.html"))
+    except OSError:
+        htmls = []
+    return htmls[0] if htmls else None
+
+
 async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str:
-    """Interactive preview/publish flow after dashboard creation."""
+    """Interactive preview/publish flow after dashboard creation.
+
+    Accepts the **artifact folder** (preferred) or any file inside it. The
+    artifact type is read from its ``metadata.json`` via
+    ``resolve_publish_target`` — fullstack apps publish the whole folder, static
+    reports publish the primary file — so callers never need to know the type."""
     import os
     import webbrowser
     from pathlib import Path
+
+    from anton.config.settings import AntonSettings
+    from anton.publish_access import (
+        access_from_owner_side,
+        resolve_access,
+        resolve_publish_target,
+    )
 
     console = session._console
 
     raw_path = tc_input.get("file_path", "")
     title = tc_input.get("title", "Dashboard")
     action = tc_input.get("action", "ask")
-    file_path = Path(raw_path)
-    if not file_path.is_absolute() and session._workspace:
-        file_path = Path(session._workspace.base) / raw_path
-
-    if not file_path.exists():
-        return f"File not found: {file_path}"
-
-    # Direct preview — just open and return, no prompts
-    if action in ("preview", "ask"):
-        abs_path = os.path.abspath(str(file_path))
-        webbrowser.open(f"file://{abs_path}")
-        return f"Opened {title} in browser. The user can ask for changes or say /publish to publish it to the web."
-
-    # Publish flow
-    from anton.config.settings import AntonSettings
-    from anton.publisher import publish
 
     settings = AntonSettings()
+    artifacts_root = Path(settings.artifacts_dir)
+
+    # Accept the artifact folder (preferred) or any file inside it. Resolve a
+    # relative path against the artifacts dir first (so "my-app" works), then
+    # the workspace base.
+    file_path = Path(raw_path)
+    if not file_path.is_absolute():
+        base = Path(session._workspace.base) if session._workspace else artifacts_root
+        file_path = next(
+            (c for c in (artifacts_root / raw_path, base / raw_path) if c.exists()),
+            base / raw_path,
+        )
+
+    if not file_path.exists():
+        return f"Path not found: {file_path}"
+
+    # Decide WHAT to publish from the artifact's metadata.json: fullstack → the
+    # whole folder, static → the primary file. Also yields the canonical
+    # .published.json location + key (shared with /publish and cowork-server).
+    publish_target, published_dir, published_key, _is_fullstack = resolve_publish_target(
+        file_path, [artifacts_root]
+    )
+
+    # Direct preview — open a previewable HTML and return, no prompts.
+    if action in ("preview", "ask"):
+        preview_file = _previewable_html(publish_target)
+        if preview_file is not None:
+            webbrowser.open(f"file://{os.path.abspath(str(preview_file))}")
+            return f"Opened {title} in browser. The user can ask for changes or say /publish to publish it to the web."
+        return f"{title} is at {file_path} but no previewable HTML was found."
+
+    # Publish flow
+    from anton.publisher import publish
 
     if not settings.minds_api_key:
         console.print()
@@ -423,19 +472,12 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     from rich.live import Live
     from rich.spinner import Spinner
 
-    from anton.publish_access import (
-        access_from_owner_side,
-        resolve_access,
-        resolve_publish_target,
-    )
     from anton.utils.prompt import prompt_or_cancel
 
-    # Check if this file was previously published — reuse report_id to
-    # update instead of creating a new report every time. Resolve the
-    # .published.json location with the unified convention (shared with
-    # /publish and cowork-server) so the two entry points never disagree.
-    artifacts_root = Path(settings.artifacts_dir)
-    _t, published_dir, published_key, _fs = resolve_publish_target(file_path, [artifacts_root])
+    # Check if this artifact was previously published — reuse report_id to
+    # update instead of creating a new report every time. published_dir /
+    # published_key were resolved above via the unified convention (shared with
+    # /publish and cowork-server) so the entry points never disagree.
     published_json = published_dir / ".published.json"
     published_map: dict = {}
     try:
@@ -485,7 +527,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     with Live(Spinner("dots", text=action_text, style="anton.cyan"), console=console, transient=True):
         try:
             result = publish(
-                file_path,
+                publish_target,
                 api_key=settings.minds_api_key,
                 report_id=report_id,
                 publish_url=settings.publish_url,
@@ -500,7 +542,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 # without report_id to create a fresh one.
                 try:
                     result = publish(
-                        file_path,
+                        publish_target,
                         api_key=settings.minds_api_key,
                         publish_url=settings.publish_url,
                         ssl_verify=settings.minds_ssl_verify,
@@ -556,19 +598,27 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
 PUBLISH_TOOL = ToolDef(
     name = "publish_or_preview",
     description = (
-        "Call this after generating an HTML dashboard or report in .anton/output/. "
+        "Call this after generating a dashboard/report/app to preview or publish it. "
+        "Pass the artifact FOLDER as file_path — the tool reads metadata.json and picks "
+        "the right thing to publish (whole folder for fullstack apps, primary file for "
+        "static reports). "
         "Actions: 'ask' (default) prompts the user to preview/publish/skip interactively. "
-        "'preview' opens the file in the browser immediately. "
+        "'preview' opens it in the browser immediately. "
         "'publish' publishes to the web immediately. "
         "Use 'preview' or 'publish' when the user has already stated their intent. "
-        "Use 'ask' after generating a new dashboard to let the user choose."
+        "Use 'ask' after generating a new artifact to let the user choose."
     ),
     input_schema = {
         "type": "object",
         "properties": {
             "file_path": {
                 "type": "string",
-                "description": "Path to the HTML file (e.g. .anton/output/dashboard.html)",
+                "description": (
+                    "Path to the artifact FOLDER (e.g. artifacts/<slug>). The tool reads "
+                    "the folder's metadata.json to decide how to publish: fullstack apps "
+                    "publish the whole folder, static reports publish their primary file. "
+                    "A path to a file inside the artifact also works."
+                ),
             },
             "title": {
                 "type": "string",
