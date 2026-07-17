@@ -50,6 +50,40 @@ def test_continuation_limit_respected(cfg, stub, tmp_path):
     ), f"Budget-exhausted message not found. Request count: {stub.request_count}"
 
 
+@pytest.mark.stub_only
+def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
+    # ENG-716: a tool-using turn that ends by asking the user a question must
+    # STOP when the verifier returns WAITING — not inject "Continue working"
+    # and answer its own question. Also asserts the tool-outcome cross-check
+    # actually reaches the verifier.
+    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "c", "code": "print(1)"})
+    stub.queue_text("Which format would you like — PDF or HTML? WAITING_ON_USER")
+    stub.queue_verification_waiting("assistant asked the user a question it needs answered")
+    result = run_anton(["--folder", str(tmp_path)], ["make me a report", "exit"],
+                       env=base_env(stub), timeout=cfg.timeout(30))
+
+    assert_exit_ok(result)
+    assert_not_output(result, "Traceback (most recent call last)")
+    assert_output(result, "WAITING_ON_USER")
+    # WAITING is a valid stop: no continuation injection may be sent.
+    assert not any(
+        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        for r in stub.requests
+    ), "WAITING verdict must not trigger a continuation injection"
+    # The verifier must receive truncated tool-result evidence (not just a flag),
+    # so it can cross-check claimed success against what the tool actually did.
+    assert any(
+        "TOOL RESULT:" in json.dumps(r.get("messages", []))
+        for r in stub.requests
+    ), "verifier did not receive tool-result evidence"
+    # ...and the current request is always stated, even if a long turn evicts it
+    # from the transcript window.
+    assert any(
+        "USER'S CURRENT REQUEST" in json.dumps(r.get("messages", []))
+        for r in stub.requests
+    ), "verifier did not receive the current request header"
+
+
 def test_session_exits_within_timeout(cfg, stub, tmp_path):
     stub.queue_text("Quick reply. QUICK_EXIT")
     stub.queue_verification_ok()

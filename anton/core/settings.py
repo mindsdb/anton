@@ -8,6 +8,11 @@ class CoreSettings(BaseSettings):
     # Session orchestration tuning
     max_tool_rounds: int = 25
     max_continuations: int = 3
+    # Skip the completion verifier when a turn used fewer than this many tool
+    # rounds. Default 1 preserves today's behavior (only pure Q&A, tool_round==0,
+    # is skipped). Raise to 2 to also skip trivial single-tool-round turns once
+    # verdict logs confirm they're rarely INCOMPLETE (ENG-716).
+    verify_min_tool_rounds: int = 1
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
