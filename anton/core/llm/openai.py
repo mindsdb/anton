@@ -687,6 +687,22 @@ class OpenAIProvider(LLMProvider):
         return set()
 
     @staticmethod
+    def resolve_web_flavor(provider_name: str, base_url: str) -> str:
+        """Flavor for the scratchpad's web_search(), from provider name + base URL.
+
+        ``name`` is always "openai" for an OpenAIProvider even when the base URL is
+        the minds gateway, so a minds/mdb.ai HOST must win over the name: minds
+        serves web_search over the chat.completions passthrough, not the Responses
+        API. Direct OpenAI uses Responses; anything else is generic (no native web).
+        """
+        host = (base_url or "").lower()
+        if any(h in host for h in ("mdb.ai", "mindshub.ai")):
+            return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+        if provider_name == "openai":
+            return OpenAIProvider.FLAVOR_OPENAI
+        return OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
+
+    @staticmethod
     def _sanitize_langfuse_tag(tag: str) -> str:
         """Clean a caller-supplied langfuse tag so it survives the wire intact.
 
