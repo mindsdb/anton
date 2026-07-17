@@ -869,6 +869,41 @@ async def _handle_unpublish(
     console.print(f"  [anton.success]Removed:[/] {title}")
     console.print()
 
+    # 6. Drop the local owner-side record for this report so a later /publish
+    # treats it as a fresh publish instead of offering to "update" (and reusing
+    # the report_id of) a report that no longer exists.
+    import json as _json
+    from pathlib import Path as _Path
+
+    removed_report_id = selected.get("report_id") or ""
+    removed_md5 = selected.get("md5") or ""
+    artifacts_root = _Path(settings.artifacts_dir)
+    for pub_file in artifacts_root.rglob(".published.json"):
+        try:
+            data = _json.loads(pub_file.read_text())
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        for key in list(data.keys()):
+            entry = data.get(key)
+            if not isinstance(entry, dict):
+                continue
+            entry_report_id = entry.get("report_id") or ""
+            matches = (
+                (removed_report_id and entry_report_id == removed_report_id)
+                or (not entry_report_id and removed_md5 and entry.get("last_md5") == removed_md5)
+            )
+            if matches:
+                del data[key]
+                changed = True
+        if changed:
+            try:
+                pub_file.write_text(_json.dumps(data, indent=2))
+            except Exception:
+                pass
+
 
 async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
     """First-run staged demo. Runs the backup script in a real scratchpad cell.
