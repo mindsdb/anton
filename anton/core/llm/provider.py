@@ -312,6 +312,18 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+class ProviderAuthError(ConnectionError):
+    """Raised on a provider HTTP 401 — the credential is invalid, revoked,
+    or missing.
+
+    Subclasses ConnectionError so legacy call sites that only know the
+    ConnectionError mapping keep working unchanged. The message MUST always
+    contain the phrase "Invalid API key": cowork-server's
+    ``turn_errors.is_auth_error`` matches the lowercase substring
+    "invalid api key" to map the failure onto its reconnect/update-key card.
+    """
+
+
 class ModelUnavailableError(ConnectionError):
     """Raised when the gateway rejects the requested model with a structured 403.
 

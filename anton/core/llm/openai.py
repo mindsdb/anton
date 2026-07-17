@@ -14,6 +14,7 @@ from .provider import (
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
+    ProviderAuthError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -28,7 +29,9 @@ from .provider import (
 )
 
 
-def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
+def _raise_for_status_error(
+    exc: "openai.APIStatusError", model: str, auth_hint: str | None = None
+) -> NoReturn:
     """Map a provider HTTP error onto anton's typed/curated exceptions.
 
     The single mapper shared by all four call paths (chat/stream ×
@@ -36,8 +39,13 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     previous four copy-pasted blocks had already diverged in wording.
 
     Mapping policy:
-      - 401 → ConnectionError with the invalid-key copy (cowork-server's
-        provider_auth detection keys on this exact phrase).
+      - 401 → ProviderAuthError with the invalid-key copy. ``auth_hint``
+        lets the caller supply provider-aware wording (MindsHub vs. a
+        generic OpenAI-compatible endpoint vs. direct OpenAI); None keeps
+        the direct-OpenAI copy so external callers stay source-compatible.
+        Whatever the hint, the message must contain "Invalid API key" —
+        cowork-server's provider_auth detection matches the lowercase
+        substring "invalid api key".
       - 403 with a structured gateway code (``model_access_denied`` /
         ``model_disabled``) → ModelUnavailableError carrying the code +
         model, with actionable copy. Detection is code-exact on purpose:
@@ -71,8 +79,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     messages as MindsHub quota would put an upsell CTA on BYOK errors.
     """
     if exc.status_code == 401:
-        raise ConnectionError(
-            "Invalid API key — check your OpenAI API key configuration."
+        raise ProviderAuthError(
+            auth_hint or "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
     body = exc.body if isinstance(exc.body, dict) else {}
@@ -644,6 +652,23 @@ class OpenAIProvider(LLMProvider):
         }:
             self._emit_trace_headers = True
 
+        # Provider-aware 401 copy for `_raise_for_status_error`. This class
+        # serves three very different backends behind the same client, and
+        # "check your OpenAI API key" is actively misleading when the key
+        # that failed belongs to MindsHub or a self-hosted endpoint. Every
+        # variant must keep the "Invalid API key" phrase — cowork-server's
+        # provider_auth detection matches the lowercase substring
+        # "invalid api key".
+        if base_url and ("mindshub.ai" in base_url or "mdb.ai" in base_url):
+            self._auth_hint = "Invalid API key — check your MindsHub API key in Settings."
+        elif base_url:
+            self._auth_hint = (
+                "Invalid API key — check the API key configured for your "
+                "OpenAI-compatible endpoint."
+            )
+        else:
+            self._auth_hint = "Invalid API key — check your OpenAI API key configuration."
+
         import httpx
 
         if api_version and _is_azure_endpoint(base_url):
@@ -793,7 +818,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            _raise_for_status_error(exc, model)
+            _raise_for_status_error(exc, model, auth_hint=self._auth_hint)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -947,7 +972,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            _raise_for_status_error(exc, model)
+            _raise_for_status_error(exc, model, auth_hint=self._auth_hint)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -1050,7 +1075,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            _raise_for_status_error(exc, model)
+            _raise_for_status_error(exc, model, auth_hint=self._auth_hint)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."
@@ -1164,7 +1189,7 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            _raise_for_status_error(exc, model)
+            _raise_for_status_error(exc, model, auth_hint=self._auth_hint)
         except openai.APIConnectionError as exc:
             raise ConnectionError(
                 "Could not reach the LLM server — check your connection or try again in a moment."

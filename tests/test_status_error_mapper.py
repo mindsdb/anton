@@ -3,8 +3,9 @@
 One mapper (`openai._raise_for_status_error`) serves all four call paths
 (chat/stream × completions/responses). These tests pin the mapping policy:
 
-- 401 → ConnectionError with the exact invalid-key copy (cowork-server's
-  provider_auth detection string-matches it).
+- 401 → ProviderAuthError whose copy always contains "Invalid API key"
+  (cowork-server's provider_auth detection matches the lowercase substring
+  "invalid api key"), with provider-aware wording via `auth_hint`.
 - 429 + quota detail → TokenLimitExceeded (and it outranks any 403 logic).
 - 403 + structured gateway code → ModelUnavailableError carrying code+model,
   with actionable copy per code.
@@ -25,8 +26,12 @@ import httpx
 import openai
 import pytest
 
-from anton.core.llm.openai import _raise_for_status_error
-from anton.core.llm.provider import ModelUnavailableError, TokenLimitExceeded
+from anton.core.llm.openai import OpenAIProvider, _raise_for_status_error
+from anton.core.llm.provider import (
+    ModelUnavailableError,
+    ProviderAuthError,
+    TokenLimitExceeded,
+)
 
 
 def _sdk_error(status_code, json_body=None, text_body=None):
@@ -80,21 +85,85 @@ def test_sdk_unwraps_error_envelope():
 
 # ── 401 ───────────────────────────────────────────────────────────────
 
-def test_401_maps_to_invalid_key_connection_error():
+def test_401_maps_to_provider_auth_error():
     exc = _sdk_error(401, json_body={"error": {"message": "bad key"}})
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(ProviderAuthError) as err:
         _raise_for_status_error(exc, "sonnet")
-    # cowork-server's provider_auth detection keys on this exact phrase.
+    # cowork-server's provider_auth detection matches the lowercase
+    # substring "invalid api key".
     assert "Invalid API key" in str(err.value)
     assert not isinstance(err.value, ModelUnavailableError)
+
+
+def test_401_is_still_a_connection_error():
+    # Legacy call sites only know ConnectionError — the typed error must
+    # keep flowing through them unchanged.
+    exc = _sdk_error(401, json_body={"error": {"message": "bad key"}})
+    with pytest.raises(ConnectionError):
+        _raise_for_status_error(exc, "sonnet")
 
 
 def test_401_html_body_maps_to_invalid_key():
     # nginx auth walls return HTML — the 401 branch must not need a body.
     exc = _sdk_error(401, text_body="<html>401 Authorization Required</html>")
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(ProviderAuthError) as err:
         _raise_for_status_error(exc, "sonnet")
     assert "Invalid API key" in str(err.value)
+
+
+def test_401_default_copy_is_openai():
+    # No auth_hint → the direct-OpenAI copy, so external callers of the
+    # mapper stay source-compatible.
+    exc = _sdk_error(401, json_body={})
+    with pytest.raises(ProviderAuthError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert str(err.value) == "Invalid API key — check your OpenAI API key configuration."
+
+
+def test_401_auth_hint_overrides_copy():
+    exc = _sdk_error(401, json_body={})
+    with pytest.raises(ProviderAuthError) as err:
+        _raise_for_status_error(
+            exc, "sonnet",
+            auth_hint="Invalid API key — check your MindsHub API key in Settings.",
+        )
+    assert str(err.value) == "Invalid API key — check your MindsHub API key in Settings."
+
+
+# ── provider-aware auth hint computed from base_url ───────────────────
+
+@pytest.mark.parametrize("base_url", [
+    "https://llm.mindshub.ai/v1",
+    "https://llm.mdb.ai",
+])
+def test_auth_hint_mindshub(base_url):
+    provider = OpenAIProvider(api_key="k", base_url=base_url)
+    assert provider._auth_hint == "Invalid API key — check your MindsHub API key in Settings."
+
+
+def test_auth_hint_generic_compatible_endpoint():
+    provider = OpenAIProvider(api_key="k", base_url="https://my-vllm.internal/v1")
+    assert provider._auth_hint == (
+        "Invalid API key — check the API key configured for your "
+        "OpenAI-compatible endpoint."
+    )
+
+
+def test_auth_hint_direct_openai():
+    provider = OpenAIProvider(api_key="k")
+    assert provider._auth_hint == "Invalid API key — check your OpenAI API key configuration."
+
+
+@pytest.mark.parametrize("base_url", [
+    None,
+    "https://llm.mindshub.ai/v1",
+    "https://my-vllm.internal/v1",
+])
+def test_every_auth_hint_contains_the_detection_substring(base_url):
+    # The contract with cowork-server's `turn_errors.is_auth_error`: every
+    # 401 message must contain the lowercase substring "invalid api key".
+    provider = OpenAIProvider(api_key="k", base_url=base_url)
+    assert "invalid api key" in provider._auth_hint.lower()
 
 
 # ── 429 (quota) ───────────────────────────────────────────────────────

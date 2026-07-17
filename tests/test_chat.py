@@ -268,3 +268,67 @@ class TestHardTruncateHistory:
         assert tail_head["content"] == [
             {"type": "text", "text": "plus my follow-up question"},
         ]
+
+
+class TestProviderAuthErrorPropagation:
+    """Provider 401s must FAIL a streaming turn — typed, unretried, never
+    wrapped into assistant prose. cowork-server's `turn_errors.is_auth_error`
+    (lowercase substring match on "invalid api key" → reconnect/update-key
+    card) can only fire when the exception propagates out of turn_stream."""
+
+    async def test_turn_stream_reraises_provider_auth_error_without_retry(self):
+        from anton.core.llm.provider import ProviderAuthError
+
+        call_count = 0
+
+        async def _plan_stream(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise ProviderAuthError(
+                "Invalid API key — check your MindsHub API key in Settings."
+            )
+            yield  # pragma: no cover — makes this an async generator
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        session._llm.plan_stream = _plan_stream
+
+        events = []
+        with pytest.raises(ProviderAuthError) as err:
+            async for event in session.turn_stream("hi"):
+                events.append(event)
+
+        # A 401 is deterministic — the auto-retry loop must not re-send the
+        # same doomed request before failing.
+        assert call_count == 1
+        assert "invalid api key" in str(err.value).lower()
+
+        # And the failure must never be softened into assistant prose.
+        prose = "".join(
+            e.text for e in events if isinstance(e, StreamTextDelta)
+        )
+        assert "An unexpected error occurred" not in prose
+
+    async def test_plain_connection_error_still_retries_and_falls_back(self):
+        """The generic transient ConnectionError keeps the legacy behavior:
+        auto-retried, then wrapped in the fallback text — proving the
+        no-retry escape is scoped to the typed subclass, not all
+        ConnectionErrors."""
+        call_count = 0
+
+        async def _plan_stream(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise ConnectionError(
+                "Server returned 503 — the LLM endpoint may be temporarily unavailable."
+            )
+            yield  # pragma: no cover
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        session._llm.plan_stream = _plan_stream
+
+        events = [e async for e in session.turn_stream("hi")]
+
+        # 1 initial + 2 auto-retries + 1 summarize attempt = 4 calls
+        assert call_count == 4
+        prose = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+        assert "An unexpected error occurred" in prose

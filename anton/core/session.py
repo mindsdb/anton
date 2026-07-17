@@ -26,6 +26,7 @@ from anton.core.llm.prompts import (
 from anton.core.llm.provider import (
     ContextOverflowError,
     ModelUnavailableError,
+    ProviderAuthError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -1616,12 +1617,18 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limits and model-gate 403s are
-                    # deterministic — the auto-retry below would just re-send
-                    # the same doomed request (and burn its budget) before
-                    # failing anyway. Don't retry; let the chat loop / server
-                    # map them to their cards.
-                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
+                    # Token/billing limits, model-gate 403s, and provider
+                    # 401s are deterministic — the auto-retry below would
+                    # just re-send the same doomed request (burning latency
+                    # and budget) before hitting the same failure. Don't
+                    # retry; let the chat loop / server map them to their
+                    # cards (token_limit / model-unavailable /
+                    # reconnect-or-update-key), which only fire when the
+                    # exception propagates.
+                    if isinstance(
+                        _agent_exc,
+                        (TokenLimitExceeded, ModelUnavailableError, ProviderAuthError),
+                    ):
                         raise
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
@@ -1676,13 +1683,14 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
-                        except (TokenLimitExceeded, ModelUnavailableError):
+                        except (TokenLimitExceeded, ModelUnavailableError, ProviderAuthError):
                             # Curated provider failures must FAIL the turn, not
                             # get wrapped into assistant prose: the server maps
                             # them to actionable error cards (token_limit /
-                            # model-unavailable), which can only fire when the
-                            # exception propagates. Wrapping them as text is
-                            # how "Server returned 403" ended up mid-chat with
+                            # model-unavailable / reconnect-or-update-key),
+                            # which can only fire when the exception
+                            # propagates. Wrapping them as text is how
+                            # "Server returned 403" ended up mid-chat with
                             # "please rephrase your request" advice.
                             raise
                         except Exception as e:

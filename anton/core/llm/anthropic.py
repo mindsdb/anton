@@ -10,6 +10,7 @@ from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
+    ProviderAuthError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -120,7 +121,7 @@ class AnthropicProvider(LLMProvider):
         except anthropic.APIStatusError as exc:
             if exc.status_code == 401:
                 msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
-                raise ConnectionError(msg) from exc
+                raise ProviderAuthError(msg) from exc
             elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
@@ -267,7 +268,7 @@ class AnthropicProvider(LLMProvider):
         except anthropic.APIStatusError as exc:
             if exc.status_code == 401:
                 msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
-                raise ConnectionError(msg) from exc
+                raise ProviderAuthError(msg) from exc
             elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
