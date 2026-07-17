@@ -75,15 +75,20 @@ def test_long_tool_turn_keeps_request_and_antecedent():
         {"role": "assistant", "content": "Done — deduped 12 rows in report_q1.csv."},
         {"role": "user", "content": "now do the same for the other file"},
     ]
-    for i in range(10):  # 10 tool rounds = 20 tool messages
-        history.append({"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad"}]})
+    for i in range(10):  # 10 tool rounds, each with preamble text + a tool call
+        history.append({"role": "assistant", "content": [
+            {"type": "text", "text": f"Processing step {i}"},
+            {"type": "tool_use", "name": "scratchpad"},
+        ]})
         history.append({"role": "user", "content": [{"type": "tool_result", "content": f"row {i} cleaned"}]})
     history.append({"role": "assistant", "content": "All cleaned."})
 
     out = _render_verify_transcript(history)
-    # Both the referential request and its antecedent survive the tool volume.
+    # Both the referential request and its antecedent survive the tool volume —
+    # preamble text ("Processing step N") must not consume the conversation budget.
     assert "now do the same for the other file" in out
     assert "clean up report_q1.csv" in out
+    assert "Done — deduped 12 rows in report_q1.csv." in out  # antecedent's answer
     # And tool evidence is still present.
     assert "TOOL RESULT:" in out
 

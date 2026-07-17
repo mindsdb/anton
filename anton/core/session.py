@@ -203,14 +203,23 @@ def _render_verify_transcript(
                 continue
             convo.append((i, f"{speaker}: {text[:text_cap]}"))
         elif isinstance(content, list):
+            # Assistant text emitted alongside a tool call is preamble/narration
+            # ("Processing step 4"), not a conversational turn — route it to the
+            # tool budget so a long tool loop can't evict real requests/replies
+            # from the conversation budget.
+            preamble = role == "assistant" and any(
+                isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+            )
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
                 if btype == "text":
                     text = (block.get("text") or "").strip()
-                    if text:
-                        convo.append((i, f"{speaker}: {text[:text_cap]}"))
+                    if not text:
+                        continue
+                    bucket = tools if preamble else convo
+                    bucket.append((i, f"{speaker}: {text[:text_cap]}"))
                 elif btype in ("image", "image_url"):
                     convo.append((i, f"{speaker}: [image]"))
                 elif btype == "tool_use":
