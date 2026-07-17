@@ -48,14 +48,14 @@ async def test_publish_passes_password_access(tmp_path):
     async def fake_prompt_access(*a, **k):
         return {"mode": "password", "password": "hunter2"}
 
-    # publish и prompt_access импортируются в _handle_publish на уровне функции,
-    # поэтому патчим ИСХОДНЫЕ модули — function-level импорт резолвит имя в
-    # момент вызова и подхватит патч.
+    # publish and prompt_access are imported inside _handle_publish at the
+    # function level, so we patch the SOURCE modules — a function-level import
+    # resolves the name at call time and picks up the patch.
     with mock.patch("anton.publisher.publish", fake_publish), \
          mock.patch("anton.publish_access.prompt_access", side_effect=fake_prompt_access), \
          mock.patch("webbrowser.open"):
-        # Директорию _make_candidate публикует только для fullstack; для
-        # html-report адресуем файл (файловая ветка _make_candidate).
+        # _make_candidate only publishes a directory for fullstack artifacts;
+        # for an html-report we address the file (the file branch of _make_candidate).
         await chat._handle_publish(Console(), settings, mock.Mock(), file_arg="sales/report.html")
 
     _, kwargs = fake_publish.call_args
