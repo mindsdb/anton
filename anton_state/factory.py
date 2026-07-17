@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 
 from .base import Store
-from .dynamo_driver import DynamoDBDriver
 from .schema import StateSchema
 from .sqlite_driver import SQLiteDriver
 
@@ -35,6 +34,8 @@ def open_store(
 ) -> Store:
     schema = _resolve_schema(schema, manifest_path)
     if state:
+        from .dynamo_driver import DynamoDBDriver  # lazy: boto3 only needed in the cloud
+
         driver = DynamoDBDriver(
             table=state["table"],
             region=state["region"],

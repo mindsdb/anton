@@ -284,7 +284,9 @@ writes across requests. Use ONLY when that state genuinely cannot live in an \
 external data source; prefer stateless when in doubt (see BACKEND & FULLSTACK \
 section) → `type="fullstack-stateful-app"`, `primary="static/index.html"`. \
 The frontend lives in a `static/` subfolder of the artifact, served by \
-`backend.py`.
+`backend.py`. Light durable state uses the platform `STATE` store (declare \
+`state_manifest.json`); heavy/relational data uses an external connected \
+database.
 
 WHEN NOT TO REGISTER:
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
@@ -624,11 +626,34 @@ present at launch.
       # "DS_POSTGRES_PROD_DB__PASSWORD": os.environ.get("DS_POSTGRES_PROD_DB__PASSWORD"),
   }}
 
+  # === State (durable storage) — INCLUDE THIS BLOCK ONLY FOR
+  # `fullstack-stateful-app`; OMIT it entirely for `fullstack-stateless-app`.
+  # STATE mirrors SECRETS: the cloud runner overlays {{table, region,
+  # credentials}} before each request; locally it stays None and the SQLite
+  # driver is used. Declare an entities schema in `state_manifest.json` next to
+  # this file. Build the store AT POINT OF USE (inside a route), reading the
+  # current STATE — never at import time.
+  STATE = None
+
+  from anton_state import open_store
+  _STATE_DIR = Path(__file__).resolve().parent
+
+  def get_store():
+      return open_store(
+          state=STATE,
+          manifest_path=str(_STATE_DIR / "state_manifest.json"),
+          local_path=str(_STATE_DIR / ".anton_state.db"),
+      )
+
   # === API routes ===
   @app.get("/api/hello")
   async def hello():
       # Example secret use (read at point of use, not at import):
       #   pw = SECRETS["DS_POSTGRES_PROD_DB__PASSWORD"]
+      # Example STATE use (stateful only; build the store at point of use):
+      #   store = get_store()
+      #   await store.put({{"pk": user_id, "sk": "profile", "name": name}})
+      #   item = await store.get(user_id, "profile")
       return {{"hello": "world"}}
 
   # Static mount MUST come AFTER all API routes (mount at "/" catches every
@@ -694,9 +719,16 @@ file surviving to a later request. If a request genuinely needs scratch \
 space, use the OS temp dir via `tempfile` and treat it as ephemeral (gone \
 the moment the request ends). ALL persistence goes through external data \
 sources.
-    * `fullstack-stateful-app`: local on-disk state (e.g. a SQLite file) IS \
-allowed — keep it in the artifact root (`<artifact_path>/`, next to \
-`backend.py`). Every other rule in this list still applies.
+    * `fullstack-stateful-app`: durable state goes through the platform \
+`STATE` store (module-level `STATE`, built via `get_store()`), which is a \
+document/key-value model — suitable for LIGHT state (counters, settings, \
+sessions, simple documents keyed by id). Declare the entities schema in \
+`state_manifest.json` next to `backend.py`. For HEAVY/relational needs \
+(joins, transactions, analytics, large data) use an EXTERNAL database via a \
+connected data source instead — do not force it into `STATE`. The \
+`anton_state` SDK needs pydantic v2, which the mandatory `fastapi` dependency \
+provides — always keep `fastapi` in `requirements.txt`. Every other rule in \
+this list still applies.
   - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go \
 to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
   - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at \

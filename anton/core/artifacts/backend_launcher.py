@@ -17,13 +17,52 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import socket
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Protocol
+
+
+def _anton_state_pythonpath_dir() -> str:
+    """A private directory exposing ONLY the `anton_state` package, for PYTHONPATH.
+
+    Pointing PYTHONPATH at the package's real parent would leak the whole anton
+    repo (or its venv's site-packages) onto the backend's sys.path and shadow
+    the scratchpad venv's own deps (fastapi/pydantic) — a local != published
+    hazard. Instead we expose anton_state alone via a symlink (copy fallback).
+    In the cloud the package is vendored into the bundle instead (see publisher).
+    """
+    import anton_state
+
+    pkg = Path(anton_state.__file__).resolve().parent
+    root = Path(tempfile.gettempdir()) / "anton_state_pp"
+    link = root / "anton_state"
+    root.mkdir(parents=True, exist_ok=True)
+    # Always reset the entry, then (re)link — keeps it fresh and simple.
+    if link.is_symlink() or link.exists():
+        if link.is_dir() and not link.is_symlink():
+            shutil.rmtree(link)
+        else:
+            link.unlink()
+    try:
+        link.symlink_to(pkg, target_is_directory=True)
+    except OSError:
+        shutil.copytree(pkg, link)
+    return str(root)
+
+
+def _build_backend_env(extra_env: dict[str, str] | None) -> dict[str, str]:
+    """Subprocess env: inherited environ + extra_env, with anton_state on PYTHONPATH."""
+    env = {**os.environ, **(extra_env or {})}
+    isolated = _anton_state_pythonpath_dir()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")
+    return env
 
 
 class ScratchpadPoolLike(Protocol):
@@ -173,7 +212,7 @@ async def launch_artifact_backend(
             stderr=log_fd,
             stdin=asyncio.subprocess.DEVNULL,
             preexec_fn=preexec_fn,
-            env={**os.environ, **(extra_env or {})},
+            env=_build_backend_env(extra_env),
         )
     except OSError as exc:
         log_fd.close()

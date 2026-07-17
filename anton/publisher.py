@@ -39,7 +39,18 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
 
 # Filenames inside an artifact folder that are housekeeping — never bundled.
-_FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.json"}
+# The .anton_state.db* entries are defensive: _zip_fullstack is allowlist-based
+# so root files are not bundled anyway, but this guards against future changes
+# (and covers the WAL side-files, where -wal holds the freshest data).
+_FULLSTACK_EXCLUDED = {
+    "metadata.json",
+    "README.md",
+    "backend.log",
+    ".published.json",
+    ".anton_state.db",
+    ".anton_state.db-wal",
+    ".anton_state.db-shm",
+}
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
@@ -233,7 +244,46 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
                     continue
                 _write_scrubbed(zf, f, arc_name)
                 included.append(arc_name)
+
+        manifest = artifact_dir / "state_manifest.json"
+        if manifest.is_file():
+            _write_scrubbed(zf, manifest, "state_manifest.json")
+            included.append("state_manifest.json")
+
+        included.extend(_vendor_anton_state(zf))
     return buf.getvalue(), included
+
+
+def _read_state_manifest(artifact_dir: Path) -> dict | None:
+    """Parse state_manifest.json from the artifact dir, or None if absent.
+
+    Included in the publish payload so the provisioning pipeline (subplan #4)
+    can read the schema without unzipping the bundle.
+    """
+    path = artifact_dir / "state_manifest.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _vendor_anton_state(zf: zipfile.ZipFile) -> list[str]:
+    """Copy the `anton_state` package into the bundle under `anton_state/`.
+
+    The published artifact imports `anton_state` from its own directory (the
+    runner puts the artifact dir on sys.path), so the SDK travels with the
+    bundle — version-locked, offline, no index needed.
+    """
+    import anton_state
+
+    pkg_dir = Path(anton_state.__file__).resolve().parent
+    added: list[str] = []
+    for f in sorted(pkg_dir.rglob("*.py")):
+        if "__pycache__" in f.parts:
+            continue
+        arc_name = f"anton_state/{f.relative_to(pkg_dir).as_posix()}"
+        _write_scrubbed(zf, f, arc_name)
+        added.append(arc_name)
+    return added
 
 
 def _collect_datasource_secrets(
@@ -323,6 +373,9 @@ def publish(
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
         payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
+        state_manifest = _read_state_manifest(file_path)
+        if state_manifest is not None:
+            payload_dict["state_manifest"] = state_manifest
         if missing:
             payload_dict["missing_datasources"] = missing
     else:
