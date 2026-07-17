@@ -43,9 +43,6 @@ def _raise_for_status_error(
         lets the caller supply provider-aware wording (MindsHub vs. a
         generic OpenAI-compatible endpoint vs. direct OpenAI); None keeps
         the direct-OpenAI copy so external callers stay source-compatible.
-        Whatever the hint, the message must contain "Invalid API key" —
-        cowork-server's provider_auth detection matches the lowercase
-        substring "invalid api key".
       - 403 with a structured gateway code (``model_access_denied`` /
         ``model_disabled``) → ModelUnavailableError carrying the code +
         model, with actionable copy. Detection is code-exact on purpose:
@@ -633,6 +630,9 @@ class OpenAIProvider(LLMProvider):
         # chat.completions path and as ``reasoning={"effort": ...}`` on the
         # Responses API path. None = the model's default.
         self._reasoning_effort = reasoning_effort
+        is_minds_endpoint = bool(base_url) and (
+            "mindshub.ai" in base_url or "mdb.ai" in base_url
+        )
         # Whether to attach langfuse-style headers (Langfuse-Session-Id,
         # Langfuse-Tags, Langfuse-Metadata) to outbound requests. Default-on
         # only for the MindsHub-backed deployment, which is the curated
@@ -644,22 +644,15 @@ class OpenAIProvider(LLMProvider):
         # Power-user opt-in: set `ANTON_LANGFUSE_HEADERS=1` to force-emit
         # the headers regardless of base URL — useful when the user has
         # pointed `base_url` at their own langfuse-instrumented proxy.
-        self._emit_trace_headers = bool(base_url) and (
-            "mindshub.ai" in base_url or "mdb.ai" in base_url
-        )
+        self._emit_trace_headers = is_minds_endpoint
         if os.environ.get("ANTON_LANGFUSE_HEADERS", "").strip().lower() in {
             "1", "true", "yes", "on",
         }:
             self._emit_trace_headers = True
 
-        # Provider-aware 401 copy for `_raise_for_status_error`. This class
-        # serves three very different backends behind the same client, and
-        # "check your OpenAI API key" is actively misleading when the key
-        # that failed belongs to MindsHub or a self-hosted endpoint. Every
-        # variant must keep the "Invalid API key" phrase — cowork-server's
-        # provider_auth detection matches the lowercase substring
-        # "invalid api key".
-        if base_url and ("mindshub.ai" in base_url or "mdb.ai" in base_url):
+        # Provider-aware 401 copy; "check your OpenAI API key" is misleading
+        # for MindsHub/self-hosted keys. Copy contract: see ProviderAuthError.
+        if is_minds_endpoint:
             self._auth_hint = "Invalid API key — check your MindsHub API key in Settings."
         elif base_url:
             self._auth_hint = (

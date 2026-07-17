@@ -93,14 +93,9 @@ def test_401_maps_to_provider_auth_error():
     # substring "invalid api key".
     assert "Invalid API key" in str(err.value)
     assert not isinstance(err.value, ModelUnavailableError)
-
-
-def test_401_is_still_a_connection_error():
     # Legacy call sites only know ConnectionError — the typed error must
     # keep flowing through them unchanged.
-    exc = _sdk_error(401, json_body={"error": {"message": "bad key"}})
-    with pytest.raises(ConnectionError):
-        _raise_for_status_error(exc, "sonnet")
+    assert isinstance(err.value, ConnectionError)
 
 
 def test_401_html_body_maps_to_invalid_key():
@@ -132,37 +127,20 @@ def test_401_auth_hint_overrides_copy():
 
 # ── provider-aware auth hint computed from base_url ───────────────────
 
-@pytest.mark.parametrize("base_url", [
-    "https://llm.mindshub.ai/v1",
-    "https://llm.mdb.ai",
+@pytest.mark.parametrize("base_url,expected", [
+    (None, "Invalid API key — check your OpenAI API key configuration."),
+    ("https://llm.mindshub.ai/v1", "Invalid API key — check your MindsHub API key in Settings."),
+    ("https://llm.mdb.ai", "Invalid API key — check your MindsHub API key in Settings."),
+    (
+        "https://my-vllm.internal/v1",
+        "Invalid API key — check the API key configured for your OpenAI-compatible endpoint.",
+    ),
 ])
-def test_auth_hint_mindshub(base_url):
+def test_auth_hint_per_base_url(base_url, expected):
     provider = OpenAIProvider(api_key="k", base_url=base_url)
-    assert provider._auth_hint == "Invalid API key — check your MindsHub API key in Settings."
-
-
-def test_auth_hint_generic_compatible_endpoint():
-    provider = OpenAIProvider(api_key="k", base_url="https://my-vllm.internal/v1")
-    assert provider._auth_hint == (
-        "Invalid API key — check the API key configured for your "
-        "OpenAI-compatible endpoint."
-    )
-
-
-def test_auth_hint_direct_openai():
-    provider = OpenAIProvider(api_key="k")
-    assert provider._auth_hint == "Invalid API key — check your OpenAI API key configuration."
-
-
-@pytest.mark.parametrize("base_url", [
-    None,
-    "https://llm.mindshub.ai/v1",
-    "https://my-vllm.internal/v1",
-])
-def test_every_auth_hint_contains_the_detection_substring(base_url):
+    assert provider._auth_hint == expected
     # The contract with cowork-server's `turn_errors.is_auth_error`: every
     # 401 message must contain the lowercase substring "invalid api key".
-    provider = OpenAIProvider(api_key="k", base_url=base_url)
     assert "invalid api key" in provider._auth_hint.lower()
 
 
