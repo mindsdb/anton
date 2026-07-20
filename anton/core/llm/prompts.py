@@ -780,6 +780,26 @@ are `{{"name": ..., "type": "S"}}` — string keys only in v1. Do NOT wrap it in
 shape) and do NOT declare non-key attributes: those fail validation \
 (`StateSchema ... pk Field required`) at the first request. Store the actual \
 values freely via `store.put({{...}})` at runtime — they need no schema entry.
+  - STATE STORE API (`fullstack-stateful-app` ONLY): the `store` from \
+`get_store()` is a pure key-value store keyed by `(pk, sk)`. It exposes ONLY \
+these async methods — there is NO `scan()` / "list everything" operation, and \
+assuming one throws `AttributeError: 'Store' object has no attribute 'scan'` at \
+runtime:
+    * `await store.get(pk, sk=None)` → one item or `None`
+    * `await store.put(item)` → write (item is a dict that MUST include `pk` \
+and, if the schema has a sort key, `sk`)
+    * `await store.delete(pk, sk=None)`
+    * `await store.query(pk, *, sk_prefix=None, index=None, filters=None, \
+limit=None)` → list of items sharing that partition key `pk`
+    DESIGN KEYS AROUND YOUR ACCESS PATTERNS UP FRONT: every "list" you need at \
+runtime must map to a single `query(pk=...)`. Put a whole collection under ONE \
+shared partition key and use `sk` for the per-item id. E.g. for a list of \
+employees: write each as `put({{"pk": "employee", "sk": emp_id, ...}})` and \
+list them with `query(pk="employee")`; store an employee's tasks under \
+`put({{"pk": f"tasks:{{emp_id}}", "sk": task_id, ...}})` and list them with \
+`query(pk=f"tasks:{{emp_id}}")`. Do NOT give each record its own unique `pk` \
+(then nothing can enumerate them) and do NOT invent an extra `"__index__"` \
+partition to fake a scan — model the collection's pk directly.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
