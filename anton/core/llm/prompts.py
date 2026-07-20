@@ -726,9 +726,10 @@ sessions, simple documents keyed by id). Declare the entities schema in \
 `state_manifest.json` next to `backend.py`. For HEAVY/relational needs \
 (joins, transactions, analytics, large data) use an EXTERNAL database via a \
 connected data source instead — do not force it into `STATE`. The \
-`anton_state` SDK needs pydantic v2, which the mandatory `fastapi` dependency \
-provides — always keep `fastapi` in `requirements.txt`. Every other rule in \
-this list still applies.
+`anton_state` SDK is injected at runtime (do NOT add it to `requirements.txt` \
+— see REQUIREMENTS below) and needs pydantic v2, which the mandatory `fastapi` \
+dependency provides — always keep `fastapi` in `requirements.txt`. Every other \
+rule in this list still applies.
   - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go \
 to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
   - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at \
@@ -743,6 +744,12 @@ minimum:
 the slug-named scratchpad's venv before spawning the process. Only simple \
 lines are supported — `-r`, `-e`, `--index-url`, blank lines and `#` \
 comments are ignored.
+    NEVER list `anton_state` in `requirements.txt` — it is NOT a published \
+package and the install will FAIL to resolve it (`anton-state was not found \
+in the package registry`), aborting the launch. The STATE SDK is provided to \
+the backend automatically at runtime, so `from anton_state import open_store` \
+just works without any dependency line. This is the ONLY import you leave out \
+of `requirements.txt`.
   - Do NOT start the server inside the scratchpad — use `launch_backend` in step 6.
   - DECLARE DATASOURCES: if `backend.py` reads any `DS_<ENGINE>_<NAME>__<FIELD>` \
 env var, call `update_artifact(slug=<slug>, datasources=[...])` immediately \

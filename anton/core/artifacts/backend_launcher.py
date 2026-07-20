@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import socket
@@ -139,6 +140,14 @@ async def launch_artifact_backend(
         for raw_line in req_path.read_text(encoding="utf-8").splitlines():
             line = raw_line.split("#", 1)[0].strip()
             if not line or line.startswith("-"):
+                continue
+            # `anton_state` is the internal STATE SDK — it is provided to the
+            # backend at runtime via PYTHONPATH (see _anton_state_pythonpath_dir),
+            # not published to any package registry. Drop it if the model listed
+            # it in requirements.txt, otherwise the install step fails with
+            # "anton-state was not found in the package registry".
+            pkg_name = re.split(r"[<>=!~ \[]", line, maxsplit=1)[0].strip()
+            if pkg_name.replace("-", "_").lower() == "anton_state":
                 continue
             packages.append(line)
         if packages:
