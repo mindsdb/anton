@@ -7,7 +7,7 @@ from tests.conftest import make_mock_llm
 import pytest
 
 from anton.core.backends.base import Cell
-from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
 from anton.commands.session import handle_resume
 from anton.core.llm.provider import LLMResponse, StreamComplete, StreamToolResult, ToolCall, Usage
@@ -84,6 +84,38 @@ class TestScratchpadToolDefinition:
             assert "scratchpad" in tool_names
         finally:
             await session.close()
+
+    async def test_tool_build_does_not_mutate_shared_singleton(self, workspace):
+        """_build_core_tools() must not mutate the shared SCRATCHPAD_TOOL
+        singleton — otherwise memory-injected wisdom would leak across every
+        session sharing this process instead of resetting per session."""
+        original_description = SCRATCHPAD_TOOL.description
+
+        mock_llm = make_mock_llm()
+        cortex_a = MagicMock()
+        cortex_a.get_scratchpad_context.return_value = "WISDOM_FROM_SESSION_A"
+        session_a = ChatSession(
+            ChatSessionConfig(llm_client=mock_llm, workspace=workspace, cortex=cortex_a)
+        )
+        try:
+            tools_a = session_a._build_tools()
+            desc_a = next(t["description"] for t in tools_a if t["name"] == "scratchpad")
+            assert "WISDOM_FROM_SESSION_A" in desc_a
+            assert SCRATCHPAD_TOOL.description == original_description
+        finally:
+            await session_a.close()
+
+        cortex_b = MagicMock()
+        cortex_b.get_scratchpad_context.return_value = ""
+        session_b = ChatSession(
+            ChatSessionConfig(llm_client=mock_llm, workspace=workspace, cortex=cortex_b)
+        )
+        try:
+            tools_b = session_b._build_tools()
+            desc_b = next(t["description"] for t in tools_b if t["name"] == "scratchpad")
+            assert "WISDOM_FROM_SESSION_A" not in desc_b
+        finally:
+            await session_b.close()
 
 
 class TestScratchpadExecViaChat:
@@ -219,7 +251,9 @@ class TestScratchpadDumpStreaming:
         """dump action yields a StreamToolResult for display, but sends a short
         summary back to the LLM to avoid it parroting the full notebook."""
         mock_llm = make_mock_llm()
-        mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — task done"))
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="task done")
+        )
 
         call_count = 0
 
@@ -274,7 +308,9 @@ class TestScratchpadStreaming:
         final_response = _text_response("Got 99.")
 
         mock_llm = make_mock_llm()
-        mock_llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — task done"))
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="task done")
+        )
 
         call_count = 0
 

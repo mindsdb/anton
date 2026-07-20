@@ -56,7 +56,7 @@ it just reads and writes.
 | `recall_rules()` | `rules.md` | Basal Ganglia + OFC |
 | `recall_lessons(token_budget)` | `lessons.md` (budget-limited, most recent first) | Anterior Temporal Lobe |
 | `recall_topic(slug)` | `topics/{slug}.md` | Cortical Association Areas |
-| `recall_scratchpad_wisdom()` | "when" rules + scratchpad-related lessons + `topics/scratchpad-*.md` | Procedural priming |
+| `recall_scratchpad_wisdom(token_budget)` | scratchpad-related "when" rules + scratchpad-related lessons (confidence tier + recency ordered, budget-limited) | Procedural priming |
 
 | Encoding method | Writes | Behavior |
 |---|---|---|
@@ -165,7 +165,9 @@ injected *after* memory, giving user instructions higher priority.
 **Moment B — scratchpad tool description (procedural priming).** When
 scratchpads are active, `cortex.get_scratchpad_context()` appends relevant
 lessons to the scratchpad tool's description — the LLM sees them exactly when
-composing code.
+composing code. Moment A excludes anything scratchpad-related
+(`get_rules(exclude_scratchpad_when=True)`, `recall_lessons()`) so the same
+rule/lesson isn't billed twice per call.
 
 ### Context budget
 
