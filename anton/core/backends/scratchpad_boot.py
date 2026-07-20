@@ -104,28 +104,11 @@ if _scratchpad_model:
                 _llm_provider_kwargs["vision_format"] = "anthropic"
             # Resolve the OpenAI "flavor" so the injected web_search() helper can
             # route through whatever native web tooling the endpoint exposes.
-            # Mirrors LLMClient._resolve_openai_compatible_flavor: direct OpenAI
-            # BYOK uses the Responses API (web_search); an openai-compatible base
-            # URL pointing at Minds/mdb.ai uses the chat.completions passthrough;
-            # any other openai-compatible endpoint is generic (no native search).
-            if _scratchpad_provider_name == "openai":
-                _llm_provider_kwargs["flavor"] = _ProviderClass.FLAVOR_OPENAI
-            else:
-                _minds_url_norm = (
-                    os.environ.get("ANTON_MINDS_URL", "").rstrip("/").lower()
-                )
-                _base_norm = (_llm_base_url or "").rstrip("/").lower()
-                if _minds_url_norm and _base_norm in (
-                    _minds_url_norm,
-                    f"{_minds_url_norm}/api/v1",
-                ):
-                    _llm_provider_kwargs["flavor"] = (
-                        _ProviderClass.FLAVOR_MINDS_PASSTHROUGH
-                    )
-                else:
-                    _llm_provider_kwargs["flavor"] = (
-                        _ProviderClass.FLAVOR_OPENAI_COMPATIBLE_GENERIC
-                    )
+            # Detect Minds/mdb.ai by HOST, not provider name (always "openai" for
+            # an OpenAIProvider even on the minds gateway) — see resolve_web_flavor.
+            _llm_provider_kwargs["flavor"] = _ProviderClass.resolve_web_flavor(
+                _scratchpad_provider_name, _llm_base_url
+            )
             _llm_provider = _ProviderClass(**_llm_provider_kwargs)
         else:
             _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
