@@ -630,9 +630,10 @@ present at launch.
   # `fullstack-stateful-app`; OMIT it entirely for `fullstack-stateless-app`.
   # STATE mirrors SECRETS: the cloud runner overlays {{table, region,
   # credentials}} before each request; locally it stays None and the SQLite
-  # driver is used. Declare an entities schema in `state_manifest.json` next to
-  # this file. Build the store AT POINT OF USE (inside a route), reading the
-  # current STATE — never at import time.
+  # driver is used. Declare the state KEY schema in `state_manifest.json` next
+  # to this file — generate it from the anton_state model, do NOT hand-write
+  # the JSON (see STATE MANIFEST below). Build the store AT POINT OF USE (inside
+  # a route), reading the current STATE — never at import time.
   STATE = None
 
   from anton_state import open_store
@@ -722,8 +723,9 @@ sources.
     * `fullstack-stateful-app`: durable state goes through the platform \
 `STATE` store (module-level `STATE`, built via `get_store()`), which is a \
 document/key-value model — suitable for LIGHT state (counters, settings, \
-sessions, simple documents keyed by id). Declare the entities schema in \
-`state_manifest.json` next to `backend.py`. For HEAVY/relational needs \
+sessions, simple documents keyed by id). Declare the state KEY schema in \
+`state_manifest.json` next to `backend.py` (see STATE MANIFEST below for the \
+exact format — do NOT hand-invent it). For HEAVY/relational needs \
 (joins, transactions, analytics, large data) use an EXTERNAL database via a \
 connected data source instead — do not force it into `STATE`. The \
 `anton_state` SDK is injected at runtime (do NOT add it to `requirements.txt` \
@@ -759,6 +761,25 @@ from the `Connected Data Sources` section of this prompt. This records the \
 deployable's credential dependencies in `metadata.json` so the artifact can \
 be redeployed with the right env vars later. Skip this call only when the \
 backend uses no `DS_*` vars at all.
+  - STATE MANIFEST (`fullstack-stateful-app` ONLY): `state_manifest.json` is a \
+SINGLE universal contract read BOTH by the local SQLite driver AND by the cloud \
+DynamoDB provisioner — the same file must validate on both. GENERATE it from \
+the `anton_state` model instead of hand-writing JSON (this makes a malformed \
+manifest impossible):
+    ```python
+    from anton_state.schema import StateSchema, Attr
+    StateSchema(
+        pk=Attr(name="pk"),            # partition key (always type "S")
+        sk=Attr(name="sk"),            # sort key — omit entirely if unused
+    ).to_manifest(f"{{artifact_path}}/state_manifest.json")
+    ```
+    The manifest describes ONLY the KEY schema, never data fields. The resulting \
+JSON is a FLAT object `{{version, pk, sk?, gsis?, ttl_attribute?}}` where `pk`/`sk` \
+are `{{"name": ..., "type": "S"}}` — string keys only in v1. Do NOT wrap it in \
+`entities`/`attributes`/`partition_key`/`sort_key` (a DynamoDB-CreateTable-style \
+shape) and do NOT declare non-key attributes: those fail validation \
+(`StateSchema ... pk Field required`) at the first request. Store the actual \
+values freely via `store.put({{...}})` at runtime — they need no schema entry.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
