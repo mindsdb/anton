@@ -23,7 +23,7 @@ def test_utf8_env_respects_explicit_override():
     assert env["PYTHONUTF8"] == "0"
 
 
-def test_boot_script_must_be_read_as_utf8():
+def test_boot_script_content_requires_utf8():
     # The boot script contains non-ASCII (…, —). Reading it with a non-UTF-8
     # host-locale default (GBK on Chinese Windows) throws a UnicodeDecodeError
     # before the scratchpad can start — the exact ENG-824 crash. Guard that (a)
@@ -33,3 +33,21 @@ def test_boot_script_must_be_read_as_utf8():
     raw.decode("utf-8")  # the fix: explicit UTF-8 succeeds
     with pytest.raises(UnicodeDecodeError):
         raw.decode("gbk")  # a GBK-locale default read would crash
+
+
+def test_boot_script_is_read_as_utf8(monkeypatch):
+    # Pin the *read*, not just the file's bytes: if someone drops the explicit
+    # encoding="utf-8" (reverting to a host-locale default), this fails even on a
+    # UTF-8 CI box — where a bytes-only check would still pass. Spy on
+    # Path.read_text and assert the boot-script read passes encoding="utf-8".
+    seen = {}
+    real_read_text = local.Path.read_text
+
+    def spy(self, *args, **kwargs):
+        if self == local._BOOT_SCRIPT_PATH:
+            seen["encoding"] = kwargs.get("encoding")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(local.Path, "read_text", spy)
+    assert local._read_boot_script()  # exercises the real read path
+    assert seen.get("encoding") == "utf-8"

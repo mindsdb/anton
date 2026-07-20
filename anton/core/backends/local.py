@@ -24,6 +24,16 @@ from anton.core.backends.utils import compute_timeouts
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
 
+def _read_boot_script() -> str:
+    """Read the boot script as UTF-8 explicitly.
+
+    It contains non-ASCII (…, —), so a host-locale-default read (e.g. GBK on
+    Chinese Windows) crashes with a codec error before the scratchpad can start
+    (ENG-824). Kept as a helper so the explicit encoding is pinned by a test.
+    """
+    return _BOOT_SCRIPT_PATH.read_text(encoding="utf-8")
+
+
 def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     """A copy of ``base`` with Python UTF-8 mode forced for the scratchpad
     subprocess.
@@ -273,7 +283,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     break
             if child_site and parent_site:
                 pth_path = os.path.join(child_site, "_parent_venv.pth")
-                with open(pth_path, "w") as f:
+                # UTF-8 explicitly: a plain open() encodes with the host locale
+                # (e.g. GBK on Chinese Windows), but the child reads .pth files
+                # as UTF-8 under UTF-8 mode — a mismatch corrupts non-ASCII
+                # site-packages paths (same class of bug as the boot script,
+                # ENG-824).
+                with open(pth_path, "w", encoding="utf-8") as f:
                     for sp in parent_site:
                         f.write(sp + "\n")
 
@@ -347,10 +362,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Write the boot script to a temp file and launch the subprocess."""
         self._ensure_venv()
 
-        # Read/write the boot script as UTF-8 explicitly: it contains non-ASCII
-        # (…, —), so a host-locale-default read (e.g. GBK on Chinese Windows)
-        # crashes with a codec error before the scratchpad can start (ENG-824).
-        boot_code = _BOOT_SCRIPT_PATH.read_text(encoding="utf-8")
+        boot_code = _read_boot_script()
         fd, path = tempfile.mkstemp(suffix=".py", prefix="anton_scratchpad_")
         os.write(fd, boot_code.encode("utf-8"))
         os.close(fd)
