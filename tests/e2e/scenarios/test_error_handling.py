@@ -47,8 +47,10 @@ def test_http_500_handled_gracefully(cfg, tmp_path):
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
-    # After 3 retries the fallback text surfaces the ConnectionError message (openai.py:364)
-    assert_output(result, "Server returned 500")
+    # ENG-673: a request-time 5xx is now classified as a transient provider error
+    # and (since the SDK already retried it) fails fast with the honest typed
+    # message rather than the old "Server returned 500" phrasing.
+    assert_output(result, "returned 500")
 
 
 @pytest.mark.stub_only
