@@ -387,7 +387,12 @@ def classify_transient(
     out — this decides between "retryable transient" and "generic unavailable".
     """
     b = body if isinstance(body, dict) else {}
-    err = b.get("error") if isinstance(b.get("error"), dict) else {}
+    # Two body dialects: Anthropic nests the error under `error` ({"error":
+    # {"type": ...}}); the OpenAI SDK unwraps its envelope (`body.get("error",
+    # body)`) so the type sits at the TOP level. Read the nested object when
+    # present, otherwise treat the body itself as the error object — so the
+    # mid-stream case classifies on BOTH providers (ENG-673, Sam's review).
+    err = b.get("error") if isinstance(b.get("error"), dict) else b
     etype = err.get("type") or err.get("code")
     # A mid-stream failure has no real HTTP error status (it's smuggled into an
     # already-sent 200, or there's no status at all), so the SDK never retried it

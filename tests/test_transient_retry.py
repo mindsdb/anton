@@ -6,10 +6,10 @@ Covers the anton-side of the fix without a live provider:
     right typed exception for each failure, incl. the mid-stream HTTP-200 case.
   * the session backoff helpers — cadence, `retry_after`, and cancel-awareness.
 
-The end-to-end turn behavior (retry recovers, budget exhausts to a
-`provider_overloaded` card, completed tools aren't re-run) is exercised by the
-mock-provider harness in `test_transient_retry_e2e` / the fixture under
-`tests/fixtures/`.
+The real-SDK wire path (a genuine SSE `error` inside a 200 is parsed and
+classified on BOTH providers) is exercised by the mock-provider harness in
+`test_transient_retry_e2e.py`, which drives the real anthropic/openai SDKs
+against an `httpx.MockTransport`.
 """
 
 from __future__ import annotations
@@ -189,6 +189,9 @@ def test_provider_overloaded_error_carries_model_and_provider():
 
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
+import httpx  # noqa: E402
+import openai  # noqa: E402
+
 from anton.chat import ChatSession  # noqa: E402
 from anton.core.llm.openai import OpenAIProvider  # noqa: E402
 from anton.core.llm.provider import StreamComplete, StreamTextDelta  # noqa: E402
@@ -244,7 +247,75 @@ async def test_stream_empty_without_finish_reason_is_truncated():
     with pytest.raises(TransientProviderError) as ei:
         await _run_openai_stream([])
     assert ei.value.code == "truncated_stream"
+    # Deliberate carve-out (ENG-673): an empty-from-start 200 is a broken-endpoint
+    # signal, not a mid-incident blip — it fails fast rather than looping the
+    # backoff budget. Genuine mid-incident silence arrives as a connection drop /
+    # read timeout / SSE error, which DO back off (tested above/below).
     assert ei.value.session_backoff is False
+
+
+# --------------------------------------------------------------------------- #
+# mid-stream vs request-time boundary — the ENG-673 session_backoff flag
+# (Sam's review): a failure AFTER the 200 was never SDK-retried → session backs
+# off; a failure DURING establishment was already SDK-retried → fail fast.
+# Drive a REAL OpenAIProvider whose client we replace, so the genuine openai.*
+# exception classes match the provider's except clauses (no module patching).
+# --------------------------------------------------------------------------- #
+
+def _req() -> httpx.Request:
+    return httpx.Request("POST", "http://mock/v1/chat/completions")
+
+
+async def _drain_openai_with_create(create_mock) -> TransientProviderError:
+    prov = OpenAIProvider(api_key="k")
+    prov._client = AsyncMock()
+    prov._client.chat.completions.create = create_mock
+    with pytest.raises(TransientProviderError) as ei:
+        _ = [
+            ev async for ev in prov.stream(
+                model="latest:sonnet", system="s",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        ]
+    return ei.value
+
+
+async def test_stream_connection_drop_during_establishment_is_fail_fast():
+    # create() itself raises → the SDK already retried at the transport layer.
+    exc = await _drain_openai_with_create(
+        AsyncMock(side_effect=openai.APIConnectionError(request=_req()))
+    )
+    assert exc.code == "connection_error"
+    assert exc.session_backoff is False
+
+
+async def test_stream_connection_drop_midstream_backs_off():
+    # A 200 was established (first chunk arrived) then the connection dropped —
+    # the SDK never retried this, so the session must.
+    async def _aiter():
+        yield _chunk(content="partial")
+        raise openai.APIConnectionError(request=_req())
+
+    exc = await _drain_openai_with_create(AsyncMock(return_value=_aiter()))
+    assert exc.code == "connection_error"
+    assert exc.session_backoff is True
+
+
+async def test_stream_midstream_bare_apierror_is_classified_and_backs_off():
+    # The OpenAI-shaped gap: a mid-stream SSE `error` surfaces as a bare
+    # openai.APIError (no status_code, body type at top level), which is NOT an
+    # APIStatusError. It must still be caught, classified from the body, and
+    # backed off — otherwise it escapes as an opaque generic error (ENG-673).
+    async def _aiter():
+        yield _chunk(content="Hel")
+        raise openai.APIError(
+            "overloaded", request=_req(),
+            body={"type": "server_error", "message": "overloaded"},
+        )
+
+    exc = await _drain_openai_with_create(AsyncMock(return_value=_aiter()))
+    assert exc.session_backoff is True
+    assert exc.code in ("server_error", "stream_error")
 
 
 def _session() -> ChatSession:

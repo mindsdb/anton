@@ -236,8 +236,15 @@ class AnthropicProvider(LLMProvider):
         # Track content blocks by index for tool correlation
         blocks: dict[int, dict] = {}
 
+        # True once the 200 stream has been established. Anything that fails
+        # AFTER this point is mid-stream: the SDK's retry wrapper already
+        # returned, so it never retried — the session must (ENG-673). A failure
+        # BEFORE this (request establishment) was already SDK-retried → fail fast.
+        stream_started = False
+
         try:
             async with self._client.messages.stream(**kwargs) as stream:
+                stream_started = True
                 async for event in stream:
                     if event.type == "message_start":
                         usage = event.message.usage
@@ -306,13 +313,16 @@ class AnthropicProvider(LLMProvider):
         except anthropic.APIStatusError as exc:
             _raise_for_status_error(exc, model=model)
         except anthropic.APIConnectionError as exc:
-            # Connection dropped mid-stream — transient, but the SDK retries
-            # connection errors at the transport layer, so fail fast rather than
-            # adding the session budget on top (ENG-673).
+            # A connection error here is retryable. If it dropped mid-stream
+            # (after the 200), the SDK never retried it → the session must back
+            # off and retry. If it failed during request establishment, the SDK
+            # already retried → fail fast (no second budget on top). (ENG-673)
             raise TransientProviderError(
-                "Lost the connection to Anthropic mid-response — try again in a moment.",
-                provider="Anthropic", code="connection_error", session_backoff=False,
-                model=model,
+                "Lost the connection to Anthropic mid-response — try again in a moment."
+                if stream_started
+                else "Could not reach Anthropic — check your connection or try again in a moment.",
+                provider="Anthropic", code="connection_error",
+                session_backoff=stream_started, model=model,
             ) from exc
 
         # Missing stop_reason is a genuine truncation only when the stream
@@ -326,6 +336,14 @@ class AnthropicProvider(LLMProvider):
                                "passing through")
             else:
                 logger.warning("Anthropic stream ended empty with no stop_reason — treating as truncated")
+                # Deliberate carve-out (ENG-673): this branch fires ONLY when the
+                # stream produced NOTHING (a content-bearing stream with no
+                # stop_reason passes through above). An empty-from-start 200 is a
+                # weak incident signal and a strong broken/misconfigured-endpoint
+                # signal, so it fails fast rather than looping the 30s budget on an
+                # endpoint that never emits. Genuine mid-incident silence surfaces
+                # instead as a connection drop / read timeout / SSE error event —
+                # all of which DO back off (session_backoff=True) above.
                 raise TransientProviderError(
                     "Anthropic ended the response early — try again in a moment.",
                     provider="Anthropic", code="truncated_stream",

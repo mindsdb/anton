@@ -909,8 +909,15 @@ class OpenAIProvider(LLMProvider):
         # Track tool call deltas by index
         tc_state: dict[int, dict] = {}
 
+        # True once the 200 stream has been established. Anything that fails
+        # AFTER this point is mid-stream: the SDK's retry wrapper already
+        # returned, so it never retried — the session must (ENG-673). A failure
+        # BEFORE this (request establishment) was already SDK-retried → fail fast.
+        stream_started = False
+
         try:
             stream = await self._client.chat.completions.create(**kwargs)
+            stream_started = True
             async for chunk in stream:
                 if chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens
@@ -972,13 +979,39 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            # Transient, but the SDK already retries connection errors at the
-            # transport layer — classify honestly and fail fast rather than
-            # stacking the session budget on top (ENG-673).
+            # A connection error here is retryable. If it dropped mid-stream
+            # (after the 200), the SDK never retried it → the session must back
+            # off and retry. If it failed during request establishment, the SDK
+            # already retried → fail fast (no second budget on top). (ENG-673)
             raise TransientProviderError(
-                "Could not reach the model provider — check your connection or try again in a moment.",
-                provider="The model provider", code="connection_error", session_backoff=False,
-                model=model,
+                "Lost the connection to the model provider mid-response — try again in a moment."
+                if stream_started
+                else "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error",
+                session_backoff=stream_started, model=model,
+            ) from exc
+        except openai.APIError as exc:
+            # A mid-stream SSE `error` event (server_error / overloaded) arrives
+            # as a BARE APIError with no status_code — NOT an APIStatusError — so
+            # it slips past the handlers above. The SDK already consumed the 200,
+            # so it never retried it → the session must back off and retry, and we
+            # must classify it here or it surfaces as an opaque generic error on
+            # the OpenAI/MindsHub path (ENG-673, Sam's review). Body type sits at
+            # the top level (SDK-unwrapped); classify_transient handles that shape.
+            transient = classify_transient(
+                getattr(exc, "status_code", None), getattr(exc, "body", None),
+                provider="The model provider", model=model,
+            )
+            if transient is not None:
+                logger.warning(
+                    "transient mid-stream provider error (%s): %s",
+                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
+                )
+                raise transient from exc
+            raise TransientProviderError(
+                "The model provider failed mid-response — try again in a moment.",
+                provider="The model provider", code="stream_error",
+                session_backoff=True, model=model,
             ) from exc
 
         # Finalize tool calls. Same safe-parse protection as the
@@ -1010,6 +1043,13 @@ class OpenAIProvider(LLMProvider):
                                "passing through (provider likely omits finish_reason)")
             else:
                 logger.warning("stream ended empty with no finish_reason — treating as truncated")
+                # Deliberate carve-out (ENG-673): fires ONLY on a stream that
+                # produced NOTHING. An empty-from-start 200 is a weak incident
+                # signal and a strong broken/misconfigured-endpoint signal, so it
+                # fails fast rather than looping the 30s budget on an endpoint that
+                # never emits. Genuine mid-incident silence surfaces instead as a
+                # connection drop / read timeout / SSE error — all of which DO back
+                # off above. Keeps a persistently-malformed endpoint from looping.
                 raise TransientProviderError(
                     "The model provider ended the response early — try again in a moment.",
                     provider="The model provider", code="truncated_stream",
@@ -1141,8 +1181,13 @@ class OpenAIProvider(LLMProvider):
         # a per-output_index stable handle for streaming arguments.
         fc_state: dict[int, dict] = {}
 
+        # See the chat-completions path: True once the 200 stream is established;
+        # a failure after this is mid-stream and was never SDK-retried (ENG-673).
+        stream_started = False
+
         try:
             stream = await self._client.responses.create(**kwargs)
+            stream_started = True
             async for event in stream:
                 etype = getattr(event, "type", "")
 
@@ -1218,13 +1263,34 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            # Transient, but the SDK already retries connection errors at the
-            # transport layer — classify honestly and fail fast rather than
-            # stacking the session budget on top (ENG-673).
+            # A connection error here is retryable. Mid-stream (after the 200) was
+            # never SDK-retried → session backs off; request-establishment was
+            # already SDK-retried → fail fast (ENG-673).
             raise TransientProviderError(
-                "Could not reach the model provider — check your connection or try again in a moment.",
-                provider="The model provider", code="connection_error", session_backoff=False,
-                model=model,
+                "Lost the connection to the model provider mid-response — try again in a moment."
+                if stream_started
+                else "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error",
+                session_backoff=stream_started, model=model,
+            ) from exc
+        except openai.APIError as exc:
+            # Bare mid-stream SSE error (no status_code) — not an APIStatusError,
+            # so it slips past the handlers above; the SDK already consumed the
+            # 200 and never retried it → the session must back off (ENG-673).
+            transient = classify_transient(
+                getattr(exc, "status_code", None), getattr(exc, "body", None),
+                provider="The model provider", model=model,
+            )
+            if transient is not None:
+                logger.warning(
+                    "transient mid-stream provider error (%s): %s",
+                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
+                )
+                raise transient from exc
+            raise TransientProviderError(
+                "The model provider failed mid-response — try again in a moment.",
+                provider="The model provider", code="stream_error",
+                session_backoff=True, model=model,
             ) from exc
 
         yield StreamComplete(
