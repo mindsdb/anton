@@ -38,6 +38,20 @@ representations that **coexist** (rather than graduating between stages):
 └── stats.json         ← per-stage usage counters
 ```
 
+### Built-in skills
+
+A second, **read-only** root ships inside the package
+(`anton/core/memory/builtin_skills/<label>/SKILL.md`) for contracts every
+install must carry from the first session — currently
+`build-fullstack-backend` (the backend/fullstack generation contract) and
+`build-html-dashboard` (the HTML dashboard output contract). Built-ins appear
+in listings and `recall_skill` lookups exactly like user skills, with
+`provenance: "builtin"`. A user/consolidator skill with the same label shadows
+the built-in (the shadow is logged); if a same-label user dir exists but is
+unreadable, `load()` falls back to the built-in instead of dead-ending the
+label. Built-ins are never written to: `delete()` no-ops and stats writes are
+skipped.
+
 The three stages mirror the cortico-striatal-cerebellar gradient:
 
 - **Stage 1 (declarative)** — what the prefrontal cortex reads when first

@@ -51,12 +51,25 @@ _INPUT_SCHEMA = {
 }
 
 
+def _recall_marker(label: str) -> str:
+    """Stable marker embedded in every recall payload.
+
+    Used to detect whether a skill's body is still present in the current
+    history: repeat recalls return a short stub instead of re-appending the
+    full body (which would be re-sent on every subsequent call), but if
+    compaction summarized the payload away the marker disappears with it and
+    the next recall re-sends the full procedure.
+    """
+    return f"# Skill recalled: `{label}`"
+
+
 def _format_skill_response(skill, *, warning: str = "") -> str:
     """Render the recall payload sent back to the LLM as a tool result."""
     parts: list[str] = []
     if warning:
         parts.append(warning.strip())
         parts.append("")  # blank line before the procedure
+    parts.append(_recall_marker(skill.label))
     parts.append(f"# Skill: {skill.name}")
     parts.append("")
     if skill.description:
@@ -66,6 +79,40 @@ def _format_skill_response(skill, *, warning: str = "") -> str:
     parts.append("")
     parts.append(skill.declarative_md.strip())
     return "\n".join(parts)
+
+
+_PROCEDURE_HEADER = "## Procedure (Stage 1 — declarative)"
+
+
+def _already_in_history(session, label: str) -> bool:
+    """True if a prior FULL recall of `label` is still visible in the history.
+
+    Requires the marker AND the procedure header in the same message: only
+    the full payload carries both. The stub deliberately contains neither
+    (see below) — a stub that survives compaction while the body is evicted
+    must not keep suppressing re-sends, and a summary that merely quotes the
+    marker doesn't count as the contract being present.
+    """
+    history = getattr(session, "history", None)
+    if not isinstance(history, list):
+        return False
+    marker = _recall_marker(label)
+    try:
+        import json as _json
+
+        for m in history:
+            # ensure_ascii=False: the header contains an em-dash, which
+            # default json.dumps would escape to — and never match.
+            text = (
+                m
+                if isinstance(m, str)
+                else _json.dumps(m, default=str, ensure_ascii=False)
+            )
+            if marker in text and _PROCEDURE_HEADER in text:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 - never let the guard break a recall
+        return False
 
 
 async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
@@ -110,6 +157,18 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
             f"⚠ No skill named '{label_in}'. Returning the closest match: "
             f"'{skill.label}'. If that's not what you wanted, ignore the "
             f"procedure below and proceed without a recalled skill."
+        )
+
+    if _already_in_history(session, skill.label):
+        # NOTE: this stub must never contain _recall_marker() or the
+        # procedure header — otherwise a stub surviving compaction would
+        # satisfy _already_in_history forever and the full contract would
+        # never be re-sent.
+        return (
+            f"Skill '{skill.label}' was already recalled in this conversation "
+            "— its full procedure is in your context above, under the "
+            f"'# Skill: {skill.name}' heading, and still applies. Not "
+            "re-sending the body."
         )
 
     # Increment the recommended counter for the *resolved* label, not the
