@@ -317,7 +317,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         try:
             req_path = os.path.join(self._venv_dir, "requirements.txt")
-            with open(req_path, "w") as f:
+            with open(req_path, "w", encoding="utf-8") as f:
                 for pkg in sorted(self._installed_packages):
                     f.write(pkg + "\n")
         except OSError:
@@ -328,7 +328,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         req_path = os.path.join(self._venv_dir, "requirements.txt")
         try:
-            with open(req_path) as f:
+            with open(req_path, encoding="utf-8") as f:
                 for line in f:
                     pkg = line.strip()
                     if pkg:
@@ -341,7 +341,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         try:
             ver_path = os.path.join(self._venv_dir, ".python_version")
-            with open(ver_path, "w") as f:
+            with open(ver_path, "w", encoding="utf-8") as f:
                 f.write(f"{sys.version_info.major}.{sys.version_info.minor}\n")
         except OSError:
             pass
@@ -351,7 +351,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return False
         ver_path = os.path.join(self._venv_dir, ".python_version")
         try:
-            with open(ver_path) as f:
+            with open(ver_path, encoding="utf-8") as f:
                 saved = f.read().strip()
             expected = f"{sys.version_info.major}.{sys.version_info.minor}"
             return saved == expected
