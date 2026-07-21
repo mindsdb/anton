@@ -426,6 +426,11 @@ async def _handle_publish(
     import webbrowser
     from pathlib import Path
 
+    from anton.publish_access import (
+        prompt_access,
+        resolve_access,
+        resolve_publish_target,
+    )
     from anton.publisher import publish
 
     console.print()
@@ -475,7 +480,6 @@ async def _handle_publish(
     # directory is no longer scanned; users move old files into a
     # proper artifact subfolder if they still want them publishable.
     artifacts_root = Path(settings.artifacts_dir)
-    publish_index_dir = artifacts_root  # `.published.json` lives at the root
     store = ArtifactStore(artifacts_root)
 
     def _make_candidate(path: Path) -> tuple[str, Path, str, str] | None:
@@ -630,20 +634,34 @@ async def _handle_publish(
         console.print()
         return
 
-    # 3. Check if this artifact was previously published
-    published_json = publish_index_dir / ".published.json"
+    # 3. Resolve where .published.json lives (unified convention) + read prev.
+    _t, published_dir, published_key, _fs = resolve_publish_target(target, [artifacts_root])
+    published_json = published_dir / ".published.json"
     published_map = {}
     try:
         if published_json.is_file():
             published_map = json.loads(published_json.read_text())
     except Exception:
         pass
+    prev = published_map.get(published_key)
+
+    # Back-compat: legacy /publish wrote a single root map keyed by relative path.
+    if not prev:
+        legacy_json = artifacts_root / ".published.json"
+        try:
+            if legacy_json.is_file():
+                legacy_map = json.loads(legacy_json.read_text())
+                legacy_entry = legacy_map.get(file_key)
+                if isinstance(legacy_entry, dict) and legacy_entry.get("report_id"):
+                    prev = legacy_entry  # carry over report_id/url/last_md5/access
+        except Exception:
+            pass
 
     report_id = None
-    prev = published_map.get(file_key)
-
     if prev and prev.get("report_id"):
-        console.print(f"  [anton.muted]Previously published: {prev.get('url', '')}[/]")
+        _mode = prev.get("mode", "public")
+        _badge = {"password": " 🔒 password", "restricted": " 👥 restricted"}.get(_mode, "")
+        console.print(f"  [anton.muted]Previously published: {prev.get('url', '')}{_badge}[/]")
         update_choice = await prompt_or_cancel(
             "  Update existing report, or publish as new?",
             choices=["update", "new", "u", "n"],
@@ -655,6 +673,18 @@ async def _handle_publish(
             return
         if update_choice in ("update", "u"):
             report_id = prev["report_id"]
+        else:
+            prev = None  # publish as new → do not inherit versions/access
+
+    # 3b. Collect access mode from the user.
+    access = await prompt_access(
+        prompt_or_cancel, previous=prev, allow_keep=bool(report_id and prev),
+    )
+    if access is None:
+        console.print()
+        return
+
+    eff_access, pwd_version, access_version, owner_side = resolve_access(None, access, prev)
 
     # 4. Publish
     from rich.live import Live
@@ -669,6 +699,9 @@ async def _handle_publish(
                 report_id=report_id,
                 publish_url=settings.publish_url,
                 ssl_verify=settings.minds_ssl_verify,
+                access=eff_access,
+                pwd_version=pwd_version,
+                access_version=access_version,
             )
         except Exception as e:
             import urllib.error
@@ -698,15 +731,25 @@ async def _handle_publish(
     else:
         console.print(f"  [anton.success]Published![/]")
     console.print(f"  [link={view_url}]{view_url}[/link]")
+
+    _mode = owner_side.get("mode", "public")
+    if _mode == "password":
+        console.print("  [anton.muted]🔒 Password-protected[/]")
+    elif _mode == "restricted":
+        _n = len(owner_side.get("emails", []))
+        _org = " · org allowed" if owner_side.get("org_allowed") else ""
+        console.print(f"  [anton.muted]👥 Restricted · {_n} emails{_org}[/]")
     console.print()
 
-    # 5. Save mapping
+    # 5. Save mapping (owner-side; new unified location + key).
     if returned_report_id:
-        published_map[file_key] = {
+        entry = dict(owner_side)
+        entry.update({
             "report_id": returned_report_id,
             "url": view_url,
             "last_md5": result.get("md5", ""),
-        }
+        })
+        published_map[published_key] = entry
         try:
             published_json.write_text(json.dumps(published_map, indent=2))
         except Exception:
@@ -825,6 +868,41 @@ async def _handle_unpublish(
 
     console.print(f"  [anton.success]Removed:[/] {title}")
     console.print()
+
+    # 6. Drop the local owner-side record for this report so a later /publish
+    # treats it as a fresh publish instead of offering to "update" (and reusing
+    # the report_id of) a report that no longer exists.
+    import json as _json
+    from pathlib import Path as _Path
+
+    removed_report_id = selected.get("report_id") or ""
+    removed_md5 = selected.get("md5") or ""
+    artifacts_root = _Path(settings.artifacts_dir)
+    for pub_file in artifacts_root.rglob(".published.json"):
+        try:
+            data = _json.loads(pub_file.read_text())
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        for key in list(data.keys()):
+            entry = data.get(key)
+            if not isinstance(entry, dict):
+                continue
+            entry_report_id = entry.get("report_id") or ""
+            matches = (
+                (removed_report_id and entry_report_id == removed_report_id)
+                or (not entry_report_id and removed_md5 and entry.get("last_md5") == removed_md5)
+            )
+            if matches:
+                del data[key]
+                changed = True
+        if changed:
+            try:
+                pub_file.write_text(_json.dumps(data, indent=2))
+            except Exception:
+                pass
 
 
 async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
