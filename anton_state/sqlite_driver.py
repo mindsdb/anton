@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from .base import _VERSION_ATTR
-from .errors import ConditionalCheckFailed, StateValidationError
+from .errors import ConditionalCheckFailed
 from .schema import StateSchema
 from .validation import validate_item, validate_key
 
@@ -25,7 +25,6 @@ class SQLiteDriver:
         self._pk = schema.pk.name
         self._sk = schema.sk.name if schema.sk else None
         self._ttl = schema.ttl_attribute
-        self._gsi = {g.name: g for g in schema.gsis}
         self._init_db()
         # Lazy cleanup of accumulated "zombies" on startup (dev server) —
         # otherwise expired items would live forever locally.
@@ -78,22 +77,29 @@ class SQLiteDriver:
         validate_item(item, self.schema)
         pk = item[self._pk]
         sk = self._sk_value(item.get(self._sk) if self._sk else None)
-        body = json.dumps(item, separators=(",", ":"), ensure_ascii=False)
-        expires = self._expires_of(item)
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
             existing = con.execute(
                 "SELECT body FROM items WHERE pk=? AND sk=?", (pk, sk)
             ).fetchone()
+            cur = json.loads(existing["body"]) if existing else None
             if if_not_exists and existing is not None:
                 raise ConditionalCheckFailed(f"item already exists: {pk}/{sk}")
             if if_version is not None:
-                cur = json.loads(existing["body"]) if existing else None
                 if cur is None or cur.get(_VERSION_ATTR) != if_version:
                     raise ConditionalCheckFailed(
                         f"version mismatch on {pk}/{sk}: expected {if_version}"
                     )
+            # Server-managed version: never trust a client-supplied _v. Monotonic
+            # to prevent ABA lost-update: an optimistic-lock write -> if_version+1;
+            # any other put -> epoch-millis (practically always greater than any
+            # prior _v, so a stale if_version can't match a re-put generation).
+            # Matches the broker (plan #2).
+            stored = {k: v for k, v in item.items() if k != _VERSION_ATTR}
+            stored[_VERSION_ATTR] = (if_version + 1) if if_version is not None else int(time.time() * 1000)
+            body = json.dumps(stored, separators=(",", ":"), ensure_ascii=False)
+            expires = self._expires_of(stored)
             con.execute(
                 "INSERT INTO items (pk, sk, body, expires_at) VALUES (?,?,?,?) "
                 "ON CONFLICT(pk, sk) DO UPDATE SET body=excluded.body, expires_at=excluded.expires_at",
@@ -134,32 +140,20 @@ class SQLiteDriver:
         pk: str,
         *,
         sk_prefix: str | None,
-        index: str | None,
         filters: dict[str, Any] | None,
         consistent: bool,
         limit: int | None,
     ) -> list[dict]:
         now = time.time()
-        where = ["(expires_at IS NULL OR expires_at >= ?)"]
-        params: list[Any] = [now]
-
-        if index is not None:
-            if index not in self._gsi:
-                raise StateValidationError(
-                    f"unknown index '{index}' (declared: {sorted(self._gsi)})"
-                )
-            gsi = self._gsi[index]
-            where.append("json_extract(body, '$.' || ?) = ?")
-            params += [gsi.pk.name, pk]
-            if sk_prefix is not None and gsi.sk is not None:
-                where.append("json_extract(body, '$.' || ?) LIKE ? || '%'")
-                params += [gsi.sk.name, sk_prefix]
-        else:
-            where.append("pk = ?")
-            params.append(pk)
-            if sk_prefix is not None:
-                where.append("sk LIKE ? || '%'")
-                params.append(sk_prefix)
+        where = ["(expires_at IS NULL OR expires_at >= ?)", "pk = ?"]
+        params: list[Any] = [now, pk]
+        if sk_prefix is not None:
+            # Literal prefix match (NOT `LIKE`): '%' and '_' in the prefix are
+            # LIKE wildcards — an underscore in a collection name like
+            # "user_settings#" would over-match — while DynamoDB begins_with is
+            # literal. substr keeps local and cloud identical.
+            where.append("substr(sk, 1, length(?)) = ?")
+            params += [sk_prefix, sk_prefix]
 
         if filters:
             for k, v in filters.items():
@@ -174,6 +168,59 @@ class SQLiteDriver:
         with self._connect() as con:
             rows = con.execute(sql, params).fetchall()
         return [json.loads(r["body"]) for r in rows]
+
+    def _rmw(self, pk, sk, mutate):
+        """Read-modify-write one item atomically; `mutate(item)->item` runs inside the txn.
+
+        Partial mutation: unlike put, this does NOT run validate_item and does
+        NOT synthesise the logical pk/sk attributes — mirroring the schema-agnostic
+        broker (plan #2), where increment/update on an absent item create a minimal
+        item (mutated field + _v) without the logical key attributes.
+        """
+        skv = self._sk_value(sk)
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT body FROM items WHERE pk=? AND sk=?", (pk, skv)).fetchone()
+            item = json.loads(row["body"]) if row else {}
+            item = mutate(item)
+            item[_VERSION_ATTR] = item.get(_VERSION_ATTR, 0) + 1
+            body = json.dumps(item, separators=(",", ":"), ensure_ascii=False)
+            con.execute(
+                "INSERT INTO items (pk, sk, body, expires_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(pk, sk) DO UPDATE SET body=excluded.body, expires_at=excluded.expires_at",
+                (pk, skv, body, self._expires_of(item)),
+            )
+            con.commit()
+            return item
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
+    def increment(self, pk: str, sk: str | None, *, field: str, by: int | float) -> int | float:
+        validate_key(pk, sk, self.schema)
+
+        def mut(item):
+            item[field] = item.get(field, 0) + by
+            return item
+
+        return self._rmw(pk, sk, mut)[field]
+
+    def update(self, pk, sk, *, set_fields, add_fields, if_version):
+        validate_key(pk, sk, self.schema)
+
+        def mut(item):
+            if if_version is not None and item.get(_VERSION_ATTR, 0) != if_version:
+                raise ConditionalCheckFailed(f"version mismatch on {pk}/{sk}: expected {if_version}")
+            for k, v in (set_fields or {}).items():
+                item[k] = v
+            for k, v in (add_fields or {}).items():
+                item[k] = item.get(k, 0) + v
+            return item
+
+        return self._rmw(pk, sk, mut)
 
     def sweep_expired(self) -> int:
         """Lazy physical cleanup of expired items (not called on the hot path)."""
