@@ -7,6 +7,7 @@ from anton_state.errors import (
     ConditionalCheckFailed,
     StateError,
     StateThrottled,
+    StateUnavailable,
     StateValidationError,
 )
 from anton_state.factory import from_backend_state, open_store

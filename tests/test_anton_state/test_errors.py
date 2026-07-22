@@ -1,3 +1,6 @@
+import pytest
+
+from anton_state import StateUnavailable  # exported from the package
 from anton_state.errors import (
     ConditionalCheckFailed,
     StateError,
@@ -7,8 +10,13 @@ from anton_state.errors import (
 
 
 def test_hierarchy():
-    for cls in (StateValidationError, ConditionalCheckFailed, StateThrottled):
+    for cls in (StateValidationError, ConditionalCheckFailed, StateThrottled, StateUnavailable):
         assert issubclass(cls, StateError)
+
+
+def test_state_unavailable_raises_as_state_error():
+    with pytest.raises(StateError):
+        raise StateUnavailable("broker down")
 
 
 def test_can_raise_and_message():
