@@ -12,6 +12,10 @@ from .schema import StateSchema
 
 MAX_ITEM_BYTES = 400 * 1024
 
+# _pk/_sk/_ttl are physical control attributes added by the broker on the shared
+# table; only _v (version) and _key (Collection) are allowed reserved names.
+_RESERVED_UNDERSCORE = {"_v", "_key"}
+
 
 def _check_value(value) -> None:
     if isinstance(value, bool) or isinstance(value, (int, float, str)) or value is None:
@@ -52,6 +56,12 @@ def validate_item(item: dict, schema: StateSchema) -> None:
     for key_name in schema.key_attrs():
         if key_name in item and isinstance(item[key_name], str) and item[key_name] == "":
             raise StateValidationError(f"key attribute '{key_name}' must not be empty")
+
+    # Forbid user attrs with a reserved "_" prefix (collide with the broker's
+    # physical _pk/_sk/_ttl on the shared table). _v and _key are allowed.
+    for name in item:
+        if name.startswith("_") and name not in _RESERVED_UNDERSCORE:
+            raise StateValidationError(f"attribute '{name}' uses a reserved '_' prefix")
 
     for value in item.values():
         _check_value(value)

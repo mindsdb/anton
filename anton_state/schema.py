@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # v1: string keys only. Numeric/binary keys would require support across the
 # whole chain (pk: str, validation, begins_with) — deferred.
@@ -34,6 +34,15 @@ class StateSchema(BaseModel):
     sk: Attr | None = None
     gsis: list[Index] = []
     ttl_attribute: str | None = None
+
+    @field_validator("gsis")
+    @classmethod
+    def _no_gsis_in_v1(cls, v):
+        # v1 on the shared table: secondary indexes are not supported (they would
+        # require a generic overloaded-GSI pool in the broker). Deferred.
+        if v:
+            raise ValueError("secondary indexes (gsis) are not supported in v1")
+        return v
 
     def key_attrs(self) -> set[str]:
         names: set[str] = {self.pk.name}

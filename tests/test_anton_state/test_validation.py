@@ -40,3 +40,13 @@ def test_ttl_must_be_number_epoch():
 def test_validate_key_empty_rejected():
     with pytest.raises(StateValidationError):
         validate_key("", None, M)
+
+
+def test_underscore_prefixed_user_attr_rejected():
+    with pytest.raises(StateValidationError):
+        validate_item({"pk": "p", "sk": "s", "_ttl": 1}, M)
+
+
+def test_reserved_underscore_attrs_allowed():
+    # _v (version) and _key (Collection) are the only allowed "_" names.
+    validate_item({"pk": "p", "sk": "s", "_v": 3, "_key": "k", "n": 1}, M)

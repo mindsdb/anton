@@ -15,10 +15,21 @@ def test_key_attrs_collects_all_keys():
     m = StateSchema(
         pk=Attr(name="pk"),
         sk=Attr(name="sk"),
-        gsis=[Index(name="by_user", pk=Attr(name="user_id"), sk=Attr(name="created_at"))],
         ttl_attribute="expires_at",
     )
-    assert m.key_attrs() == {"pk", "sk", "user_id", "created_at"}
+    assert m.key_attrs() == {"pk", "sk"}
+
+
+def test_non_empty_gsis_rejected():
+    # v1 shared table: secondary indexes are not supported.
+    with pytest.raises(ValueError):
+        StateSchema(pk=Attr(name="pk"), sk=Attr(name="sk"),
+                    gsis=[Index(name="byUser", pk=Attr(name="user"))])
+
+
+def test_empty_gsis_ok():
+    s = StateSchema(pk=Attr(name="pk"), sk=Attr(name="sk"))
+    assert s.gsis == []
 
 
 def test_non_string_key_type_rejected():
