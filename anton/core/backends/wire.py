@@ -22,17 +22,22 @@ def heal_surrogate_source(code: str) -> str:
     makes ``compile()`` lenient, so we must clean the source ourselves.
 
     Strategy: re-encode via ``surrogateescape`` to recover the original bytes,
-    then decode as UTF-8. When the surrogates are the byte-escaped halves of a
-    real multibyte character (the common path case) this reassembles it exactly
-    — so the cell not only compiles but references the *correct* path. A
-    genuinely lone surrogate (not a valid byte sequence, or outside the
-    escapable range) falls back to the replacement char so ``compile()`` at
-    least succeeds instead of crashing. A no-op for clean source.
+    then decode as UTF-8 with ``errors="replace"``. When the surrogates are the
+    byte-escaped halves of a real multibyte character (the common path case)
+    this reassembles it exactly — so the cell not only compiles but references
+    the *correct* path. ``errors="replace"`` (rather than a strict decode with a
+    full-scrub fallback) matters for a **mixed** cell: a recoverable path and an
+    unrelated lone byte in the same source are handled in one pass, so the
+    recoverable character isn't lost just because a stray byte sits next to it;
+    the stray byte becomes U+FFFD (a genuinely-lone byte can't be recovered, but
+    ``compile()`` succeeds instead of crashing). A no-op for clean source.
     """
     if not any("\ud800" <= ch <= "\udfff" for ch in code):
         return code
     try:
-        return code.encode("utf-8", "surrogateescape").decode("utf-8")
-    except UnicodeError:
-        # High/unpaired surrogates outside the surrogateescape range: scrub.
+        return code.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    except UnicodeEncodeError:
+        # High/unpaired surrogates outside surrogateescape's DC80..DCFF range —
+        # the escape codec can't map them at all; surrogatepass can, and the
+        # replace-decode then scrubs them. This branch can't raise.
         return code.encode("utf-8", "surrogatepass").decode("utf-8", "replace")

@@ -202,6 +202,17 @@ def test_heal_recovers_escaped_emoji():
     compile(healed, "<scratchpad>", "exec")
 
 
+def test_heal_preserves_recoverable_char_in_mixed_cell():
+    # A recoverable byte-escaped path AND an unrelated lone byte in the same
+    # cell: the recoverable "Área" must survive (only the stray byte is scrubbed)
+    # — a strict-decode-then-full-scrub would mojibake the whole thing.
+    mixed = 'p = r"C:\\\udcc3\udc81rea"  # noqa\nq = "\udc81"\n'
+    healed = wire.heal_surrogate_source(mixed)
+    assert "Área" in healed
+    assert not any("\ud800" <= ch <= "\udfff" for ch in healed)  # no residual
+    compile(healed, "<scratchpad>", "exec")
+
+
 def test_heal_scrubs_truly_lone_surrogate_so_compile_succeeds():
     # A genuinely lone surrogate (not a valid byte sequence): can't be recovered,
     # but must not crash compile() — replaced rather than raised.
