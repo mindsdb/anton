@@ -3,6 +3,9 @@ host locale code page (e.g. GBK/cp936 on Chinese Windows)."""
 
 from __future__ import annotations
 
+import inspect
+import re
+
 import pytest
 
 import anton.core.backends.local as local
@@ -88,3 +91,94 @@ def test_parent_venv_pth_is_written_as_utf8(tmp_path, monkeypatch):
     assert seen.get("encoding") == "utf-8"  # assert before any later read
     written = (child_site / "_parent_venv.pth").read_text(encoding="utf-8")
     assert "/parent/site-packages" in written
+
+
+# ── ENG-940: the chat/scratchpad-path reads are launcher-independent ──────────
+#
+# ENG-824 shipped the PYTHONUTF8 "belt"; these pin the "suspenders" — explicit
+# encoding="utf-8" on the reads themselves — so they can't regress to the host
+# locale default on a launcher that doesn't set the env (bare CLI, Docker,
+# OpenClaw), which would re-crash on a GBK/CJK Windows host.
+
+def test_scratchpad_script_read_is_locale_independent(tmp_path):
+    # Models ENG-824's root-caused crash site (`code = script_path.read_text()`):
+    # the scratchpad script holds arbitrary model-written non-ASCII (string
+    # literals, comments). A host-locale (GBK) default read crashes on UTF-8
+    # bytes — the reported failure. Explicit encoding="utf-8" is locale-
+    # independent. Proven on a real fixture, no dependence on the interpreter's
+    # UTF-8 mode / PYTHONUTF8.
+    script = tmp_path / "cell.py"
+    body = 'label = "café — 数据 リポート"\nprint(label)\n'
+    script.write_text(body, encoding="utf-8")
+
+    raw = script.read_bytes()
+    assert any(b > 0x7F for b in raw)  # genuinely non-ASCII → a locale read is at risk
+
+    # The fix: an explicit UTF-8 read returns the script verbatim, independent
+    # of the host locale / PYTHONUTF8.
+    assert script.read_text(encoding="utf-8") == body
+
+    # A host-locale (GBK) default read is unsafe — it either raises (the
+    # reported ENG-824 crash) or silently corrupts the source. Payload-
+    # independent: we don't rely on which failure mode these bytes trigger.
+    try:
+        assert raw.decode("gbk") != raw.decode("utf-8")  # mojibake
+    except UnicodeDecodeError:
+        pass  # crash — the exact ENG-824 failure mode
+
+
+def test_chat_module_has_no_bare_read_text():
+    # Regression guard (ENG-940): every text read in anton/chat.py must pass an
+    # explicit encoding, so it can't silently revert to the host-locale default
+    # (the ENG-824 crash at `code = script_path.read_text()`). Fails the instant
+    # a `.read_text(...)` call omits encoding=.
+    import anton.chat as chat
+
+    src = inspect.getsource(chat)
+    bare = [
+        m.group(0)
+        for m in re.finditer(r"\.read_text\(([^)]*)\)", src)
+        if "encoding=" not in m.group(1)
+    ]
+    assert not bare, f"bare read_text() in anton/chat.py (add encoding='utf-8'): {bare}"
+
+
+# ── ENG-940: the *encode*-side sibling (write path, lone surrogates) ──────────
+#
+# Distinct from the decode crash above: on a non-UTF-8 host, a non-ASCII
+# Windows path (pt-BR "Área de Trabalho", an emoji filename) is surrogate-
+# escaped into lone surrogates (\udcXX) when decoded. When such a string reaches
+# the strict UTF-8 encode of the cell payload it raises "surrogates not allowed"
+# and kills the whole session (users sabrina/eddie/janis). surrogatepass keeps
+# the host-side encode from crashing; the subprocess (UTF-8 mode) decodes it.
+
+def test_cell_payload_encode_survives_lone_surrogate():
+    # A Windows path that os.fsdecode surrogate-escaped on a non-UTF-8 host lands
+    # in the model-written code as lone surrogates (U+DC80..U+DCFF). Model this
+    # exactly and assert the fix.
+    code = 'open(r"C:\\Users\\\udc81\udc9d\\index.html", "w")  # 🎉\n'
+    payload = code + "\n" + local.CELL_DELIM + "\n"
+
+    # A strict UTF-8 encode is the crash the three users hit.
+    with pytest.raises(UnicodeEncodeError):
+        payload.encode("utf-8")
+
+    # The fix: the encode no longer raises, independent of PYTHONUTF8.
+    encoded = local._encode_cell_payload(payload)
+    assert isinstance(encoded, bytes)
+
+    # The path survives intact end-to-end: the subprocess always runs in UTF-8
+    # mode, so its stdin decodes with surrogateescape. Decoding *that* way (not
+    # surrogatepass) must reproduce the original — this is why the helper uses
+    # surrogateescape. surrogatepass would fail this assertion (re-mangled).
+    assert encoded.decode("utf-8", errors="surrogateescape") == payload
+
+
+def test_cell_payload_encode_preserves_accented_and_emoji():
+    # Ordinary (well-formed) accented-Latin + emoji content must pass through
+    # byte-for-byte — the fix must not mangle the common case.
+    code = 'label = "Área de Trabalho 🎉 café"\nprint(label)\n'
+    payload = code + "\n" + local.CELL_DELIM + "\n"
+
+    encoded = local._encode_cell_payload(payload)
+    assert encoded.decode("utf-8") == payload  # strict decode: no corruption

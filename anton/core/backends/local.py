@@ -34,6 +34,28 @@ def _read_boot_script() -> str:
     return _BOOT_SCRIPT_PATH.read_text(encoding="utf-8")
 
 
+def _encode_cell_payload(payload: str) -> bytes:
+    """Encode the cell payload sent to the scratchpad subprocess.
+
+    ``errors="surrogateescape"`` rather than a strict UTF-8 encode: model-written
+    cell code can embed a filesystem path that ``os.fsdecode`` surrogate-escaped
+    when it couldn't decode the path bytes on a non-UTF-8 host (e.g. a pt-BR
+    ``Área de Trabalho`` or an emoji path on Windows → lone surrogates in
+    U+DC80..U+DCFF). A strict encode raises ``UnicodeEncodeError: surrogates not
+    allowed`` here and takes down the whole session before the code reaches the
+    subprocess — the encode-side sibling of ENG-824's decode crash (ENG-940).
+
+    ``surrogateescape`` (not ``surrogatepass``) is deliberate: it's the inverse
+    of the ``os.fsdecode`` that created these surrogates, so it restores the
+    original path bytes, and it matches how the subprocess — which always runs
+    in UTF-8 mode (``_utf8_env``) and so decodes stdin with ``surrogateescape``
+    — reads them back. ``surrogatepass`` would emit the 3-byte CESU form that the
+    subprocess's ``surrogateescape`` decode then re-mangles, so the path would
+    not survive intact.
+    """
+    return payload.encode("utf-8", errors="surrogateescape")
+
+
 def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     """A copy of ``base`` with Python UTF-8 mode forced for the scratchpad
     subprocess.
@@ -317,7 +339,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         try:
             req_path = os.path.join(self._venv_dir, "requirements.txt")
-            with open(req_path, "w") as f:
+            with open(req_path, "w", encoding="utf-8") as f:
                 for pkg in sorted(self._installed_packages):
                     f.write(pkg + "\n")
         except OSError:
@@ -328,7 +350,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         req_path = os.path.join(self._venv_dir, "requirements.txt")
         try:
-            with open(req_path) as f:
+            with open(req_path, encoding="utf-8") as f:
                 for line in f:
                     pkg = line.strip()
                     if pkg:
@@ -341,7 +363,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         try:
             ver_path = os.path.join(self._venv_dir, ".python_version")
-            with open(ver_path, "w") as f:
+            with open(ver_path, "w", encoding="utf-8") as f:
                 f.write(f"{sys.version_info.major}.{sys.version_info.minor}\n")
         except OSError:
             pass
@@ -351,7 +373,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return False
         ver_path = os.path.join(self._venv_dir, ".python_version")
         try:
-            with open(ver_path) as f:
+            with open(ver_path, encoding="utf-8") as f:
                 saved = f.read().strip()
             expected = f"{sys.version_info.major}.{sys.version_info.minor}"
             return saved == expected
@@ -530,7 +552,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
 
         payload = code + "\n" + CELL_DELIM + "\n"
-        self._proc.stdin.write(payload.encode("utf-8"))  # type: ignore[union-attr]
+        self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
         total_timeout, inactivity_timeout = compute_timeouts(estimated_seconds)
