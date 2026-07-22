@@ -1,8 +1,7 @@
-import pytest
 from anton_state.schema import Attr, StateSchema
 from anton_state.factory import open_store
 from anton_state.sqlite_driver import SQLiteDriver
-from anton_state.dynamo_driver import DynamoDBDriver
+from anton_state.http_driver import HTTPDriver
 
 M = StateSchema(pk=Attr(name="pk"), sk=Attr(name="sk"))
 
@@ -29,22 +28,6 @@ def test_schema_loaded_from_manifest_file_when_omitted(tmp_path, monkeypatch):
     assert store.schema == M
 
 
-def test_state_dict_selects_dynamo():
-    from moto import mock_aws
-    import boto3
-    state = {
-        "table": "t1", "region": "us-east-1",
-        "credentials": {"key": "k", "secret": "s", "token": "t"},
-    }
-    with mock_aws():
-        boto3.client("dynamodb", region_name="us-east-1").create_table(
-            TableName="t1",
-            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
-            AttributeDefinitions=[
-                {"AttributeName": "pk", "AttributeType": "S"},
-                {"AttributeName": "sk", "AttributeType": "S"},
-            ],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        store = open_store(M, state=state)
-        assert isinstance(store._driver, DynamoDBDriver)
+def test_cloud_state_selects_http_driver():
+    store = open_store(M, state={"url": "https://b/_state", "token": "t.sig"})
+    assert isinstance(store._driver, HTTPDriver)

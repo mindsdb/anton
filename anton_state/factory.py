@@ -1,8 +1,8 @@
 """Driver selection and schema loading.
 
 Schema comes from the manifest file (single source, the same one the publish
-pipeline reads); the driver is chosen by backend.STATE (dict → DynamoDB,
-otherwise the local SQLite driver).
+pipeline reads); the driver is chosen by backend.STATE ({url, token} dict → the
+HTTP broker driver, otherwise the local SQLite driver).
 """
 from __future__ import annotations
 
@@ -34,15 +34,9 @@ def open_store(
 ) -> Store:
     schema = _resolve_schema(schema, manifest_path)
     if state:
-        from .dynamo_driver import DynamoDBDriver  # lazy: boto3 only needed in the cloud
+        from .http_driver import HTTPDriver  # cloud: RPC to the trusted state broker
 
-        driver = DynamoDBDriver(
-            table=state["table"],
-            region=state["region"],
-            credentials=state["credentials"],
-            schema=schema,
-        )
-        return Store(driver, schema)
+        return Store(HTTPDriver(url=state["url"], token=state["token"], schema=schema), schema)
     path = local_path or os.environ.get(_ENV_PATH) or _DEFAULT_LOCAL
     return Store(SQLiteDriver(path, schema), schema)
 
