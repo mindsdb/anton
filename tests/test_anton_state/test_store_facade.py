@@ -17,9 +17,17 @@ class FakeDriver:
     def delete(self, pk, sk, *, if_version):
         self.calls.append(("delete", pk, sk, if_version))
 
-    def query(self, pk, *, sk_prefix, index, filters, consistent, limit):
-        self.calls.append(("query", pk, sk_prefix, index, filters, consistent, limit))
+    def query(self, pk, *, sk_prefix, filters, consistent, limit):
+        self.calls.append(("query", pk, sk_prefix, filters, consistent, limit))
         return [{"pk": pk}]
+
+    def increment(self, pk, sk, *, field, by):
+        self.calls.append(("increment", pk, sk, field, by))
+        return 7
+
+    def update(self, pk, sk, *, set_fields, add_fields, if_version):
+        self.calls.append(("update", pk, sk, set_fields, add_fields, if_version))
+        return {"pk": pk}
 
 
 M = StateSchema(pk=Attr(name="pk"), sk=Attr(name="sk"))
@@ -42,8 +50,29 @@ async def test_query_defaults():
 
 
 async def test_put_rejects_mutually_exclusive_conditions():
-    import pytest
     from anton_state.errors import StateValidationError
     store = Store(FakeDriver(), M)
     with pytest.raises(StateValidationError):
         await store.put({"pk": "u1", "sk": "s"}, if_not_exists=True, if_version=1)
+
+
+async def test_query_has_no_index_kwarg():
+    store = Store(FakeDriver(), M)
+    with pytest.raises(TypeError):
+        await store.query("u1", index="byUser")  # index removed in v1
+
+
+async def test_increment_delegates_and_returns():
+    d = FakeDriver()
+    store = Store(d, M)
+    v = await store.increment("c", "global", field="n", by=2)
+    assert v == 7
+    assert d.calls[-1] == ("increment", "c", "global", "n", 2)
+
+
+async def test_update_delegates():
+    d = FakeDriver()
+    store = Store(d, M)
+    item = await store.update("c", "g", set_fields={"a": 1}, add_fields={"n": 1})
+    assert item == {"pk": "c"}
+    assert d.calls[-1] == ("update", "c", "g", {"a": 1}, {"n": 1}, None)
