@@ -34,6 +34,22 @@ def _read_boot_script() -> str:
     return _BOOT_SCRIPT_PATH.read_text(encoding="utf-8")
 
 
+def _encode_cell_payload(payload: str) -> bytes:
+    """Encode the cell payload sent to the scratchpad subprocess.
+
+    ``errors="surrogatepass"`` rather than a strict UTF-8 encode: model-written
+    cell code can embed a filesystem path that was surrogate-escaped when
+    decoded on a non-UTF-8 host (e.g. a pt-BR ``Área de Trabalho`` or an emoji
+    path on Windows → lone surrogates ``\\udcXX``). A strict encode raises
+    ``UnicodeEncodeError: surrogates not allowed`` here and takes down the whole
+    session before the code ever reaches the subprocess — the encode-side
+    sibling of ENG-824's decode crash (ENG-940). The subprocess runs in UTF-8
+    mode, so it decodes the payload fine; surrogatepass just keeps this host-side
+    encode from crashing when the host itself isn't in UTF-8 mode.
+    """
+    return payload.encode("utf-8", errors="surrogatepass")
+
+
 def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     """A copy of ``base`` with Python UTF-8 mode forced for the scratchpad
     subprocess.
@@ -530,7 +546,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
 
         payload = code + "\n" + CELL_DELIM + "\n"
-        self._proc.stdin.write(payload.encode("utf-8"))  # type: ignore[union-attr]
+        self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
         total_timeout, inactivity_timeout = compute_timeouts(estimated_seconds)

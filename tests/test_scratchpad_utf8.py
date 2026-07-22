@@ -141,3 +141,39 @@ def test_chat_module_has_no_bare_read_text():
         if "encoding=" not in m.group(1)
     ]
     assert not bare, f"bare read_text() in anton/chat.py (add encoding='utf-8'): {bare}"
+
+
+# ── ENG-940: the *encode*-side sibling (write path, lone surrogates) ──────────
+#
+# Distinct from the decode crash above: on a non-UTF-8 host, a non-ASCII
+# Windows path (pt-BR "Área de Trabalho", an emoji filename) is surrogate-
+# escaped into lone surrogates (\udcXX) when decoded. When such a string reaches
+# the strict UTF-8 encode of the cell payload it raises "surrogates not allowed"
+# and kills the whole session (users sabrina/eddie/janis). surrogatepass keeps
+# the host-side encode from crashing; the subprocess (UTF-8 mode) decodes it.
+
+def test_cell_payload_encode_survives_lone_surrogate():
+    # A path decoded via surrogateescape on a non-UTF-8 host lands in the model-
+    # written code as lone surrogates. Model this exactly and assert the fix.
+    code = 'open(r"C:\\Users\\\udc81\udc9d\\index.html", "w")  # 🎉\n'
+    payload = code + "\n" + local.CELL_DELIM + "\n"
+
+    # A strict UTF-8 encode is the crash the three users hit.
+    with pytest.raises(UnicodeEncodeError):
+        payload.encode("utf-8")
+
+    # The fix: surrogatepass encodes without raising, independent of PYTHONUTF8.
+    encoded = local._encode_cell_payload(payload)
+    assert isinstance(encoded, bytes)
+    # Round-trips back to the same string (subprocess reconstructs the path).
+    assert encoded.decode("utf-8", errors="surrogatepass") == payload
+
+
+def test_cell_payload_encode_preserves_accented_and_emoji():
+    # Ordinary (well-formed) accented-Latin + emoji content must pass through
+    # byte-for-byte — the fix must not mangle the common case.
+    code = 'label = "Área de Trabalho 🎉 café"\nprint(label)\n'
+    payload = code + "\n" + local.CELL_DELIM + "\n"
+
+    encoded = local._encode_cell_payload(payload)
+    assert encoded.decode("utf-8") == payload  # strict decode: no corruption
