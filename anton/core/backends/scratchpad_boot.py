@@ -10,6 +10,7 @@ from anton.core.backends.wire import (
     CELL_DELIM,
     RESULT_START,
     RESULT_END,
+    heal_surrogate_source,
 )
 
 
@@ -718,6 +719,10 @@ while True:
         break
 
     code = "".join(lines)
+    # Heal lone surrogates before compile() — a non-ASCII Windows path byte can
+    # arrive surrogate-escaped over stdin and would crash compile() with
+    # "surrogates not allowed" (ENG-981).
+    code = heal_surrogate_source(code)
     if not code.strip():
         result = {"stdout": "", "stderr": "", "logs": "", "error": None}
         _real_stdout.write(RESULT_START + "\n")
