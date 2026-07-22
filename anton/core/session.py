@@ -21,6 +21,7 @@ from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
+from anton.memory.history_store import is_user_turn
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -327,7 +328,7 @@ class ChatSession:
         )
         self._pending_memory_confirmations: list = []
         self._turn_count = (
-            sum(1 for m in self._history if m.get("role") == "user")
+            sum(1 for m in self._history if is_user_turn(m))
             if config.initial_history
             else 0
         )
