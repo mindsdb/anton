@@ -1027,7 +1027,7 @@ class ChatSession:
             # 3b-full: a structured, in-place-updated STATE RECORD rather than a
             # freeform blob — so "Remaining" work survives compaction instead of
             # being flattened into prose.
-            summary_response = await self._llm.code(
+            summary_response = await self._llm.summarize(
                 system=(
                     "You compact an agent's earlier conversation into a terse, factual "
                     "STATE RECORD (not prose). Output only these sections, omitting any "
