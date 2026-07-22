@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 import anton.core.backends.local as local
+import anton.core.backends.wire as wire
 
 
 def test_utf8_env_forces_utf8_mode():
@@ -88,3 +89,59 @@ def test_parent_venv_pth_is_written_as_utf8(tmp_path, monkeypatch):
     assert seen.get("encoding") == "utf-8"  # assert before any later read
     written = (child_site / "_parent_venv.pth").read_text(encoding="utf-8")
     assert "/parent/site-packages" in written
+
+
+# ── ENG-981: heal lone surrogates before compile() (folded into the belt hotfix)
+#
+# The scratchpad child crashes at compile() on a lone surrogate in the cell
+# source — a non-ASCII Windows path byte (Área de Trabalho, an emoji) surrogate-
+# escaped upstream and passed through the belt's lenient surrogateescape stdin.
+# compile() is always strict, so heal_surrogate_source() cleans the source first.
+
+def test_heal_recovers_byte_escaped_multibyte_path():
+    mangled = 'open(r"C:\\Users\\\udcc3\udc81rea\\f.html")\n'   # "Área" split into surrogates
+    healed = wire.heal_surrogate_source(mangled)
+    assert healed == 'open(r"C:\\Users\\Área\\f.html")\n'
+    compile(healed, "<scratchpad>", "exec")
+
+
+def test_heal_recovers_escaped_emoji():
+    mangled = 'x = "\udcf0\udc9f\udc8e\udc89"\n'                 # 🎉 = f0 9f 8e 89, escaped
+    healed = wire.heal_surrogate_source(mangled)
+    assert healed == 'x = "🎉"\n'
+    compile(healed, "<scratchpad>", "exec")
+
+
+def test_heal_preserves_recoverable_char_in_mixed_cell():
+    mixed = 'p = r"C:\\\udcc3\udc81rea"  # noqa\nq = "\udc81"\n'
+    healed = wire.heal_surrogate_source(mixed)
+    assert "Área" in healed
+    assert not any("\ud800" <= ch <= "\udfff" for ch in healed)
+    compile(healed, "<scratchpad>", "exec")
+
+
+def test_heal_preserves_recoverable_char_beside_unmappable_surrogate():
+    # A recoverable byte-escaped "Á" and a high/unpaired surrogate (\ud800,
+    # outside DC80..DCFF) in the same cell: the unmappable one is scrubbed WITHOUT
+    # dragging "Á" into a full-cell scrub.
+    mixed = 'p = r"C:\\\udcc3\udc81rea"\nq = "\ud800"\n'
+    healed = wire.heal_surrogate_source(mixed)
+    assert "Área" in healed
+    assert not any("\ud800" <= ch <= "\udfff" for ch in healed)
+    compile(healed, "<scratchpad>", "exec")
+
+
+def test_heal_scrubs_truly_lone_surrogate_so_compile_succeeds():
+    healed = wire.heal_surrogate_source('x = "a\udc81b"\n')
+    assert "\udc81" not in healed
+    compile(healed, "<scratchpad>", "exec")
+
+
+def test_heal_is_noop_on_clean_source():
+    clean = 'print("Área de Trabalho 🎉")\n'
+    assert wire.heal_surrogate_source(clean) == clean
+
+
+def test_bare_compile_on_lone_surrogate_still_raises():
+    with pytest.raises(UnicodeEncodeError):
+        compile('x = "a\udc81b"\n', "<scratchpad>", "exec")
