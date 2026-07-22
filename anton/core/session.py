@@ -1561,7 +1561,7 @@ class ChatSession:
         except Exception:
             summaries = []
         try:
-            return await gate_turn(
+            decision = await gate_turn(
                 self._llm,
                 history=self._history,
                 skill_summaries=summaries,
@@ -1573,6 +1573,18 @@ class ChatSession:
                 exc,
             )
             return None
+        # The gate hits every text turn, so its usage must be visible in
+        # telemetry regardless of outcome — StreamComplete only surfaces it
+        # on the direct-answer path, leaving all delegated turns unaccounted.
+        usage = getattr(decision.response, "usage", None)
+        if usage is not None:
+            logger.info(
+                "Router gate: action=%s in_tokens=%s out_tokens=%s",
+                decision.action,
+                getattr(usage, "input_tokens", "?"),
+                getattr(usage, "output_tokens", "?"),
+            )
+        return decision
 
     def _inject_recalled_skills(self, labels: list[str]) -> None:
         """Preload thalamus-named skills as a synthetic recall_skill exchange.
@@ -1591,7 +1603,10 @@ class ChatSession:
         store = self._skill_store
         if store is None:
             return
-        from anton.core.tools.recall_skill import _format_skill_response
+        from anton.core.tools.recall_skill import (
+            _already_in_history,
+            _format_skill_response,
+        )
 
         self._thalamus_recall_counter += 1
         tool_uses: list[dict] = []
@@ -1609,6 +1624,11 @@ class ChatSession:
             except Exception:
                 skill = None
             if skill is None:
+                continue
+            # Skip skills whose full body is already in context — mirrors
+            # handle_recall_skill's stub path so a preload can't duplicate a
+            # procedure the planning model already has (wasted tokens).
+            if _already_in_history(self, skill.label):
                 continue
             content = _format_skill_response(skill)
             try:

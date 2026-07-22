@@ -245,21 +245,36 @@ class TestSessionThalamus:
     async def test_preload_ids_unique_across_non_streaming_turns(self):
         # turn() (unlike turn_stream()) never increments _turn_count, so an
         # id derived from it would repeat on every call — regression guard
-        # for that.
+        # for that. Two *different* skills across the two turns, since the
+        # same skill would be deduped on the second preload.
+        skills = {
+            "csv-summary": SimpleNamespace(
+                label="csv-summary", name="CSV Summary",
+                description="", declarative_md="1. load the CSV",
+            ),
+            "json-summary": SimpleNamespace(
+                label="json-summary", name="JSON Summary",
+                description="", declarative_md="1. load the JSON",
+            ),
+        }
+        store = MagicMock()
+        store.load.side_effect = lambda label: skills.get(label)
+
         llm = make_mock_llm()
         llm.gate = AsyncMock(
-            return_value=_response(
-                tool_calls=[_delegate_call(skills=["csv-summary"])]
-            )
+            side_effect=[
+                _response(tool_calls=[_delegate_call(skills=["csv-summary"])]),
+                _response(tool_calls=[_delegate_call(skills=["json-summary"])]),
+            ]
         )
         llm.plan = AsyncMock(return_value=_response("ok"))
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
-        session._skill_store = _mock_skill_store()
+        session._skill_store = store
 
         await session.turn("summarize data.csv")
         first_id = session.history[1]["content"][0]["id"]
 
-        await session.turn("summarize data.csv again")
+        await session.turn("now summarize data.json")
         second_id = session.history[5]["content"][0]["id"]
 
         assert first_id != second_id
@@ -278,6 +293,20 @@ class TestSessionThalamus:
         assert any(
             isinstance(e, StreamTextDelta) and e.text == "Working on it." for e in events
         )
+
+    async def test_preload_skips_skill_already_in_history(self):
+        # A skill whose full body is already in context must not be
+        # re-injected — mirrors handle_recall_skill's stub path, so a
+        # later delegate naming the same skill can't duplicate the
+        # procedure (wasted tokens).
+        llm = make_mock_llm()
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session._skill_store = _mock_skill_store()
+
+        session._inject_recalled_skills(["csv-summary"])
+        assert len(session.history) == 2  # tool_use + tool_result appended
+        session._inject_recalled_skills(["csv-summary"])
+        assert len(session.history) == 2  # second preload is a no-op
 
     async def test_thalamus_failure_falls_back_to_planning(self):
         llm = make_mock_llm()
