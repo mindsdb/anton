@@ -144,22 +144,22 @@ def test_chat_module_has_no_bare_read_text():
     assert not bare, f"bare read_text() in anton/chat.py (add encoding='utf-8'): {bare}"
 
 
-# ── ENG-940: the *encode*-side sibling (write path, lone surrogates) ──────────
+# ── ENG-940 transport (NOT the fix): parent→child cell-payload encode ─────────
 #
-# Distinct from the decode crash above: on a non-UTF-8 host, a non-ASCII
-# Windows path (pt-BR "Área de Trabalho", an emoji filename) is surrogate-
-# escaped into lone surrogates (\udcXX) when decoded. When such a string reaches
-# the strict UTF-8 encode of the cell payload it raises "surrogates not allowed"
-# and kills the whole session (users sabrina/eddie/janis). surrogatepass keeps
-# the host-side encode from crashing; the subprocess (UTF-8 mode) decodes it.
+# On a non-UTF-8 host a non-ASCII Windows path (pt-BR "Área de Trabalho", an
+# emoji filename) becomes a lone surrogate (\udcXX) in the cell source. This
+# section only pins that _encode_cell_payload uses surrogateescape so the pipe
+# transport is lossless (a surrogatepass encode would re-mangle it). It does NOT
+# fix the crash — the raiser is compile() in the child, healed by
+# heal_surrogate_source (ENG-981), covered in the section below.
 
 def test_cell_payload_encode_is_lossless_over_the_pipe():
-    # NOTE: this pins the *transport* only — that surrogateescape encode (parent)
-    # round-trips through the subprocess's surrogateescape stdin decode. It does
-    # NOT by itself fix the crash: the real raiser is compile() in the child on a
-    # lone surrogate, healed by heal_surrogate_source (ENG-981), tested below.
-    # (The `surrogatepass` alternative would fail this round-trip, re-mangling
-    # the bytes — that's the only claim this test makes.)
+    # NOTE: this pins the *transport* only — that _encode_cell_payload's
+    # surrogateescape encode (parent) round-trips through the subprocess's
+    # surrogateescape stdin decode. It does NOT by itself fix the crash: the real
+    # raiser is compile() in the child on a lone surrogate, healed by
+    # heal_surrogate_source (ENG-981), tested below. (A surrogatepass encode would
+    # fail this round-trip, re-mangling the bytes — that's the only claim here.)
     code = 'open(r"C:\\Users\\\udc81\udc9d\\index.html", "w")  # 🎉\n'
     payload = code + "\n" + local.CELL_DELIM + "\n"
     encoded = local._encode_cell_payload(payload)
@@ -207,6 +207,19 @@ def test_heal_preserves_recoverable_char_in_mixed_cell():
     # cell: the recoverable "Área" must survive (only the stray byte is scrubbed)
     # — a strict-decode-then-full-scrub would mojibake the whole thing.
     mixed = 'p = r"C:\\\udcc3\udc81rea"  # noqa\nq = "\udc81"\n'
+    healed = wire.heal_surrogate_source(mixed)
+    assert "Área" in healed
+    assert not any("\ud800" <= ch <= "\udfff" for ch in healed)  # no residual
+    compile(healed, "<scratchpad>", "exec")
+
+
+def test_heal_preserves_recoverable_char_beside_unmappable_surrogate():
+    # Mixed-range (pnewsam review): a recoverable byte-escaped "Á" and a
+    # high/unpaired surrogate (\ud800, outside DC80..DCFF) in the same cell. The
+    # unmappable one must be scrubbed WITHOUT dragging the recoverable "Á" into a
+    # full-cell scrub — the surrogateescape encode would otherwise raise on
+    # \ud800 and lose everything.
+    mixed = 'p = r"C:\\\udcc3\udc81rea"\nq = "\ud800"\n'
     healed = wire.heal_surrogate_source(mixed)
     assert "Área" in healed
     assert not any("\ud800" <= ch <= "\udfff" for ch in healed)  # no residual
