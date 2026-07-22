@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, List, Literal
 import os
@@ -27,6 +28,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    LLMResponse,
     ModelUnavailableError,
     StreamComplete,
     StreamContextCompacted,
@@ -36,6 +38,11 @@ from anton.core.llm.provider import (
     StreamToolResult,
     TokenLimitExceeded,
     ToolCall,
+)
+from anton.core.llm.thalamus import (
+    ACTION_RESPOND,
+    ThalamicDecision,
+    gate_turn,
 )
 from anton.core.llm.tracing import (
     TraceContext,
@@ -76,6 +83,8 @@ from anton.core.settings import CoreSettings
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
 _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
+
+logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
@@ -282,6 +291,10 @@ class ChatSessionConfig:
     # None → fall back to today.
     started_at: datetime | None = None
     selection_elicitor: SelectionElicitor | None = None
+    # Cheap front-model routing (ENG-648). None (default) defers to the
+    # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
+    # explicit bool to override per session.
+    router_enabled: bool | None = None
 
 
 class ChatSession:
@@ -302,6 +315,20 @@ class ChatSession:
         self._resilience_nudge_at = s.resilience_nudge_at
         self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
+        # Router (ENG-648): explicit host override wins; otherwise the
+        # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
+        # tests pass bare CoreSettings-shaped objects.
+        self._router_enabled = (
+            config.router_enabled
+            if config.router_enabled is not None
+            else bool(getattr(s, "router_enabled", False))
+        )
+        self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
+        # Monotonic counter for thalamus-preloaded tool_use ids. Deliberately
+        # separate from `_turn_count`, which only increments in turn_stream()
+        # — using it here would emit the same id on every call made through
+        # the non-streaming turn() API.
+        self._thalamus_recall_counter = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -935,11 +962,13 @@ class ChatSession:
         self._tracked_backends.clear()
 
     async def _summarize_history(self) -> None:
-        """Compress old conversation turns into a summary using the coding model.
+        """Compress old conversation turns into a summary.
 
         Splits history into old (first 60%) and recent (last 40%), keeping at
-        least 4 recent turns.  The old portion is summarized by the fast coding
-        model and replaced with a single user message.
+        least 4 recent turns. The old portion is summarized by the routing/
+        summarization model (the router role, which falls back to the coding
+        model when no distinct one is configured) and replaced with a single
+        user message.
         """
         if len(self._history) < 6:
             return  # Too short to summarize
@@ -1516,6 +1545,96 @@ class ChatSession:
             # Cerebellum learning is best-effort, so just drop the buffer.
             cb.reset()
 
+    async def _gate_turn(self) -> ThalamicDecision | None:
+        """Run the cheap routing call for the turn just appended to history.
+
+        Returns None — meaning "proceed to the planning model as if no
+        thalamus existed" — on any thalamus failure. Routing must never be
+        able to break a turn; it can only save one.
+        """
+        try:
+            summaries = (
+                self._skill_store.list_summaries()
+                if self._skill_store is not None
+                else []
+            )
+        except Exception:
+            summaries = []
+        try:
+            return await gate_turn(
+                self._llm,
+                history=self._history,
+                skill_summaries=summaries,
+                max_tokens=self._router_max_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Router call failed (%s) — falling through to the planning model.",
+                exc,
+            )
+            return None
+
+    def _inject_recalled_skills(self, labels: list[str]) -> None:
+        """Preload thalamus-named skills as a synthetic recall_skill exchange.
+
+        Appends an assistant `tool_use` + user `tool_result` pair to
+        history, byte-identical in payload to what the planning model
+        would have gotten by calling `recall_skill` itself — but without
+        spending a full-context planning round on the fetch. Labels must
+        match exactly (no fuzzy fallback: a wrong preload is worse than
+        none), unknown labels are dropped silently, and at most 3 skills
+        load per turn. Built-ins and user skills resolve through the same
+        SkillStore that `recall_skill` uses.
+        """
+        if not labels:
+            return
+        store = self._skill_store
+        if store is None:
+            return
+        from anton.core.tools.recall_skill import _format_skill_response
+
+        self._thalamus_recall_counter += 1
+        tool_uses: list[dict] = []
+        results: list[dict] = []
+        seen: set[str] = set()
+        for label in labels:
+            label = (label or "").strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            if len(tool_uses) >= 3:
+                break
+            try:
+                skill = store.load(label)
+            except Exception:
+                skill = None
+            if skill is None:
+                continue
+            content = _format_skill_response(skill)
+            try:
+                store.increment_recommended(skill.label, stage=1)
+            except Exception:
+                pass
+            tu_id = f"thalamus_recall_{self._thalamus_recall_counter}_{len(tool_uses)}"
+            tool_uses.append(
+                {
+                    "type": "tool_use",
+                    "id": tu_id,
+                    "name": "recall_skill",
+                    "input": {"label": skill.label},
+                }
+            )
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tu_id,
+                    "content": content,
+                }
+            )
+        if tool_uses:
+            self._append_history({"role": "assistant", "content": tool_uses})
+            self._append_history({"role": "user", "content": results})
+
     async def turn(self, user_input: str | list[dict]) -> str:
         user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
@@ -1525,6 +1644,26 @@ class ChatSession:
             if isinstance(user_input, str)
             else next((b["text"] for b in user_input if b.get("type") == "text"), "")
         )
+
+        # Cheap front-model routing (ENG-648). Text-only turns first hit
+        # the thalamus model, which either answers trivial/from-context
+        # requests directly (skipping the full prompt + tools + planning
+        # model entirely) or delegates, optionally preloading skills.
+        # Image turns skip the thalamus — attachments imply real work.
+        if self._router_enabled and isinstance(user_input, str):
+            decision = await self._gate_turn()
+            if decision is not None and decision.action == ACTION_RESPOND:
+                self._append_history(
+                    {"role": "assistant", "content": decision.text}
+                )
+                if self._cortex is not None and self._cortex.mode != "off":
+                    self._cortex.maybe_vacuum()
+                self._schedule_cerebellum_flush()
+                self._schedule_acc_flush()
+                return decision.text
+            if decision is not None and decision.skills:
+                self._inject_recalled_skills(decision.skills)
+
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
@@ -1722,7 +1861,34 @@ class ChatSession:
         )
 
         try:
-            while True:
+            # Cheap front-model routing (ENG-648). Text-only turns first
+            # hit the thalamus model, which either answers trivial/from-
+            # context requests directly (skipping the full prompt + tool
+            # schemas + planning model entirely) or delegates, optionally
+            # preloading skills into history so the planning model doesn't
+            # spend a round on recall_skill. Image turns skip the thalamus —
+            # attachments imply real work. The thalamus buffers rather than
+            # streams: direct answers are short by construction
+            # (router_max_tokens), and a delegate decision must never leak
+            # preamble text to the user.
+            routed_direct = False
+            if self._router_enabled and isinstance(user_input, str):
+                decision = await self._gate_turn()
+                if decision is not None and decision.action == ACTION_RESPOND:
+                    self._append_history(
+                        {"role": "assistant", "content": decision.text}
+                    )
+                    assistant_text_parts.append(decision.text)
+                    yield StreamTextDelta(text=decision.text)
+                    yield StreamComplete(
+                        response=decision.response
+                        or LLMResponse(content=decision.text)
+                    )
+                    routed_direct = True
+                elif decision is not None and decision.skills:
+                    self._inject_recalled_skills(decision.skills)
+
+            while not routed_direct:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):
