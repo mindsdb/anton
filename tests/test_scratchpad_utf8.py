@@ -153,8 +153,9 @@ def test_chat_module_has_no_bare_read_text():
 # the host-side encode from crashing; the subprocess (UTF-8 mode) decodes it.
 
 def test_cell_payload_encode_survives_lone_surrogate():
-    # A path decoded via surrogateescape on a non-UTF-8 host lands in the model-
-    # written code as lone surrogates. Model this exactly and assert the fix.
+    # A Windows path that os.fsdecode surrogate-escaped on a non-UTF-8 host lands
+    # in the model-written code as lone surrogates (U+DC80..U+DCFF). Model this
+    # exactly and assert the fix.
     code = 'open(r"C:\\Users\\\udc81\udc9d\\index.html", "w")  # 🎉\n'
     payload = code + "\n" + local.CELL_DELIM + "\n"
 
@@ -162,11 +163,15 @@ def test_cell_payload_encode_survives_lone_surrogate():
     with pytest.raises(UnicodeEncodeError):
         payload.encode("utf-8")
 
-    # The fix: surrogatepass encodes without raising, independent of PYTHONUTF8.
+    # The fix: the encode no longer raises, independent of PYTHONUTF8.
     encoded = local._encode_cell_payload(payload)
     assert isinstance(encoded, bytes)
-    # Round-trips back to the same string (subprocess reconstructs the path).
-    assert encoded.decode("utf-8", errors="surrogatepass") == payload
+
+    # The path survives intact end-to-end: the subprocess always runs in UTF-8
+    # mode, so its stdin decodes with surrogateescape. Decoding *that* way (not
+    # surrogatepass) must reproduce the original — this is why the helper uses
+    # surrogateescape. surrogatepass would fail this assertion (re-mangled).
+    assert encoded.decode("utf-8", errors="surrogateescape") == payload
 
 
 def test_cell_payload_encode_preserves_accented_and_emoji():

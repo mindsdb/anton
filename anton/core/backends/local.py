@@ -37,17 +37,23 @@ def _read_boot_script() -> str:
 def _encode_cell_payload(payload: str) -> bytes:
     """Encode the cell payload sent to the scratchpad subprocess.
 
-    ``errors="surrogatepass"`` rather than a strict UTF-8 encode: model-written
-    cell code can embed a filesystem path that was surrogate-escaped when
-    decoded on a non-UTF-8 host (e.g. a pt-BR ``Área de Trabalho`` or an emoji
-    path on Windows → lone surrogates ``\\udcXX``). A strict encode raises
-    ``UnicodeEncodeError: surrogates not allowed`` here and takes down the whole
-    session before the code ever reaches the subprocess — the encode-side
-    sibling of ENG-824's decode crash (ENG-940). The subprocess runs in UTF-8
-    mode, so it decodes the payload fine; surrogatepass just keeps this host-side
-    encode from crashing when the host itself isn't in UTF-8 mode.
+    ``errors="surrogateescape"`` rather than a strict UTF-8 encode: model-written
+    cell code can embed a filesystem path that ``os.fsdecode`` surrogate-escaped
+    when it couldn't decode the path bytes on a non-UTF-8 host (e.g. a pt-BR
+    ``Área de Trabalho`` or an emoji path on Windows → lone surrogates in
+    U+DC80..U+DCFF). A strict encode raises ``UnicodeEncodeError: surrogates not
+    allowed`` here and takes down the whole session before the code reaches the
+    subprocess — the encode-side sibling of ENG-824's decode crash (ENG-940).
+
+    ``surrogateescape`` (not ``surrogatepass``) is deliberate: it's the inverse
+    of the ``os.fsdecode`` that created these surrogates, so it restores the
+    original path bytes, and it matches how the subprocess — which always runs
+    in UTF-8 mode (``_utf8_env``) and so decodes stdin with ``surrogateescape``
+    — reads them back. ``surrogatepass`` would emit the 3-byte CESU form that the
+    subprocess's ``surrogateescape`` decode then re-mangles, so the path would
+    not survive intact.
     """
-    return payload.encode("utf-8", errors="surrogatepass")
+    return payload.encode("utf-8", errors="surrogateescape")
 
 
 def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
