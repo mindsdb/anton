@@ -42,6 +42,9 @@ FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-state
 # The .anton_state.db* entries are defensive: _zip_fullstack is allowlist-based
 # so root files are not bundled anyway, but this guards against future changes
 # (and covers the WAL side-files, where -wal holds the freshest data).
+# Local snapshot of the last-published state key schema (for the client-side
+# schema-change warning). Never bundled.
+_STATE_SNAPSHOT = ".state_manifest.published.json"
 _FULLSTACK_EXCLUDED = {
     "metadata.json",
     "README.md",
@@ -50,6 +53,7 @@ _FULLSTACK_EXCLUDED = {
     ".anton_state.db",
     ".anton_state.db-wal",
     ".anton_state.db-shm",
+    _STATE_SNAPSHOT,
 }
 
 
@@ -266,6 +270,42 @@ def _read_state_manifest(artifact_dir: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _state_key_shape(manifest: dict) -> tuple:
+    """Normalised key schema (pk/sk name+type) for compatibility comparison."""
+    def attr(a):
+        return (a["name"], a.get("type", "S")) if a else None
+    return (attr(manifest.get("pk")), attr(manifest.get("sk")))
+
+
+def _warn_state_schema_change(artifact_dir: Path, manifest: dict) -> str | None:
+    """Warn (non-blocking) if the key schema changed vs the last publish — on a
+    shared table that orphans old data (no per-artifact key schema for AWS to
+    reject). Read-only: does NOT write the snapshot (see _save_state_snapshot)."""
+    snap = artifact_dir / _STATE_SNAPSHOT
+    if not snap.is_file():
+        return None
+    try:
+        prev = json.loads(snap.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if _state_key_shape(prev) == _state_key_shape(manifest):
+        return None
+    warning = (
+        "WARNING: state key schema changed since the last publish — existing "
+        "stored data will become UNREACHABLE (its keys are encoded under the old "
+        "schema). Migrations are out of scope in v1."
+    )
+    print(warning)
+    return warning
+
+
+def _save_state_snapshot(artifact_dir: Path, manifest: dict) -> None:
+    """Record the just-published key schema for the next publish's comparison.
+    Called ONLY after a successful /upload, so a failed publish doesn't hide the
+    next real change."""
+    (artifact_dir / _STATE_SNAPSHOT).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
 def _vendor_anton_state(zf: zipfile.ZipFile) -> list[str]:
     """Copy the `anton_state` package into the bundle under `anton_state/`.
 
@@ -364,6 +404,7 @@ def publish(
         raise FileNotFoundError(f"Path not found: {file_path}")
 
     payload_dict: dict = {}
+    state_manifest = None
 
     artifact = _load_artifact_metadata(file_path) if file_path.is_dir() else None
     if artifact is not None and artifact.type in FULLSTACK_ARTIFACT_TYPES:
@@ -375,6 +416,7 @@ def publish(
         payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
         state_manifest = _read_state_manifest(file_path)
         if state_manifest is not None:
+            _warn_state_schema_change(file_path, state_manifest)  # before upload
             payload_dict["state_manifest"] = state_manifest
         if missing:
             payload_dict["missing_datasources"] = missing
@@ -399,6 +441,10 @@ def publish(
 
     url = f"{publish_url.rstrip('/')}/upload"
     raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    # Upload succeeded (minds_request raises on failure): record the published
+    # key schema so the next publish can warn on an incompatible change.
+    if state_manifest is not None:
+        _save_state_snapshot(file_path, state_manifest)
     return json.loads(raw)
 
 

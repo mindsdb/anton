@@ -628,12 +628,12 @@ present at launch.
 
   # === State (durable storage) — INCLUDE THIS BLOCK ONLY FOR
   # `fullstack-stateful-app`; OMIT it entirely for `fullstack-stateless-app`.
-  # STATE mirrors SECRETS: the cloud runner overlays {{table, region,
-  # credentials}} before each request; locally it stays None and the SQLite
-  # driver is used. Declare the state KEY schema in `state_manifest.json` next
-  # to this file — generate it from the anton_state model, do NOT hand-write
-  # the JSON (see STATE MANIFEST below). Build the store AT POINT OF USE (inside
-  # a route), reading the current STATE — never at import time.
+  # STATE mirrors SECRETS: the cloud runner overlays {{url, token}} (a short-lived
+  # capability for the trusted state broker) before each request; locally it stays
+  # None and the SQLite driver is used. Declare the state KEY schema in
+  # `state_manifest.json` next to this file — generate it from the anton_state
+  # model, do NOT hand-write the JSON (see STATE MANIFEST below). Build the store
+  # AT POINT OF USE (inside a route), reading the current STATE — never at import time.
   STATE = None
 
   from anton_state import open_store
@@ -762,8 +762,8 @@ deployable's credential dependencies in `metadata.json` so the artifact can \
 be redeployed with the right env vars later. Skip this call only when the \
 backend uses no `DS_*` vars at all.
   - STATE MANIFEST (`fullstack-stateful-app` ONLY): `state_manifest.json` is a \
-SINGLE universal contract read BOTH by the local SQLite driver AND by the cloud \
-DynamoDB provisioner — the same file must validate on both. GENERATE it from \
+SINGLE universal contract read by the local SQLite driver AND (client-side) by \
+the cloud HTTP driver — the trusted broker is schema-agnostic. GENERATE it from \
 the `anton_state` model instead of hand-writing JSON (this makes a malformed \
 manifest impossible):
     ```python
@@ -781,25 +781,32 @@ shape) and do NOT declare non-key attributes: those fail validation \
 (`StateSchema ... pk Field required`) at the first request. Store the actual \
 values freely via `store.put({{...}})` at runtime — they need no schema entry.
   - STATE STORE API (`fullstack-stateful-app` ONLY): the `store` from \
-`get_store()` is a pure key-value store keyed by `(pk, sk)`. It exposes ONLY \
-these async methods — there is NO `scan()` / "list everything" operation, and \
-assuming one throws `AttributeError: 'Store' object has no attribute 'scan'` at \
-runtime:
+`get_store()` is a key-value store keyed by `(pk, sk)`. PREFER the `Collection` \
+helper for light state — it manages the sort key and defaults the partition:
+    ```python
+    from anton_state import Collection
+    todos = Collection(get_store(), "todos")
+    await todos.put("id1", {{"text": "buy milk"}})     # pk defaults to one partition
+    items = await todos.list()                          # all items in the collection
+    n = await Collection(get_store(), "counters").increment("visits", field="n")
+    ```
+    Low-level `store` methods (all async; NO `scan()` / "list everything"):
     * `await store.get(pk, sk=None)` → one item or `None`
-    * `await store.put(item)` → write (item is a dict that MUST include `pk` \
-and, if the schema has a sort key, `sk`)
+    * `await store.put(item)` → write (dict MUST include `pk` and, if the schema \
+has a sort key, `sk`); `_v` is set by the store — never set it yourself
     * `await store.delete(pk, sk=None)`
-    * `await store.query(pk, *, sk_prefix=None, index=None, filters=None, \
-limit=None)` → list of items sharing that partition key `pk`
-    DESIGN KEYS AROUND YOUR ACCESS PATTERNS UP FRONT: every "list" you need at \
-runtime must map to a single `query(pk=...)`. Put a whole collection under ONE \
-shared partition key and use `sk` for the per-item id. E.g. for a list of \
-employees: write each as `put({{"pk": "employee", "sk": emp_id, ...}})` and \
-list them with `query(pk="employee")`; store an employee's tasks under \
-`put({{"pk": f"tasks:{{emp_id}}", "sk": task_id, ...}})` and list them with \
-`query(pk=f"tasks:{{emp_id}}")`. Do NOT give each record its own unique `pk` \
-(then nothing can enumerate them) and do NOT invent an extra `"__index__"` \
-partition to fake a scan — model the collection's pk directly.
+    * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)` → \
+items sharing partition key `pk` (NO secondary indexes in v1 — there is no \
+`index=` argument)
+    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use \
+this for counters; do NOT hand-roll read-modify-write)
+    * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None, \
+if_version=None)` → atomic partial update
+    DESIGN KEYS AROUND ACCESS PATTERNS: every "list" must map to a single \
+`query(pk=...)` (or `Collection.list()`). Do NOT call the store in a loop — \
+collect with one `query`. Do NOT wrap a STATE mutation (`put`/`delete`/ \
+`increment`/`update`) in your own retry loop: on a timeout the outcome is \
+unknown and a retry can double-apply — surface the error instead.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface

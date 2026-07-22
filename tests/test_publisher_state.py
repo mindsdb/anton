@@ -76,3 +76,37 @@ def test_read_state_manifest_none_when_absent(tmp_path):
     d = tmp_path / "art"
     d.mkdir()
     assert _read_state_manifest(d) is None
+
+
+# --- schema-change warning + snapshot (ENG-704 shared table) ---
+from anton import publisher as _pub
+
+
+def test_snapshot_excluded_from_bundle():
+    assert _pub._STATE_SNAPSHOT in _pub._FULLSTACK_EXCLUDED
+
+
+def test_warns_on_key_schema_change(tmp_path):
+    (tmp_path / _pub._STATE_SNAPSHOT).write_text(json.dumps(
+        {"version": 1, "pk": {"name": "pk", "type": "S"}, "sk": {"name": "sk", "type": "S"}}))
+    new = {"version": 1, "pk": {"name": "userId", "type": "S"}, "sk": None}  # changed pk, dropped sk
+    warn = _pub._warn_state_schema_change(tmp_path, new)
+    assert warn is not None and "key schema changed" in warn.lower()
+
+
+def test_no_warning_when_schema_unchanged(tmp_path):
+    m = {"version": 1, "pk": {"name": "pk", "type": "S"}, "sk": {"name": "sk", "type": "S"}}
+    (tmp_path / _pub._STATE_SNAPSHOT).write_text(json.dumps(m))
+    assert _pub._warn_state_schema_change(tmp_path, m) is None
+
+
+def test_warn_does_not_write_snapshot(tmp_path):
+    m = {"version": 1, "pk": {"name": "pk", "type": "S"}, "sk": None}
+    assert _pub._warn_state_schema_change(tmp_path, m) is None  # no prior snapshot -> no warning
+    assert not (tmp_path / _pub._STATE_SNAPSHOT).exists()  # warn NEVER writes (only _save does)
+
+
+def test_save_snapshot_writes_after_success(tmp_path):
+    m = {"version": 1, "pk": {"name": "pk", "type": "S"}, "sk": None}
+    _pub._save_state_snapshot(tmp_path, m)
+    assert (tmp_path / _pub._STATE_SNAPSHOT).is_file()
