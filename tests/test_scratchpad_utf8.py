@@ -9,6 +9,7 @@ import re
 import pytest
 
 import anton.core.backends.local as local
+import anton.core.backends.wire as wire
 
 
 def test_utf8_env_forces_utf8_mode():
@@ -152,33 +153,70 @@ def test_chat_module_has_no_bare_read_text():
 # and kills the whole session (users sabrina/eddie/janis). surrogatepass keeps
 # the host-side encode from crashing; the subprocess (UTF-8 mode) decodes it.
 
-def test_cell_payload_encode_survives_lone_surrogate():
-    # A Windows path that os.fsdecode surrogate-escaped on a non-UTF-8 host lands
-    # in the model-written code as lone surrogates (U+DC80..U+DCFF). Model this
-    # exactly and assert the fix.
+def test_cell_payload_encode_is_lossless_over_the_pipe():
+    # NOTE: this pins the *transport* only — that surrogateescape encode (parent)
+    # round-trips through the subprocess's surrogateescape stdin decode. It does
+    # NOT by itself fix the crash: the real raiser is compile() in the child on a
+    # lone surrogate, healed by heal_surrogate_source (ENG-981), tested below.
+    # (The `surrogatepass` alternative would fail this round-trip, re-mangling
+    # the bytes — that's the only claim this test makes.)
     code = 'open(r"C:\\Users\\\udc81\udc9d\\index.html", "w")  # 🎉\n'
     payload = code + "\n" + local.CELL_DELIM + "\n"
-
-    # A strict UTF-8 encode is the crash the three users hit.
-    with pytest.raises(UnicodeEncodeError):
-        payload.encode("utf-8")
-
-    # The fix: the encode no longer raises, independent of PYTHONUTF8.
     encoded = local._encode_cell_payload(payload)
     assert isinstance(encoded, bytes)
-
-    # The path survives intact end-to-end: the subprocess always runs in UTF-8
-    # mode, so its stdin decodes with surrogateescape. Decoding *that* way (not
-    # surrogatepass) must reproduce the original — this is why the helper uses
-    # surrogateescape. surrogatepass would fail this assertion (re-mangled).
     assert encoded.decode("utf-8", errors="surrogateescape") == payload
 
 
 def test_cell_payload_encode_preserves_accented_and_emoji():
     # Ordinary (well-formed) accented-Latin + emoji content must pass through
-    # byte-for-byte — the fix must not mangle the common case.
+    # byte-for-byte — the transport must not mangle the common case.
     code = 'label = "Área de Trabalho 🎉 café"\nprint(label)\n'
     payload = code + "\n" + local.CELL_DELIM + "\n"
 
     encoded = local._encode_cell_payload(payload)
     assert encoded.decode("utf-8") == payload  # strict decode: no corruption
+
+
+# ── ENG-981: heal lone surrogates before compile() (the real encode-side fix) ──
+#
+# The raiser is compile() in the child on a lone surrogate in the cell source
+# (a non-ASCII Windows path byte, surrogate-escaped upstream and passed through
+# the belt's lenient surrogateescape stdin). compile() is always strict, so the
+# source must be cleaned first. These pin heal_surrogate_source, which the child
+# calls right before compile().
+
+def test_heal_recovers_byte_escaped_multibyte_path():
+    # The common case: a real char whose UTF-8 bytes were escaped byte-wise
+    # upstream (Á = C3 81 -> \udcc3\udc81). Heal must reassemble the *correct*
+    # character so the cell compiles AND references the right path.
+    mangled = 'open(r"C:\\Users\\\udcc3\udc81rea\\f.html")\n'   # "Área" split into surrogates
+    healed = wire.heal_surrogate_source(mangled)
+    assert healed == 'open(r"C:\\Users\\Área\\f.html")\n'
+    compile(healed, "<scratchpad>", "exec")  # no UnicodeEncodeError
+
+
+def test_heal_recovers_escaped_emoji():
+    mangled = 'x = "\udcf0\udc9f\udc8e\udc89"\n'                 # 🎉 = f0 9f 8e 89, escaped
+    healed = wire.heal_surrogate_source(mangled)
+    assert healed == 'x = "🎉"\n'
+    compile(healed, "<scratchpad>", "exec")
+
+
+def test_heal_scrubs_truly_lone_surrogate_so_compile_succeeds():
+    # A genuinely lone surrogate (not a valid byte sequence): can't be recovered,
+    # but must not crash compile() — replaced rather than raised.
+    mangled = 'x = "a\udc81b"\n'
+    healed = wire.heal_surrogate_source(mangled)
+    assert "\udc81" not in healed
+    compile(healed, "<scratchpad>", "exec")  # previously: UnicodeEncodeError
+
+
+def test_heal_is_noop_on_clean_source():
+    clean = 'print("Área de Trabalho 🎉")\n'   # real chars, no surrogates
+    assert wire.heal_surrogate_source(clean) == clean
+
+
+def test_bare_compile_on_lone_surrogate_still_raises():
+    # Guard the premise: without the heal, this is the exact ENG-981 crash.
+    with pytest.raises(UnicodeEncodeError):
+        compile('x = "a\udc81b"\n', "<scratchpad>", "exec")
