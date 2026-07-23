@@ -10,7 +10,7 @@ from anton.core.memory.skills import Skill, SkillStore
 REAL_BUILTIN_ROOT = (
     Path(skills_mod.__file__).parent / "builtin_skills"
 )
-SHIPPED_LABELS = {"build-fullstack-backend", "build-html-dashboard"}
+SHIPPED_LABELS = {"build-fullstack-backend", "build-html-dashboard", "public-data-sources"}
 
 
 @pytest.fixture()
@@ -37,6 +37,14 @@ class TestShippedSkills:
         assert dashboard is not None
         assert dashboard.provenance == "builtin"
         assert len(dashboard.declarative_md) > 5_000
+
+        data_sources = store.load("public-data-sources")
+        assert data_sources is not None
+        assert data_sources.provenance == "builtin"
+        # spot-check endpoints + single-brace URL params (SKILL.md bodies are
+        # not str.format()'d, unlike the CHAT_SYSTEM_PROMPT they moved out of)
+        assert "feedparser" in data_sources.declarative_md
+        assert "api.worldbank.org/v2/country/{code}/indicator/{indicator}" in data_sources.declarative_md
 
     def test_descriptions_fit_prompt_budget(self, store):
         for summary in store.list_summaries():
@@ -98,12 +106,14 @@ class TestHintLabelDrift:
     def test_prompt_hints_reference_shipped_skills(self, store):
         from anton.core.llm.prompts import (
             BACKEND_GENERATION_PROMPT,
+            CHAT_SYSTEM_PROMPT,
             VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
             VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
         )
 
         referenced = self._referenced_labels(
             BACKEND_GENERATION_PROMPT,
+            CHAT_SYSTEM_PROMPT,
             VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
             VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
         )
@@ -120,6 +130,27 @@ class TestHintLabelDrift:
         assert referenced
         for label in referenced:
             assert store.load(label) is not None, f"hinted skill missing: {label}"
+
+
+class TestDataCatalogMovedToSkill:
+    """The public-data endpoint catalog must live in the recalled skill only,
+    not inline in the always-on CHAT_SYSTEM_PROMPT (that duplication is the
+    token cost this move removes)."""
+
+    CATALOG_MARKERS = ("api.worldbank.org", "hacker-news.firebaseio.com", "feedparser")
+
+    def test_catalog_not_inline_in_base_prompt(self):
+        from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+
+        for marker in self.CATALOG_MARKERS:
+            assert marker not in CHAT_SYSTEM_PROMPT, f"catalog leaked into base prompt: {marker}"
+        assert 'recall_skill("public-data-sources")' in CHAT_SYSTEM_PROMPT
+
+    def test_catalog_lives_in_skill(self, store):
+        skill = store.load("public-data-sources")
+        assert skill is not None and skill.provenance == "builtin"
+        for marker in self.CATALOG_MARKERS:
+            assert marker in skill.declarative_md, f"catalog marker missing from skill: {marker}"
 
 
 class TestBrokenShadowFallback:
