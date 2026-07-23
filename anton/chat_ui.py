@@ -202,11 +202,7 @@ class StreamDisplay:
         self._live: Live | None = None
         self._toolbar = toolbar
         self._activities: list[_ToolActivity] = []
-        self._buffer = ""  # answer text accumulated during streaming
-        self._in_tool_phase = False
-        self._last_was_tool = False
-        self._initial_text = ""
-        self._initial_printed = False
+        self._pending = ""  # assistant text accumulated during streaming
         self._active = False
         # 3-line footer state
         self._line1_fun: str = ""  # Line 1: Esc to cancel — fun message
@@ -280,11 +276,7 @@ class StreamDisplay:
         self._line3_peek = ""
         self._set_status(self._line1_fun)
         self._activities = []
-        self._buffer = ""
-        self._initial_text = ""
-        self._initial_printed = False
-        self._in_tool_phase = False
-        self._last_was_tool = False
+        self._pending = ""
         self._cancel_msg = ""
         self._active = True
         self._start_spinner()
@@ -292,15 +284,9 @@ class StreamDisplay:
     def append_text(self, delta: str) -> None:
         if not self._active:
             return
-        if self._in_tool_phase:
-            self._buffer += delta
-            self._last_was_tool = False
-            self._line3_peek = self._extract_peek(self._buffer)
-            self._update_spinner()
-        else:
-            self._initial_text += delta
-            self._line3_peek = self._extract_peek(self._initial_text)
-            self._update_spinner()
+        self._pending += delta
+        self._line3_peek = self._extract_peek(self._pending)
+        self._update_spinner()
 
     def show_tool_result(self, content: str) -> None:
         """Print a tool result permanently (immediately scrollable)."""
@@ -308,7 +294,6 @@ class StreamDisplay:
             return
         self._stop_spinner()
         self._console.print(Markdown(content))
-        self._last_was_tool = True
         self._start_spinner()
 
     def show_tool_execution(self, task: str) -> None:
@@ -316,13 +301,25 @@ class StreamDisplay:
         self.on_tool_use_start(f"_compat_{id(task)}", task)
 
     def on_tool_use_start(self, tool_id: str, name: str) -> None:
-        """Track a new tool use."""
+        """Track a new tool use.
+
+        Any text accumulated since the last flush is the current round's
+        preamble (inner-speech). Print it dimmed now and clear the
+        accumulator, so it is visually separated from other rounds'
+        preambles and from the final answer.
+        """
         import time as _time
 
         if not self._active:
             return
-        self._in_tool_phase = True
-        self._last_was_tool = True
+        preamble = self._pending.rstrip()
+        if preamble:
+            self._stop_spinner()
+            self._console.print(Text(preamble, style="anton.muted"))
+            self._start_spinner()
+        self._pending = ""
+        self._line3_peek = ""
+        self._update_spinner()  # refresh footer even when preamble was empty
         activity = _ToolActivity(
             tool_id=tool_id, name=name, start_time=_time.monotonic()
         )
@@ -467,23 +464,12 @@ class StreamDisplay:
                 act.done_line_printed = True
                 self._print_done_line(act, act.work_elapsed)
 
-        # Print initial text as muted "inner speech" (if not already printed)
-        if self._initial_text and not self._initial_printed:
-            if self._activities:
-                self._console.print(
-                    Text(self._initial_text.rstrip(), style="anton.muted")
-                )
-
-        # Print answer
-        if self._activities:
-            if self._buffer:
-                self._console.print(Text("anton> ", style="anton.prompt"), end="")
-                self._console.print(Markdown(self._buffer))
-        else:
-            all_text = self._initial_text + self._buffer
-            if all_text:
-                self._console.print(Text("anton> ", style="anton.prompt"), end="")
-                self._console.print(Markdown(all_text))
+        # Whatever remains in _pending is the text after the last tool — the
+        # true final answer. All preambles were already flushed dimmed at
+        # each tool start, so there is nothing to disambiguate here.
+        if self._pending:
+            self._console.print(Text("anton> ", style="anton.prompt"), end="")
+            self._console.print(Markdown(self._pending))
 
         self._active = False
         self._console.print()
