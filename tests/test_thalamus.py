@@ -101,6 +101,18 @@ class TestCondenseHistory:
         assert condense_history([]) == []
         assert condense_history([{"role": "system", "content": "x"}]) == []
 
+    def test_merged_block_respects_max_chars_cap(self):
+        # Point 3: truncation runs AFTER merge, so a block merged from several
+        # near-cap same-role messages still honours the per-entry cap (before
+        # the fix each piece was capped but the merged sum blew past it).
+        history = [{"role": "user", "content": "x" * 1000} for _ in range(5)]
+        max_chars = 200
+        condensed = condense_history(history, max_chars=max_chars)
+        assert len(condensed) == 1  # all merged into one user block
+        assert len(condensed[0]["content"]) <= max_chars
+        # and the whole view is bounded by max_messages * max_chars
+        assert all(len(m["content"]) <= max_chars for m in condensed)
+
 
 class TestGateTurn:
     async def test_direct_answer(self):

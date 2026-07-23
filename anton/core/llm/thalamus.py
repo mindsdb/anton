@@ -180,6 +180,22 @@ def build_thalamus_system_prompt(
     return _THALAMUS_SYSTEM_PROMPT.format(skills_section=skills_section)
 
 
+_TRUNCATION_MARKER = "\n[… truncated …]\n"
+
+
+def _truncate_middle(text: str, max_chars: int) -> str:
+    """Middle-truncate ``text`` to at most ``max_chars``, keeping head and tail.
+
+    The result (including the marker) never exceeds ``max_chars`` — the
+    marker length is subtracted from the head/tail budget — so callers can
+    rely on a hard per-entry cap.
+    """
+    if len(text) <= max_chars:
+        return text
+    half = max(0, (max_chars - len(_TRUNCATION_MARKER)) // 2)
+    return f"{text[:half]}{_TRUNCATION_MARKER}{text[-half:]}"
+
+
 def condense_history(
     history: list[dict],
     *,
@@ -188,12 +204,15 @@ def condense_history(
 ) -> list[dict]:
     """Build the thalamus's text-only view of the conversation.
 
-    Tool blocks collapse to one-line markers (the gate only needs to
-    know work happened, not its payload), long messages are middle-
-    truncated, and consecutive same-role messages merge so the result
-    keeps the role alternation providers require. Only the most recent
-    ``max_messages`` survive, and a leading assistant message left over
-    from the cut is dropped so the list starts with a user message.
+    Tool blocks collapse to one-line markers (the gate only needs to know
+    work happened, not its payload), and consecutive same-role messages
+    merge so the result keeps the role alternation providers require. Only
+    the most recent ``max_messages`` survive, and a leading assistant
+    message left over from the cut is dropped so the list starts with a
+    user message. Each surviving entry is then middle-truncated to
+    ``max_chars`` — applied AFTER the merge so a merged block can't exceed
+    the cap. The whole view is therefore bounded by
+    ``max_messages * max_chars``.
     """
     condensed: list[dict] = []
     for msg in history:
@@ -223,9 +242,6 @@ def condense_history(
         text = text.strip()
         if not text:
             continue
-        if len(text) > max_chars:
-            half = max_chars // 2
-            text = f"{text[:half]}\n[… truncated …]\n{text[-half:]}"
         if condensed and condensed[-1]["role"] == role:
             condensed[-1]["content"] += "\n" + text
         else:
@@ -234,6 +250,10 @@ def condense_history(
     condensed = condensed[-max_messages:]
     while condensed and condensed[0]["role"] != "user":
         condensed.pop(0)
+    # Truncate AFTER merge: each surviving (possibly merged) entry is capped
+    # here, so the per-entry cap holds no matter how many messages merged.
+    for msg in condensed:
+        msg["content"] = _truncate_middle(msg["content"], max_chars)
     return condensed
 
 
