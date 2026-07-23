@@ -308,6 +308,26 @@ class TestSessionThalamus:
         session._inject_recalled_skills(["csv-summary"])
         assert len(session.history) == 2  # second preload is a no-op
 
+    async def test_gate_usage_counted_on_delegate_streaming(self):
+        # The gate hits every text turn; on delegate its usage must reach the
+        # consumer as its own StreamComplete (like a planning round), or token
+        # counters that sum StreamComplete usage under-report every gate call.
+        llm = make_mock_llm()
+        llm.gate = AsyncMock(return_value=_response(tool_calls=[_delegate_call()]))
+
+        async def _plan_stream(**kwargs):
+            yield StreamTextDelta(text="Working on it.")
+            yield StreamComplete(response=_response("Working on it."))
+
+        llm.plan_stream = _plan_stream
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        events = [e async for e in session.turn_stream("analyze data.csv")]
+        completes = [e for e in events if isinstance(e, StreamComplete)]
+        # two calls billed: the gate, then the planning round
+        assert len(completes) == 2
+        total_in = sum(e.response.usage.input_tokens for e in completes)
+        assert total_in == 20  # 10 (gate) + 10 (planning)
+
     async def test_thalamus_failure_falls_back_to_planning(self):
         llm = make_mock_llm()
         llm.gate = AsyncMock(side_effect=RuntimeError("thalamus down"))

@@ -1561,7 +1561,7 @@ class ChatSession:
         except Exception:
             summaries = []
         try:
-            decision = await gate_turn(
+            return await gate_turn(
                 self._llm,
                 history=self._history,
                 skill_summaries=summaries,
@@ -1573,18 +1573,6 @@ class ChatSession:
                 exc,
             )
             return None
-        # The gate hits every text turn, so its usage must be visible in
-        # telemetry regardless of outcome — StreamComplete only surfaces it
-        # on the direct-answer path, leaving all delegated turns unaccounted.
-        usage = getattr(decision.response, "usage", None)
-        if usage is not None:
-            logger.info(
-                "Router gate: action=%s in_tokens=%s out_tokens=%s",
-                decision.action,
-                getattr(usage, "input_tokens", "?"),
-                getattr(usage, "output_tokens", "?"),
-            )
-        return decision
 
     def _inject_recalled_skills(self, labels: list[str]) -> None:
         """Preload thalamus-named skills as a synthetic recall_skill exchange.
@@ -1905,8 +1893,15 @@ class ChatSession:
                         or LLMResponse(content=decision.text)
                     )
                     routed_direct = True
-                elif decision is not None and decision.skills:
-                    self._inject_recalled_skills(decision.skills)
+                elif decision is not None:
+                    # Delegating: surface the gate call's usage as its own
+                    # StreamComplete so token accounting counts it, exactly
+                    # like a planning round (the loop below emits more). The
+                    # gate hits every turn, so dropping it would under-report.
+                    if decision.response is not None:
+                        yield StreamComplete(response=decision.response)
+                    if decision.skills:
+                        self._inject_recalled_skills(decision.skills)
 
             while not routed_direct:
                 try:
