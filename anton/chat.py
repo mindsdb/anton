@@ -640,7 +640,7 @@ async def _handle_publish(
     published_map = {}
     try:
         if published_json.is_file():
-            published_map = json.loads(published_json.read_text())
+            published_map = json.loads(published_json.read_text(encoding="utf-8"))
     except Exception:
         pass
     prev = published_map.get(published_key)
@@ -650,7 +650,7 @@ async def _handle_publish(
         legacy_json = artifacts_root / ".published.json"
         try:
             if legacy_json.is_file():
-                legacy_map = json.loads(legacy_json.read_text())
+                legacy_map = json.loads(legacy_json.read_text(encoding="utf-8"))
                 legacy_entry = legacy_map.get(file_key)
                 if isinstance(legacy_entry, dict) and legacy_entry.get("report_id"):
                     prev = legacy_entry  # carry over report_id/url/last_md5/access
@@ -751,7 +751,7 @@ async def _handle_publish(
         })
         published_map[published_key] = entry
         try:
-            published_json.write_text(json.dumps(published_map, indent=2))
+            published_json.write_text(json.dumps(published_map, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -880,7 +880,7 @@ async def _handle_unpublish(
     artifacts_root = _Path(settings.artifacts_dir)
     for pub_file in artifacts_root.rglob(".published.json"):
         try:
-            data = _json.loads(pub_file.read_text())
+            data = _json.loads(pub_file.read_text(encoding="utf-8"))
         except Exception:
             continue
         if not isinstance(data, dict):
@@ -900,7 +900,7 @@ async def _handle_unpublish(
                 changed = True
         if changed:
             try:
-                pub_file.write_text(_json.dumps(data, indent=2))
+                pub_file.write_text(_json.dumps(data, indent=2), encoding="utf-8")
             except Exception:
                 pass
 
@@ -1021,7 +1021,12 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         description="Demo dashboard comparing NVDA stock and BTC prices over time.",
         type="html-app",
     )
-    code = script_path.read_text()
+    # Read as UTF-8 explicitly, never the host-locale default: on a non-UTF-8
+    # Windows code page (GBK/cp936) a bare read_text() crashes decoding UTF-8
+    # script content (ENG-824's root-caused crash site — 'gbk' codec can't
+    # decode …). Explicit encoding is launcher-independent, unlike the
+    # PYTHONUTF8 belt (ENG-940).
+    code = script_path.read_text(encoding="utf-8")
     output_dir = str(_store.folder_for(_demo_artifact.slug))
     output_html = str(Path(output_dir) / "dashboard.html")
     code = (
@@ -1146,9 +1151,9 @@ def _persist_first_run_done(settings) -> None:
 
     env_path = Path.home() / ".anton" / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = env_path.read_text() if env_path.is_file() else ""
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
     if "ANTON_FIRST_RUN_DONE" not in existing:
-        with env_path.open("a") as f:
+        with env_path.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write("ANTON_FIRST_RUN_DONE=true\n")

@@ -266,6 +266,13 @@ WORKFLOW:
 again — that creates a duplicate.
 3. If you discover the entry-point filename only later (or change it), call \
 `update_artifact(slug, primary=...)` so the renderer opens the right file.
+4. AFTER FINISHING — reference the artifact in your final message. Once the \
+artifact's files are written, tell the user what was created and point to it by \
+`name` and `slug`, and include the primary file's path \
+(`<artifact_path>/<primary>`) so it is clickable/openable in a plain CLI. NEVER \
+end with only a description of the content and no pointer to the result. (For \
+fullstack apps, prefer the `url` returned by `launch_backend` as the primary \
+pointer — see the BACKEND & FULLSTACK section.)
 """
 
 
