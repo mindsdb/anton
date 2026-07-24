@@ -199,6 +199,21 @@ class TestMindsCloudProviderNormalization:
             s = AntonSettings(planning_provider=p, _env_file=None)
             assert s.planning_provider == p
 
+    def test_minds_cloud_router_maps_to_openai_compatible(self, monkeypatch):
+        # from_settings validates the router role identically, so the same
+        # normalization must cover router_provider or it re-crashes there.
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(router_provider="minds-cloud", _env_file=None)
+        assert s.router_provider == "openai-compatible"
+
+    def test_router_provider_and_model_default_none(self, monkeypatch):
+        for k in _ANTON_MODEL_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(_env_file=None)
+        assert s.router_provider is None
+        assert s.router_model is None
+
     def test_from_settings_does_not_crash_on_minds_cloud(self, monkeypatch):
         # The exact regression: building the LLM client from a minds-cloud
         # config must not raise "Unknown planning provider".

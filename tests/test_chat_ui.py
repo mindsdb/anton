@@ -20,7 +20,7 @@ class TestStreamDisplay:
         MockLive.return_value.start.assert_called_once()
 
     @patch("anton.chat_ui.Live")
-    def test_append_text_updates_buffer(self, MockLive):
+    def test_append_text_accumulates_in_pending(self, MockLive):
         display, console = self._make_display()
         display.start()
         live = MockLive.return_value
@@ -28,8 +28,8 @@ class TestStreamDisplay:
         display.append_text("Hello ")
         display.append_text("world!")
 
-        # Before any tool use, text goes to _initial_text
-        assert display._initial_text == "Hello world!"
+        # All streamed text accumulates in the single _pending buffer
+        assert display._pending == "Hello world!"
         assert live.update.call_count == 2
 
     @patch("anton.chat_ui.Live")
@@ -115,22 +115,50 @@ class TestActivityTracking:
 
     @patch("anton.chat_ui.Live")
     def test_finish_prints_activity_summary(self, MockLive):
+        from rich.markdown import Markdown as RichMarkdown
+        from rich.text import Text as RichText
+
         display, console = self._make_display()
         display.start()
 
-        # Initial text before tools
+        # Preamble before the tool — must flush dimmed AT on_tool_use_start
         display.append_text("Let me check...")
-
         display.on_tool_use_start("tool_1", "scratchpad")
+
+        muted_before_finish = [
+            c.args[0].plain
+            for c in console.print.call_args_list
+            if c.args
+            and isinstance(c.args[0], RichText)
+            and c.args[0].style == "anton.muted"
+        ]
+        assert muted_before_finish == ["Let me check..."]
+
         display.on_tool_use_delta("tool_1", '{"action": "exec", "name": "pad"}')
         display.on_tool_use_end("tool_1")
 
-        # Answer text after tools
+        # Answer text after the tool
         display.append_text("Here's what I found...")
-        display.finish()
 
-        # finish should print: muted initial, activity tree, anton> + answer markdown, trailing newline
-        assert console.print.call_count >= 4
+        calls_before_finish = len(console.print.call_args_list)
+        display.finish()
+        finish_calls = console.print.call_args_list[calls_before_finish:]
+
+        # finish() prints NO muted inner-speech (it was flushed earlier) …
+        assert not [
+            c
+            for c in finish_calls
+            if c.args
+            and isinstance(c.args[0], RichText)
+            and c.args[0].style == "anton.muted"
+        ]
+        # … and prints the final answer as a single Markdown block.
+        markdowns = [
+            c.args[0].markup
+            for c in finish_calls
+            if c.args and isinstance(c.args[0], RichMarkdown)
+        ]
+        assert markdowns == ["Here's what I found..."]
 
     @patch("anton.chat_ui.Live")
     def test_no_activities_no_tree(self, MockLive):
@@ -203,24 +231,130 @@ class TestActivityTracking:
         assert result == "exec"
 
     @patch("anton.chat_ui.Live")
-    def test_text_routes_to_initial_before_tools(self, MockLive):
-        display, _ = self._make_display()
-        display.start()
+    def test_preamble_flushed_dimmed_at_tool_start(self, MockLive):
+        from rich.text import Text as RichText
 
-        display.append_text("Let me check...")
-        assert display._initial_text == "Let me check..."
-        assert display._buffer == ""
-        assert not display._in_tool_phase
-
-    @patch("anton.chat_ui.Live")
-    def test_text_routes_to_buffer_after_tools(self, MockLive):
-        display, _ = self._make_display()
+        display, console = self._make_display()
         display.start()
 
         display.append_text("Initial text")
         display.on_tool_use_start("tool_1", "scratchpad")
-        display.append_text("Answer text")
 
-        assert display._initial_text == "Initial text"
-        assert display._buffer == "Answer text"
-        assert display._in_tool_phase
+        # Preamble printed dimmed at the tool boundary, accumulator cleared
+        muted = [
+            c.args[0].plain
+            for c in console.print.call_args_list
+            if c.args
+            and isinstance(c.args[0], RichText)
+            and c.args[0].style == "anton.muted"
+        ]
+        assert muted == ["Initial text"]
+        assert display._pending == ""
+
+        # Subsequent text accumulates fresh
+        display.append_text("Answer text")
+        assert display._pending == "Answer text"
+
+    @patch("anton.chat_ui.Live")
+    def test_multiround_preambles_flushed_separately(self, MockLive):
+        from rich.markdown import Markdown as RichMarkdown
+        from rich.text import Text as RichText
+
+        display, console = self._make_display()
+        display.start()
+
+        # Round 1: preamble → tool
+        display.append_text("Now launching the backend:")
+        display.on_tool_use_start("t1", "scratchpad")
+        display.on_tool_use_delta("t1", '{"action": "exec", "name": "p"}')
+        display.on_tool_use_end("t1")
+
+        # Round 2: preamble → tool
+        display.append_text("Launched! Checking the API:")
+        display.on_tool_use_start("t2", "scratchpad")
+        display.on_tool_use_delta("t2", '{"action": "exec", "name": "p"}')
+        display.on_tool_use_end("t2")
+
+        # Trailing text after the last tool = the real final answer
+        display.append_text("Everything works.")
+        display.finish()
+
+        muted = [
+            c.args[0].plain
+            for c in console.print.call_args_list
+            if c.args
+            and isinstance(c.args[0], RichText)
+            and c.args[0].style == "anton.muted"
+        ]
+        # Both preambles printed live, in order, each on its own line
+        assert muted == [
+            "Now launching the backend:",
+            "Launched! Checking the API:",
+        ]
+
+        markdowns = [
+            c.args[0].markup
+            for c in console.print.call_args_list
+            if c.args and isinstance(c.args[0], RichMarkdown)
+        ]
+        # Final answer is a single block — NOT concatenated with the preambles
+        assert markdowns == ["Everything works."]
+
+    @patch("anton.chat_ui.Live")
+    def test_consecutive_tools_no_text_no_flush(self, MockLive):
+        from rich.text import Text as RichText
+
+        display, console = self._make_display()
+        display.start()
+
+        display.on_tool_use_start("t1", "scratchpad")
+        display.on_tool_use_end("t1")
+        display.on_tool_use_start("t2", "scratchpad")
+        display.on_tool_use_end("t2")
+
+        muted = [
+            c
+            for c in console.print.call_args_list
+            if c.args
+            and isinstance(c.args[0], RichText)
+            and getattr(c.args[0], "style", None) == "anton.muted"
+        ]
+        assert muted == []
+
+    @patch("anton.chat_ui.Live")
+    def test_turn_ending_with_tool_prints_no_answer(self, MockLive):
+        from rich.markdown import Markdown as RichMarkdown
+
+        display, console = self._make_display()
+        display.start()
+
+        display.append_text("Preamble")
+        display.on_tool_use_start("t1", "scratchpad")
+        display.on_tool_use_end("t1")
+        display.finish()
+
+        markdowns = [
+            c
+            for c in console.print.call_args_list
+            if c.args and isinstance(c.args[0], RichMarkdown)
+        ]
+        # No trailing text → no anton> answer block
+        assert markdowns == []
+
+    @patch("anton.chat_ui.Live")
+    def test_no_tools_single_markdown_answer(self, MockLive):
+        from rich.markdown import Markdown as RichMarkdown
+
+        display, console = self._make_display()
+        display.start()
+
+        display.append_text("Hello ")
+        display.append_text("world!")
+        display.finish()
+
+        markdowns = [
+            c.args[0].markup
+            for c in console.print.call_args_list
+            if c.args and isinstance(c.args[0], RichMarkdown)
+        ]
+        assert markdowns == ["Hello world!"]

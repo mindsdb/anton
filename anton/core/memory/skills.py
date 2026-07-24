@@ -14,6 +14,13 @@ Each skill lives at `~/.anton/skills/<label>/` as a directory:
     ├── scripts/           # Stage 3 — optional
     └── stats.json         # per-stage usage counters (internal sidecar)
 
+A second, read-only root ships inside the package (`builtin_skills/` next to
+this module) for skills every install must carry from the first session (e.g.
+the backend/fullstack and HTML-dashboard contracts). Built-ins appear in
+listings and `recall_skill` lookups like user skills; a user skill with the
+same label shadows the built-in (logged), and an unreadable user dir falls
+back to the built-in.
+
 Legacy format (meta.json + declarative.md) is migrated transparently on first
 read via check_migrate().
 
@@ -50,6 +57,12 @@ from anton.core.tools.skill_format import AgentSkill, dump_skill, parse_skill_di
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SKILLS_ROOT = Path("~/.anton/skills").expanduser()
+
+# Read-only skills shipped inside the package. They appear in listings and
+# recall_skill lookups like user skills, but live in the codebase so every
+# install has them from the first session. A user/consolidator skill with the
+# same label shadows the built-in.
+_BUILTIN_SKILLS_ROOT = Path(__file__).parent / "builtin_skills"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +102,7 @@ class Skill:
     description: str
     declarative_md: str
     created_at: str
-    provenance: str  # "manual" | "consolidator"
+    provenance: str  # "manual" | "consolidator" | "builtin"
     when_to_use: str = ""
     stage_1_present: bool = True
     stage_2_present: bool = False
@@ -266,8 +279,16 @@ class SkillStore:
     on first access via check_migrate().
     """
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        builtin_root: Path | None = None,
+    ) -> None:
         self.root = Path(root) if root is not None else _DEFAULT_SKILLS_ROOT
+        # Resolved at construction so tests can monkeypatch the module default.
+        self.builtin_root = (
+            Path(builtin_root) if builtin_root is not None else _BUILTIN_SKILLS_ROOT
+        )
 
     # ── internal helpers ─────────────────────────────────────────────
 
@@ -311,18 +332,46 @@ class SkillStore:
     # ── reading ─────────────────────────────────────────────────────
 
     def load(self, label: str) -> Skill | None:
-        """Read a single skill by label. Returns None if absent or unreadable."""
-        if not self.root.is_dir():
-            return None
-        d = self._find_dir(label)
-        if d is None:
-            return None
+        """Read a single skill by label. Returns None if absent or unreadable.
 
-        d = check_migrate(d, self.root)
-        if d is None:
-            return None
+        User skills (under `root`) shadow built-in skills with the same label;
+        the shadow is logged so a silent swap of a built-in contract is at
+        least visible. A user dir that exists but cannot be parsed falls back
+        to the built-in rather than dead-ending the label.
+        """
+        if self.root.is_dir():
+            d = self._find_dir(label)
+            if d is not None:
+                try:
+                    migrated = check_migrate(d, self.root)
+                except OSError:
+                    migrated = None
+                skill = self._skill_from_dir(migrated) if migrated is not None else None
+                if skill is not None:
+                    if (self.builtin_root / skill.label).is_dir():
+                        logger.info(
+                            "skill %r: user skill shadows the built-in skill "
+                            "of the same label", skill.label,
+                        )
+                    return skill
+                fallback = self._load_builtin(label)
+                if fallback is not None:
+                    logger.warning(
+                        "skill dir %r exists but is unreadable; falling back "
+                        "to the built-in skill", label,
+                    )
+                    return fallback
+                return None
+        return self._load_builtin(label)
 
-        return self._skill_from_dir(d)
+    def _load_builtin(self, label: str) -> Skill | None:
+        d = self.builtin_root / label.replace("_", "-")
+        if not d.is_dir():
+            return None
+        skill = self._skill_from_dir(d)
+        if skill is not None:
+            skill.provenance = "builtin"
+        return skill
 
     def _load_stats(self, label: str) -> SkillStats:
         path = self._skill_dir(label) / "stats.json"
@@ -340,22 +389,15 @@ class SkillStore:
         )
 
     def list_all(self) -> list[Skill]:
-        """Return every loadable skill, sorted by label."""
-        if not self.root.is_dir():
-            return []
+        """Return every loadable skill (built-ins included), sorted by label."""
         out: list[Skill] = []
-        for child in sorted(self.root.iterdir()):
-            if not child.is_dir():
-                continue
-            try:
-                child = check_migrate(child, self.root)
-                if child is None:
-                    continue
-            except OSError:
-                continue
+        for child in self._iter_skill_dirs():
             skill = self._skill_from_dir(child)
             if skill is not None:
+                if child.parent == self.builtin_root:
+                    skill.provenance = "builtin"
                 out.append(skill)
+        out.sort(key=lambda s: s.label)
         return out
 
     def list_summaries(self) -> list[dict]:
@@ -364,28 +406,49 @@ class SkillStore:
         Returns dicts with keys: label, name, description.
         Reads only SKILL.md frontmatter, skips the body.
         """
-        if not self.root.is_dir():
-            return []
         out: list[dict] = []
-        for child in sorted(self.root.iterdir()):
-            if not child.is_dir():
-                continue
-            try:
-                child = check_migrate(child, self.root)
-                if child is None:
-                    continue
-            except OSError:
-                continue
+        for child in self._iter_skill_dirs():
             fm = parse_skill_dir(child)
             if fm is None:
                 continue
-
             out.append({
                 "label": fm.name,
                 "name": fm.metadata.get("display_name", fm.name),
                 "description": fm.description,
             })
+        out.sort(key=lambda s: s["label"])
         return out
+
+    def _builtin_dirs(self) -> list[Path]:
+        if not self.builtin_root.is_dir():
+            return []
+        return sorted(
+            d for d in self.builtin_root.iterdir()
+            if d.is_dir() and (d / "SKILL.md").is_file()
+        )
+
+    def _iter_skill_dirs(self) -> list[Path]:
+        """User skill dirs (migrated) plus built-in dirs not shadowed by one.
+
+        Shared walk for list_all()/list_summaries(); load() resolves single
+        labels itself so it can fall back when a user dir is unreadable.
+        """
+        dirs: list[Path] = []
+        seen: set[str] = set()
+        if self.root.is_dir():
+            for child in sorted(self.root.iterdir()):
+                if not child.is_dir():
+                    continue
+                try:
+                    child = check_migrate(child, self.root)
+                except OSError:
+                    continue
+                if child is None:
+                    continue
+                dirs.append(child)
+                seen.add(child.name)
+        dirs.extend(d for d in self._builtin_dirs() if d.name not in seen)
+        return dirs
 
     # ── writing ─────────────────────────────────────────────────────
 
