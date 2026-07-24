@@ -1927,7 +1927,7 @@ class ChatSession:
             routed_direct = False
             if self._router_enabled and isinstance(user_input, str):
                 decision = await self._gate_turn()
-                1/0
+
                 if decision is not None and decision.action == ACTION_RESPOND:
                     self._append_history(
                         {"role": "assistant", "content": decision.text}
