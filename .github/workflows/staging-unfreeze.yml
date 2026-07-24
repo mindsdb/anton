@@ -17,3 +17,14 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     uses: mindsdb/github-actions/.github/workflows/release-unfreeze.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
     secrets: inherit
+
+  notify-failure:
+    # Alert the eng channel if the unfreeze or main->staging sync-back fails —
+    # otherwise staging stays frozen (or drifts from main) with no signal.
+    needs: [unfreeze]
+    if: failure()
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "staging unfreeze"
+      runs-on: ubuntu-latest
+    secrets: inherit
