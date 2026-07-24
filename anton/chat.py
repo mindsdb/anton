@@ -875,6 +875,8 @@ async def _handle_unpublish(
     import json as _json
     from pathlib import Path as _Path
 
+    from anton.publisher import _STATE_SNAPSHOT
+
     removed_report_id = selected.get("report_id") or ""
     removed_md5 = selected.get("md5") or ""
     artifacts_root = _Path(settings.artifacts_dir)
@@ -898,6 +900,20 @@ async def _handle_unpublish(
             if matches:
                 del data[key]
                 changed = True
+                # Reset the state-snapshot baseline so a later /publish with a
+                # changed collection set is treated as fresh (not blocked).
+                # Modern layout: snapshot sits next to .published.json. Legacy
+                # root .published.json uses "{slug}/" keys → snapshot lives in
+                # the per-artifact subdir named by the key.
+                snap_dirs = [pub_file.parent]
+                if key.endswith("/"):
+                    snap_dirs.append(pub_file.parent / key.rstrip("/"))
+                for snap_dir in snap_dirs:
+                    snap = snap_dir / _STATE_SNAPSHOT
+                    try:
+                        snap.unlink()
+                    except OSError:
+                        pass
         if changed:
             try:
                 pub_file.write_text(_json.dumps(data, indent=2), encoding="utf-8")

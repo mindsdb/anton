@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 # v1: string keys only. Numeric/binary keys would require support across the
 # whole chain (pk: str, validation, begins_with) — deferred.
@@ -34,6 +34,7 @@ class StateSchema(BaseModel):
     sk: Attr | None = None
     gsis: list[Index] = []
     ttl_attribute: str | None = None
+    collections: list[str] = []
 
     @field_validator("gsis")
     @classmethod
@@ -43,6 +44,24 @@ class StateSchema(BaseModel):
         if v:
             raise ValueError("secondary indexes (gsis) are not supported in v1")
         return v
+
+    @model_validator(mode="after")
+    def _validate_collections(self):
+        if not self.collections:
+            return self
+        # Collection encodes its name into the sort key (odm.py); no sk → no collections.
+        if self.sk is None:
+            raise ValueError("collections require a schema with a sort key")
+        seen: set[str] = set()
+        for name in self.collections:
+            if not name:
+                raise ValueError("collection names must be non-empty")
+            if "#" in name:
+                raise ValueError(f"collection name must not contain '#': {name!r}")
+            if name in seen:
+                raise ValueError(f"duplicate collection name: {name!r}")
+            seen.add(name)
+        return self
 
     def key_attrs(self) -> set[str]:
         names: set[str] = {self.pk.name}

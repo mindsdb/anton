@@ -57,6 +57,12 @@ _FULLSTACK_EXCLUDED = {
 }
 
 
+class StatePublishBlocked(Exception):
+    """Publish aborted: a previously published state collection disappeared from
+    the new schema, which would orphan its stored data. Tooling-level error
+    (not an anton_state runtime error) — surfaced to the publish caller."""
+
+
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 
 # Owner-side housekeeping files that must never enter the published
@@ -306,6 +312,21 @@ def _save_state_snapshot(artifact_dir: Path, manifest: dict) -> None:
     (artifact_dir / _STATE_SNAPSHOT).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
+def _blocked_collection_drops(artifact_dir: Path, manifest: dict) -> set[str]:
+    """Collections present in the last published manifest but missing from the new
+    one — their stored data (keyed by artifact_id in the shared table) would be
+    orphaned. Empty when there is no snapshot (first publish) or nothing was
+    removed (adding a collection is safe)."""
+    snap = artifact_dir / _STATE_SNAPSHOT
+    if not snap.is_file():
+        return set()
+    try:
+        prev = json.loads(snap.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return set()
+    return set(prev.get("collections", [])) - set(manifest.get("collections", []))
+
+
 def _vendor_anton_state(zf: zipfile.ZipFile) -> list[str]:
     """Copy the `anton_state` package into the bundle under `anton_state/`.
 
@@ -417,6 +438,14 @@ def publish(
         state_manifest = _read_state_manifest(file_path)
         if state_manifest is not None:
             _warn_state_schema_change(file_path, state_manifest)  # before upload
+            dropped = _blocked_collection_drops(file_path, state_manifest)
+            if dropped:
+                raise StatePublishBlocked(
+                    f"Collections {sorted(dropped)} exist in the published version "
+                    f"but are missing from the new schema — their stored data would "
+                    f"be orphaned. Unpublish the artifact and publish again with the "
+                    f"new schema (the old data is not migrated)."
+                )
             payload_dict["state_manifest"] = state_manifest
         if missing:
             payload_dict["missing_datasources"] = missing

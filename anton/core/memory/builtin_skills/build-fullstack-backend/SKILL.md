@@ -165,9 +165,10 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
     StateSchema(
         pk=Attr(name="pk"),            # partition key (always type "S")
         sk=Attr(name="sk"),            # sort key — omit entirely if unused
+        collections=["comments", "users"],  # every Collection(store, "<name>") you use
     ).to_manifest(f"{artifact_path}/state_manifest.json")
     ```
-    The manifest describes ONLY the KEY schema, never data fields. The resulting JSON is a FLAT object `{version, pk, sk?, gsis?, ttl_attribute?}` where `pk`/`sk` are `{"name": ..., "type": "S"}` — string keys only in v1. Do NOT wrap it in `entities`/`attributes`/`partition_key`/`sort_key` (a DynamoDB-CreateTable-style shape) and do NOT declare non-key attributes: those fail validation (`StateSchema ... pk Field required`) at the first request. Store the actual values freely via `store.put({...})` at runtime — they need no schema entry.
+    The manifest describes ONLY the KEY schema, never data fields. The resulting JSON is a FLAT object `{version, pk, sk?, gsis?, ttl_attribute?, collections?}` where `pk`/`sk` are `{"name": ..., "type": "S"}` — string keys only in v1. Do NOT wrap it in `entities`/`attributes`/`partition_key`/`sort_key` (a DynamoDB-CreateTable-style shape) and do NOT declare non-key attributes: those fail validation (`StateSchema ... pk Field required`) at the first request. Store the actual values freely via `store.put({...})` at runtime — they need no schema entry. List every `Collection(store, "<name>")` name in `collections` (this is NOT declaring data fields — it is the collection registry). Removing a name here when UPDATING an already-published artifact BLOCKS the publish (its stored data would be orphaned) — to change the set you must /unpublish first and publish again.
   - STATE STORE API (`fullstack-stateful-app` ONLY): the `store` from `get_store()` is a key-value store keyed by `(pk, sk)`. PREFER the `Collection` helper for light state — it manages the sort key and defaults the partition:
     ```python
     from anton_state import Collection
