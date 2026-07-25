@@ -12,54 +12,12 @@ concurrency:
   group: auto-release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  CALVER_MAJOR: 2
-
 jobs:
   auto-release:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # need tags for sequence calculation
-
-      - name: Compute CalVer version
-        id: version
-        run: |
-          set -euo pipefail
-
-          MAJOR=${{ env.CALVER_MAJOR }}
-          YY=$(date -u +%y)    # e.g. 26
-          M=$(date -u +%-m)    # e.g. 6 (no zero-pad)
-          DD=$(date -u +%-d)   # e.g. 23 (no zero-pad)
-
-          # Find the highest sequence for today's date
-          PREFIX="v${MAJOR}.${YY}.${M}.${DD}."
-          SEQ=0
-          for tag in $(git tag -l "${PREFIX}*" | sort -t. -k5 -n); do
-            N="${tag##*.}"
-            if [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt "$SEQ" ]; then
-              SEQ="$N"
-            fi
-          done
-          SEQ=$((SEQ + 1))
-
-          VERSION="${MAJOR}.${YY}.${M}.${DD}.${SEQ}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Computed version: ${VERSION}"
-
-      - name: Create tag and GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --generate-notes \
-            --title "${{ steps.version.outputs.tag }}"
+    uses: mindsdb/github-actions/.github/workflows/calver-release.yml@main
+    with:
+      calver-major: "2"
+      runs-on: ubuntu-latest
 
   publish:
     name: Publish to PyPI
@@ -94,26 +52,20 @@ jobs:
       tag: ${{ needs.auto-release.outputs.tag }}
     secrets: inherit
 
-  notify-failure:
+  notify:
     # Alert the eng channel if ANY job in the release pipeline fails (tag, PyPI
     # publish, or release e2e).
+    # One job covers both outcomes: a `uses:` job cannot branch on status, so
+    # the aggregate result picks the failed or recovered message, and a
+    # cancelled run stays silent.
     needs: [auto-release, publish, e2e]
-    if: failure()
+    if: ${{ !cancelled() && !contains(needs.*.result, 'cancelled') }}
+    permissions:
+      contents: read
+      actions: read  # the prior-run lookup behind the recovery message
     uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
     with:
       env-name: "release"
-      runs-on: ubuntu-latest
-    secrets: inherit
-
-
-  notify-recovery:
-    # Post a green "recovered" message when the pipeline goes green after a
-    # failing run (the reusable no-ops on a normal green run).
-    needs: [auto-release, publish, e2e]
-    if: success()
-    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
-    with:
-      env-name: "release"
-      status: recovered
+      status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
       runs-on: ubuntu-latest
     secrets: inherit
