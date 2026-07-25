@@ -27,26 +27,20 @@ jobs:
       - name: Run E2E tests (stub)
         run: uv run --extra dev pytest tests/e2e/ -v
 
-  notify-failure:
+  notify:
     # Alert the eng channel if CI fails on a direct push to main/staging. PR runs
     # are skipped — the author sees those directly.
+    # One job covers both outcomes: a `uses:` job cannot branch on status, so
+    # the aggregate result picks the failed or recovered message, and a
+    # cancelled run stays silent.
     needs: [run-tests]
-    if: failure() && github.event_name == 'push'
+    if: ${{ !cancelled() && !contains(needs.*.result, 'cancelled') && github.event_name == 'push' }}
+    permissions:
+      contents: read
+      actions: read  # the prior-run lookup behind the recovery message
     uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
     with:
       env-name: "CI"
-      runs-on: ubuntu-latest
-    secrets: inherit
-
-
-  notify-recovery:
-    # Post a green "recovered" message when the pipeline goes green after a
-    # failing run (the reusable no-ops on a normal green run).
-    needs: [run-tests]
-    if: success() && github.event_name == 'push'
-    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
-    with:
-      env-name: "CI"
-      status: recovered
+      status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
       runs-on: ubuntu-latest
     secrets: inherit
