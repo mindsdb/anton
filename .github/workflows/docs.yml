@@ -47,3 +47,26 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  notify-failure:
+    # Alert the eng channel if the docs build or Pages deploy fails.
+    needs: [build, deploy]
+    if: failure()
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "docs deploy"
+      runs-on: ubuntu-latest
+    secrets: inherit
+
+
+  notify-recovery:
+    # Post a green "recovered" message when the pipeline goes green after a
+    # failing run (the reusable no-ops on a normal green run).
+    needs: [build, deploy]
+    if: success()
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "docs deploy"
+      status: recovered
+      runs-on: ubuntu-latest
+    secrets: inherit

@@ -13,3 +13,14 @@ jobs:
   freeze:
     uses: mindsdb/github-actions/.github/workflows/release-freeze.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
     secrets: inherit
+
+  notify-failure:
+    # Alert the eng channel if the freeze fails (e.g. missing ruleset) — otherwise
+    # a broken freeze is silent and the code-freeze window never opens.
+    needs: [freeze]
+    if: failure()
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "staging freeze"
+      runs-on: ubuntu-latest
+    secrets: inherit

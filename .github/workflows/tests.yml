@@ -26,3 +26,27 @@ jobs:
 
       - name: Run E2E tests (stub)
         run: uv run --extra dev pytest tests/e2e/ -v
+
+  notify-failure:
+    # Alert the eng channel if CI fails on a direct push to main/staging. PR runs
+    # are skipped — the author sees those directly.
+    needs: [run-tests]
+    if: failure() && github.event_name == 'push'
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "CI"
+      runs-on: ubuntu-latest
+    secrets: inherit
+
+
+  notify-recovery:
+    # Post a green "recovered" message when the pipeline goes green after a
+    # failing run (the reusable no-ops on a normal green run).
+    needs: [run-tests]
+    if: success() && github.event_name == 'push'
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "CI"
+      status: recovered
+      runs-on: ubuntu-latest
+    secrets: inherit

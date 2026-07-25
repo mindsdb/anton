@@ -93,3 +93,27 @@ jobs:
     with:
       tag: ${{ needs.auto-release.outputs.tag }}
     secrets: inherit
+
+  notify-failure:
+    # Alert the eng channel if ANY job in the release pipeline fails (tag, PyPI
+    # publish, or release e2e).
+    needs: [auto-release, publish, e2e]
+    if: failure()
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "release"
+      runs-on: ubuntu-latest
+    secrets: inherit
+
+
+  notify-recovery:
+    # Post a green "recovered" message when the pipeline goes green after a
+    # failing run (the reusable no-ops on a normal green run).
+    needs: [auto-release, publish, e2e]
+    if: success()
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "release"
+      status: recovered
+      runs-on: ubuntu-latest
+    secrets: inherit
