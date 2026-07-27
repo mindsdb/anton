@@ -312,6 +312,115 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+class TransientProviderError(ConnectionError):
+    """Raised when the provider fails in a way that a retry might fix.
+
+    Covers provider/infra-side hiccups — an ``overloaded_error``/``api_error``
+    event (including the mid-stream case that arrives inside an HTTP-200 stream,
+    see ENG-673), a 5xx, a plain 429 (no quota detail), a dropped connection, or
+    a truncated stream. The session loop backs off and retries these within a
+    bounded budget; distinct from auth/quota/model-gate failures, which are
+    permanent for the identical request and must fail fast.
+
+    Subclasses ConnectionError so legacy call sites that only know the
+    ConnectionError mapping keep working unchanged.
+    """
+
+    def __init__(
+        self, message: str, *, provider: str = "", code: str | None = None,
+        retry_after: float | None = None, session_backoff: bool = True,
+        model: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.code = code
+        self.retry_after = retry_after
+        # The model that was in flight when this failed — so a downstream
+        # ProviderOverloadedError names the ACTUAL model (planning OR coding),
+        # not whatever the session defaults to (ENG-673).
+        self.model = model
+        # Whether the SESSION should spend its backoff budget on this (ENG-673).
+        # True for failures that had NO prior retry — a mid-stream error (arrives
+        # inside an HTTP-200 stream), a dropped connection, or a truncated stream.
+        # False for request-time HTTP errors (real 4xx/5xx): the SDK already
+        # retried those with backoff, so the session fails fast (still with the
+        # honest typed message) instead of stacking another 30s on top.
+        self.session_backoff = session_backoff
+
+
+class ProviderOverloadedError(ConnectionError):
+    """Terminal form of a transient failure: the retry budget was exhausted.
+
+    Carries the failing ``model`` + ``provider`` so cowork-server can render the
+    ``provider_overloaded`` card (the MindsHub cross-provider-failover nudge).
+    Typed consumers read ``code``/``model``/``provider``; it subclasses
+    ConnectionError for legacy call sites.
+    """
+
+    def __init__(
+        self, message: str, *, provider: str = "", model: str = "",
+        code: str = "provider_overloaded",
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.code = code
+
+
+# Body ``error.type``/``error.code`` values that mean "provider is momentarily
+# failing" — retryable. The mid-stream overload arrives with one of these inside
+# an HTTP-200 stream (ENG-673), so classification must read the body, not status.
+_TRANSIENT_ERROR_TYPES = frozenset(
+    {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
+)
+
+
+def classify_transient(
+    status_code: int | None, body: Any, *, provider: str = "", model: str = ""
+) -> "TransientProviderError | None":
+    """Arm A of the transient classifier (see ENG-673): inspect an
+    ``APIStatusError``'s status + body and return a ``TransientProviderError`` if
+    it's a retryable provider/infra failure, else ``None``.
+
+    Shared by both providers so the mapping can't drift. Call this only AFTER the
+    permanent classifications (401 / 429-quota / 403 model-gate) have been ruled
+    out — this decides between "retryable transient" and "generic unavailable".
+    """
+    b = body if isinstance(body, dict) else {}
+    # Two body dialects: Anthropic nests the error under `error` ({"error":
+    # {"type": ...}}); the OpenAI SDK unwraps its envelope (`body.get("error",
+    # body)`) so the type sits at the TOP level. Read the nested object when
+    # present, otherwise treat the body itself as the error object — so the
+    # mid-stream case classifies on BOTH providers (ENG-673, Sam's review).
+    err = b.get("error") if isinstance(b.get("error"), dict) else b
+    etype = err.get("type") or err.get("code")
+    # A mid-stream failure has no real HTTP error status (it's smuggled into an
+    # already-sent 200, or there's no status at all), so the SDK never retried it
+    # → the session must. A request-time error carries a real 4xx/5xx → the SDK
+    # already retried → fail fast.
+    session_backoff = status_code is None or status_code == 200
+    if isinstance(etype, str) and etype in _TRANSIENT_ERROR_TYPES:
+        # Explicit overload/api_error — the body is authoritative (status may be
+        # a misleading 200 mid-stream, or a real 529 at request time).
+        return TransientProviderError(
+            f"{provider or 'The model provider'} is momentarily overloaded.",
+            provider=provider, code=etype, session_backoff=session_backoff, model=model,
+        )
+    if isinstance(status_code, int) and 500 <= status_code < 600:
+        return TransientProviderError(
+            f"{provider or 'The model provider'} returned {status_code}.",
+            provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
+        )
+    if status_code == 429 and not b.get("detail"):
+        # Plain rate-limit ("slow down"), NOT an out-of-quota 429 (that carries a
+        # `detail` and is mapped to TokenLimitExceeded upstream of this call).
+        return TransientProviderError(
+            f"{provider or 'The model provider'} is rate-limiting requests.",
+            provider=provider, code="rate_limited", session_backoff=False, model=model,
+        )
+    return None
+
+
 class ModelUnavailableError(ConnectionError):
     """Raised when the gateway rejects the requested model with a structured 403.
 

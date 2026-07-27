@@ -26,7 +26,11 @@ import openai
 import pytest
 
 from anton.core.llm.openai import _raise_for_status_error
-from anton.core.llm.provider import ModelUnavailableError, TokenLimitExceeded
+from anton.core.llm.provider import (
+    ModelUnavailableError,
+    TokenLimitExceeded,
+    TransientProviderError,
+)
 
 
 def _sdk_error(status_code, json_body=None, text_body=None):
@@ -114,17 +118,23 @@ def test_429_enveloped_detail_also_maps_to_token_limit():
     # the `detail` field, the SDK unwraps it to top level — still classified.
     # (An envelope carrying only `message` — OpenAI's own quota dialect —
     # deliberately stays generic; see the mapper docstring's known limits.)
+    # Classified before the transient path (429+detail → quota), so ENG-673's
+    # bare-429-is-transient change leaves this untouched.
     exc = _sdk_error(429, json_body={"error": {"detail": "Monthly limit exceeded for tokens: 5/5"}})
     with pytest.raises(TokenLimitExceeded) as err:
         _raise_for_status_error(exc, "sonnet")
     assert "Monthly limit exceeded" in str(err.value)
 
 
-def test_bare_429_stays_generic():
+def test_bare_429_is_transient_fail_fast():
+    # ENG-673: a plain 429 (no quota detail) is a retryable rate-limit, but the
+    # SDK already retried it at request time → fail fast (no session backoff).
+    # Replaces the old test_bare_429_stays_generic — this path is now typed.
     exc = _sdk_error(429, json_body={})
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(TransientProviderError) as err:
         _raise_for_status_error(exc, "sonnet")
-    assert "temporarily unavailable" in str(err.value)
+    assert err.value.session_backoff is False
+    assert "rate-limiting" in str(err.value).lower()
 
 
 def test_429_list_detail_stays_generic():
@@ -239,10 +249,13 @@ def test_429_with_detail_wins_even_if_error_code_present():
         _raise_for_status_error(exc, "sonnet")
 
 
-# ── other statuses stay generic ───────────────────────────────────────
+# ── 5xx / infra failures are transient (ENG-673) ──────────────────────
 
-def test_500_stays_generic():
-    exc = _sdk_error(500, json_body={"error": {"message": "boom"}})
-    with pytest.raises(ConnectionError) as err:
+def test_500_is_transient_fail_fast():
+    # ENG-673: a request-time 5xx is transient (retryable), but SDK-retried
+    # already → fail fast with the honest typed message, no session backoff.
+    exc = _sdk_error(500, json_body={})
+    with pytest.raises(TransientProviderError) as err:
         _raise_for_status_error(exc, "sonnet")
-    assert "Server returned 500" in str(err.value)
+    assert err.value.session_backoff is False
+    assert "returned 500" in str(err.value)

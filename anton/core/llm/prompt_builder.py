@@ -163,7 +163,9 @@ class ChatSystemPromptBuilder:
             conversation_started=conversation_started,
         )
 
-        prompt += "\n\n" + BACKEND_GENERATION_PROMPT.format(output_dir=output_dir)
+        # Short pointer only — the full backend/fullstack contract lives in the
+        # built-in `build-fullstack-backend` skill (recalled on demand).
+        prompt += "\n\n" + BACKEND_GENERATION_PROMPT
 
         tool_prompts = self._build_tool_prompts_section(tool_defs)
         if tool_prompts:

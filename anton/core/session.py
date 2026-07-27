@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, List, Literal
 import os
@@ -20,6 +22,7 @@ from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
+from anton.memory.history_store import is_user_turn
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -27,7 +30,9 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    LLMResponse,
     ModelUnavailableError,
+    ProviderOverloadedError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -36,6 +41,12 @@ from anton.core.llm.provider import (
     StreamToolResult,
     TokenLimitExceeded,
     ToolCall,
+    TransientProviderError,
+)
+from anton.core.llm.thalamus import (
+    ACTION_RESPOND,
+    ThalamicDecision,
+    gate_turn,
 )
 from anton.core.llm.tracing import (
     TraceContext,
@@ -76,6 +87,8 @@ from anton.core.settings import CoreSettings
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
 _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
+
+logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
@@ -282,10 +295,19 @@ class ChatSessionConfig:
     # None → fall back to today.
     started_at: datetime | None = None
     selection_elicitor: SelectionElicitor | None = None
+    # Cheap front-model routing (ENG-648). None (default) defers to the
+    # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
+    # explicit bool to override per session.
+    router_enabled: bool | None = None
 
 
 class ChatSession:
     """Manages a multi-turn conversation with tool-call delegation."""
+
+    # ENG-673: wall-clock budget for backing off + retrying transient provider
+    # failures within a single turn. Class attribute so it's tunable (a future
+    # per-surface / config knob) and injectable in tests.
+    _transient_budget_s: float = 30.0
 
     def __init__(self, config: ChatSessionConfig) -> None:
         s = config.settings or CoreSettings()
@@ -302,6 +324,20 @@ class ChatSession:
         self._resilience_nudge_at = s.resilience_nudge_at
         self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
+        # Router (ENG-648): explicit host override wins; otherwise the
+        # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
+        # tests pass bare CoreSettings-shaped objects.
+        self._router_enabled = (
+            config.router_enabled
+            if config.router_enabled is not None
+            else bool(getattr(s, "router_enabled", False))
+        )
+        self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
+        # Monotonic counter for thalamus-preloaded tool_use ids. Deliberately
+        # separate from `_turn_count`, which only increments in turn_stream()
+        # — using it here would emit the same id on every call made through
+        # the non-streaming turn() API.
+        self._thalamus_recall_counter = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -319,7 +355,7 @@ class ChatSession:
         )
         self._pending_memory_confirmations: list = []
         self._turn_count = (
-            sum(1 for m in self._history if m.get("role") == "user")
+            sum(1 for m in self._history if is_user_turn(m))
             if config.initial_history
             else 0
         )
@@ -935,11 +971,13 @@ class ChatSession:
         self._tracked_backends.clear()
 
     async def _summarize_history(self) -> None:
-        """Compress old conversation turns into a summary using the coding model.
+        """Compress old conversation turns into a summary.
 
         Splits history into old (first 60%) and recent (last 40%), keeping at
-        least 4 recent turns.  The old portion is summarized by the fast coding
-        model and replaced with a single user message.
+        least 4 recent turns. The old portion is summarized by the routing/
+        summarization model (the router role, which falls back to the coding
+        model when no distinct one is configured) and replaced with a single
+        user message.
         """
         if len(self._history) < 6:
             return  # Too short to summarize
@@ -1027,7 +1065,7 @@ class ChatSession:
             # 3b-full: a structured, in-place-updated STATE RECORD rather than a
             # freeform blob — so "Remaining" work survives compaction instead of
             # being flattened into prose.
-            summary_response = await self._llm.code(
+            summary_response = await self._llm.summarize(
                 system=(
                     "You compact an agent's earlier conversation into a terse, factual "
                     "STATE RECORD (not prose). Output only these sections, omitting any "
@@ -1088,6 +1126,34 @@ class ChatSession:
             if pad._compact_cells():
                 compacted = True
         return compacted
+
+    @staticmethod
+    def _transient_backoff_delay(attempt: int, retry_after: float | None = None) -> float:
+        """Backoff for a transient-provider retry (ENG-673).
+
+        Honors a provider `retry_after` when present (usually only on
+        request-time 429/529 — the mid-stream 200 case carries none). Otherwise
+        ~2s → ~10s → ~18s with ±20% jitter, so a fleet recovering from the same
+        incident doesn't retry in lockstep against an already-struggling provider.
+        """
+        if retry_after is not None and retry_after > 0:
+            return min(float(retry_after), 30.0)
+        base = (2.0, 10.0, 18.0)
+        d = base[attempt] if attempt < len(base) else base[-1]
+        return d * (0.8 + 0.4 * random.random())
+
+    async def _backoff_sleep(self, delay: float) -> bool:
+        """Sleep `delay` seconds, waking early if the turn is cancelled.
+
+        Returns True if cancelled during the wait, False if the full delay
+        elapsed — so a user hitting stop during backoff aborts immediately
+        instead of waiting out the incident (ENG-673).
+        """
+        try:
+            await asyncio.wait_for(self._cancel_event.wait(), timeout=delay)
+            return True  # _cancel_event fired
+        except asyncio.TimeoutError:
+            return False  # slept the full delay
 
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
@@ -1516,6 +1582,104 @@ class ChatSession:
             # Cerebellum learning is best-effort, so just drop the buffer.
             cb.reset()
 
+    async def _gate_turn(self) -> ThalamicDecision | None:
+        """Run the cheap routing call for the turn just appended to history.
+
+        Returns None — meaning "proceed to the planning model as if no
+        thalamus existed" — on any thalamus failure. Routing must never be
+        able to break a turn; it can only save one.
+        """
+        try:
+            summaries = (
+                self._skill_store.list_summaries()
+                if self._skill_store is not None
+                else []
+            )
+        except Exception:
+            summaries = []
+        try:
+            return await gate_turn(
+                self._llm,
+                history=self._history,
+                skill_summaries=summaries,
+                max_tokens=self._router_max_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Router call failed (%s) — falling through to the planning model.",
+                exc,
+            )
+            return None
+
+    def _inject_recalled_skills(self, labels: list[str]) -> None:
+        """Preload thalamus-named skills as a synthetic recall_skill exchange.
+
+        Appends an assistant `tool_use` + user `tool_result` pair to
+        history, byte-identical in payload to what the planning model
+        would have gotten by calling `recall_skill` itself — but without
+        spending a full-context planning round on the fetch. Labels must
+        match exactly (no fuzzy fallback: a wrong preload is worse than
+        none), unknown labels are dropped silently, and at most 3 skills
+        load per turn. Built-ins and user skills resolve through the same
+        SkillStore that `recall_skill` uses.
+        """
+        if not labels:
+            return
+        store = self._skill_store
+        if store is None:
+            return
+        from anton.core.tools.recall_skill import (
+            _already_in_history,
+            _format_skill_response,
+        )
+
+        self._thalamus_recall_counter += 1
+        tool_uses: list[dict] = []
+        results: list[dict] = []
+        seen: set[str] = set()
+        for label in labels:
+            label = (label or "").strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            if len(tool_uses) >= 3:
+                break
+            try:
+                skill = store.load(label)
+            except Exception:
+                skill = None
+            if skill is None:
+                continue
+            # Skip skills whose full body is already in context — mirrors
+            # handle_recall_skill's stub path so a preload can't duplicate a
+            # procedure the planning model already has (wasted tokens).
+            if _already_in_history(self, skill.label):
+                continue
+            content = _format_skill_response(skill)
+            try:
+                store.increment_recommended(skill.label, stage=1)
+            except Exception:
+                pass
+            tu_id = f"thalamus_recall_{self._thalamus_recall_counter}_{len(tool_uses)}"
+            tool_uses.append(
+                {
+                    "type": "tool_use",
+                    "id": tu_id,
+                    "name": "recall_skill",
+                    "input": {"label": skill.label},
+                }
+            )
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tu_id,
+                    "content": content,
+                }
+            )
+        if tool_uses:
+            self._append_history({"role": "assistant", "content": tool_uses})
+            self._append_history({"role": "user", "content": results})
+
     async def turn(self, user_input: str | list[dict]) -> str:
         user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
@@ -1525,6 +1689,26 @@ class ChatSession:
             if isinstance(user_input, str)
             else next((b["text"] for b in user_input if b.get("type") == "text"), "")
         )
+
+        # Cheap front-model routing (ENG-648). Text-only turns first hit
+        # the thalamus model, which either answers trivial/from-context
+        # requests directly (skipping the full prompt + tools + planning
+        # model entirely) or delegates, optionally preloading skills.
+        # Image turns skip the thalamus — attachments imply real work.
+        if self._router_enabled and isinstance(user_input, str):
+            decision = await self._gate_turn()
+            if decision is not None and decision.action == ACTION_RESPOND:
+                self._append_history(
+                    {"role": "assistant", "content": decision.text}
+                )
+                if self._cortex is not None and self._cortex.mode != "off":
+                    self._cortex.maybe_vacuum()
+                self._schedule_cerebellum_flush()
+                self._schedule_acc_flush()
+                return decision.text
+            if decision is not None and decision.skills:
+                self._inject_recalled_skills(decision.skills)
+
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
@@ -1698,6 +1882,14 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        # ENG-673: a mid-stream provider failure that had NO prior retry (an
+        # overload smuggled into an HTTP-200 stream) gets budget-bounded
+        # backoff-and-retry — separate from the instant, count-bounded recovery
+        # used for genuine errors. The clock starts on the first such error and
+        # is measured across the turn. Request-time transients (real 5xx/429,
+        # connection errors) carry session_backoff=False and skip this path.
+        _transient_deadline: float | None = None
+        _transient_attempt = 0
         self._active_explainability = ExplainabilityCollector(
             self._explainability_store,
             turn=self._turn_count + 1,
@@ -1722,7 +1914,41 @@ class ChatSession:
         )
 
         try:
-            while True:
+            # Cheap front-model routing (ENG-648). Text-only turns first
+            # hit the thalamus model, which either answers trivial/from-
+            # context requests directly (skipping the full prompt + tool
+            # schemas + planning model entirely) or delegates, optionally
+            # preloading skills into history so the planning model doesn't
+            # spend a round on recall_skill. Image turns skip the thalamus —
+            # attachments imply real work. The thalamus buffers rather than
+            # streams: direct answers are short by construction
+            # (router_max_tokens), and a delegate decision must never leak
+            # preamble text to the user.
+            routed_direct = False
+            if self._router_enabled and isinstance(user_input, str):
+                decision = await self._gate_turn()
+                if decision is not None and decision.action == ACTION_RESPOND:
+                    self._append_history(
+                        {"role": "assistant", "content": decision.text}
+                    )
+                    assistant_text_parts.append(decision.text)
+                    yield StreamTextDelta(text=decision.text)
+                    yield StreamComplete(
+                        response=decision.response
+                        or LLMResponse(content=decision.text)
+                    )
+                    routed_direct = True
+                elif decision is not None:
+                    # Delegating: surface the gate call's usage as its own
+                    # StreamComplete so token accounting counts it, exactly
+                    # like a planning round (the loop below emits more). The
+                    # gate hits every turn, so dropping it would under-report.
+                    if decision.response is not None:
+                        yield StreamComplete(response=decision.response)
+                    if decision.skills:
+                        self._inject_recalled_skills(decision.skills)
+
+            while not routed_direct:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):
@@ -1737,6 +1963,51 @@ class ChatSession:
                     # map them to their cards.
                     if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
                         raise
+
+                    # ENG-673: a mid-stream transient failure that had NO prior
+                    # retry (overload smuggled into a 200, or a truncated stream).
+                    # Back off and retry the SAME step within a per-turn budget —
+                    # do NOT inject a "you errored, change approach" note (it was
+                    # a provider blip, not the model's fault) and do NOT spend the
+                    # count-based retry budget reserved for genuine errors.
+                    # Completed tool_results already sit in history and are never
+                    # re-executed on retry (idempotency); we only seal any
+                    # tool_use the interrupted stream left dangling so the retried
+                    # request is valid. Request-time transients (real 5xx/429,
+                    # connection errors) set session_backoff=False — the SDK
+                    # already retried them, so they fall through to the fast
+                    # count-based path below with their honest typed message.
+                    if isinstance(_agent_exc, TransientProviderError) and _agent_exc.session_backoff:
+                        now = asyncio.get_running_loop().time()
+                        if _transient_deadline is None:
+                            _transient_deadline = now + self._transient_budget_s
+                        self._seal_dangling_tool_uses("interrupted by a transient provider error")
+                        remaining = _transient_deadline - now
+                        if remaining > 0.5:
+                            delay = min(
+                                self._transient_backoff_delay(
+                                    _transient_attempt, _agent_exc.retry_after
+                                ),
+                                remaining,
+                            )
+                            _transient_attempt += 1
+                            if await self._backoff_sleep(delay):
+                                # User cancelled during backoff — stop cleanly
+                                # (like a normal stop), not with an error card.
+                                break
+                            continue
+                        # Budget exhausted — fail with an actionable, honest error
+                        # the server renders as the provider_overloaded card.
+                        # Name the model that actually failed (planning OR coding),
+                        # falling back to the session's planning model.
+                        raise ProviderOverloadedError(
+                            f"{_agent_exc.provider or 'The model provider'} is experiencing an "
+                            "incident and didn't recover in time.",
+                            provider=getattr(_agent_exc, "provider", "") or "",
+                            model=(getattr(_agent_exc, "model", "") or "")
+                            or getattr(self._llm, "planning_model", "") or "",
+                        ) from _agent_exc
+
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
                     # message after a `tool_use` lacks matching
@@ -1750,18 +2021,27 @@ class ChatSession:
                     # and we get the same 400 forever.
                     self._seal_dangling_tool_uses("interrupted by error")
                     if _retry_count <= _max_auto_retries:
-                        # Inject the error into history and let the LLM try to recover
-                        self._append_history(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
-                                    "If you can diagnose and fix the issue, continue working on the task. "
-                                    "Adjust your approach to avoid the same error. "
-                                    "If this is unrecoverable, summarize what you accomplished and suggest next steps."
-                                ),
-                            }
-                        )
+                        # Inject the error into history and let the LLM try to
+                        # recover. A TransientProviderError reaching here is a
+                        # request-time provider blip (5xx / rate-limit / dropped
+                        # connection) — NOT the model's fault, so don't tell it to
+                        # "adjust your approach" (that misattributes the failure
+                        # and can degrade the next attempt during an incident);
+                        # just note it was transient and continue as planned (ENG-673).
+                        if isinstance(_agent_exc, TransientProviderError):
+                            recovery_note = (
+                                f"SYSTEM: A temporary provider error interrupted execution: {_agent_exc}\n\n"
+                                "This was a transient service issue, not a problem with your approach — "
+                                "continue the task as planned."
+                            )
+                        else:
+                            recovery_note = (
+                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                "If you can diagnose and fix the issue, continue working on the task. "
+                                "Adjust your approach to avoid the same error. "
+                                "If this is unrecoverable, summarize what you accomplished and suggest next steps."
+                            )
+                        self._append_history({"role": "user", "content": recovery_note})
                         # Continue the while loop — _stream_and_handle_tools will be called
                         # again with the error context now in history
                         continue

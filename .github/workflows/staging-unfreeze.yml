@@ -17,3 +17,22 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     uses: mindsdb/github-actions/.github/workflows/release-unfreeze.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
     secrets: inherit
+
+  notify:
+    # Alert the eng channel if the unfreeze or main->staging sync-back fails —
+    # otherwise staging stays frozen (or drifts from main) with no signal.
+    needs: [unfreeze]
+    if: failure()
+    permissions:
+      contents: read
+      # Declared even though this caller never runs the prior-run lookup: a
+      # reusable workflow's requested permissions are validated when the file
+      # is parsed, not when the step that needs them runs, so a caller that
+      # grants less than the reusable asks for is INVALID rather than merely
+      # degraded, and the whole workflow fails to load.
+      actions: read
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "staging unfreeze"
+      runs-on: ubuntu-latest
+    secrets: inherit

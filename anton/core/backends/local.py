@@ -22,6 +22,61 @@ from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
+
+
+def _read_boot_script() -> str:
+    """Read the boot script as UTF-8 explicitly.
+
+    It contains non-ASCII (…, —), so a host-locale-default read (e.g. GBK on
+    Chinese Windows) crashes with a codec error before the scratchpad can start
+    (ENG-824). Kept as a helper so the explicit encoding is pinned by a test.
+    """
+    return _BOOT_SCRIPT_PATH.read_text(encoding="utf-8")
+
+
+def _encode_cell_payload(payload: str) -> bytes:
+    """Encode the cell payload sent to the scratchpad subprocess.
+
+    ``errors="surrogateescape"`` rather than a strict UTF-8 encode: model-written
+    cell code can embed a filesystem path that ``os.fsdecode`` surrogate-escaped
+    when it couldn't decode the path bytes on a non-UTF-8 host (e.g. a pt-BR
+    ``Área de Trabalho`` or an emoji path on Windows → lone surrogates in
+    U+DC80..U+DCFF). A strict encode raises ``UnicodeEncodeError: surrogates not
+    allowed`` here and takes down the whole session before the code reaches the
+    subprocess — the encode-side sibling of ENG-824's decode crash (ENG-940).
+
+    ``surrogateescape`` (not ``surrogatepass``) is deliberate: it's the inverse
+    of the ``os.fsdecode`` that created these surrogates, so it restores the
+    original path bytes, and it matches how the subprocess — which always runs
+    in UTF-8 mode (``_utf8_env``) and so decodes stdin with ``surrogateescape``
+    — reads them back. ``surrogatepass`` would emit the 3-byte CESU form that the
+    subprocess's ``surrogateescape`` decode then re-mangles, so the path would
+    not survive intact.
+    """
+    return payload.encode("utf-8", errors="surrogateescape")
+
+
+def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
+    """A copy of ``base`` with Python UTF-8 mode forced for the scratchpad
+    subprocess.
+
+    The parent may run under a non-UTF-8 host locale (e.g. GBK/cp936 on
+    Chinese Windows). Without this, the child interpreter inherits that code
+    page and every ``open()``/``print()``/stdio defaults to it — so reading the
+    boot script or emitting non-ASCII output crashes (ENG-824). ``setdefault``
+    so an explicit operator override still wins.
+
+    Only ``PYTHONUTF8`` is set: UTF-8 mode already makes open()/filesystem/stdio
+    UTF-8 with the lenient ``surrogateescape`` stdio handler. We deliberately do
+    NOT also set ``PYTHONIOENCODING`` — a bare value downgrades the stdio error
+    handler back to ``strict`` (verified), which would re-introduce a crash on
+    exotic output rather than round-tripping it.
+    """
+    env = dict(base)
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
+
 _MAX_OUTPUT = 10_000
 
 
@@ -199,7 +254,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 capture_output=True,
                 timeout=5,
             )
-            return result.returncode == 0 and "ok" in result.stdout.decode()
+            return result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
         except Exception:
             return False
 
@@ -250,7 +305,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     break
             if child_site and parent_site:
                 pth_path = os.path.join(child_site, "_parent_venv.pth")
-                with open(pth_path, "w") as f:
+                # UTF-8 explicitly: a plain open() encodes with the host locale
+                # (e.g. GBK on Chinese Windows), but the child reads .pth files
+                # as UTF-8 under UTF-8 mode — a mismatch corrupts non-ASCII
+                # site-packages paths (same class of bug as the boot script,
+                # ENG-824).
+                with open(pth_path, "w", encoding="utf-8") as f:
                     for sp in parent_site:
                         f.write(sp + "\n")
 
@@ -279,7 +339,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         try:
             req_path = os.path.join(self._venv_dir, "requirements.txt")
-            with open(req_path, "w") as f:
+            with open(req_path, "w", encoding="utf-8") as f:
                 for pkg in sorted(self._installed_packages):
                     f.write(pkg + "\n")
         except OSError:
@@ -290,7 +350,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         req_path = os.path.join(self._venv_dir, "requirements.txt")
         try:
-            with open(req_path) as f:
+            with open(req_path, encoding="utf-8") as f:
                 for line in f:
                     pkg = line.strip()
                     if pkg:
@@ -303,7 +363,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
         try:
             ver_path = os.path.join(self._venv_dir, ".python_version")
-            with open(ver_path, "w") as f:
+            with open(ver_path, "w", encoding="utf-8") as f:
                 f.write(f"{sys.version_info.major}.{sys.version_info.minor}\n")
         except OSError:
             pass
@@ -313,7 +373,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return False
         ver_path = os.path.join(self._venv_dir, ".python_version")
         try:
-            with open(ver_path) as f:
+            with open(ver_path, encoding="utf-8") as f:
                 saved = f.read().strip()
             expected = f"{sys.version_info.major}.{sys.version_info.minor}"
             return saved == expected
@@ -324,13 +384,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Write the boot script to a temp file and launch the subprocess."""
         self._ensure_venv()
 
-        boot_code = _BOOT_SCRIPT_PATH.read_text()
+        boot_code = _read_boot_script()
         fd, path = tempfile.mkstemp(suffix=".py", prefix="anton_scratchpad_")
-        os.write(fd, boot_code.encode())
+        os.write(fd, boot_code.encode("utf-8"))
         os.close(fd)
         self._boot_path = path
 
-        env = os.environ.copy()
+        # Force UTF-8 mode in the child so its I/O never depends on the host
+        # code page (ENG-824).
+        env = _utf8_env(os.environ)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:
@@ -490,7 +552,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
 
         payload = code + "\n" + CELL_DELIM + "\n"
-        self._proc.stdin.write(payload.encode())  # type: ignore[union-attr]
+        self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
         total_timeout, inactivity_timeout = compute_timeouts(estimated_seconds)
@@ -622,7 +684,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 }
                 return
 
-            line = raw.decode().rstrip("\r\n")
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
             if line.startswith(PROGRESS_MARKER):
                 current_inactivity = max(
@@ -676,6 +738,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # Same UTF-8 mode as the scratchpad process, so pip/uv output on a
+            # non-UTF-8 host locale doesn't come back as mojibake (ENG-824).
+            env=_utf8_env(os.environ),
         )
         try:
             stdout, _ = await asyncio.wait_for(
@@ -685,7 +750,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             proc.kill()
             await proc.wait()
             return f"Install timed out after {_install_timeout}s."
-        output = stdout.decode()
+        output = stdout.decode("utf-8", errors="replace")
         if proc.returncode != 0:
             return f"Install failed (exit {proc.returncode}):\n{output}"
         for p in needed:

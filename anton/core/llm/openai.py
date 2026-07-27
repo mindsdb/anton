@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from typing import NoReturn
 
 import openai
 from openai import AsyncAzureOpenAI
+
+from anton.utils.datasources import scrub_credentials
 
 from .provider import safe_parse_tool_input
 from .provider import (
@@ -23,9 +26,13 @@ from .provider import (
     StreamToolUseStart,
     TokenLimitExceeded,
     ToolCall,
+    TransientProviderError,
     Usage,
+    classify_transient,
     compute_context_pressure,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
@@ -102,6 +109,17 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
                 "upgrading your plan may enable it."
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
+    # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
+    # session loop rather than surfacing an instant, misleading failure (ENG-673).
+    transient = classify_transient(exc.status_code, body, provider="The model provider", model=model)
+    if transient is not None:
+        logger.warning(
+            "transient provider error (%s): status=%s body=%s",
+            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+        )
+        raise transient from exc
 
     raise ConnectionError(
         f"Server returned {exc.status_code} — the LLM endpoint may be "
@@ -687,6 +705,22 @@ class OpenAIProvider(LLMProvider):
         return set()
 
     @staticmethod
+    def resolve_web_flavor(provider_name: str, base_url: str) -> str:
+        """Flavor for the scratchpad's web_search(), from provider name + base URL.
+
+        ``name`` is always "openai" for an OpenAIProvider even when the base URL is
+        the minds gateway, so a minds/mdb.ai HOST must win over the name: minds
+        serves web_search over the chat.completions passthrough, not the Responses
+        API. Direct OpenAI uses Responses; anything else is generic (no native web).
+        """
+        host = (base_url or "").lower()
+        if any(h in host for h in ("mdb.ai", "mindshub.ai")):
+            return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+        if provider_name == "openai":
+            return OpenAIProvider.FLAVOR_OPENAI
+        return OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
+
+    @staticmethod
     def _sanitize_langfuse_tag(tag: str) -> str:
         """Clean a caller-supplied langfuse tag so it survives the wire intact.
 
@@ -795,8 +829,13 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         choice = response.choices[0]
@@ -886,8 +925,15 @@ class OpenAIProvider(LLMProvider):
         # Track tool call deltas by index
         tc_state: dict[int, dict] = {}
 
+        # True once the 200 stream has been established. Anything that fails
+        # AFTER this point is mid-stream: the SDK's retry wrapper already
+        # returned, so it never retried — the session must (ENG-673). A failure
+        # BEFORE this (request establishment) was already SDK-retried → fail fast.
+        stream_started = False
+
         try:
             stream = await self._client.chat.completions.create(**kwargs)
+            stream_started = True
             async for chunk in stream:
                 if chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens
@@ -949,8 +995,39 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # A connection error here is retryable. If it dropped mid-stream
+            # (after the 200), the SDK never retried it → the session must back
+            # off and retry. If it failed during request establishment, the SDK
+            # already retried → fail fast (no second budget on top). (ENG-673)
+            raise TransientProviderError(
+                "Lost the connection to the model provider mid-response — try again in a moment."
+                if stream_started
+                else "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error",
+                session_backoff=stream_started, model=model,
+            ) from exc
+        except openai.APIError as exc:
+            # A mid-stream SSE `error` event (server_error / overloaded) arrives
+            # as a BARE APIError with no status_code — NOT an APIStatusError — so
+            # it slips past the handlers above. The SDK already consumed the 200,
+            # so it never retried it → the session must back off and retry, and we
+            # must classify it here or it surfaces as an opaque generic error on
+            # the OpenAI/MindsHub path (ENG-673, Sam's review). Body type sits at
+            # the top level (SDK-unwrapped); classify_transient handles that shape.
+            transient = classify_transient(
+                getattr(exc, "status_code", None), getattr(exc, "body", None),
+                provider="The model provider", model=model,
+            )
+            if transient is not None:
+                logger.warning(
+                    "transient mid-stream provider error (%s): %s",
+                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
+                )
+                raise transient from exc
+            raise TransientProviderError(
+                "The model provider failed mid-response — try again in a moment.",
+                provider="The model provider", code="stream_error",
+                session_backoff=True, model=model,
             ) from exc
 
         # Finalize tool calls. Same safe-parse protection as the
@@ -968,6 +1045,32 @@ class OpenAIProvider(LLMProvider):
                 parse_error=parse_error,
             ))
             yield StreamToolUseEnd(id=info["id"])
+
+        # Missing finish_reason is ambiguous: it's a genuine truncation only when
+        # the stream produced NOTHING (empty + no terminal marker). A stream that
+        # produced content/tool_calls but no finish_reason is almost always a
+        # provider that just doesn't report one (many OpenAI-compatible endpoints)
+        # — treating THAT as truncated would discard a complete, good answer, so
+        # we log and pass it through. Only the truly-empty case is transient
+        # (fail-fast: a persistently-malformed endpoint must not loop). (ENG-673)
+        if stop_reason is None:
+            if content_text or tool_calls:
+                logger.warning("stream ended with no finish_reason but produced output — "
+                               "passing through (provider likely omits finish_reason)")
+            else:
+                logger.warning("stream ended empty with no finish_reason — treating as truncated")
+                # Deliberate carve-out (ENG-673): fires ONLY on a stream that
+                # produced NOTHING. An empty-from-start 200 is a weak incident
+                # signal and a strong broken/misconfigured-endpoint signal, so it
+                # fails fast rather than looping the 30s budget on an endpoint that
+                # never emits. Genuine mid-incident silence surfaces instead as a
+                # connection drop / read timeout / SSE error — all of which DO back
+                # off above. Keeps a persistently-malformed endpoint from looping.
+                raise TransientProviderError(
+                    "The model provider ended the response early — try again in a moment.",
+                    provider="The model provider", code="truncated_stream",
+                    session_backoff=False, model=model,
+                )
 
         yield StreamComplete(
             response=LLMResponse(
@@ -1052,8 +1155,13 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         return _parse_response_object(response, model)
@@ -1089,8 +1197,13 @@ class OpenAIProvider(LLMProvider):
         # a per-output_index stable handle for streaming arguments.
         fc_state: dict[int, dict] = {}
 
+        # See the chat-completions path: True once the 200 stream is established;
+        # a failure after this is mid-stream and was never SDK-retried (ENG-673).
+        stream_started = False
+
         try:
             stream = await self._client.responses.create(**kwargs)
+            stream_started = True
             async for event in stream:
                 etype = getattr(event, "type", "")
 
@@ -1166,8 +1279,34 @@ class OpenAIProvider(LLMProvider):
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
         except openai.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # A connection error here is retryable. Mid-stream (after the 200) was
+            # never SDK-retried → session backs off; request-establishment was
+            # already SDK-retried → fail fast (ENG-673).
+            raise TransientProviderError(
+                "Lost the connection to the model provider mid-response — try again in a moment."
+                if stream_started
+                else "Could not reach the model provider — check your connection or try again in a moment.",
+                provider="The model provider", code="connection_error",
+                session_backoff=stream_started, model=model,
+            ) from exc
+        except openai.APIError as exc:
+            # Bare mid-stream SSE error (no status_code) — not an APIStatusError,
+            # so it slips past the handlers above; the SDK already consumed the
+            # 200 and never retried it → the session must back off (ENG-673).
+            transient = classify_transient(
+                getattr(exc, "status_code", None), getattr(exc, "body", None),
+                provider="The model provider", model=model,
+            )
+            if transient is not None:
+                logger.warning(
+                    "transient mid-stream provider error (%s): %s",
+                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
+                )
+                raise transient from exc
+            raise TransientProviderError(
+                "The model provider failed mid-response — try again in a moment.",
+                provider="The model provider", code="stream_error",
+                session_backoff=True, model=model,
             ) from exc
 
         yield StreamComplete(

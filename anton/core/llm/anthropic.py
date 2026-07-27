@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import json
+import logging
 from collections.abc import AsyncIterator
+from typing import NoReturn
 
 import anthropic
+
+from anton.utils.datasources import scrub_credentials
 
 from .provider import safe_parse_tool_input
 from .provider import (
@@ -17,10 +20,56 @@ from .provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    TokenLimitExceeded,
     ToolCall,
+    TransientProviderError,
     Usage,
+    classify_transient,
     compute_context_pressure,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _raise_for_status_error(
+    exc: anthropic.APIStatusError, *, provider: str = "Anthropic", model: str = "",
+) -> NoReturn:
+    """Map an Anthropic HTTP error onto anton's typed/curated exceptions.
+
+    Shared by ``complete`` and ``stream`` so the mapping can't drift (the two
+    were byte-identical copy-paste before ENG-673). Order matters — permanent
+    failures are classified first; only what's left is offered to the transient
+    classifier, and the generic "unavailable" copy is the last resort.
+
+    - 401 → ConnectionError (invalid-key copy; cowork-server keys on this phrase).
+    - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
+    - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, plain 429
+      → TransientProviderError (retryable — see ENG-673).
+    - anything else → the generic "temporarily unavailable" ConnectionError.
+    """
+    if exc.status_code == 401:
+        raise ConnectionError(
+            "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
+        ) from exc
+
+    body = exc.body if isinstance(exc.body, dict) else {}
+    if exc.status_code == 429 and body.get("detail"):
+        msg = f"Server returned 429 — {body['detail']}"
+        msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
+        raise TokenLimitExceeded(msg) from exc
+
+    transient = classify_transient(exc.status_code, body, provider=provider, model=model)
+    if transient is not None:
+        logger.warning(
+            "transient provider error (%s): status=%s body=%s",
+            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+        )
+        raise transient from exc
+
+    raise ConnectionError(
+        f"Server returned {exc.status_code} — the LLM endpoint may be "
+        "temporarily unavailable. Try again in a moment."
+    ) from exc
 
 # Native server-side web tool type strings exposed by the Anthropic Messages API.
 # The model invokes these inside the provider — Anton's tool-dispatch loop never
@@ -118,25 +167,15 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model=model)
         except anthropic.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # Transient, but the SDK already retries connection errors at the
+            # transport layer — so classify honestly and fail fast rather than
+            # stacking the session budget on top (ENG-673).
+            raise TransientProviderError(
+                "Could not reach Anthropic — check your connection or try again in a moment.",
+                provider="Anthropic", code="connection_error", session_backoff=False,
+                model=model,
             ) from exc
 
         content_text = ""
@@ -197,8 +236,15 @@ class AnthropicProvider(LLMProvider):
         # Track content blocks by index for tool correlation
         blocks: dict[int, dict] = {}
 
+        # True once the 200 stream has been established. Anything that fails
+        # AFTER this point is mid-stream: the SDK's retry wrapper already
+        # returned, so it never retried — the session must (ENG-673). A failure
+        # BEFORE this (request establishment) was already SDK-retried → fail fast.
+        stream_started = False
+
         try:
             async with self._client.messages.stream(**kwargs) as stream:
+                stream_started = True
                 async for event in stream:
                     if event.type == "message_start":
                         usage = event.message.usage
@@ -265,26 +311,44 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if exc.status_code == 401:
-                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
-                raise ConnectionError(msg) from exc
-            elif (
-                exc.status_code == 429
-                and isinstance(exc.body, dict)
-                and exc.body.get("detail")
-            ):
-                msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
-                from .provider import TokenLimitExceeded
-
-                raise TokenLimitExceeded(msg) from exc
-            else:
-                msg = f"Server returned {exc.status_code} — the LLM endpoint may be temporarily unavailable. Try again in a moment."
-            raise ConnectionError(msg) from exc
+            _raise_for_status_error(exc, model=model)
         except anthropic.APIConnectionError as exc:
-            raise ConnectionError(
-                "Could not reach the LLM server — check your connection or try again in a moment."
+            # A connection error here is retryable. If it dropped mid-stream
+            # (after the 200), the SDK never retried it → the session must back
+            # off and retry. If it failed during request establishment, the SDK
+            # already retried → fail fast (no second budget on top). (ENG-673)
+            raise TransientProviderError(
+                "Lost the connection to Anthropic mid-response — try again in a moment."
+                if stream_started
+                else "Could not reach Anthropic — check your connection or try again in a moment.",
+                provider="Anthropic", code="connection_error",
+                session_backoff=stream_started, model=model,
             ) from exc
+
+        # Missing stop_reason is a genuine truncation only when the stream
+        # produced NOTHING. A content/tool-bearing stream that lacks it is almost
+        # always a provider that doesn't report one — treating THAT as truncated
+        # would discard a complete, good answer, so we log and pass it through.
+        # Only the truly-empty case is transient (fail-fast). (ENG-673)
+        if stop_reason is None:
+            if content_text or tool_calls:
+                logger.warning("Anthropic stream ended with no stop_reason but produced output — "
+                               "passing through")
+            else:
+                logger.warning("Anthropic stream ended empty with no stop_reason — treating as truncated")
+                # Deliberate carve-out (ENG-673): this branch fires ONLY when the
+                # stream produced NOTHING (a content-bearing stream with no
+                # stop_reason passes through above). An empty-from-start 200 is a
+                # weak incident signal and a strong broken/misconfigured-endpoint
+                # signal, so it fails fast rather than looping the 30s budget on an
+                # endpoint that never emits. Genuine mid-incident silence surfaces
+                # instead as a connection drop / read timeout / SSE error event —
+                # all of which DO back off (session_backoff=True) above.
+                raise TransientProviderError(
+                    "Anthropic ended the response early — try again in a moment.",
+                    provider="Anthropic", code="truncated_stream",
+                    session_backoff=False, model=model,
+                )
 
         yield StreamComplete(
             response=LLMResponse(

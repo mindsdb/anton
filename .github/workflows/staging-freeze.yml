@@ -13,3 +13,22 @@ jobs:
   freeze:
     uses: mindsdb/github-actions/.github/workflows/release-freeze.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
     secrets: inherit
+
+  notify:
+    # Alert the eng channel if the freeze fails (e.g. missing ruleset) — otherwise
+    # a broken freeze is silent and the code-freeze window never opens.
+    needs: [freeze]
+    if: failure()
+    permissions:
+      contents: read
+      # Declared even though this caller never runs the prior-run lookup: a
+      # reusable workflow's requested permissions are validated when the file
+      # is parsed, not when the step that needs them runs, so a caller that
+      # grants less than the reusable asks for is INVALID rather than merely
+      # degraded, and the whole workflow fails to load.
+      actions: read
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "staging freeze"
+      runs-on: ubuntu-latest
+    secrets: inherit

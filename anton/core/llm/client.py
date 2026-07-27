@@ -40,12 +40,21 @@ class LLMClient:
         planning_model: str,
         coding_provider: LLMProvider,
         coding_model: str,
+        router_provider: LLMProvider | None = None,
+        router_model: str | None = None,
         max_tokens: int = 8192,
     ) -> None:
         self._planning_provider = planning_provider
         self._planning_model = planning_model
         self._coding_provider = coding_provider
         self._coding_model = coding_model
+        # Router role: the cheap model that owns history
+        # summarization (and, later, per-turn respond-vs-delegate gating).
+        # Defaults to the coding role so hosts that construct LLMClient
+        # directly (cowork-server) get behavior-preserving summarization
+        # with no changes.
+        self._router_provider = router_provider or coding_provider
+        self._router_model = router_model or coding_model
         self._max_tokens = max_tokens
 
     async def plan(
@@ -100,6 +109,16 @@ class LLMClient:
         """The model name used for coding/skill execution."""
         return self._coding_model
 
+    @property
+    def router_provider(self) -> LLMProvider:
+        """The LLM provider used for the cheap router (summarization) role."""
+        return self._router_provider
+
+    @property
+    def router_model(self) -> str:
+        """The model name used for the cheap router (summarization) role."""
+        return self._router_model
+
     async def code(
         self,
         *,
@@ -116,6 +135,49 @@ class LLMClient:
             tools=tools,
             max_tokens=max_tokens or self._max_tokens,
             native_web_tools=native_web_tools,
+        )
+
+    async def summarize(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """History-compaction call — runs on the cheap router role.
+
+        Falls back to the coding role when no router model is configured
+        (the router_* kwargs default to the coding role in __init__), so
+        this is behavior-preserving unless a distinct model is selected.
+        """
+        return await self._router_provider.complete(
+            model=self._router_model,
+            system=system,
+            messages=messages,
+            max_tokens=max_tokens or self._max_tokens,
+        )
+
+    async def gate(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        tool_choice: dict | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """One cheap gating call on the router role — see `anton.core.llm.thalamus`.
+
+        No ``native_web_tools``: the thalamus must never do work itself,
+        only answer from context or delegate.
+        """
+        return await self._router_provider.complete(
+            model=self._router_model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens or self._max_tokens,
         )
 
     async def _generate_object_with(
@@ -301,6 +363,18 @@ class LLMClient:
         if coding_factory is None:
             raise ValueError(f"Unknown coding provider: {settings.coding_provider}")
 
+        # Router role: the cheap model for summarization (and later gating).
+        # Optional override; unset falls back to the coding provider/model
+        # inside __init__. No reasoning effort: summarization is a single
+        # cheap call.
+        router_provider = None
+        router_provider_name = getattr(settings, "router_provider", None)
+        if router_provider_name:
+            router_factory = providers.get(router_provider_name)
+            if router_factory is None:
+                raise ValueError(f"Unknown router provider: {router_provider_name}")
+            router_provider = router_factory(None)
+
         return cls(
             planning_provider=planning_factory(
                 getattr(settings, "planning_reasoning_effort", None)
@@ -310,5 +384,7 @@ class LLMClient:
                 getattr(settings, "coding_reasoning_effort", None)
             ),
             coding_model=settings.coding_model,
+            router_provider=router_provider,
+            router_model=getattr(settings, "router_model", None),
             max_tokens=getattr(settings, "max_tokens", 8192),
         )

@@ -9,6 +9,7 @@ from rich.console import Console
 from anton.config.settings import AntonSettings
 from anton.utils.prompt import prompt_or_cancel
 from anton.chat_session import rebuild_session
+from anton.memory.history_store import is_user_turn
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
@@ -121,7 +122,7 @@ async def restore_session(
         session_id=sid,
     )
     new_session._history = list(history)
-    new_session._turn_count = sum(1 for m in history if m.get("role") == "user")
+    new_session._turn_count = sum(1 for m in history if is_user_turn(m))
 
     console.print()
     console.print(
