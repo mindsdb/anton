@@ -2735,9 +2735,15 @@ class ChatSession:
                     )
                     if not retrying:
                         break
-                except Exception:
+                except Exception as exc:
+                    # Log the cause. Four different failures used to collapse
+                    # into one indistinguishable "verifier unavailable" line,
+                    # which is why a 25%-of-calls truncation went unnoticed for
+                    # ten days (ENG-1081); a bare `verdict=ERROR` would repeat
+                    # that mistake for whatever comes next.
                     _verifier_log.info(
-                        "completion-verifier verdict=ERROR budget=%d", budget
+                        "completion-verifier verdict=ERROR budget=%d error=%s: %s",
+                        budget, type(exc).__name__, exc,
                     )
                     break
 
