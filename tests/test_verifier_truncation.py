@@ -172,13 +172,17 @@ async def test_short_empty_response_is_not_truncated():
 
 
 def _session_that_uses_a_tool(mock_llm, workspace) -> ChatSession:
-    """Drive one turn that uses a tool, so the completion verifier runs."""
+    """Session whose every turn uses one tool, so the completion verifier runs.
+
+    Each turn makes exactly two `plan_stream` calls — the tool round, then the
+    final text — so alternating keeps the pattern correct across several turns.
+    """
     call_count = 0
 
     def fake_plan_stream(**kwargs):
         nonlocal call_count
         call_count += 1
-        if call_count == 1:
+        if call_count % 2 == 1:
             return _FakeAsyncIter([StreamComplete(response=_scratchpad_response("Running."))])
         return _FakeAsyncIter([StreamComplete(response=_text_response("Done."))])
 
@@ -245,6 +249,39 @@ async def test_non_truncated_failure_is_not_retried(workspace):
         await session.close()
 
     assert calls == [_VERIFIER_TOKEN_BUDGETS[0]], "must not pay for a hopeless retry"
+
+
+async def test_retry_is_not_bought_twice_in_one_session(workspace):
+    """If the retry is truncated too, the model can't fit a verdict at any budget
+    we'll pay for — later turns in the session must stop paying for the retry."""
+    budgets: list[int] = []
+
+    async def fake_verdict(_schema, *, system, messages, max_tokens):
+        budgets.append(max_tokens)
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=fake_verdict)
+
+    session = _session_that_uses_a_tool(mock_llm, workspace)
+    try:
+        async for _ in session.turn_stream("first turn"):
+            pass
+        assert budgets == list(_VERIFIER_TOKEN_BUDGETS), "turn 1 tries both budgets"
+
+        # Same session, second turn: only the first budget should be attempted.
+        budgets.clear()
+        async for _ in session.turn_stream("second turn"):
+            pass
+    finally:
+        await session.close()
+
+    assert budgets == [_VERIFIER_TOKEN_BUDGETS[0]], (
+        "the retry must not be re-bought on every later turn"
+    )
 
 
 async def test_verifier_prompt_forbids_preamble(workspace):
