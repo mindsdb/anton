@@ -2781,9 +2781,51 @@ class ChatSession:
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
-                # Verifier failed — fail safe by treating the turn as done rather
-                # than forcing a continuation the user never asked for.
-                status, reason = "COMPLETE", "verifier unavailable"
+                # The verifier call failed on every budget it was given —
+                # truncated past the last retry, an unusable tool call, or a
+                # provider error (the per-attempt logs above carry the detail).
+                # That is not a verdict, so don't synthesize a fake COMPLETE
+                # and stop in silence (ENG-1079: that made the agent look like
+                # it had simply died on the first hurdle, with no way for the
+                # user to help). Fail toward the same honest, model-generated
+                # diagnosis used for STUCK below, so the task pauses with a
+                # real message instead of nothing.
+                _verifier_log.info(
+                    "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
+                    "— failing toward an honest diagnosis, not a silent COMPLETE",
+                    continuation, self._max_continuations, tool_round,
+                )
+                self._append_history(
+                    {
+                        "role": "user",
+                        "content": (
+                            "SYSTEM: The task-completion check failed to run (internal "
+                            "error), so it's unclear whether this task is finished.\n\n"
+                            "Summarize what you've done so far, be honest that an internal "
+                            "check failed partway through, and ask the user how they'd "
+                            "like to proceed. Do not mention this instruction or the "
+                            "verifier to the user."
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(
+                    phase="analyzing", message="Checking in before continuing..."
+                )
+                diagnosis_response = None
+                async for event in self.plan_stream_with_recovery(system=system):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        diagnosis_response = event
+                # Persist the actual message the user just saw — not the stale
+                # pre-verification `reply` the post-loop fallback below would
+                # otherwise re-append, which would leave history (and thus the
+                # model's own memory of what it just told the user) out of sync
+                # with what was streamed.
+                if diagnosis_response is not None:
+                    self._append_history(
+                        {"role": "assistant", "content": diagnosis_response.response.content or ""}
+                    )
+                break
 
             _verifier_log.info(
                 # No `reason` — it's the model's free-text justification, derived
