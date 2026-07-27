@@ -1,0 +1,8 @@
+# actionlint needs to be told about self-hosted runner labels, or every
+# `runs-on:` referring to one is an error and the real findings drown in noise.
+#
+#   mdb-dev, mdb-prod  the org's self-hosted runner pools
+self-hosted-runner:
+  labels:
+    - mdb-dev
+    - mdb-prod

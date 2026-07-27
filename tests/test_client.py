@@ -73,6 +73,61 @@ class TestLLMClient:
         assert call_kwargs["tools"] == tools
 
 
+class TestRouterRole:
+    """Summarization runs on the router role, which defaults to the coding
+    role when no distinct router model is configured (behavior-preserving)."""
+
+    async def test_summarize_defaults_to_coding_role(self, mock_providers):
+        planning, coding = mock_providers
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+        result = await client.summarize(
+            system="sys", messages=[{"role": "user", "content": "old turns"}]
+        )
+        coding.complete.assert_awaited_once()
+        assert coding.complete.call_args.kwargs["model"] == "model-b"
+        assert result.content == "code"
+
+    async def test_summarize_uses_distinct_router_model(self, mock_providers):
+        planning, coding = mock_providers
+        router = AsyncMock(spec=LLMProvider)
+        router.complete = AsyncMock(
+            return_value=LLMResponse(content="summary", usage=Usage())
+        )
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+            router_provider=router,
+            router_model="model-c",
+        )
+        result = await client.summarize(
+            system="sys", messages=[{"role": "user", "content": "old turns"}]
+        )
+        router.complete.assert_awaited_once()
+        assert router.complete.call_args.kwargs["model"] == "model-c"
+        coding.complete.assert_not_awaited()
+        assert result.content == "summary"
+        assert client.router_provider is router
+        assert client.router_model == "model-c"
+
+    def test_router_accessors_fall_back_to_coding(self, mock_providers):
+        planning, coding = mock_providers
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+        assert client.router_provider is coding
+        assert client.router_model == "model-b"
+
+
 class TestLLMClientFromSettings:
     def test_from_settings_creates_client(self):
         from anton.core.llm.anthropic import AnthropicProvider
@@ -128,4 +183,40 @@ class TestLLMClientFromSettings:
             _env_file=None,
         )
         with pytest.raises(ValueError, match="Unknown coding provider"):
+            LLMClient.from_settings(settings)
+
+    def test_router_model_wired_to_router_role(self):
+        with patch("anthropic.AsyncAnthropic"):
+            settings = AntonSettings(
+                planning_provider="anthropic",
+                coding_provider="anthropic",
+                coding_model="coding-m",
+                router_provider="anthropic",
+                router_model="router-m",
+                anthropic_api_key="test-key",
+                _env_file=None,
+            )
+            client = LLMClient.from_settings(settings)
+            assert client.router_model == "router-m"
+
+    def test_router_unset_falls_back_to_coding_role(self):
+        with patch("anthropic.AsyncAnthropic"):
+            settings = AntonSettings(
+                planning_provider="anthropic",
+                coding_provider="anthropic",
+                coding_model="coding-m",
+                anthropic_api_key="test-key",
+                _env_file=None,
+            )
+            client = LLMClient.from_settings(settings)
+            assert client.router_provider is client._coding_provider
+            assert client.router_model == "coding-m"
+
+    def test_unknown_router_provider_raises(self):
+        settings = AntonSettings(
+            router_provider="unknown",
+            anthropic_api_key="test",
+            _env_file=None,
+        )
+        with pytest.raises(ValueError, match="Unknown router provider"):
             LLMClient.from_settings(settings)

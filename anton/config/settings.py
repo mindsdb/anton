@@ -36,7 +36,9 @@ class AntonSettings(CoreSettings):
     coding_provider: str = "anthropic"
     coding_model: str = "claude-haiku-4-5-20251001"
 
-    @field_validator("planning_provider", "coding_provider", mode="before")
+    @field_validator(
+        "planning_provider", "coding_provider", "router_provider", mode="before"
+    )
     @classmethod
     def _map_minds_cloud_to_openai_compatible(cls, v: object) -> object:
         """MindsHub is an OpenAI-compatible endpoint, so the CLI serves it via
@@ -48,6 +50,11 @@ class AntonSettings(CoreSettings):
         Normalise it here so both names resolve to the same working provider
         (ENG-655). Tolerant of case, surrounding whitespace, and the underscore
         spelling.
+
+        Covers ``router_provider`` too: ``LLMClient.from_settings`` validates the
+        router role identically, so without this a shared ``minds-cloud`` config
+        would re-crash with ``Unknown router provider: minds-cloud``. Keep every
+        provider field in this decorator's list.
         """
         if isinstance(v, str) and v.strip().lower().replace("_", "-") == "minds-cloud":
             return "openai-compatible"
@@ -65,6 +72,12 @@ class AntonSettings(CoreSettings):
     # class). Set these only when the corresponding model supports it.
     planning_reasoning_effort: str | None = None
     coding_reasoning_effort: str | None = None
+
+    # Router role (ENG-648) — the cheap model that runs history summarization
+    # (and, later, per-turn respond-vs-delegate gating). Unset falls back to
+    # the coding provider/model.
+    router_provider: str | None = None
+    router_model: str | None = None
 
     max_tokens: int = 8192  # max output tokens per LLM call
 

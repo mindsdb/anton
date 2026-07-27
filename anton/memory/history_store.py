@@ -20,6 +20,24 @@ if TYPE_CHECKING:
     from anton.core.memory.episodes import EpisodicMemory
 
 
+def is_user_turn(message: dict) -> bool:
+    """True for a genuine user turn.
+
+    A user-role message whose content is only ``tool_result`` blocks is the
+    reply to a tool call, not a new turn. Counting it would inflate turn
+    totals once tool activity is replayed back into history.
+    """
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return True  # string / multimodal input is always a real turn
+    return not any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for block in content
+    )
+
+
 class HistoryStore:
     """Persist and retrieve full chat history for session resume."""
 
@@ -159,8 +177,8 @@ class HistoryStore:
 
             session_id = path.stem.removesuffix("_history")
 
-            # Count user turns
-            turns = sum(1 for m in data if m.get("role") == "user")
+            # Count user turns (tool_result replies are not turns)
+            turns = sum(1 for m in data if is_user_turn(m))
             if turns == 0:
                 continue
 

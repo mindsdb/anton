@@ -317,6 +317,11 @@ Anton uses an automated release flow. The single source of truth for the package
    - Publishes a GitHub release with auto-generated notes.
    - Triggers [`tests_e2e_release.yml`](.github/workflows/tests_e2e_release.yml) to run live e2e tests against the released version.
 
+The version computation, tag push, and release creation are shared with the other
+service repos through the `calver-release.yml` reusable workflow in
+[mindsdb/github-actions](https://github.com/mindsdb/github-actions); this repo's
+workflow supplies the major component and consumes the resulting `tag` output.
+
 ### What you should NOT do
 
 - **Don't create GitHub releases manually.** The `v*` tag namespace is locked via a repo ruleset — only the release workflow can create them. Manual attempts will be rejected by GitHub.
