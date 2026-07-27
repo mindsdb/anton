@@ -227,11 +227,8 @@ class LLMClient:
                 response.tool_calls[0].input, validator_class, is_list
             )
         except Exception:
-            # The budget can also run out *inside* the tool call's JSON, in
-            # which case `safe_parse_tool_input` salvages a partial dict (with
-            # `parse_error` set) and validation fails here instead. Same cause,
-            # so it deserves the same retry — otherwise it reads like a schema
-            # bug and silently falls through to the caller's fail-safe.
+            # The budget can also run out *inside* the tool call's JSON, so
+            # validation fails here instead. Same cause, same retry (ENG-1081).
             if looks_truncated(response, budget):
                 raise_unusable_tool_call(
                     response, tool_name=tool["name"], budget=budget

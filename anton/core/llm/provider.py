@@ -313,27 +313,17 @@ class TokenLimitExceeded(Exception):
 
 
 class StructuredOutputError(ValueError):
-    """Raised when a forced-tool-call structured-output call returns no tool call.
+    """Raised when a forced-tool-call structured-output call yields no usable call.
 
-    ``truncated`` distinguishes the two very different reasons this happens:
+    ``truncated`` says whether a retry can help: ``True`` means the model spent
+    the ``max_tokens`` budget narrating before it reached the tool call (the
+    narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``, ``qwen`` — do
+    this deterministically under a tight budget, ENG-1081); ``False`` means the
+    provider errored, refused, or returned nothing, and a bigger budget won't
+    fix it. See `structured.looks_truncated` for how that's decided.
 
-    - **Truncated** (``True``) — the model narrated in plain ``content`` and ran
-      out of the ``max_tokens`` budget before reaching the tool call. This is a
-      budget problem and a retry with more room usually succeeds. Models served
-      through MindsHub's Fireworks aliases (``mindshub_air``/``kimi``,
-      ``deepseek``) always narrate first, so a tight budget fails them
-      deterministically (ENG-1081).
-    - **Anything else** (``False``) — the provider errored, refused, or returned
-      an empty response. A retry at the same size is not expected to help.
-
-    Truncation is detected by output-token count, not by ``stop_reason``: the
-    MindsHub gateway reports ``finish_reason: "stop"`` while returning exactly
-    ``max_tokens`` tokens for most aliases (ENG-1082), so the standard
-    ``"length"`` check cannot be relied on. ``stop_reason`` is still honoured
-    when the provider does report it correctly.
-
-    Subclasses ``ValueError`` so existing call sites that catch the documented
-    ``ValueError`` from ``generate_object``/``generate_object_code`` keep working.
+    Subclasses ``ValueError`` so call sites catching the documented ``ValueError``
+    from ``generate_object``/``generate_object_code`` keep working.
     """
 
     def __init__(

@@ -159,49 +159,68 @@ class _VerifierVerdict(BaseModel):
     reason: str = Field(description="One brief sentence explaining the verdict.")
 
 
-# Output budgets for the completion-verifier verdict call: first attempt, then
-# the retry used when the first one is truncated (ENG-1081).
+# Output budgets for the verdict call: first attempt, then the retry used when
+# it comes back truncated (ENG-1081).
 #
-# The verdict itself is tiny — first-party models answer in 43–115 tokens with no
-# preamble. But the open-weight aliases MindsHub serves through Fireworks
-# (`mindshub_air`/`kimi`, `deepseek`) narrate ~1,300 characters of reasoning as
-# plain text *before* the forced tool call, because `tool_choice` is advisory on
-# that endpoint. The original 256 truncated them mid-sentence, every single time:
-# 98.6% of `mindshub_air` verdict calls in prod returned no tool call, which the
-# fail-safe below then turned into a silent "task complete" and a turn that ended
-# without a message.
+# Models that narrate before acting (`mindshub_air`/`kimi`, `deepseek`, `qwen`)
+# spend the budget on prose and never reach the forced tool call. The original
+# 256 truncated them on essentially every call — 98.6% of `mindshub_air` verdicts
+# in prod returned no tool call, which the fail-safe below turned into a silent
+# "task complete".
 #
-# Sized from a measured distribution, not one sample. 16 identical verdict calls
-# to `mindshub_air` (2048 + the no-preamble clause below) spent:
-#
-#   245 246 247 253 253 254 267 279 287 295 392 407 571 573 610 865 1654
-#   median ≈ 290, max 1654 — a 6.7x spread for the *same* request.
-#
-# So output length is stochastic per call, not a fixed property of the model:
-# 2048 clears the median comfortably but is only ~1.24x the observed worst case,
-# which is why the 4096 retry exists rather than a single larger budget. 1024
-# would have been wrong (1/3 in the earlier run). Nothing pays for headroom it
-# doesn't use — first-party models answer in 43–115 tokens either way.
-#
-# Deliberately no "this model can't do it" latch: with a 6.7x per-call spread,
-# one truncation is a tail sample, not proof about the next turn, and a latch
-# that skips the retry on that evidence would reintroduce silent stops. The
-# retry is cheap because it only fires when the first attempt truncates — 0 of
-# 12 at 2048 in the sample above.
+# 2048 is sized from a measured distribution, not one sample: 16 identical calls
+# spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is also
+# why there is no "this model can't do it" latch — one truncation is a tail
+# sample, not proof about the next turn — and why the 4096 retry exists rather
+# than a single bigger budget. 1024 was measurably too small. Nothing pays for
+# headroom it doesn't use; first-party models answer in 43–115 tokens either way.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
 
-# Appended to the verifier system prompt. Halves the preamble on narrating
-# models; on its own it is not sufficient (0/3 at 256 even with it), which is why
-# it is paired with the budgets above rather than used instead of them.
-# Names the tool off the schema class so the instruction can't go stale if the
-# class is renamed (the forced tool name is derived from it in
-# `build_structured_tool`). This is the exact wording measured at 3/3.
+# Appended to the verifier system prompt. Shortens the preamble on narrating
+# models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
+# budgets above. Tool name comes off the schema class so it can't go stale.
 _VERIFIER_NO_PREAMBLE = (
     f"Call the {_VerifierVerdict.__name__} tool immediately as your first "
     "action. Do not think out loud, restate the conversation, or explain your "
     "reasoning before calling it — put your one-sentence justification in the "
     "tool's `reason` field."
 )
+
+
+def _safe_error_detail(exc: BaseException) -> str:
+    """Describe an exception for logs without copying model or user content.
+
+    Neither ``str(exc)`` nor ``repr(exc)`` is safe here: a Pydantic
+    ``ValidationError`` embeds the rejected ``input_value`` — for the verifier
+    that's model-generated text derived from the user's conversation — and
+    provider exceptions can carry response bodies. Emits the exception type,
+    plus for validation errors the field locations and error codes only, which
+    is what actually identifies the failure.
+    """
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        return f"{name}(status={status})"
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        try:
+            try:
+                details = errors(
+                    include_input=False, include_url=False, include_context=False
+                )
+            except TypeError:  # pydantic v1 has no include_* kwargs
+                details = errors()
+            # Only `loc` and `type` are ever read — `msg`/`input`/`ctx` can
+            # quote the rejected value.
+            fields = ",".join(
+                f"{'.'.join(str(p) for p in e.get('loc') or ())}:{e.get('type', '?')}"
+                for e in details
+            )
+            if fields:
+                return f"{name}({fields})"
+        except Exception:
+            pass
+    return name
 
 
 def _render_tool_result_content(content, cap: int) -> str:
@@ -2736,14 +2755,13 @@ class ChatSession:
                     if not retrying:
                         break
                 except Exception as exc:
-                    # Log the cause. Four different failures used to collapse
-                    # into one indistinguishable "verifier unavailable" line,
-                    # which is why a 25%-of-calls truncation went unnoticed for
-                    # ten days (ENG-1081); a bare `verdict=ERROR` would repeat
-                    # that mistake for whatever comes next.
+                    # Enough to tell the failure modes apart — four used to
+                    # collapse into one "verifier unavailable" line — but never
+                    # the exception message, which can carry conversation
+                    # content (ENG-1081).
                     _verifier_log.info(
-                        "completion-verifier verdict=ERROR budget=%d error=%s: %s",
-                        budget, type(exc).__name__, exc,
+                        "completion-verifier verdict=ERROR budget=%d error=%s",
+                        budget, _safe_error_detail(exc),
                     )
                     break
 
@@ -2756,8 +2774,11 @@ class ChatSession:
                 status, reason = "COMPLETE", "verifier unavailable"
 
             _verifier_log.info(
-                "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d reason=%s",
-                status, continuation, self._max_continuations, tool_round, reason,
+                # No `reason` — it's the model's free-text justification, derived
+                # from the user's conversation, and this is an ordinary app log.
+                # It stays in the Langfuse trace, where that content belongs.
+                "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d",
+                status, continuation, self._max_continuations, tool_round,
             )
 
             if status in ("COMPLETE", "WAITING"):
