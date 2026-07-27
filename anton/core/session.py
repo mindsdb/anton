@@ -1018,6 +1018,29 @@ class ChatSession:
         old_turns = self._history[:split]
         recent_turns = self._history[split:]
 
+        # Skip if the last pass saved less than ~10%.
+
+        # get not compacted yet messages
+        new_old_turns = old_turns
+        if (
+            old_turns
+            and isinstance(old_turns[0].get("content"), str)
+            and old_turns[0]["content"].lstrip().startswith(_COMPACTED_MARKER)
+        ):
+            new_old_turns = old_turns[1:]
+
+        def _approx_len(msgs: list[dict]) -> int:
+            total = 0
+            for m in msgs:
+                content = m.get("content", "")
+                total += len(content) if isinstance(content, str) else len(str(content))
+            return total
+
+        new_old_len = _approx_len(new_old_turns)
+        recent_len = _approx_len(recent_turns)
+        if new_old_len < 0.10 * (new_old_len + recent_len):
+            return
+
         # Serialize old turns. Pull out any prior compacted summary so we
         # UPDATE it in place rather than summarize a summary (which compounds
         # loss every compaction).
