@@ -312,6 +312,46 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+class StructuredOutputError(ValueError):
+    """Raised when a forced-tool-call structured-output call returns no tool call.
+
+    ``truncated`` distinguishes the two very different reasons this happens:
+
+    - **Truncated** (``True``) — the model narrated in plain ``content`` and ran
+      out of the ``max_tokens`` budget before reaching the tool call. This is a
+      budget problem and a retry with more room usually succeeds. Models served
+      through MindsHub's Fireworks aliases (``mindshub_air``/``kimi``,
+      ``deepseek``) always narrate first, so a tight budget fails them
+      deterministically (ENG-1081).
+    - **Anything else** (``False``) — the provider errored, refused, or returned
+      an empty response. A retry at the same size is not expected to help.
+
+    Truncation is detected by output-token count, not by ``stop_reason``: the
+    MindsHub gateway reports ``finish_reason: "stop"`` while returning exactly
+    ``max_tokens`` tokens for most aliases (ENG-1082), so the standard
+    ``"length"`` check cannot be relied on. ``stop_reason`` is still honoured
+    when the provider does report it correctly.
+
+    Subclasses ``ValueError`` so existing call sites that catch the documented
+    ``ValueError`` from ``generate_object``/``generate_object_code`` keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        truncated: bool = False,
+        output_tokens: int = 0,
+        max_tokens: int = 0,
+        stop_reason: str | None = None,
+    ):
+        super().__init__(message)
+        self.truncated = truncated
+        self.output_tokens = output_tokens
+        self.max_tokens = max_tokens
+        self.stop_reason = stop_reason
+
+
 class TransientProviderError(ConnectionError):
     """Raised when the provider fails in a way that a retry might fix.
 
