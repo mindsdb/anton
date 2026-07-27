@@ -35,14 +35,11 @@ from .provider import StructuredOutputError
 def looks_truncated(response, budget: int) -> bool:
     """True if `response` was cut off by the `max_tokens` budget.
 
-    Token count is checked *first* because the MindsHub gateway reports
-    ``finish_reason: "stop"`` while returning exactly ``max_tokens`` for most
-    aliases (ENG-1082) — the standard ``"length"`` check cannot be relied on
-    there. Both provider dialects are still honoured when they do report it:
-    OpenAI/the gateway say ``"length"``, Anthropic says ``"max_tokens"``.
-
-    A response with no usage information yields ``False``: without evidence we
-    don't claim truncation, which is the safe direction (no retry is bought).
+    Token count first, because the MindsHub gateway reports
+    ``finish_reason: "stop"`` at the cap for most aliases (ENG-1082) — the
+    standard ``"length"`` check can't be relied on there. Both dialects are
+    honoured when reported: OpenAI says ``"length"``, Anthropic ``"max_tokens"``.
+    No usage information → ``False``; without evidence we don't buy a retry.
     """
     usage = getattr(response, "usage", None)
     output_tokens = getattr(usage, "output_tokens", 0) or 0

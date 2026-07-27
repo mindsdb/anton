@@ -235,14 +235,10 @@ if _scratchpad_model:
                 )
 
                 if not response.tool_calls:
-                    # Same classification as the async path: a model that
-                    # narrates before acting (mindshub_air/kimi, deepseek) can
-                    # blow `max_tokens` on prose and never reach the call, and
-                    # scratchpad code picks its own budget. Says so instead of
-                    # raising a blind ValueError (ENG-1081). Nothing retries
-                    # here, but the message reaches the model as a traceback,
-                    # so "you ran out of budget" is actionable where "did not
-                    # return structured output" was not.
+                    # Same classification as the async path (ENG-1081).
+                    # Nothing retries here, but the message reaches the model as
+                    # a traceback, so "you ran out of budget" is actionable
+                    # where "did not return structured output" was not.
                     raise_unusable_tool_call(
                         response, tool_name=tool["name"], budget=max_tokens
                     )

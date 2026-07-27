@@ -492,3 +492,52 @@ async def test_verifier_prompt_forbids_preamble(workspace):
 
     assert "immediately as your first action" in seen["system"]
     assert "Do not think out loud" in seen["system"]
+
+
+# --------------------------------------------------------------------------
+# 3. Verifier logs must not carry conversation content (review finding).
+# --------------------------------------------------------------------------
+
+
+def test_error_detail_never_leaks_the_rejected_value():
+    """`_safe_error_detail` must identify the failure without quoting content.
+
+    A pydantic ValidationError's message embeds the rejected `input_value` — for
+    the verifier that's model-generated text derived from the user's
+    conversation — so `str(exc)` cannot go into ordinary application logs.
+    """
+    import pydantic
+
+    from anton.core.session import _safe_error_detail
+
+    secret = "the user's bank balance is 12345"
+    try:
+        _VerifierVerdict.model_validate({"status": secret, "reason": secret})
+    except pydantic.ValidationError as exc:
+        detail = _safe_error_detail(exc)
+    else:
+        raise AssertionError("expected a ValidationError")
+
+    assert secret not in detail, f"rejected value leaked into the log detail: {detail!r}"
+    assert "12345" not in detail
+    # Still useful: names the exception type and which field failed.
+    assert "ValidationError" in detail
+    assert "status" in detail
+
+
+def test_error_detail_of_a_provider_error_is_type_and_status_only():
+    from anton.core.session import _safe_error_detail
+
+    class _FakeAPIError(Exception):
+        status_code = 503
+
+    detail = _safe_error_detail(_FakeAPIError("upstream said: <full response body>"))
+    assert detail == "_FakeAPIError(status=503)"
+    assert "response body" not in detail
+
+
+def test_error_detail_falls_back_to_the_type_name():
+    from anton.core.session import _safe_error_detail
+
+    detail = _safe_error_detail(RuntimeError("provider hiccup with conversation text"))
+    assert detail == "RuntimeError"
