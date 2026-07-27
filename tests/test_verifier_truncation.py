@@ -166,26 +166,94 @@ async def test_short_empty_response_is_not_truncated():
     assert exc_info.value.truncated is False
 
 
+def _damaged_tool_call_response(output_tokens: int) -> LLMResponse:
+    """A forced tool call that ran out of budget *inside* its JSON arguments.
+
+    `safe_parse_tool_input` repairs what it can and sets `parse_error`, so the
+    call arrives non-empty but incomplete — here missing the required `reason`.
+    """
+    return LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc_v", name="_VerifierVerdict",
+                             input={"status": "WAITING"},
+                             parse_error="Unterminated string starting at: line 1")],
+        usage=Usage(input_tokens=100, output_tokens=output_tokens),
+        stop_reason="stop",
+    )
+
+
+async def test_tool_call_truncated_mid_arguments_is_retryable():
+    """The budget can run out *inside* the tool call, not only before it.
+
+    That arrives as a non-empty but incomplete tool call, so the missing-call
+    check doesn't see it and validation fails instead — which without this
+    would read as a schema bug, skip the retry, and land right back on the
+    silent-stop fail-safe this whole change exists to remove.
+    """
+    llm = _client_with_response(_damaged_tool_call_response(output_tokens=2048))
+
+    with pytest.raises(StructuredOutputError) as exc_info:
+        await llm.generate_object_code(
+            _VerifierVerdict, system="s", messages=[{"role": "user", "content": "m"}],
+            max_tokens=2048,
+        )
+
+    assert exc_info.value.truncated is True, "must be retryable, not a schema error"
+    assert "unusable tool call" in str(exc_info.value)
+
+
+async def test_schema_mismatch_under_budget_is_not_disguised_as_truncation():
+    """The mirror case: a malformed tool call with budget to spare is a real
+    schema failure. It must keep propagating as a validation error rather than
+    being relabelled truncation and buying a retry that cannot help."""
+    llm = _client_with_response(_damaged_tool_call_response(output_tokens=60))
+
+    with pytest.raises(ValueError) as exc_info:
+        await llm.generate_object_code(
+            _VerifierVerdict, system="s", messages=[{"role": "user", "content": "m"}],
+            max_tokens=2048,
+        )
+
+    assert not isinstance(exc_info.value, StructuredOutputError), (
+        "a genuine schema mismatch must stay a validation error"
+    )
+
+
 def test_shared_classifier_is_used_by_both_structured_paths():
     """The async client and the scratchpad's sync twin must classify identically.
 
-    `raise_missing_tool_call` is the single implementation both call — the whole
+    `raise_unusable_tool_call` is the single implementation both call — the whole
     point of `structured.py`. Guarded here because the previous version of this
     fix put the logic in `client.py`, which silently left the sync path
     (exposed to model-written scratchpad code, with a caller-chosen budget)
     raising a blind ValueError.
     """
+    import ast
+
     from anton.core.llm import structured
 
-    assert hasattr(structured, "raise_missing_tool_call")
-    # Read the source rather than importing it: `scratchpad_boot` is a
-    # subprocess bootstrap and reads stdin at import time.
+    assert hasattr(structured, "raise_unusable_tool_call")
+    # Parse the source rather than importing it — `scratchpad_boot` is a
+    # subprocess bootstrap and reads stdin at import time. AST rather than a
+    # substring search, so a passing mention in a comment or a stale import
+    # can't satisfy it: the call must be inside `generate_object` itself.
     boot_src = (
         Path(__file__).resolve().parents[1]
         / "anton" / "core" / "backends" / "scratchpad_boot.py"
     ).read_text()
-    assert "raise_missing_tool_call" in boot_src, (
-        "the sync scratchpad path must use the shared classifier, not its own raise"
+    tree = ast.parse(boot_src)
+    generate_object = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "generate_object"),
+        None,
+    )
+    assert generate_object is not None, "sync generate_object not found"
+    called = {
+        n.func.id for n in ast.walk(generate_object)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "raise_unusable_tool_call" in called, (
+        "the sync scratchpad path must call the shared classifier, not raise its own"
     )
     assert "LLM did not return structured output." not in boot_src, (
         "the old blind ValueError should be gone from the sync path"
@@ -196,13 +264,13 @@ def test_classifier_tolerates_a_response_without_usage():
     """Defensive: a provider response missing `usage` must not blow up the
     classifier — it just can't prove truncation, which is the safe direction
     (no retry bought without evidence)."""
-    from anton.core.llm.structured import raise_missing_tool_call
+    from anton.core.llm.structured import raise_unusable_tool_call
 
     class _Bare:
         content = "some prose"
 
     with pytest.raises(StructuredOutputError) as exc_info:
-        raise_missing_tool_call(_Bare(), tool_name="_VerifierVerdict", budget=2048)
+        raise_unusable_tool_call(_Bare(), tool_name="_VerifierVerdict", budget=2048)
 
     assert exc_info.value.truncated is False
     assert exc_info.value.output_tokens == 0
@@ -341,12 +409,14 @@ async def test_attempts_are_bounded_and_repeat_each_turn(workspace):
     )
 
 
-async def test_truncation_retry_through_the_real_client(workspace):
-    """End-to-end: a provider response with prose-at-the-cap must flow through
-    the real `LLMClient` detection into a session-level retry.
+@pytest.mark.parametrize("first_failure", ["no_tool_call", "damaged_tool_call"])
+async def test_truncation_retry_through_the_real_client(workspace, first_failure):
+    """End-to-end: both shapes of a truncated verdict must flow through the real
+    `LLMClient` detection into a session-level retry — prose-at-the-cap with no
+    call at all, and a call cut off inside its own arguments.
 
     The other session tests raise `StructuredOutputError` by hand, so they would
-    pass even if the detection in `raise_missing_tool_call` were wrong. This one
+    pass even if the detection in `raise_unusable_tool_call` were wrong. This one
     wires a fake *provider* through the real client, so provider → client →
     session is the actual code path (ENG-747: don't hand-build error fixtures).
     """
@@ -355,6 +425,9 @@ async def test_truncation_retry_through_the_real_client(workspace):
     async def fake_complete(*, model, system, messages, tools, tool_choice, max_tokens):
         calls.append(max_tokens)
         if len(calls) == 1:
+            if first_failure == "damaged_tool_call":
+                # Budget ran out *inside* the call's JSON arguments.
+                return _damaged_tool_call_response(output_tokens=max_tokens)
             # Narrated right up to the ceiling, never reached the tool call —
             # and the gateway calls that `finish_reason: "stop"` (ENG-1082).
             return _text_response("Let me analyze this conversation carefully...",
