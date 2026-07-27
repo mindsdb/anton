@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from .provider import LLMProvider, LLMResponse, StreamEvent, StructuredOutputError
+from .provider import LLMProvider, LLMResponse, StreamEvent
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -199,6 +199,7 @@ class LLMClient:
         """
         from anton.core.llm.structured import (
             build_structured_tool,
+            raise_missing_tool_call,
             unwrap_structured_response,
         )
 
@@ -216,31 +217,9 @@ class LLMClient:
         )
 
         if not response.tool_calls:
-            # Report *why* there is no tool call, so callers can retry a
-            # truncated call with more room instead of treating a budget
-            # problem as a hard failure (ENG-1081). Token count is the
-            # reliable signal here — the MindsHub gateway reports
-            # `finish_reason: "stop"` at the cap for most aliases (ENG-1082),
-            # so `stop_reason` alone would miss it.
-            # Both provider dialects: OpenAI/gateway say "length", Anthropic says
-            # "max_tokens" (passed through raw by AnthropicProvider).
-            output_tokens = response.usage.output_tokens
-            truncated = response.stop_reason in ("length", "max_tokens") or (
-                budget > 0 and output_tokens >= budget
-            )
-            raise StructuredOutputError(
-                f"LLM did not return a tool call for forced schema {tool['name']}"
-                + (
-                    f" (truncated: {output_tokens}/{budget} output tokens spent "
-                    "on text before the call)."
-                    if truncated
-                    else "."
-                ),
-                truncated=truncated,
-                output_tokens=output_tokens,
-                max_tokens=budget,
-                stop_reason=response.stop_reason,
-            )
+            # Shared with the scratchpad's sync twin so both paths classify the
+            # failure identically — see `raise_missing_tool_call` (ENG-1081).
+            raise_missing_tool_call(response, tool_name=tool["name"], budget=budget)
 
         return unwrap_structured_response(
             response.tool_calls[0].input, validator_class, is_list

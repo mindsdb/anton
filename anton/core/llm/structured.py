@@ -29,6 +29,63 @@ from __future__ import annotations
 
 from typing import Any
 
+from .provider import StructuredOutputError
+
+
+def raise_missing_tool_call(response, *, tool_name: str, budget: int) -> None:
+    """Raise `StructuredOutputError` explaining *why* there is no tool call.
+
+    Lives here, next to `build_structured_tool`/`unwrap_structured_response`,
+    because both structured-output paths must classify the failure the same
+    way — the async `LLMClient._generate_object_with` and the sync
+    `_ScratchpadLLM.generate_object` in the scratchpad subprocess. Keeping it
+    in one of the two callers is how they drift (ENG-1081).
+
+    A forced tool call can come back empty for two very different reasons:
+
+    - **Truncated** — the model narrated in plain ``content`` and ran out of
+      ``budget`` before reaching the call. Retrying with more room usually
+      works. Models served through MindsHub's Fireworks aliases
+      (``mindshub_air``/``kimi``, ``deepseek``) narrate before acting, so a
+      tight budget fails them.
+    - **Anything else** — the provider errored, refused, or returned nothing.
+      A bigger budget won't help.
+
+    Truncation is detected by output-token count *first*, because the MindsHub
+    gateway reports ``finish_reason: "stop"`` while returning exactly
+    ``max_tokens`` for most aliases (ENG-1082) — the standard ``"length"``
+    check cannot be relied on there. Both provider dialects are still honoured
+    when they do report it: OpenAI/gateway say ``"length"``, Anthropic says
+    ``"max_tokens"``.
+
+    Args:
+        response: The provider's ``LLMResponse`` (no tool calls on it).
+        tool_name: Name of the forced tool, for the message.
+        budget: The ``max_tokens`` the call was given.
+
+    Raises:
+        StructuredOutputError: Always. ``.truncated`` carries the verdict.
+    """
+    usage = getattr(response, "usage", None)
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    stop_reason = getattr(response, "stop_reason", None)
+    truncated = stop_reason in ("length", "max_tokens") or (
+        budget > 0 and output_tokens >= budget
+    )
+    detail = (
+        f" (truncated: {output_tokens}/{budget} output tokens spent on text "
+        "before the call)."
+        if truncated
+        else "."
+    )
+    raise StructuredOutputError(
+        f"LLM did not return a tool call for forced schema {tool_name}{detail}",
+        truncated=truncated,
+        output_tokens=output_tokens,
+        max_tokens=budget,
+        stop_reason=stop_reason,
+    )
+
 
 def build_structured_tool(schema_class) -> tuple[dict, type, bool]:
     """Build a forced tool-call definition from a Pydantic schema.
