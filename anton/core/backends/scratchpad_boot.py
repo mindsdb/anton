@@ -217,6 +217,7 @@ if _scratchpad_model:
                 """
                 from anton.core.llm.structured import (
                     build_structured_tool,
+                    raise_missing_tool_call,
                     unwrap_structured_response,
                 )
 
@@ -233,7 +234,14 @@ if _scratchpad_model:
                 )
 
                 if not response.tool_calls:
-                    raise ValueError("LLM did not return structured output.")
+                    # Same classification as the async path: a model that
+                    # narrates before acting (mindshub_air/kimi, deepseek) can
+                    # blow `max_tokens` on prose and never reach the call, and
+                    # scratchpad code picks its own budget. Says so instead of
+                    # raising a blind ValueError (ENG-1081).
+                    raise_missing_tool_call(
+                        response, tool_name=tool["name"], budget=max_tokens
+                    )
 
                 return unwrap_structured_response(
                     response.tool_calls[0].input, validator_class, is_list

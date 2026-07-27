@@ -166,27 +166,79 @@ async def test_short_empty_response_is_not_truncated():
     assert exc_info.value.truncated is False
 
 
+def test_shared_classifier_is_used_by_both_structured_paths():
+    """The async client and the scratchpad's sync twin must classify identically.
+
+    `raise_missing_tool_call` is the single implementation both call — the whole
+    point of `structured.py`. Guarded here because the previous version of this
+    fix put the logic in `client.py`, which silently left the sync path
+    (exposed to model-written scratchpad code, with a caller-chosen budget)
+    raising a blind ValueError.
+    """
+    from anton.core.llm import structured
+
+    assert hasattr(structured, "raise_missing_tool_call")
+    # Read the source rather than importing it: `scratchpad_boot` is a
+    # subprocess bootstrap and reads stdin at import time.
+    boot_src = (
+        Path(__file__).resolve().parents[1]
+        / "anton" / "core" / "backends" / "scratchpad_boot.py"
+    ).read_text()
+    assert "raise_missing_tool_call" in boot_src, (
+        "the sync scratchpad path must use the shared classifier, not its own raise"
+    )
+    assert "LLM did not return structured output." not in boot_src, (
+        "the old blind ValueError should be gone from the sync path"
+    )
+
+
+def test_classifier_tolerates_a_response_without_usage():
+    """Defensive: a provider response missing `usage` must not blow up the
+    classifier — it just can't prove truncation, which is the safe direction
+    (no retry bought without evidence)."""
+    from anton.core.llm.structured import raise_missing_tool_call
+
+    class _Bare:
+        content = "some prose"
+
+    with pytest.raises(StructuredOutputError) as exc_info:
+        raise_missing_tool_call(_Bare(), tool_name="_VerifierVerdict", budget=2048)
+
+    assert exc_info.value.truncated is False
+    assert exc_info.value.output_tokens == 0
+
+
 # --------------------------------------------------------------------------
 # 2. The verifier retries a truncated verdict, once, with more room.
 # --------------------------------------------------------------------------
 
 
-def _session_that_uses_a_tool(mock_llm, workspace) -> ChatSession:
-    """Session whose every turn uses one tool, so the completion verifier runs.
+class _ToolThenText:
+    """`plan_stream` fake: one tool round per turn, then plain text.
 
-    Each turn makes exactly two `plan_stream` calls — the tool round, then the
-    final text — so alternating keeps the pattern correct across several turns.
+    Keyed off "have I already used the tool this turn?" rather than a call
+    counter — a counter with `% 2` would silently desync if a turn ever made a
+    third `plan_stream` call (an extra tool round, an internal recovery retry),
+    and the test would then be asserting something other than it claims.
+    Call `next_turn()` between turns.
     """
-    call_count = 0
 
-    def fake_plan_stream(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count % 2 == 1:
+    def __init__(self):
+        self.tool_used = False
+
+    def next_turn(self) -> None:
+        self.tool_used = False
+
+    def __call__(self, **kwargs):
+        if not self.tool_used:
+            self.tool_used = True
             return _FakeAsyncIter([StreamComplete(response=_scratchpad_response("Running."))])
         return _FakeAsyncIter([StreamComplete(response=_text_response("Done."))])
 
-    mock_llm.plan_stream = fake_plan_stream
+
+def _session_that_uses_a_tool(mock_llm, workspace) -> ChatSession:
+    """Session whose turn uses one tool, so the completion verifier runs."""
+    mock_llm.plan_stream = _ToolThenText()
     return ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
 
 
@@ -251,9 +303,14 @@ async def test_non_truncated_failure_is_not_retried(workspace):
     assert calls == [_VERIFIER_TOKEN_BUDGETS[0]], "must not pay for a hopeless retry"
 
 
-async def test_retry_is_not_bought_twice_in_one_session(workspace):
-    """If the retry is truncated too, the model can't fit a verdict at any budget
-    we'll pay for — later turns in the session must stop paying for the retry."""
+async def test_attempts_are_bounded_and_repeat_each_turn(workspace):
+    """Truncation retries are bounded by the budget list — and are re-tried on a
+    later turn rather than latched off.
+
+    Output length varies ~6.7x per call for an identical request, so one
+    truncation is a tail sample, not proof the model can never fit a verdict.
+    Latching the retry off on that evidence would bring silent stops back.
+    """
     budgets: list[int] = []
 
     async def fake_verdict(_schema, *, system, messages, max_tokens):
@@ -270,17 +327,74 @@ async def test_retry_is_not_bought_twice_in_one_session(workspace):
     try:
         async for _ in session.turn_stream("first turn"):
             pass
-        assert budgets == list(_VERIFIER_TOKEN_BUDGETS), "turn 1 tries both budgets"
+        assert budgets == list(_VERIFIER_TOKEN_BUDGETS), "bounded by the budget list"
 
-        # Same session, second turn: only the first budget should be attempted.
         budgets.clear()
+        mock_llm.plan_stream.next_turn()
         async for _ in session.turn_stream("second turn"):
             pass
     finally:
         await session.close()
 
-    assert budgets == [_VERIFIER_TOKEN_BUDGETS[0]], (
-        "the retry must not be re-bought on every later turn"
+    assert budgets == list(_VERIFIER_TOKEN_BUDGETS), (
+        "a later turn gets a fresh chance — the retry is not latched off"
+    )
+
+
+async def test_truncation_retry_through_the_real_client(workspace):
+    """End-to-end: a provider response with prose-at-the-cap must flow through
+    the real `LLMClient` detection into a session-level retry.
+
+    The other session tests raise `StructuredOutputError` by hand, so they would
+    pass even if the detection in `raise_missing_tool_call` were wrong. This one
+    wires a fake *provider* through the real client, so provider → client →
+    session is the actual code path (ENG-747: don't hand-build error fixtures).
+    """
+    calls: list[int] = []
+
+    async def fake_complete(*, model, system, messages, tools, tool_choice, max_tokens):
+        calls.append(max_tokens)
+        if len(calls) == 1:
+            # Narrated right up to the ceiling, never reached the tool call —
+            # and the gateway calls that `finish_reason: "stop"` (ENG-1082).
+            return _text_response("Let me analyze this conversation carefully...",
+                                  output_tokens=max_tokens, stop_reason="stop")
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="tc_v", name="_VerifierVerdict",
+                                 input={"status": "WAITING", "reason": "asked the user"})],
+            usage=Usage(input_tokens=100, output_tokens=60),
+            stop_reason="tool_calls",
+        )
+
+    provider = MagicMock()
+    provider.complete = AsyncMock(side_effect=fake_complete)
+    real_client = LLMClient(
+        planning_provider=provider, planning_model="planner",
+        coding_provider=provider, coding_model="coder",
+    )
+
+    # Only the verdict call goes through the real client; the turn itself still
+    # uses the mock so the test stays a unit test.
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = real_client.generate_object_code
+
+    session = _session_that_uses_a_tool(mock_llm, workspace)
+    try:
+        async for _ in session.turn_stream("build me a dashboard"):
+            pass
+    finally:
+        await session.close()
+
+    assert calls == list(_VERIFIER_TOKEN_BUDGETS), (
+        "the real client must classify prose-at-the-cap as truncated and the "
+        "session must retry it with the larger budget"
+    )
+    # The retried verdict (WAITING) stands: no forced continuation.
+    assert not any(
+        "SYSTEM: Task verification determined this task is not yet complete"
+        in str(m.get("content", ""))
+        for m in session.history
     )
 
 

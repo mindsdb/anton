@@ -171,9 +171,23 @@ class _VerifierVerdict(BaseModel):
 # fail-safe below then turned into a silent "task complete" and a turn that ended
 # without a message.
 #
-# 2048 was measured, not guessed — `mindshub_air` spent 1,654 output tokens even
-# *with* the no-preamble instruction, so 1024 was not enough. Nothing pays for
-# the headroom it doesn't use.
+# Sized from a measured distribution, not one sample. 16 identical verdict calls
+# to `mindshub_air` (2048 + the no-preamble clause below) spent:
+#
+#   245 246 247 253 253 254 267 279 287 295 392 407 571 573 610 865 1654
+#   median ≈ 290, max 1654 — a 6.7x spread for the *same* request.
+#
+# So output length is stochastic per call, not a fixed property of the model:
+# 2048 clears the median comfortably but is only ~1.24x the observed worst case,
+# which is why the 4096 retry exists rather than a single larger budget. 1024
+# would have been wrong (1/3 in the earlier run). Nothing pays for headroom it
+# doesn't use — first-party models answer in 43–115 tokens either way.
+#
+# Deliberately no "this model can't do it" latch: with a 6.7x per-call spread,
+# one truncation is a tail sample, not proof about the next turn, and a latch
+# that skips the retry on that evidence would reintroduce silent stops. The
+# retry is cheap because it only fires when the first attempt truncates — 0 of
+# 12 at 2048 in the sample above.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
 
 # Appended to the verifier system prompt. Halves the preamble on narrating
@@ -351,10 +365,6 @@ class ChatSession:
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
-        # Latched once the verifier's truncation retry has itself been truncated:
-        # this model narrates past even the larger budget, so the retry is pure
-        # waste on every later turn of this session (ENG-1081).
-        self._verifier_retry_exhausted = False
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -2700,10 +2710,7 @@ class ChatSession:
                 + _VERIFIER_NO_PREAMBLE
             )
             verdict = None
-            budgets = _VERIFIER_TOKEN_BUDGETS
-            if self._verifier_retry_exhausted:
-                budgets = budgets[:1]
-            for attempt, budget in enumerate(budgets):
+            for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
                 try:
                     verdict = await self._llm.generate_object_code(
                         _VerifierVerdict,
@@ -2717,12 +2724,9 @@ class ChatSession:
                     # model narrated past `budget` before it reached the tool call
                     # (ENG-1081). Retry with more room. Any other structured-output
                     # failure won't be fixed by a bigger budget, so don't pay for it.
-                    retrying = exc.truncated and attempt + 1 < len(budgets)
-                    if exc.truncated and not retrying and len(budgets) > 1:
-                        # The retry ran and was truncated too: this model won't
-                        # fit the verdict at any budget we're willing to pay for.
-                        # Stop buying the retry for the rest of the session.
-                        self._verifier_retry_exhausted = True
+                    retrying = exc.truncated and attempt + 1 < len(
+                        _VERIFIER_TOKEN_BUDGETS
+                    )
                     _verifier_log.info(
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s retrying=%s",
