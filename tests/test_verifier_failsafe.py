@@ -121,6 +121,10 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         ]
         assert any("task-completion check failed to run" in t for t in history_texts)
         assert not any("Continue working on the original request" in t for t in history_texts)
+        # The model must be asked for a solvability self-assessment, not just
+        # a status dump — otherwise "let me know how to proceed" is a vague
+        # ask instead of an actual recommendation (ENG-1079 follow-up).
+        assert any("whether you believe this is still solvable on your own" in t for t in history_texts)
 
         final_texts = [
             m["content"] for m in session.history

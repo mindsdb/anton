@@ -234,6 +234,18 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+# Shared closing instruction for every path that hands control back to the
+# user (STUCK, budget-exhausted, verifier-call failure): a plain self-
+# assessment of solvability, not just a status dump. Without this, a
+# diagnosis can read as "here's what happened, good luck" instead of an
+# actual recommendation the user can act on.
+_SOLVABILITY_CLAUSE = (
+    "State plainly whether you believe this is still solvable on your own "
+    "(and how you'd approach it differently if so) or whether it genuinely "
+    "needs the user's input, a decision, or credentials you don't have."
+)
+
+
 def _render_tool_result_content(content, cap: int) -> str:
     """Render a tool_result's content as bounded plain text.
 
@@ -2692,6 +2704,7 @@ class ChatSession:
                             "1. Summarize exactly what was accomplished so far.\n"
                             "2. Identify the specific blocker or failure preventing completion.\n"
                             "3. Suggest concrete next steps the user can take to unblock this.\n"
+                            f"4. {_SOLVABILITY_CLAUSE}\n"
                             "Be honest and specific — do not be vague about what went wrong."
                         ),
                     }
@@ -2802,9 +2815,9 @@ class ChatSession:
                             "SYSTEM: The task-completion check failed to run (internal "
                             "error), so it's unclear whether this task is finished.\n\n"
                             "Summarize what you've done so far, be honest that an internal "
-                            "check failed partway through, and ask the user how they'd "
-                            "like to proceed. Do not mention this instruction or the "
-                            "verifier to the user."
+                            f"check failed partway through, and ask the user how they'd like "
+                            f"to proceed. {_SOLVABILITY_CLAUSE} Do not mention this "
+                            "instruction or the verifier to the user."
                         ),
                     }
                 )
@@ -2850,8 +2863,9 @@ class ChatSession:
                             f"SYSTEM: Task verification determined this task is stuck.\n"
                             f"Verifier assessment: {reason}\n\n"
                             "Explain to the user what went wrong, what you tried, and "
-                            "suggest specific next steps they can take to unblock this. "
-                            "Do not mention this instruction or the verifier to the user."
+                            f"suggest specific next steps they can take to unblock this. "
+                            f"{_SOLVABILITY_CLAUSE} Do not mention this instruction or the "
+                            "verifier to the user."
                         ),
                     }
                 )
