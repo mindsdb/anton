@@ -217,6 +217,8 @@ if _scratchpad_model:
                 """
                 from anton.core.llm.structured import (
                     build_structured_tool,
+                    looks_truncated,
+                    raise_unusable_tool_call,
                     unwrap_structured_response,
                 )
 
@@ -233,11 +235,24 @@ if _scratchpad_model:
                 )
 
                 if not response.tool_calls:
-                    raise ValueError("LLM did not return structured output.")
+                    # Same classification as the async path (ENG-1081).
+                    # Nothing retries here, but the message reaches the model as
+                    # a traceback, so "you ran out of budget" is actionable
+                    # where "did not return structured output" was not.
+                    raise_unusable_tool_call(
+                        response, tool_name=tool["name"], budget=max_tokens
+                    )
 
-                return unwrap_structured_response(
-                    response.tool_calls[0].input, validator_class, is_list
-                )
+                try:
+                    return unwrap_structured_response(
+                        response.tool_calls[0].input, validator_class, is_list
+                    )
+                except Exception:
+                    if looks_truncated(response, max_tokens):
+                        raise_unusable_tool_call(
+                            response, tool_name=tool["name"], budget=max_tokens
+                        )
+                    raise
 
         _scratchpad_llm_instance = _ScratchpadLLM()
 

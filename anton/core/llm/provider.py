@@ -312,6 +312,36 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+class StructuredOutputError(ValueError):
+    """Raised when a forced-tool-call structured-output call yields no usable call.
+
+    ``truncated`` says whether a retry can help: ``True`` means the model spent
+    the ``max_tokens`` budget narrating before it reached the tool call (the
+    narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``, ``qwen`` — do
+    this deterministically under a tight budget, ENG-1081); ``False`` means the
+    provider errored, refused, or returned nothing, and a bigger budget won't
+    fix it. See `structured.looks_truncated` for how that's decided.
+
+    Subclasses ``ValueError`` so call sites catching the documented ``ValueError``
+    from ``generate_object``/``generate_object_code`` keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        truncated: bool = False,
+        output_tokens: int = 0,
+        max_tokens: int = 0,
+        stop_reason: str | None = None,
+    ):
+        super().__init__(message)
+        self.truncated = truncated
+        self.output_tokens = output_tokens
+        self.max_tokens = max_tokens
+        self.stop_reason = stop_reason
+
+
 class TransientProviderError(ConnectionError):
     """Raised when the provider fails in a way that a retry might fix.
 
