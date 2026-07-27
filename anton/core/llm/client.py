@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from .provider import LLMProvider, LLMResponse, StreamEvent
+from .provider import LLMProvider, LLMResponse, StreamEvent, StructuredOutputError
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -204,18 +204,42 @@ class LLMClient:
 
         tool, validator_class, is_list = build_structured_tool(schema_class)
 
+        budget = max_tokens or self._max_tokens
+
         response = await provider.complete(
             model=model,
             system=system,
             messages=messages,
             tools=[tool],
             tool_choice={"type": "tool", "name": tool["name"]},
-            max_tokens=max_tokens or self._max_tokens,
+            max_tokens=budget,
         )
 
         if not response.tool_calls:
-            raise ValueError(
-                f"LLM did not return a tool call for forced schema {tool['name']}."
+            # Report *why* there is no tool call, so callers can retry a
+            # truncated call with more room instead of treating a budget
+            # problem as a hard failure (ENG-1081). Token count is the
+            # reliable signal here — the MindsHub gateway reports
+            # `finish_reason: "stop"` at the cap for most aliases (ENG-1082),
+            # so `stop_reason` alone would miss it.
+            # Both provider dialects: OpenAI/gateway say "length", Anthropic says
+            # "max_tokens" (passed through raw by AnthropicProvider).
+            output_tokens = response.usage.output_tokens
+            truncated = response.stop_reason in ("length", "max_tokens") or (
+                budget > 0 and output_tokens >= budget
+            )
+            raise StructuredOutputError(
+                f"LLM did not return a tool call for forced schema {tool['name']}"
+                + (
+                    f" (truncated: {output_tokens}/{budget} output tokens spent "
+                    "on text before the call)."
+                    if truncated
+                    else "."
+                ),
+                truncated=truncated,
+                output_tokens=output_tokens,
+                max_tokens=budget,
+                stop_reason=response.stop_reason,
             )
 
         return unwrap_structured_response(
@@ -263,8 +287,11 @@ class LLMClient:
             input was a list annotation.
 
         Raises:
-            ValueError: If the LLM fails to produce a tool call (rare —
-                forced tool_choice usually prevents this).
+            StructuredOutputError: If the LLM fails to produce a tool call.
+                A ``ValueError`` subclass, so callers that catch
+                ``ValueError`` are unaffected. Check ``.truncated`` to tell a
+                blown ``max_tokens`` budget (retry with more room) from a
+                genuine failure (ENG-1081).
             pydantic.ValidationError: If the tool's input doesn't match
                 the schema.
 

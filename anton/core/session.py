@@ -39,6 +39,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StructuredOutputError,
     TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
@@ -156,6 +157,37 @@ class _VerifierVerdict(BaseModel):
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
+
+
+# Output budgets for the completion-verifier verdict call: first attempt, then
+# the retry used when the first one is truncated (ENG-1081).
+#
+# The verdict itself is tiny — first-party models answer in 43–115 tokens with no
+# preamble. But the open-weight aliases MindsHub serves through Fireworks
+# (`mindshub_air`/`kimi`, `deepseek`) narrate ~1,300 characters of reasoning as
+# plain text *before* the forced tool call, because `tool_choice` is advisory on
+# that endpoint. The original 256 truncated them mid-sentence, every single time:
+# 98.6% of `mindshub_air` verdict calls in prod returned no tool call, which the
+# fail-safe below then turned into a silent "task complete" and a turn that ended
+# without a message.
+#
+# 2048 was measured, not guessed — `mindshub_air` spent 1,654 output tokens even
+# *with* the no-preamble instruction, so 1024 was not enough. Nothing pays for
+# the headroom it doesn't use.
+_VERIFIER_TOKEN_BUDGETS = (2048, 4096)
+
+# Appended to the verifier system prompt. Halves the preamble on narrating
+# models; on its own it is not sufficient (0/3 at 256 even with it), which is why
+# it is paired with the budgets above rather than used instead of them.
+# Names the tool off the schema class so the instruction can't go stale if the
+# class is renamed (the forced tool name is derived from it in
+# `build_structured_tool`). This is the exact wording measured at 3/3.
+_VERIFIER_NO_PREAMBLE = (
+    f"Call the {_VerifierVerdict.__name__} tool immediately as your first "
+    "action. Do not think out loud, restate the conversation, or explain your "
+    "reasoning before calling it — put your one-sentence justification in the "
+    "tool's `reason` field."
+)
 
 
 def _render_tool_result_content(content, cap: int) -> str:
@@ -2656,18 +2688,47 @@ class ChatSession:
                 "You are a task-completion verifier. Decide whether the user's "
                 "request is complete, the assistant is waiting on the user, the work "
                 "is unfinished, or the assistant is blocked. Follow the status "
-                "definitions exactly."
+                "definitions exactly.\n\n"
+                # Models that narrate before acting spend the whole budget on
+                # prose and never reach the tool call (ENG-1081). Asking for the
+                # call first shortens the preamble; it does not eliminate it,
+                # which is why the budget below is generous as well.
+                f"{_VERIFIER_NO_PREAMBLE}"
             )
-            try:
-                verdict = await self._llm.generate_object_code(
-                    _VerifierVerdict,
-                    system=verifier_system,
-                    messages=verify_messages,
-                    max_tokens=256,
-                )
+            verdict = None
+            for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
+                try:
+                    verdict = await self._llm.generate_object_code(
+                        _VerifierVerdict,
+                        system=verifier_system,
+                        messages=verify_messages,
+                        max_tokens=budget,
+                    )
+                    break
+                except StructuredOutputError as exc:
+                    # A truncated verdict is a budget problem, not a verdict: the
+                    # model narrated past `budget` before it reached the tool call
+                    # (ENG-1081). Retry with more room. Any other structured-output
+                    # failure won't be fixed by a bigger budget, so don't pay for it.
+                    retrying = exc.truncated and attempt + 1 < len(_VERIFIER_TOKEN_BUDGETS)
+                    _verifier_log.info(
+                        "completion-verifier verdict=%s budget=%d output_tokens=%d "
+                        "stop_reason=%s retrying=%s",
+                        "TRUNCATED" if exc.truncated else "NO_TOOL_CALL",
+                        budget, exc.output_tokens, exc.stop_reason, retrying,
+                    )
+                    if not retrying:
+                        break
+                except Exception:
+                    _verifier_log.info(
+                        "completion-verifier verdict=ERROR budget=%d", budget
+                    )
+                    break
+
+            if verdict is not None:
                 status = verdict.status
                 reason = verdict.reason.strip()
-            except Exception:
+            else:
                 # Verifier failed — fail safe by treating the turn as done rather
                 # than forcing a continuation the user never asked for.
                 status, reason = "COMPLETE", "verifier unavailable"
