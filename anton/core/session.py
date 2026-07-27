@@ -197,13 +197,21 @@ def _safe_error_detail(exc: BaseException) -> str:
     plus for validation errors the field locations and error codes only, which
     is what actually identifies the failure.
     """
-    name = type(exc).__name__
-    status = getattr(exc, "status_code", None)
-    if status is not None:
-        return f"{name}(status={status})"
-    errors = getattr(exc, "errors", None)
-    if callable(errors):
-        try:
+    # This runs *inside* an `except` handler, so it must not raise: an exception
+    # escaping here would turn a gracefully-handled verifier failure into a dead
+    # turn. Everything below is therefore wrapped, including the attribute reads
+    # (a custom exception can expose `status_code`/`errors` as a property that
+    # raises).
+    try:
+        name = type(exc).__name__
+    except Exception:  # pragma: no cover — defensive
+        return "unavailable"
+    try:
+        status = getattr(exc, "status_code", None)
+        if status is not None:
+            return f"{name}(status={status})"
+        errors = getattr(exc, "errors", None)
+        if callable(errors):
             try:
                 details = errors(
                     include_input=False, include_url=False, include_context=False
@@ -218,8 +226,11 @@ def _safe_error_detail(exc: BaseException) -> str:
             )
             if fields:
                 return f"{name}({fields})"
-        except Exception:
-            pass
+    except Exception:
+        # Anything odd about this exception object — a property that raises, an
+        # `errors()` that misbehaves — degrades to the type name, never a crash
+        # and never the message.
+        pass
     return name
 
 

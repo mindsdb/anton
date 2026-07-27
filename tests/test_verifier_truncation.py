@@ -541,3 +541,22 @@ def test_error_detail_falls_back_to_the_type_name():
 
     detail = _safe_error_detail(RuntimeError("provider hiccup with conversation text"))
     assert detail == "RuntimeError"
+
+
+def test_error_detail_never_raises_from_inside_an_except_handler():
+    """It runs inside `except`, so raising would turn a handled verifier failure
+    into a dead turn. Hostile exceptions must still produce a string."""
+    from anton.core.session import _safe_error_detail
+
+    class _Hostile(Exception):
+        @property
+        def status_code(self):
+            raise RuntimeError("boom")
+
+    class _HostileErrors(Exception):
+        def errors(self, **kwargs):
+            raise RuntimeError("boom")
+
+    # Degrades to the exception type — never raises, never the message.
+    assert _safe_error_detail(_Hostile()) == "_Hostile"
+    assert _safe_error_detail(_HostileErrors()) == "_HostileErrors"
