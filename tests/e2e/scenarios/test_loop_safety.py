@@ -51,6 +51,45 @@ def test_continuation_limit_respected(cfg, stub, tmp_path):
 
 
 @pytest.mark.stub_only
+def test_truncated_verdict_is_retried_not_silently_dropped(cfg, stub, tmp_path):
+    # ENG-1081: the verdict call is a forced tool call, and models that narrate
+    # before acting (mindshub_air/kimi, deepseek) spend the whole budget on prose
+    # and never reach it. That used to raise, get swallowed as a fake COMPLETE,
+    # and end the turn with no message at all. The session must retry with a
+    # bigger budget and then honour the real verdict.
+    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "c", "code": "print(1)"})
+    stub.queue_text("Ran the script. TURN_TEXT")
+    stub.queue_verification_truncated()          # first budget: narrated to the cap
+    stub.queue_verification_incomplete("the summary table is still missing")
+    stub.queue_text("Finished the summary table. RETRY_VERDICT_HONOURED")
+    stub.queue_verification_ok()
+    result = run_anton(["--folder", str(tmp_path)], ["build me a summary", "exit"],
+                       env=base_env(stub), timeout=cfg.timeout(60))
+
+    assert_exit_ok(result)
+    assert_not_output(result, "Traceback (most recent call last)")
+    # The retried verdict (INCOMPLETE) drove a continuation, so the turn kept
+    # working instead of stopping silently on a fabricated COMPLETE.
+    assert_output(result, "RETRY_VERDICT_HONOURED")
+    verdict_calls = [
+        r for r in stub.requests
+        if "task-completion verifier" in json.dumps(r.get("messages", []))
+        or "task-completion verifier" in str(r.get("system", ""))
+    ]
+    assert len(verdict_calls) >= 2, (
+        f"expected a retried verdict call, saw {len(verdict_calls)}. "
+        f"Request count: {stub.request_count}"
+    )
+    # The OpenAI provider sends the budget as `max_completion_tokens`.
+    budgets = [
+        r.get("max_completion_tokens") or r.get("max_tokens") for r in verdict_calls[:2]
+    ]
+    assert budgets[0] < budgets[1], (
+        f"the retry must ask for more room than the first attempt, got {budgets}"
+    )
+
+
+@pytest.mark.stub_only
 def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
     # ENG-716: a tool-using turn that ends by asking the user a question must
     # STOP when the verifier returns WAITING — not inject "Continue working"

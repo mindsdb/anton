@@ -199,10 +199,14 @@ class LLMClient:
         """
         from anton.core.llm.structured import (
             build_structured_tool,
+            looks_truncated,
+            raise_unusable_tool_call,
             unwrap_structured_response,
         )
 
         tool, validator_class, is_list = build_structured_tool(schema_class)
+
+        budget = max_tokens or self._max_tokens
 
         response = await provider.complete(
             model=model,
@@ -210,17 +214,26 @@ class LLMClient:
             messages=messages,
             tools=[tool],
             tool_choice={"type": "tool", "name": tool["name"]},
-            max_tokens=max_tokens or self._max_tokens,
+            max_tokens=budget,
         )
 
         if not response.tool_calls:
-            raise ValueError(
-                f"LLM did not return a tool call for forced schema {tool['name']}."
-            )
+            # Shared with the scratchpad's sync twin so both paths classify the
+            # failure identically — see `raise_unusable_tool_call` (ENG-1081).
+            raise_unusable_tool_call(response, tool_name=tool["name"], budget=budget)
 
-        return unwrap_structured_response(
-            response.tool_calls[0].input, validator_class, is_list
-        )
+        try:
+            return unwrap_structured_response(
+                response.tool_calls[0].input, validator_class, is_list
+            )
+        except Exception:
+            # The budget can also run out *inside* the tool call's JSON, so
+            # validation fails here instead. Same cause, same retry (ENG-1081).
+            if looks_truncated(response, budget):
+                raise_unusable_tool_call(
+                    response, tool_name=tool["name"], budget=budget
+                )
+            raise
 
     async def generate_object(
         self,
@@ -263,8 +276,11 @@ class LLMClient:
             input was a list annotation.
 
         Raises:
-            ValueError: If the LLM fails to produce a tool call (rare —
-                forced tool_choice usually prevents this).
+            StructuredOutputError: If the LLM fails to produce a tool call.
+                A ``ValueError`` subclass, so callers that catch
+                ``ValueError`` are unaffected. Check ``.truncated`` to tell a
+                blown ``max_tokens`` budget (retry with more room) from a
+                genuine failure (ENG-1081).
             pydantic.ValidationError: If the tool's input doesn't match
                 the schema.
 
