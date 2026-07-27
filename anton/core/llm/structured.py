@@ -27,13 +27,43 @@ the subprocess already imports from `anton.core.*` at boot.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from .provider import StructuredOutputError
 
 
-def raise_missing_tool_call(response, *, tool_name: str, budget: int) -> None:
-    """Raise `StructuredOutputError` explaining *why* there is no tool call.
+def looks_truncated(response, budget: int) -> bool:
+    """True if `response` was cut off by the `max_tokens` budget.
+
+    Token count is checked *first* because the MindsHub gateway reports
+    ``finish_reason: "stop"`` while returning exactly ``max_tokens`` for most
+    aliases (ENG-1082) — the standard ``"length"`` check cannot be relied on
+    there. Both provider dialects are still honoured when they do report it:
+    OpenAI/the gateway say ``"length"``, Anthropic says ``"max_tokens"``.
+
+    A response with no usage information yields ``False``: without evidence we
+    don't claim truncation, which is the safe direction (no retry is bought).
+    """
+    usage = getattr(response, "usage", None)
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    stop_reason = getattr(response, "stop_reason", None)
+    return stop_reason in ("length", "max_tokens") or (
+        budget > 0 and output_tokens >= budget
+    )
+
+
+def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoReturn:
+    """Raise `StructuredOutputError` explaining *why* the tool call is unusable.
+
+    Covers both shapes of the same underlying problem:
+
+    - **No tool call at all** — the model narrated in plain ``content`` until
+      the budget ran out.
+    - **A damaged tool call** — the budget ran out *inside* the call's JSON
+      arguments, so ``safe_parse_tool_input`` salvaged a partial dict and set
+      ``parse_error``, and validation then fails. Without this, that case
+      surfaces as a bare ``ValidationError``, which reads like a schema bug and
+      never gets the retry a truncation deserves (ENG-1081).
 
     Lives here, next to `build_structured_tool`/`unwrap_structured_response`,
     because both structured-output paths must classify the failure the same
@@ -51,15 +81,10 @@ def raise_missing_tool_call(response, *, tool_name: str, budget: int) -> None:
     - **Anything else** — the provider errored, refused, or returned nothing.
       A bigger budget won't help.
 
-    Truncation is detected by output-token count *first*, because the MindsHub
-    gateway reports ``finish_reason: "stop"`` while returning exactly
-    ``max_tokens`` for most aliases (ENG-1082) — the standard ``"length"``
-    check cannot be relied on there. Both provider dialects are still honoured
-    when they do report it: OpenAI/gateway say ``"length"``, Anthropic says
-    ``"max_tokens"``.
+    See `looks_truncated` for how truncation is detected.
 
     Args:
-        response: The provider's ``LLMResponse`` (no tool calls on it).
+        response: The provider's ``LLMResponse``.
         tool_name: Name of the forced tool, for the message.
         budget: The ``max_tokens`` the call was given.
 
@@ -69,17 +94,20 @@ def raise_missing_tool_call(response, *, tool_name: str, budget: int) -> None:
     usage = getattr(response, "usage", None)
     output_tokens = getattr(usage, "output_tokens", 0) or 0
     stop_reason = getattr(response, "stop_reason", None)
-    truncated = stop_reason in ("length", "max_tokens") or (
-        budget > 0 and output_tokens >= budget
+    truncated = looks_truncated(response, budget)
+    what = (
+        "returned an unusable tool call for"
+        if getattr(response, "tool_calls", None)
+        else "did not return a tool call for"
     )
     detail = (
-        f" (truncated: {output_tokens}/{budget} output tokens spent on text "
-        "before the call)."
+        f" (truncated: {output_tokens}/{budget} output tokens spent before the "
+        "call was complete)."
         if truncated
         else "."
     )
     raise StructuredOutputError(
-        f"LLM did not return a tool call for forced schema {tool_name}{detail}",
+        f"LLM {what} forced schema {tool_name}{detail}",
         truncated=truncated,
         output_tokens=output_tokens,
         max_tokens=budget,

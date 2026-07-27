@@ -199,7 +199,8 @@ class LLMClient:
         """
         from anton.core.llm.structured import (
             build_structured_tool,
-            raise_missing_tool_call,
+            looks_truncated,
+            raise_unusable_tool_call,
             unwrap_structured_response,
         )
 
@@ -218,12 +219,24 @@ class LLMClient:
 
         if not response.tool_calls:
             # Shared with the scratchpad's sync twin so both paths classify the
-            # failure identically — see `raise_missing_tool_call` (ENG-1081).
-            raise_missing_tool_call(response, tool_name=tool["name"], budget=budget)
+            # failure identically — see `raise_unusable_tool_call` (ENG-1081).
+            raise_unusable_tool_call(response, tool_name=tool["name"], budget=budget)
 
-        return unwrap_structured_response(
-            response.tool_calls[0].input, validator_class, is_list
-        )
+        try:
+            return unwrap_structured_response(
+                response.tool_calls[0].input, validator_class, is_list
+            )
+        except Exception:
+            # The budget can also run out *inside* the tool call's JSON, in
+            # which case `safe_parse_tool_input` salvages a partial dict (with
+            # `parse_error` set) and validation fails here instead. Same cause,
+            # so it deserves the same retry — otherwise it reads like a schema
+            # bug and silently falls through to the caller's fail-safe.
+            if looks_truncated(response, budget):
+                raise_unusable_tool_call(
+                    response, tool_name=tool["name"], budget=budget
+                )
+            raise
 
     async def generate_object(
         self,
