@@ -29,6 +29,11 @@ class _Response:
     tool_calls: list[dict] = field(default_factory=list)
     # None = honour request's `stream` flag; True/False = override
     force_streaming: bool | None = None
+    # Reported as `usage.completion_tokens`. Set it equal to the request's
+    # `max_tokens` to emulate a truncated response — which is how the real
+    # MindsHub gateway presents one, since it still says
+    # `finish_reason: "stop"` at the cap (ENG-1082).
+    output_tokens: int = 10
 
 
 class StubServer:
@@ -67,24 +72,51 @@ class StubServer:
         }]))
         return self
 
-    def queue_verification_ok(self) -> "StubServer":
-        """Queue a non-streaming 'STATUS: COMPLETE' verification response."""
-        self._queue.put(
-            _Response(content="STATUS: COMPLETE — task is done.", force_streaming=False)
-        )
+    def _queue_verdict(self, status: str, reason: str) -> "StubServer":
+        """Queue a non-streaming structured verifier verdict.
+
+        The completion verifier now runs via ``generate_object_code`` with a
+        forced tool_choice on the ``_VerifierVerdict`` schema, so the stub must
+        answer with a tool call (status + reason), not free text (ENG-716).
+        """
+        self._queue.put(_Response(
+            tool_calls=[{
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "name": "_VerifierVerdict",
+                "arguments": {"status": status, "reason": reason},
+            }],
+            force_streaming=False,
+        ))
         return self
+
+    def queue_verification_truncated(self, output_tokens: int = 2048) -> "StubServer":
+        """Queue a verdict call that narrated instead of calling the tool and ran
+        out of budget doing it (ENG-1081).
+
+        Text, no tool call, and `completion_tokens` equal to the verifier's first
+        budget — exactly what `mindshub_air`/`kimi`/`deepseek` return. The
+        session should retry with the larger budget rather than treating this as
+        a verdict.
+        """
+        self._queue.put(_Response(
+            content="Let me analyze this conversation carefully. The user asked for",
+            force_streaming=False,
+            output_tokens=output_tokens,
+        ))
+        return self
+
+    def queue_verification_ok(self) -> "StubServer":
+        """Queue a COMPLETE verifier verdict."""
+        return self._queue_verdict("COMPLETE", "task is done.")
 
     def queue_verification_incomplete(self, reason: str = "still more to do") -> "StubServer":
-        self._queue.put(
-            _Response(content=f"STATUS: INCOMPLETE — {reason}", force_streaming=False)
-        )
-        return self
+        return self._queue_verdict("INCOMPLETE", reason)
+
+    def queue_verification_waiting(self, reason: str = "waiting on the user") -> "StubServer":
+        return self._queue_verdict("WAITING", reason)
 
     def queue_verification_stuck(self, reason: str = "blocked") -> "StubServer":
-        self._queue.put(
-            _Response(content=f"STATUS: STUCK — {reason}", force_streaming=False)
-        )
-        return self
+        return self._queue_verdict("STUCK", reason)
 
     def queue_summary(self, text: str = "Summary of earlier turns.") -> "StubServer":
         """Queue a response for _summarize_history's coding model call."""
@@ -212,6 +244,16 @@ def _send_sse(handler: BaseHTTPRequestHandler, resp: _Response) -> None:
 
 
 def _send_json(handler: BaseHTTPRequestHandler, resp: _Response) -> None:
+    message: dict = {"role": "assistant", "content": resp.content or None}
+    finish_reason = "stop"
+    if resp.tool_calls:
+        tc = resp.tool_calls[0]
+        message["tool_calls"] = [{
+            "id": tc["id"],
+            "type": "function",
+            "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])},
+        }]
+        finish_reason = "tool_calls"
     data = {
         "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
         "object": "chat.completion",
@@ -219,10 +261,14 @@ def _send_json(handler: BaseHTTPRequestHandler, resp: _Response) -> None:
         "model": "gpt-test",
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": resp.content},
-            "finish_reason": "stop",
+            "message": message,
+            "finish_reason": finish_reason,
         }],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": resp.output_tokens,
+            "total_tokens": 10 + resp.output_tokens,
+        },
     }
     body = json.dumps(data).encode()
     handler.send_response(200)

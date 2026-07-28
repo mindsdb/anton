@@ -65,7 +65,9 @@ background task — the user gets their reply immediately:
 3. Each lesson becomes an `Engram` with `kind="lesson"`, `topic="scratchpad"`,
    `source="consolidation"`, routed through `Cortex.encode()`.
 4. Future scratchpad cells see those lessons via the existing
-   `recall_scratchpad_wisdom()` injection into the scratchpad tool description.
+   `recall_scratchpad_wisdom()` injection into the scratchpad tool description
+   (confidence tier + recency ordered, budget-limited — not all lessons are
+   guaranteed to survive the cut).
 
 The cerebellum is a **producer only** — no parallel storage system, no separate
 corrections file. Whatever the consolidator and `memorize` write to, the

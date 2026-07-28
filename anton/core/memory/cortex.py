@@ -185,8 +185,11 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if identity:
             sections.append(f"## Your Memory — Identity\n{identity}")
 
-        # 2. Global rules (with smart retrieval)
-        global_engrams = self.global_hc.get_rules()
+        # 2. Global rules (with smart retrieval). get_rules(exclude_scratchpad_when=True)
+        # drops scratchpad-related "when" rules — those are already injected
+        # into the scratchpad tool description by get_scratchpad_context(),
+        # and showing them here too would double their token cost.
+        global_engrams = self.global_hc.get_rules(exclude_scratchpad_when=True)
         if global_engrams:
             global_engrams = await self._retrieve_relevant_rules(global_engrams, user_message)
             if global_engrams:
@@ -194,8 +197,8 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     f"## Your Memory — Global Rules\n{self._format_rules_engrams(global_engrams)}"
                 )
 
-        # 3. Project rules (with smart retrieval)
-        project_engrams = self.project_hc.get_rules()
+        # 3. Project rules (with smart retrieval) — same scratchpad exclusion.
+        project_engrams = self.project_hc.get_rules(exclude_scratchpad_when=True)
         if project_engrams:
             project_engrams = await self._retrieve_relevant_rules(project_engrams, user_message)
             if project_engrams:
@@ -205,17 +208,18 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 for engram in project_engrams:
                     self._log_read_engram(engram)
 
-        # 4. Global lessons
-        global_lessons = self.global_hc.recall_lessons(token_budget=1000)
+        # 4. Global lessons. recall_lessons() excludes scratchpad-related
+        # entries internally — same reasoning as the rules exclusion above.
+        global_lessons = self.global_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
         if global_lessons:
             sections.append(f"## Your Memory — Global Lessons\n{global_lessons}")
 
-        # 5. Project lessons
-        project_lessons = self.project_hc.recall_lessons(token_budget=1000)
+        # 5. Project lessons — same scratchpad exclusion.
+        project_lessons = self.project_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
         if project_lessons:
             sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
             if self._episodic is not None:
-                for engram in self.project_hc.get_lessons(token_budget=1000):
+                for engram in self.project_hc.get_lessons(token_budget=1000, exclude_scratchpad=True):
                     self._log_read_engram(engram)
 
         # 6. Minds datasource context (auto-loaded if present)

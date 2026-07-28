@@ -305,7 +305,7 @@ When scratchpads are active, relevant lessons are appended to the scratchpad too
 scratchpad_tool["description"] += f"\n\nLessons from past sessions:\n{wisdom}"
 ```
 
-This combines all "when" rules + lessons with `scratchpad-*` topics from both scopes. The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi.
+This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi.
 
 ## The `memorize` Tool
 
@@ -572,7 +572,7 @@ When errored cells exist, they accumulate in a buffer across the turn. At end-of
 1. The buffered cells get formatted into a compact post-mortem prompt
 2. One LLM call via `LLMClient.generate_object_code` (the cheap coding model) returns a `_DiffPassResult` Pydantic model with extracted lessons
 3. Each lesson is wrapped as an `Engram` with `kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`, and routed through `Cortex.encode()` — the same path manual lessons and the consolidator already use
-4. Future scratchpad cells see those lessons via the existing `recall_scratchpad_wisdom()` injection into the scratchpad tool description
+4. Future scratchpad cells see those lessons via the existing `recall_scratchpad_wisdom()` injection into the scratchpad tool description (confidence tier + recency ordered, budget-limited — not all lessons are guaranteed to survive the cut)
 
 The cerebellum is a **producer** only — it generates new lesson entries for the existing storage and retrieval pipeline. There's no parallel storage system, no separate `corrections.md` file. Whatever the consolidator and `/memorize` write to, the cerebellum also writes to.
 
@@ -811,7 +811,7 @@ The Hippocampus handles one scope (global OR project) and is the canonical file-
 | `recall_rules()` | `rules.md` | Basal Ganglia + OFC |
 | `recall_lessons(token_budget)` | `lessons.md` (budget-limited, most recent first) | Anterior Temporal Lobe |
 | `recall_topic(slug)` | `topics/{slug}.md` | Cortical Association Areas |
-| `recall_scratchpad_wisdom()` | "when" rules + scratchpad-related lessons + `topics/scratchpad-*.md` | Procedural memory |
+| `recall_scratchpad_wisdom(token_budget)` | scratchpad-related "when" rules + scratchpad-related lessons (confidence tier + recency ordered, budget-limited) | Procedural memory |
 
 **Encoding methods:**
 | Method | Writes | Behavior |

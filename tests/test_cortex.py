@@ -59,6 +59,35 @@ class TestBuildMemoryContext:
         assert "Global fact" in result
         assert "Project fact" in result
 
+    async def test_excludes_scratchpad_when_rules(self, cortex, dirs):
+        """Scratchpad-related "when" rules already surface via the scratchpad
+        tool description (get_scratchpad_context) — showing them here too
+        would double their token cost, so they're excluded from the system
+        prompt. Unrelated "when" rules are unaffected."""
+        g, _ = dirs
+        hc = Hippocampus(g)
+        hc.encode_rule(
+            "If a scratchpad API is paginated, use progress()",
+            kind="when", confidence="high", source="user",
+        )
+        hc.encode_rule(
+            "If the user writes in Spanish, respond in Spanish",
+            kind="when", confidence="high", source="user",
+        )
+        result = await cortex.build_memory_context()
+        assert "paginated" not in result
+        assert "Spanish" in result
+
+    async def test_excludes_scratchpad_lessons(self, cortex, dirs):
+        """Same exclusion as above, for lessons."""
+        g, _ = dirs
+        hc = Hippocampus(g)
+        hc.encode_lesson("Scratchpad cells timeout at 30s")
+        hc.encode_lesson("CoinGecko rate-limits at 50/min")
+        result = await cortex.build_memory_context()
+        assert "timeout at 30s" not in result
+        assert "rate-limits" in result
+
 
 class TestGetScratchpadContext:
     def test_empty_returns_empty(self, cortex):
@@ -66,7 +95,9 @@ class TestGetScratchpadContext:
 
     def test_combines_scopes(self, cortex, dirs):
         g, p = dirs
-        (g / "rules.md").write_text("# Rules\n\n## Always\n\n## Never\n\n## When\n- If slow → batch\n")
+        (g / "rules.md").write_text(
+            "# Rules\n\n## Always\n\n## Never\n\n## When\n- If scratchpad is slow → batch\n"
+        )
         (p / "lessons.md").write_text("# Lessons\n- Scratchpad times out at 30s\n")
         result = cortex.get_scratchpad_context()
         assert "slow" in result

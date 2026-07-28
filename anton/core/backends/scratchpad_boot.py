@@ -10,6 +10,7 @@ from anton.core.backends.wire import (
     CELL_DELIM,
     RESULT_START,
     RESULT_END,
+    heal_surrogate_source,
 )
 
 
@@ -104,28 +105,11 @@ if _scratchpad_model:
                 _llm_provider_kwargs["vision_format"] = "anthropic"
             # Resolve the OpenAI "flavor" so the injected web_search() helper can
             # route through whatever native web tooling the endpoint exposes.
-            # Mirrors LLMClient._resolve_openai_compatible_flavor: direct OpenAI
-            # BYOK uses the Responses API (web_search); an openai-compatible base
-            # URL pointing at Minds/mdb.ai uses the chat.completions passthrough;
-            # any other openai-compatible endpoint is generic (no native search).
-            if _scratchpad_provider_name == "openai":
-                _llm_provider_kwargs["flavor"] = _ProviderClass.FLAVOR_OPENAI
-            else:
-                _minds_url_norm = (
-                    os.environ.get("ANTON_MINDS_URL", "").rstrip("/").lower()
-                )
-                _base_norm = (_llm_base_url or "").rstrip("/").lower()
-                if _minds_url_norm and _base_norm in (
-                    _minds_url_norm,
-                    f"{_minds_url_norm}/api/v1",
-                ):
-                    _llm_provider_kwargs["flavor"] = (
-                        _ProviderClass.FLAVOR_MINDS_PASSTHROUGH
-                    )
-                else:
-                    _llm_provider_kwargs["flavor"] = (
-                        _ProviderClass.FLAVOR_OPENAI_COMPATIBLE_GENERIC
-                    )
+            # Detect Minds/mdb.ai by HOST, not provider name (always "openai" for
+            # an OpenAIProvider even on the minds gateway) — see resolve_web_flavor.
+            _llm_provider_kwargs["flavor"] = _ProviderClass.resolve_web_flavor(
+                _scratchpad_provider_name, _llm_base_url
+            )
             _llm_provider = _ProviderClass(**_llm_provider_kwargs)
         else:
             _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
@@ -233,6 +217,8 @@ if _scratchpad_model:
                 """
                 from anton.core.llm.structured import (
                     build_structured_tool,
+                    looks_truncated,
+                    raise_unusable_tool_call,
                     unwrap_structured_response,
                 )
 
@@ -249,11 +235,24 @@ if _scratchpad_model:
                 )
 
                 if not response.tool_calls:
-                    raise ValueError("LLM did not return structured output.")
+                    # Same classification as the async path (ENG-1081).
+                    # Nothing retries here, but the message reaches the model as
+                    # a traceback, so "you ran out of budget" is actionable
+                    # where "did not return structured output" was not.
+                    raise_unusable_tool_call(
+                        response, tool_name=tool["name"], budget=max_tokens
+                    )
 
-                return unwrap_structured_response(
-                    response.tool_calls[0].input, validator_class, is_list
-                )
+                try:
+                    return unwrap_structured_response(
+                        response.tool_calls[0].input, validator_class, is_list
+                    )
+                except Exception:
+                    if looks_truncated(response, max_tokens):
+                        raise_unusable_tool_call(
+                            response, tool_name=tool["name"], budget=max_tokens
+                        )
+                    raise
 
         _scratchpad_llm_instance = _ScratchpadLLM()
 
@@ -735,6 +734,10 @@ while True:
         break
 
     code = "".join(lines)
+    # Heal lone surrogates before compile() — a non-ASCII Windows path byte can
+    # arrive surrogate-escaped over stdin and would crash compile() with
+    # "surrogates not allowed" (ENG-981).
+    code = heal_surrogate_source(code)
     if not code.strip():
         result = {"stdout": "", "stderr": "", "logs": "", "error": None}
         _real_stdout.write(RESULT_START + "\n")

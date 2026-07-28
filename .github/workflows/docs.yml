@@ -47,3 +47,20 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  notify:
+    # Alert the eng channel if the docs build or Pages deploy fails.
+    # One job covers both outcomes: a `uses:` job cannot branch on status, so
+    # the aggregate result picks the failed or recovered message, and a
+    # cancelled run stays silent.
+    needs: [build, deploy]
+    if: ${{ !cancelled() && !contains(needs.*.result, 'cancelled') }}
+    permissions:
+      contents: read
+      actions: read  # the prior-run lookup behind the recovery message
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "docs deploy"
+      status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
+      runs-on: ubuntu-latest
+    secrets: inherit

@@ -235,7 +235,7 @@ class LocalDataVault:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.chmod(0o600)
-        tmp.rename(path)
+        tmp.replace(path)
         return path
 
     def load(self, engine: str, name: str) -> dict[str, str] | None:

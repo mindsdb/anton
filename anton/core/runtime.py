@@ -141,32 +141,29 @@ async def build_chat_session(
     initial_history = history_store.load(session_id)
 
     data_vault = LocalDataVault() if LocalDataVault is not None else None
-    google_drive_oauth_connected = False
     if data_vault is not None:
         try:
-            for conn in data_vault.list_connections():
+            connections = data_vault.list_connections()
+        except Exception:
+            logger.debug("Could not list Anton data vault connections", exc_info=True)
+            connections = []
+        for conn in connections:
+            # Per-connection try/except so one bad record can't abort
+            # injecting env for the rest; engine/name are set before the try
+            # so the except's own logging can't itself raise.
+            engine = None
+            name = None
+            try:
                 engine = conn.get("engine")
                 name = conn.get("name")
                 if not (engine and name):
                     continue
                 data_vault.inject_env(engine, name)
-                if engine == "google_drive":
-                    fields = data_vault.load(engine, name) or {}
-                    if fields.get("auth_type") == "oauth":
-                        google_drive_oauth_connected = True
-        except Exception:
-            logger.debug("Could not inject Anton data vault env", exc_info=True)
-
-    integration_guidance = ""
-    if google_drive_oauth_connected:
-        integration_guidance = (
-            " Connected Google Drive accounts are available through Google OAuth credentials "
-            "in the injected `DS_GOOGLE_DRIVE_<CONNECTION>__...` environment variables. "
-            "Only claim Google Drive access if you can actually use those credentials successfully."
-        )
-
-    suffix_parts = [s for s in (system_prompt_suffix, integration_guidance) if s]
-    final_suffix = "".join(suffix_parts) if suffix_parts else None
+            except Exception:
+                logger.debug(
+                    "Could not inject Anton data vault env for %s/%s",
+                    engine, name, exc_info=True,
+                )
 
     config = ChatSessionConfig(
         llm_client=llm_client,
@@ -176,7 +173,10 @@ async def build_chat_session(
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
-            suffix=final_suffix,
+            # SystemPromptContext.suffix is typed str (default ""), not
+            # Optional — pass "" rather than None when no suffix was given,
+            # or ChatSystemPromptBuilder.build()'s suffix.strip() crashes.
+            suffix=system_prompt_suffix or "",
         ),
         output_dir=str(output_dir),
         workspace=workspace,
