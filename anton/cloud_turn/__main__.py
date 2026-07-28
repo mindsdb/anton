@@ -1,30 +1,39 @@
 from __future__ import annotations
 import asyncio
+import json
 import sys
+from typing import AsyncIterator
 
 from anton.core.runtime import build_chat_session
-from anton.cloud_turn.contract import TurnRequestV1, TurnResultV1
+from anton.core.llm.provider import StreamTextDelta
+from anton.cloud_turn.contract import TurnRequestV1
 
 
-async def run_turn(req: TurnRequestV1) -> TurnResultV1:
+async def stream_turn(req: TurnRequestV1) -> AsyncIterator[dict]:
     try:
         session = await build_chat_session(
             session_id=req.conversation_id,
             workspace_path=req.workspace_path,
             model=req.model,
         )
-        final_text = await session.turn(req.input)
-        return TurnResultV1(protocol_version=1, kind="turn_completed", final_text=final_text)
-    except Exception as exc:  # dev skeleton: surface as terminal failure
-        return TurnResultV1(protocol_version=1, kind="turn_failed", error=repr(exc))
+        async for event in session.turn_stream(req.input):
+            if isinstance(event, StreamTextDelta):
+                yield {"kind": "delta", "text": event.text}
+        yield {"kind": "turn_completed"}
+    except Exception as exc:
+        yield {"kind": "turn_failed", "error": repr(exc)}
+
+
+async def _run() -> None:
+    line = sys.stdin.readline()
+    req = TurnRequestV1.from_json(line)
+    async for ev in stream_turn(req):
+        sys.stdout.write(json.dumps(ev) + "\n")
+        sys.stdout.flush()
 
 
 def main() -> int:
-    raw = sys.stdin.read()
-    req = TurnRequestV1.from_json(raw)
-    result = asyncio.run(run_turn(req))
-    sys.stdout.write(result.to_json() + "\n")
-    sys.stdout.flush()
+    asyncio.run(_run())
     return 0
 
 
