@@ -28,8 +28,13 @@ def test_schemas_are_valid_json_with_expected_roots():
     req = json.loads(sx.REQUEST_SCHEMA_PATH.read_text())
     ev = json.loads(sx.EVENT_SCHEMA_PATH.read_text())
     assert req["title"] == "TurnRequestV1"
-    # The event schema is the discriminated union of the three event kinds.
-    assert "oneOf" in ev or "anyOf" in ev or "$defs" in ev
+    assert req["additionalProperties"] is False  # extra="forbid" made it onto the wire schema
+    # The event schema is a union discriminated on `kind`, mapping exactly the
+    # three event types — not just "some union".
+    assert ev["discriminator"]["propertyName"] == "kind"
+    assert set(ev["discriminator"]["mapping"]) == {
+        "turn.started", "turn.completed", "turn.failed"
+    }
 
 
 # ── item 6: committed fixtures match the models + validate ───────────────────

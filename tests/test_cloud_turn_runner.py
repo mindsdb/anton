@@ -18,11 +18,10 @@ class _FakeSession:
     user message (as the real session does), then appends scripted generated
     messages, yielding a drive event per append."""
 
-    def __init__(self, initial_history=None, generated=None, raise_on_stream=None, print_mid=False):
+    def __init__(self, initial_history=None, generated=None, raise_on_stream=None):
         self.history = list(initial_history or [])
         self._generated = list(generated or [])
         self._raise = raise_on_stream
-        self._print_mid = print_mid
         self.closed = False
 
     async def turn_stream(self, user_input, **kwargs):
@@ -31,8 +30,6 @@ class _FakeSession:
         self.history.append({"role": "user", "content": user_input})
         yield object()
         for msg in self._generated:
-            if self._print_mid:
-                print("STRAY STDOUT that must not corrupt the protocol")
             self.history.append(msg)
             yield object()
 

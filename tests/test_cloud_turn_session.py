@@ -25,20 +25,9 @@ from anton.cloud_turn.session import (
 from anton.core.backends.local import sanitized_scratchpad_runtime_factory
 
 
-class _FakeRegistry:
-    def __init__(self) -> None:
-        self.removed: list[str] = []
-
-    def unregister_tool(self, name: str) -> None:
-        self.removed.append(name)
-
-    def get_tool_defs(self):
-        return []
-
-
 class _FakeSession:
-    def __init__(self) -> None:
-        self.tool_registry = _FakeRegistry()
+    """Placeholder return value for the mocked ChatSession — the config-level
+    tests only inspect the captured ChatSessionConfig, never the session."""
 
 
 def _build(tmp_path, monkeypatch, **req_overrides):
