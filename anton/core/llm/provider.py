@@ -105,6 +105,21 @@ class StreamContextCompacted:
     message: str
 
 
+@dataclass
+class StreamReasoningDelta:
+    """A chunk of the model's own extended-thinking/reasoning text.
+
+    NOT part of the final answer — Anthropic's `thinking_delta` content
+    blocks (surfaced via `output_config.effort`'s adaptive thinking) and
+    OpenAI's `response.reasoning_summary_text.delta` Responses-API events
+    both map to this. Kept distinct from `StreamTextDelta` so the harness
+    layer can route it to a separate "current thought" channel instead of
+    the persisted answer body.
+    """
+
+    text: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -114,6 +129,7 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamReasoningDelta
 )
 
 

@@ -36,6 +36,7 @@ from anton.core.llm.provider import (
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
@@ -2605,9 +2606,12 @@ class ChatSession:
                 async for event in self.plan_stream_with_recovery(
                     system=system, tools=tools
                 ):
-                    # Capture reasoning elapsed on first text or tool event
+                    # Capture reasoning elapsed on first text, reasoning, or
+                    # tool event — a StreamReasoningDelta means the model has
+                    # already started reasoning, same signal as the first
+                    # text token.
                     if _reasoning_t0 and isinstance(
-                        event, (StreamTextDelta, StreamComplete)
+                        event, (StreamTextDelta, StreamReasoningDelta, StreamComplete)
                     ):
                         _reasoning_elapsed = _time.monotonic() - _reasoning_t0
                         _reasoning_t0 = 0  # only fire once
