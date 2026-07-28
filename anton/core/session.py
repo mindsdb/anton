@@ -375,6 +375,10 @@ class ChatSessionConfig:
     # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
     # explicit bool to override per session.
     router_enabled: bool | None = None
+    # When set, only these tool names survive the build; ``None`` = full desktop
+    # set. Applied on every ``_build_tools`` call so a lazy rebuild can't leak a
+    # non-allowlisted tool.
+    tool_allowlist: frozenset[str] | None = None
 
 
 class ChatSession:
@@ -423,6 +427,7 @@ class ChatSession:
         self._act_first = config.act_first
         self._started_at = config.started_at
         self._extra_tools = config.tools
+        self._tool_allowlist = config.tool_allowlist
         self._workspace = config.workspace
         self._data_vault = config.data_vault
         self._console = config.console
@@ -955,6 +960,20 @@ class ChatSession:
             self._build_core_tools()
             for tool in self._extra_tools:
                 self.tool_registry.register_tool(tool)
+        # Enforce the allowlist on every build (None = full desktop set).
+        if self._tool_allowlist is not None:
+            built = {t.name for t in self.tool_registry.get_tool_defs()}
+            # Fail loud on a name that matches no built tool (typo / unavailable
+            # here) rather than silently dropping it.
+            unknown = set(self._tool_allowlist) - built
+            if unknown:
+                raise ValueError(
+                    "tool_allowlist names not registered in this session: "
+                    + ", ".join(sorted(unknown))
+                    + f" (available: {', '.join(sorted(built))})"
+                )
+            for name in built - set(self._tool_allowlist):
+                self.tool_registry.unregister_tool(name)
         return self.tool_registry.dump()
 
     def _build_core_tools(self) -> None:
