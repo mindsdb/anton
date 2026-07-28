@@ -68,7 +68,7 @@ def _install_fake_model() -> None:
 
 
 def _install_stray_session(fail: bool) -> None:
-    import anton.cloud_turn.runner as runner_mod
+    import anton.cloud_turn.__main__ as entry_mod
 
     class _StraySession:
         def __init__(self) -> None:
@@ -81,7 +81,6 @@ def _install_stray_session(fail: bool) -> None:
             sys.stdout.write("STRAY via sys.stdout.write\n")  # Python stdout
             os.write(1, b"STRAY via os.write(1)\n")           # direct FD 1 (native-style)
             logging.getLogger("some.library").warning("STRAY via logging")
-            self.history.append({"role": "assistant", "content": "clean answer"})
             if fail:
                 raise RuntimeError("boom after stray output")
             if False:  # make this an async generator
@@ -90,7 +89,7 @@ def _install_stray_session(fail: bool) -> None:
         def close(self):
             self.closed = True
 
-    runner_mod.build_cloud_chat_session = lambda request: _StraySession()
+    entry_mod.build_cloud_chat_session = lambda request: _StraySession()
 
 
 def main() -> int:
