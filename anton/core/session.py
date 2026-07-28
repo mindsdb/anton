@@ -353,6 +353,11 @@ class ChatSession:
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
         )
+        # Seed length + how many leading history messages the last compaction
+        # folded into its summary — lets a host map the compaction back onto
+        # its own message list (see `last_compaction`).
+        self._seed_len = len(self._history)
+        self._last_compacted_count: int | None = None
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
@@ -483,6 +488,23 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    @property
+    def last_compaction(self) -> dict | None:
+        """Result of the last history compaction this session ran, or None.
+
+        `summary`: the compacted message content, verbatim (re-seed it as
+        history[0] next turn so it gets recognized and extended, not
+        resummarized). `covered_through`: how many of `initial_history`'s
+        messages are now folded into it — map this count onto your own
+        message list to find the cutoff.
+        """
+        if self._last_compacted_count is None:
+            return None
+        return {
+            "summary": self._history[0]["content"],
+            "covered_through": min(self._last_compacted_count, self._seed_len),
+        }
 
     def _apply_error_tracking(
         self,
@@ -983,17 +1005,19 @@ class ChatSession:
             return  # Too short to summarize
 
         min_recent = 4
-        split = max(int(len(self._history) * 0.6), 1)
+        # Number of leading messages to fold into the summary; doubles as the
+        # cut index (old = history[:compacted_count], recent = the rest).
+        compacted_count = max(int(len(self._history) * 0.6), 1)
         # Ensure we keep at least min_recent turns
-        split = min(split, len(self._history) - min_recent)
-        if split < 2:
+        compacted_count = min(compacted_count, len(self._history) - min_recent)
+        if compacted_count < 2:
             return
 
-        # Walk split backward to avoid breaking tool_use / tool_result pairs.
-        # A user message containing tool_result blocks must stay with the
-        # preceding assistant message that contains the matching tool_use.
-        while split > 1:
-            msg = self._history[split]
+        # Walk the cut backward to avoid breaking tool_use / tool_result
+        # pairs. A user message containing tool_result blocks must stay with
+        # the preceding assistant message that contains the matching tool_use.
+        while compacted_count > 1:
+            msg = self._history[compacted_count]
             if msg.get("role") != "user":
                 break
             content = msg.get("content")
@@ -1006,17 +1030,17 @@ class ChatSession:
                 break
             # This user message has tool_results — keep it (and its paired
             # assistant message) in the recent portion.
-            split -= 1
+            compacted_count -= 1
             # Also pull back over the preceding assistant message so the
             # pair stays together.
-            if split > 1 and self._history[split].get("role") == "assistant":
-                split -= 1
+            if compacted_count > 1 and self._history[compacted_count].get("role") == "assistant":
+                compacted_count -= 1
 
-        if split < 2:
+        if compacted_count < 2:
             return
 
-        old_turns = self._history[:split]
-        recent_turns = self._history[split:]
+        old_turns = self._history[:compacted_count]
+        recent_turns = self._history[compacted_count:]
 
         # Skip if the last pass saved less than ~10%.
 
@@ -1130,6 +1154,7 @@ class ChatSession:
             f"{summary}"
         )
         summary_msg = {"role": "user", "content": summary_body}
+        self._last_compacted_count = compacted_count
 
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
