@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -95,6 +96,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_base_url: str,
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
+        session_id: str | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -114,6 +116,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # is a "where to put scratchpad venvs" hint; the explicit
         # arg is "the agent's project, when known".
         self._explicit_workspace_path: Path | None = workspace_path
+        # Conversation id when the host supplies one (cowork-server passes the
+        # conversation's UUID as `session_id`). Only used to scope the namespace
+        # snapshot — see `_session_snapshot_path`.
+        self._session_id: str | None = session_id
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -124,6 +130,55 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             self._venvs_base = workspace_path / ".anton" / "scratchpad-venvs"
         else:
             self._venvs_base = Path("~/.anton/scratchpad-venvs").expanduser()
+
+    def _session_snapshot_path(self) -> Path | None:
+        """Where this pad's namespace snapshot lives, or None if it can't be written.
+
+        Scoped per conversation *and* per pad. Both matter: without the pad segment two
+        named scratchpads would overwrite each other, and without the conversation
+        segment two conversations in the same workspace that happen to use the same pad
+        name would read each other's variables — a correctness bug and a confidentiality
+        one. Falls back to a shared `_no-session` bucket when the host supplies no
+        session id (bare CLI use, tests), where there is only one conversation anyway.
+
+        Returns None when the directory cannot be created; the caller then leaves
+        ANTON_SCRATCHPAD_SESSION_PATH unset so the failure is reported rather than silent.
+        """
+        # The pad name is model-chosen and flows into a filesystem path, so contain it.
+        # Keep it recognisable but strip anything that could traverse or confuse a path.
+        # Deliberately NOT case-folded or separator-collapsed: that would change which
+        # pads share state, and belongs with the venv-path normalisation in ENG-1133.
+        safe_pad = re.sub(r"[^A-Za-z0-9._-]", "_", self.name).strip("._") or "scratchpad"
+        safe_session = re.sub(r"[^A-Za-z0-9._-]", "_", self._session_id or "").strip("._")
+        base = self._venvs_base.parent / "scratchpad-sessions" / (safe_session or "_no-session")
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        path = (base / f"{safe_pad}.pkl").resolve()
+        # Belt for the sanitiser above: never hand back a path outside the snapshot root.
+        try:
+            path.relative_to(base.resolve())
+        except ValueError:
+            return None
+        return path
+
+    def _discard_session_snapshot(self) -> None:
+        """Delete this pad's namespace snapshot, if any. Best-effort."""
+        path = self._session_snapshot_path()
+        if path is None:
+            return
+        candidates = [path]
+        # The writer suffixes its temp file with a pid, so match any of them.
+        try:
+            candidates += sorted(path.parent.glob(f"{path.name}.*.tmp"))
+        except OSError:
+            pass
+        for candidate in candidates:
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
 
     def _ensure_venv(self) -> None:
         if self._venv_dir is not None and self._verify_venv_python():
@@ -447,6 +502,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             env["ANTON_UV_PATH"] = uv
 
+        # Namespace snapshot path (ENG-1124). The boot script reads
+        # ANTON_SCRATCHPAD_SESSION_PATH and nothing ever set it, so it fell back to a
+        # hardcoded "/anton_scratchpad_session.pkl" — the filesystem root, which no
+        # Cowork process can write to. Every save failed and every failure was
+        # discarded, so state never survived a turn. This is the only place that knows
+        # the pad name, so it is where the path is composed.
+        snapshot = self._session_snapshot_path()
+        if snapshot is not None:
+            env["ANTON_SCRATCHPAD_SESSION_PATH"] = str(snapshot)
+        else:
+            # Leaving it unset makes the boot script *report* that state will not
+            # persist, rather than silently pretending it does.
+            env.pop("ANTON_SCRATCHPAD_SESSION_PATH", None)
+
         _anton_root = str(Path(__file__).resolve().parent.parent.parent.parent)
         python_path = env.get("PYTHONPATH", "")
         if _anton_root not in python_path:
@@ -493,6 +562,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Kill the process, clear cells, and restart."""
         await self._stop_process()
         self.cells.clear()
+        # The tool contract for `reset` is "clearing all state (installed packages
+        # survive)". Since the namespace is now snapshotted to disk (ENG-1124), the
+        # snapshot has to go too — otherwise start() below reloads it and `reset`
+        # silently stops resetting anything.
+        self._discard_session_snapshot()
         if not self._verify_venv_python():
             self._nuke_venv()
         await self.start()
@@ -530,6 +604,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Kill process and delete the venv entirely."""
         await self._stop_process()
         self._nuke_venv()
+        self._discard_session_snapshot()
 
     async def execute_streaming(
         self,
@@ -807,6 +882,7 @@ def local_scratchpad_runtime_factory(
     coding_base_url: str,
     cells: list[Cell] | None,
     workspace_path: Path | None,
+    session_id: str | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -816,4 +892,5 @@ def local_scratchpad_runtime_factory(
         coding_base_url=coding_base_url,
         cells=cells,
         workspace_path=workspace_path,
+        session_id=session_id,
     )

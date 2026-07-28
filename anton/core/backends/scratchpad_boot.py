@@ -16,12 +16,64 @@ from anton.core.backends.wire import (
 
 # --- Python session persistence and namespace injection ---
 PERSIST_SESSION = os.environ.get("ANTON_SCRATCHPAD_PERSIST_SESSION", "false").lower() in {"1", "true", "yes", "on"}
-SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "/anton_scratchpad_session.pkl")
+
+# NO default path (ENG-1124). The historical default was "/anton_scratchpad_session.pkl"
+# — the filesystem ROOT, which no Cowork process can write to: macOS desktop gets EROFS
+# from the sealed system volume, and the hosted container runs as non-root `anton`
+# (uid 1000) so `/` is EACCES. Every dump failed, every failure was discarded, and
+# session persistence was silently a no-op for ~2 months while reporting as enabled.
+# An unset path now disables persistence *loudly* (see `_load_namespace`) rather than
+# aiming writes at somewhere unwritable. The caller owns the path: `local.py` composes
+# a per-pad, per-conversation one under the workspace and creates the directory.
+SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "")
+
+# Snapshot size ceiling. Persisting after every cell costs nothing while it always
+# fails; once it works, a namespace holding large frames would be rewritten on each
+# cell. Above the cap we skip the write and say so, rather than stalling every cell on
+# hundreds of MB of pickling.
+_SESSION_MAX_DEFAULT = 100 * 1024 * 1024
+try:
+    SESSION_MAX_BYTES = int(
+        os.environ.get("ANTON_SCRATCHPAD_SESSION_MAX_BYTES", str(_SESSION_MAX_DEFAULT))
+    )
+except ValueError:
+    # A malformed override must never stop the scratchpad from booting.
+    SESSION_MAX_BYTES = _SESSION_MAX_DEFAULT
+
+# Names this module re-injects on every boot. Excluded from the snapshot because they
+# are rebuilt fresh anyway, and some (`get_llm`, `web_search`, `query_minds_data`)
+# close over live network clients that must not be pickled or carried between
+# processes. Agent-authored functions and data are NOT excluded — those are the whole
+# point, and dill handles them (including nested references between them).
+_SESSION_EXCLUDE = frozenset(
+    {
+        "__builtins__",
+        "_anton_explainability_queries",
+        "get_llm",
+        "agentic_loop",
+        "web_search",
+        "query_minds_data",
+        "progress",
+        "sample",
+    }
+)
+
+# Persistence notes for the next cell's `logs`. Deliberately NOT `error` — a snapshot
+# problem must not make the cell look failed, or it would feed the consecutive-error
+# circuit breaker and the resilience nudge.
+_session_notes: list[str] = []
 
 
 def _load_namespace() -> tuple[dict, str | None]:
     if not PERSIST_SESSION:
         return {"__builtins__": __builtins__}, None
+    if not SESSION_PATH:
+        return (
+            {"__builtins__": __builtins__},
+            "Scratchpad session persistence is enabled but "
+            "ANTON_SCRATCHPAD_SESSION_PATH is unset, so nothing will survive this "
+            "process. Variables and imports are lost when this scratchpad restarts.",
+        )
     try:
         with open(SESSION_PATH, "rb") as f:
             ns = dill.load(f)
@@ -30,8 +82,12 @@ def _load_namespace() -> tuple[dict, str | None]:
         ns.setdefault("__builtins__", __builtins__)
         return ns, None
     except FileNotFoundError:
+        # First cell of a brand-new pad — expected, not a problem.
         return {"__builtins__": __builtins__}, None
     except Exception:
+        # Includes unpickling failures from package-version skew between turns (e.g. a
+        # later cell installed a newer pandas). Degrading to a fresh namespace is the
+        # old behaviour; the difference is that now it is reported.
         return (
             {"__builtins__": __builtins__},
             "Failed to load scratchpad session; starting fresh.\n" + traceback.format_exc(),
@@ -39,18 +95,43 @@ def _load_namespace() -> tuple[dict, str | None]:
 
 
 def _dump_namespace(ns: dict) -> str | None:
-    if not PERSIST_SESSION:
+    if not PERSIST_SESSION or not SESSION_PATH:
         return None
+    payload = {k: v for k, v in ns.items() if k not in _SESSION_EXCLUDE}
+    # Include the pid: a pad can briefly overlap with its own replacement, and two
+    # writers sharing one .tmp would corrupt each other's snapshot.
+    tmp_path = f"{SESSION_PATH}.{os.getpid()}.tmp"
     try:
-        with open(SESSION_PATH, "wb") as f:
-            dill.dump(ns, f)
+        # Write-then-replace. This process is killed abruptly at the end of a turn (and
+        # by the inactivity watchdog mid-cell), so writing straight to SESSION_PATH
+        # would eventually leave a torn pickle that the next process fails to load.
+        # os.replace is atomic within a filesystem.
+        with open(tmp_path, "wb") as f:
+            dill.dump(payload, f)
+        size = os.path.getsize(tmp_path)
+        if size > SESSION_MAX_BYTES:
+            os.unlink(tmp_path)
+            return (
+                f"Scratchpad session NOT saved: snapshot is {size:,} bytes, over the "
+                f"{SESSION_MAX_BYTES:,}-byte cap. Variables will not survive a restart "
+                "of this scratchpad — write large results to disk (or an artifact) "
+                "instead of holding them in memory."
+            )
+        os.replace(tmp_path, SESSION_PATH)
         return None
     except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         return "Failed to dump scratchpad session.\n" + traceback.format_exc()
 
 
-# Persistent namespace across cells
-namespace, _ = _load_namespace()
+# Persistent namespace across cells. Keep the load note — discarding it is how the
+# broken path went unnoticed; it is surfaced on the first cell's `logs`.
+namespace, _session_load_note = _load_namespace()
+if _session_load_note:
+    _session_notes.append(_session_load_note)
 namespace["_anton_explainability_queries"] = []
 
 # --- Inject get_llm() for LLM access from scratchpad code ---
@@ -819,13 +900,24 @@ while True:
             + f"\n\n... (truncated, {len(stdout_val)} chars total)"
         )
 
-    # Persist session after each cell.
-    _dump_namespace(namespace)
+    # Persist session after each cell. Keep the return value: a swallowed failure here
+    # is exactly how ENG-1124 stayed invisible for two months.
+    _session_dump_note = _dump_namespace(namespace)
+    if _session_dump_note:
+        _session_notes.append(_session_dump_note)
+
+    # Surface persistence problems on `logs`, never on `error` — see `_session_notes`.
+    logs_val = log_buf.getvalue()
+    if _session_notes:
+        logs_val = (logs_val.rstrip("\n") + "\n\n" if logs_val.strip() else "") + "\n".join(
+            _session_notes
+        )
+        _session_notes.clear()
 
     result = {
         "stdout": stdout_val,
         "stderr": err_buf.getvalue(),
-        "logs": log_buf.getvalue(),
+        "logs": logs_val,
         "error": error,
         "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
     }
