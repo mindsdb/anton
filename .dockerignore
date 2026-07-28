@@ -1,0 +1,13 @@
+# Version is pinned via SETUPTOOLS_SCM_PRETEND_VERSION in the Dockerfile, so .git is not needed.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+dist
+build
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+docs
