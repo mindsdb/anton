@@ -1,38 +1,13 @@
-"""Cloud turn runner: run one full anton turn inside a sandbox pod.
+"""Cloud turn: run one full anton turn inside a sandbox pod.
 
-`python -m anton.cloud_turn` reads a :class:`TurnRequestV1` as JSON on stdin,
-runs the turn to completion against the mounted workspace, and emits versioned
-:class:`TurnEventV1` records as JSONL on stdout (diagnostics go to stderr). It is
-the cloud counterpart of the in-process host harness: the same ChatSession, but
-built cloud-safe (see :mod:`anton.cloud_turn.session`) and driven headlessly.
+`python -m anton.cloud_turn` reads a :class:`TurnRequestV1` as one JSON line on
+stdin, runs the turn to completion against the mounted workspace with a
+cloud-safe session, and emits `delta` / `turn_completed` / `turn_failed` JSONL
+events on stdout (diagnostics to stderr). It is the headless counterpart of the
+desktop CLI host: the same ChatSession, built cloud-safe.
 """
 
-from anton.cloud_turn.protocol import (
-    PROTOCOL_VERSION,
-    CapabilitiesV1,
-    ErrorCodeV1,
-    MessageV1,
-    TurnCompletedV1,
-    TurnErrorV1,
-    TurnEventV1,
-    TurnFailedV1,
-    TurnRequestV1,
-    TurnStartedV1,
-    event_line,
-    parse_request,
-)
+from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.session import build_cloud_chat_session
 
-__all__ = [
-    "PROTOCOL_VERSION",
-    "CapabilitiesV1",
-    "TurnRequestV1",
-    "MessageV1",
-    "TurnEventV1",
-    "TurnStartedV1",
-    "TurnCompletedV1",
-    "TurnFailedV1",
-    "TurnErrorV1",
-    "ErrorCodeV1",
-    "parse_request",
-    "event_line",
-]
+__all__ = ["TurnRequestV1", "build_cloud_chat_session"]

@@ -1,206 +1,126 @@
-"""`python -m anton.cloud_turn` — the pod entrypoint.
+"""`python -m anton.cloud_turn` - the sandbox-pod turn entrypoint.
 
-Process contract:
-  stdin : a single TurnRequestV1 JSON document, EOF-terminated (bounded read)
-  stdout: versioned JSONL TurnEventV1 records ONLY — nothing else, ever
+Contract (matches scratchpad-controller + cowork-server):
+  stdin : ONE newline-terminated TurnRequestV1 JSON line (controller closes stdin)
+  stdout: JSONL events - `delta` / `turn_completed` / `turn_failed`, nothing else
   stderr: diagnostic logs + full tracebacks
-  exit  : 0 = turn completed
-          2 = request could not be validated (no turn.started emitted)
-          3 = valid request reached execution but failed
+  exit  : 0 (the controller detects the terminal from the event, not the code)
 
-stdout isolation is enforced at the OS file-descriptor level (see
-``_isolated_protocol_stdout``): the original FD 1 is duplicated to a private,
-non-inheritable descriptor used ONLY for protocol events, and process FD 1 is
-redirected to stderr. So ``print()``, ``os.write(1, ...)``, native-library
-writes, and child-process stdout can never corrupt the events stream.
-
-`python -m anton.cloud_turn capabilities` prints a stable machine-readable
-manifest of what this milestone actually enables.
+stdout is isolated at the OS file-descriptor level: the real FD 1 is duplicated
+to a private, non-inheritable descriptor used only for protocol events, and
+process FD 1 is redirected to stderr. So `print()`, `os.write(1, ...)`,
+native-library writes, and child-process stdout can never corrupt the stream.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
 import sys
 
-from anton.cloud_turn import protocol
-from anton.cloud_turn.errors import classify_error
-from anton.cloud_turn.protocol import (
-    SUPPORTED_CONTENT_BLOCK_TYPES,
-    SUPPORTED_MESSAGE_ROLES,
-    SUPPORTED_PROTOCOL_VERSIONS,
-    TurnFailedV1,
-    event_line,
-    parse_request,
-)
-from anton.cloud_turn.runner import run_turn
+from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.session import build_cloud_chat_session
 
 logger = logging.getLogger(__name__)
 
-EXIT_OK = 0
-EXIT_BAD_REQUEST = 2
-EXIT_FAILED = 3
-
-#: The cloud-turn implementation version (independent of the wire protocol
-#: version). Bump on behavioural changes to the process boundary.
-CLOUD_TURN_IMPL_VERSION = "1.0"
+#: Bound the single request line so a malformed/huge stdin can't exhaust memory.
+MAX_REQUEST_BYTES = 10 * 1024 * 1024
+#: Keep wire error strings short and log-safe.
+MAX_ERROR_MESSAGE_CHARS = 300
 
 
-def _capabilities() -> dict:
-    """Stable, machine-readable manifest of what THIS milestone enables.
+def _scrub(exc: Exception) -> str:
+    """Short, credential-scrubbed error string for the wire. Full traceback
+    stays on stderr (logged by the caller)."""
+    from anton.utils.datasources import scrub_credentials
 
-    Reports only behaviour that is actually on — not merely code that exists.
-    """
-    from anton.cloud_turn.session import CLOUD_TOOL_ALLOWLIST, _MODEL_ALLOWLIST_ENV
-
-    try:
-        import anton
-
-        anton_version = getattr(anton, "__version__", "unknown")
-    except Exception:
-        anton_version = "unknown"
-
-    provider_sdks: dict[str, bool] = {}
-    for name in ("anthropic", "openai"):
-        try:
-            __import__(name)
-            provider_sdks[name] = True
-        except Exception:
-            provider_sdks[name] = False
-
-    model_allowlist = [
-        m.strip() for m in os.environ.get(_MODEL_ALLOWLIST_ENV, "").split(",") if m.strip()
-    ]
-
-    return {
-        "ok": True,
-        "entrypoint": "anton.cloud_turn",
-        "cloud_turn_version": CLOUD_TURN_IMPL_VERSION,
-        "anton_version": anton_version,
-        "protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
-        "tools": sorted(CLOUD_TOOL_ALLOWLIST),
-        "content_block_types": sorted(SUPPORTED_CONTENT_BLOCK_TYPES),
-        "message_roles": sorted(SUPPORTED_MESSAGE_ROLES),
-        "model_override": {
-            # A request may request a model, but only one on the trusted pod-side
-            # allowlist is honoured; empty allowlist = default-deny.
-            "supported": True,
-            "policy": "trusted_allowlist",
-            "default": "deny",
-            "allowlist_size": len(model_allowlist),
-        },
-        "memory": {"personal": False, "workspace": False},
-        "connectors": False,
-        "data_vault": False,
-        "scratchpad_execution": True,
-        "web_tools": False,
-        "provider_sdks": provider_sdks,
-        # The capability FLAG names (all default OFF this milestone).
-        "capabilities": list(protocol.CapabilitiesV1.model_fields.keys()),
-    }
+    text = scrub_credentials(f"{type(exc).__name__}: {exc}")
+    if len(text) > MAX_ERROR_MESSAGE_CHARS:
+        text = text[: MAX_ERROR_MESSAGE_CHARS - 1] + "…"
+    return text
 
 
 @contextlib.contextmanager
 def _isolated_protocol_stdout():
-    """OS-level stdout isolation. Yields an ``emit(event)`` that writes JSONL to
-    the saved protocol descriptor; everything else (FD 1) is redirected to
-    stderr.
-
-    Works wherever ``os.dup2`` is available (POSIX + Windows for FDs 0/1/2),
-    which covers the Linux pod, macOS dev, and CI.
-    """
+    """OS-level stdout isolation. Yields ``emit(event: dict)`` writing JSONL to
+    the saved protocol descriptor; everything else (FD 1) goes to stderr."""
     sys.stdout.flush()
     sys.stderr.flush()
     stderr_fd = sys.stderr.fileno()
 
-    # Private, non-inheritable copy of the real protocol channel (original FD 1).
     protocol_fd = os.dup(1)
-    os.set_inheritable(protocol_fd, False)
-    # Redirect process FD 1 → stderr: any write to fd 1 (print, os.write(1, …),
-    # native libs, inherited child stdout) now lands on stderr, never protocol.
-    os.dup2(stderr_fd, 1)
+    os.set_inheritable(protocol_fd, False)  # children never inherit the protocol channel
+    os.dup2(stderr_fd, 1)                   # any write to fd 1 now lands on stderr
     saved_sys_stdout = sys.stdout
-    sys.stdout = sys.stderr  # Python-level print() → stderr too
+    sys.stdout = sys.stderr
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 
-    def emit(event) -> None:
-        data = (event_line(event) + "\n").encode("utf-8")
+    def emit(event: dict) -> None:
+        data = (json.dumps(event) + "\n").encode("utf-8")
         view = memoryview(data)
-        while view:  # os.write may do a partial write; loop until fully flushed
+        while view:  # os.write may partial-write; loop until fully flushed
             n = os.write(protocol_fd, view)
             view = view[n:]
 
     try:
         yield emit
     finally:
-        # Flush diagnostics, then close the protocol descriptor. os.write went
-        # straight to the kernel, so there is no userspace buffer to lose.
         with contextlib.suppress(Exception):
             sys.stderr.flush()
         sys.stdout = saved_sys_stdout
         os.close(protocol_fd)
 
 
-def _safe_ids(raw: str) -> tuple[str | None, str | None]:
-    """Best-effort identifiers from an UNVALIDATED request body.
-
-    Returns ``None`` for any id that is absent or not a string — we never invent
-    a valid-looking identifier for a request we could not validate (malformed
-    JSON, empty stdin, missing/mistyped ids all yield ``None``)."""
+async def _close(session) -> None:
+    close = getattr(session, "close", None)
+    if close is None:
+        return
     try:
-        data = json.loads(raw)
+        result = close()
+        if inspect.isawaitable(result):
+            await result
     except Exception:
-        return None, None
-    if not isinstance(data, dict):
-        return None, None
-    rid = data.get("run_id")
-    aid = data.get("attempt_id")
-    return (
-        rid if isinstance(rid, str) else None,
-        aid if isinstance(aid, str) else None,
-    )
+        logger.warning("cloud session close failed (non-fatal)", exc_info=True)
 
 
-def _run(raw: str, emit, session_builder=None) -> int:
-    """Parse the request and drive the turn. The testable core — no FD or stdin
-    handling, so unit tests can inject ``raw`` + a capturing ``emit``."""
+async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
+    """Parse the request, run one turn, and emit exactly one terminal event.
+
+    Streaming: assistant text is emitted as ``delta`` events as it arrives, then
+    a bare ``turn_completed``. Any failure (parse or turn) -> one ``turn_failed``
+    with a scrubbed error string.
+    """
+    from anton.core.llm.provider import StreamTextDelta
+
+    builder = session_builder or build_cloud_chat_session
+    session = None
     try:
-        request = parse_request(raw)
+        req = TurnRequestV1.from_json(raw_line)
+        session = builder(req)
+        async for event in session.turn_stream(req.input):
+            if isinstance(event, StreamTextDelta):
+                emit({"kind": "delta", "text": event.text or ""})
+        emit({"kind": "turn_completed"})
     except Exception as exc:
-        # Invalid request: one structured failure event, NO turn.started
-        # (sequence 1, the only event of the run). Ids are None when the request
-        # supplied none usable.
-        run_id, attempt_id = _safe_ids(raw)
-        logger.exception("invalid cloud-turn request run_id=%s", run_id)
-        emit(
-            TurnFailedV1(
-                run_id=run_id,
-                attempt_id=attempt_id,
-                sequence=1,
-                error=classify_error(exc),
-            )
-        )
-        return EXIT_BAD_REQUEST
-    return asyncio.run(run_turn(request, emit, session_builder=session_builder))
+        # Full traceback -> stderr only; wire carries a short scrubbed string.
+        logger.exception("cloud turn failed")
+        emit({"kind": "turn_failed", "error": _scrub(exc)})
+    finally:
+        if session is not None:
+            await _close(session)
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-
-    if argv and argv[0] == "capabilities":
-        print(json.dumps(_capabilities()))
-        return 0
-
     with _isolated_protocol_stdout() as emit:
-        # Bounded read: never pull an unbounded request into memory. Read at most
-        # MAX_REQUEST_BYTES+1 (chars ≤ bytes in UTF-8); parse_request enforces
-        # the precise byte limit.
-        raw = sys.stdin.read(protocol.MAX_REQUEST_BYTES + 1)
-        return _run(raw, emit)
+        # One bounded line (the controller writes a single JSON line + \n, then
+        # closes stdin). ``readline`` returns on the newline without blocking.
+        raw_line = sys.stdin.readline(MAX_REQUEST_BYTES + 1)
+        asyncio.run(stream_turn(raw_line, emit))
+    return 0
 
 
 if __name__ == "__main__":
