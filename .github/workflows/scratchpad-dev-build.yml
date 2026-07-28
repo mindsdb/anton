@@ -19,23 +19,8 @@ concurrency:
 
 jobs:
 
-  get-deploy-labels:
-    runs-on: mdb-dev
-    outputs:
-      deploy-envs: ${{ steps.get-labels.outputs.deploy-envs }}
-    steps:
-      - name: Pull MindsDB Github Actions
-        uses: actions/checkout@v4
-        with:
-          repository: mindsdb/github-actions
-          path: github-actions
-      - id: get-labels
-        uses: ./github-actions/get-deploy-labels
-
   build:
     runs-on: mdb-dev
-    needs: [get-deploy-labels]
-    if: needs.get-deploy-labels.outputs.deploy-envs != '[]'
     outputs:
       image: ${{ steps.build.outputs.image }}
     env:
@@ -43,26 +28,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Pull MindsDB Github Actions
-        uses: actions/checkout@v4
-        with:
-          repository: mindsdb/github-actions
-          path: github-actions
-      - uses: ./github-actions/setup-env
+      - uses: mindsdb/github-actions/setup-env@main
       - id: build
-        uses: ./github-actions/build-push-ecr
+        uses: mindsdb/github-actions/build-push-ecr@main
         with:
           # Override the repo-slug default so the image lands at .../minds-anton-scratchpad.
           module-name: minds-anton-scratchpad
           build-for-environment: development
-
-  scan:
-    runs-on: mdb-dev
-    needs: [build]
-    name: Scan minds-anton-scratchpad image
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mindsdb/github-actions/snyk-docker-scan@main
-        with:
-          image: ${{ needs.build.outputs.image }}
-          snyk-token: ${{ secrets.SNYK_TOKEN }}
