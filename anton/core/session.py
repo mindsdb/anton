@@ -1042,9 +1042,9 @@ class ChatSession:
         old_turns = self._history[:compacted_count]
         recent_turns = self._history[compacted_count:]
 
-        # Skip if the last pass saved less than ~10%.
-
-        # get not compacted yet messages
+        # A prior summary carried forward from an earlier compaction isn't
+        # new material — exclude it so re-summarizing a barely-grown summary
+        # doesn't look worthwhile.
         new_old_turns = old_turns
         if (
             old_turns
@@ -1060,6 +1060,9 @@ class ChatSession:
                 total += len(content) if isinstance(content, str) else len(str(content))
             return total
 
+        # Skip the LLM round-trip when the genuinely-new old turns are under
+        # ~10% of what we'd re-send — folding them in wouldn't shrink history
+        # enough to be worth the summarization call.
         new_old_len = _approx_len(new_old_turns)
         recent_len = _approx_len(recent_turns)
         if new_old_len < 0.10 * (new_old_len + recent_len):
