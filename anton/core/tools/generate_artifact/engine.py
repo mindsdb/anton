@@ -36,9 +36,62 @@ if TYPE_CHECKING:
     from anton.chat_session import ChatSession
 
 
-# Higher than the old 12 because the sub-generator now also spends rounds on
-# scratchpad calls (pulling/rebuilding data) on top of writing files.
-MAX_ROUNDS = 16
+# Higher than the old 12 because the sub-generator also spends rounds on
+# scratchpad calls (pulling/rebuilding data) on top of writing files, and higher
+# than 16 because a file is now built in chunks (`mode="a"`) rather than in one
+# call — head, sections, scripts and closing tags each cost a round unless the
+# model batches them. One shared cap: it also gates `fetch_data_sample`, and a
+# runaway there is bounded by DATA_LOOP_MAX anyway.
+MAX_ROUNDS = 20
+
+
+# Two distinct rejections, because the causes differ and the model must react
+# differently. Both wordings point at the only working way out — chunked writing
+# (see _WRITE_DISCIPLINE in prompts.py and the design spec, 3.1).
+#
+# CRITICAL in _TRUNCATED_MSG: state that the EARLIER calls in the same reply did
+# land. Truncation is streaming — only the last block is incomplete, the rest
+# arrived in full. Without saying so, the model re-sends the chunks it already
+# wrote and mode="a" duplicates them in the file.
+_TRUNCATED_MSG = (
+    "Error: THIS tool call was cut off by the output limit and wrote nothing. "
+    "The earlier tool calls in this same reply DID take effect — do NOT re-send "
+    "them, or `mode=\"a\"` will duplicate their content. Continue from where the "
+    "file now ends, appending with `mode=\"a\"` and keeping each call's "
+    "`content` well under ~6 KB."
+)
+
+_NO_CONTENT_MSG = (
+    "Error: `content` was not delivered, so nothing was written. Re-emit this "
+    "chunk with a non-empty `content`, well under ~6 KB, appending with "
+    "`mode=\"a\"` if the file already has earlier chunks."
+)
+
+
+def _output_token_cap(session) -> int | None:
+    """The client's effective output cap, or None when it cannot be read.
+
+    `LLMClient` exposes no public accessor — only the private `_max_tokens`
+    (`anton/core/llm/client.py:58`). In tests the session is an `AsyncMock` where
+    the attribute exists and is truthy but is not a number, so the type check is
+    mandatory: without it the detection would fire on every test.
+    """
+    cap = getattr(getattr(session, "_llm", None), "_max_tokens", None)
+    return cap if isinstance(cap, int) and cap > 0 else None
+
+
+def _response_is_truncated(response, cap: int | None) -> bool:
+    """The reply hit the output cap, so its last tool call was not delivered.
+
+    `stop_reason` cannot be relied on: the gateway reports `'stop'` on truncation
+    too (stage-1a measurement, findings 2-3). `output_tokens` is sometimes None —
+    then the signal is unknown and we do NOT flag: a false rejection is worse than
+    a miss.
+    """
+    if not cap:
+        return False
+    used = getattr(getattr(response, "usage", None), "output_tokens", None)
+    return isinstance(used, int) and used >= cap
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +106,7 @@ async def generate(
     artifact_path: Path,
     context: str,
     slug: str,
+    primary: str | None = None,
 ) -> dict | str:
     """Drive the artifact-generation FSM to populate ``artifact_path``.
 
@@ -84,6 +138,7 @@ async def generate(
         slug=slug,
         brief=context,
         is_fullstack=artifact_type != "html-app",
+        primary=primary,
         trace_log=trace,
     )
     result = await run(state)
@@ -181,6 +236,7 @@ async def _run_loop(
     data-access code that ran to later FSM steps.
     """
     tools = sub_tools.tool_schemas()
+    cap = _output_token_cap(session)
     messages: list[dict] = [{"role": "user", "content": kickoff}]
 
     files_written: list[str] = []
@@ -208,6 +264,19 @@ async def _run_loop(
                 attempt=attempt,
                 round=round_idx,
             )
+
+        # Truncation is streaming: only the LAST block of the reply is
+        # incomplete, the earlier ones arrived in full. Rejecting them all would
+        # throw away finished work every round, and if the model consistently
+        # spends its whole output budget (measured: output_tokens at the cap in
+        # roughly 20 of 32 rounds) nothing would ever be written across all
+        # rounds. That would be the same failure this work fixes, only with a
+        # clearer error text.
+        truncated_tc_id = (
+            response.tool_calls[-1].id
+            if _response_is_truncated(response, cap) and response.tool_calls
+            else None
+        )
 
         if not response.tool_calls:
             tail = (response.content or "").strip()
@@ -256,10 +325,34 @@ async def _run_loop(
                     {"type": "tool_result", "tool_use_id": tc.id, "content": "ok"}
                 )
             elif name == "write_file":
+                # `inp.get("content")` without a "" default: a missing key must
+                # be distinguishable from a deliberately empty string, or the
+                # error text is guessing. Both forms are rejected either way, but
+                # with different messages — their causes differ.
+                content = inp.get("content")
+                if tc.id == truncated_tc_id:
+                    result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": _TRUNCATED_MSG,
+                        }
+                    )
+                    continue
+                if not content:
+                    result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": _NO_CONTENT_MSG,
+                        }
+                    )
+                    continue
                 res = sub_tools.write_file(
                     artifact_path,
                     inp.get("path", ""),
-                    inp.get("content", ""),
+                    content,
+                    mode=inp.get("mode", "w"),
                 )
                 msg = res["message"]
                 if res.get("ok"):

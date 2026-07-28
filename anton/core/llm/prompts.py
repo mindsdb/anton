@@ -259,20 +259,30 @@ opens (intermediate CSVs, cached JSON, debug logs).
 - Throwaway files inside the scratchpad's own working directory.
 
 WORKFLOW:
-1. NEW artifact: call `create_artifact(name, description, type, primary?)` \
-→ use the returned `<artifact_path>` for every subsequent write.
-2. EDITING an existing artifact: call `list_artifacts` to find it, then \
-`open_artifact(slug)` to get the folder path. Do NOT call `create_artifact` \
-again — that creates a duplicate.
-3. If you discover the entry-point filename only later (or change it), call \
-`update_artifact(slug, primary=...)` so the renderer opens the right file.
-4. AFTER FINISHING — reference the artifact in your final message. Once the \
-artifact's files are written, tell the user what was created and point to it by \
-`name` and `slug`, and include the primary file's path \
-(`<artifact_path>/<primary>`) so it is clickable/openable in a plain CLI. NEVER \
-end with only a description of the content and no pointer to the result. (For \
-fullstack apps, prefer the `url` returned by `launch_backend` as the primary \
-pointer — see the BACKEND & FULLSTACK section.)
+1. REGISTER FIRST, always: call `create_artifact(name, description, type, \
+primary?)`. It claims the folder and returns `<artifact_path>`.
+2. THEN, for `html-app`, `fullstack-stateless-app` and \
+`fullstack-stateful-app` — call `generate_artifact(slug, context)` and let it \
+produce every file. It runs a verified pipeline (data check → tech spec → API \
+spec → code generation with static verification → launch and health check) and \
+for fullstack apps it launches the backend itself, so you do NOT call \
+`launch_backend` afterwards. Do NOT write these files yourself in the \
+scratchpad — the pipeline's checks are what keep the result openable and \
+deployable.
+3. For the other types (`document`, `dataset`, `image`, `mixed`) there is no \
+generator: write the files yourself into `<artifact_path>`.
+4. EDITING an existing artifact: call `list_artifacts` to find it, then \
+`open_artifact(slug)` to get the folder path, then edit its files yourself. Do \
+NOT call `create_artifact` again — that creates a duplicate. `generate_artifact` \
+builds from scratch, so it is not the tool for a small edit.
+5. If you discover the entry-point filename only later (or change it), call \
+`update_artifact(slug, primary=...)` so the renderer opens the right file. \
+(`generate_artifact` does this for you.)
+6. AFTER FINISHING — reference the artifact in your final message. Tell the user \
+what was created and point to it by `name` and `slug`, and include the primary \
+file's path (`<artifact_path>/<primary>`) so it is clickable/openable in a plain \
+CLI. NEVER end with only a description of the content and no pointer to the \
+result. For fullstack apps, prefer the `url` the launch step returned.
 """
 
 
@@ -310,14 +320,18 @@ Output format:
 VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = """\
 Present analysis results as HTML dashboards/reports — the user has proactive \
 dashboards enabled. Narrate the key insights in chat first (per the workflow \
-above), then build the visualization as a self-contained HTML artifact.
+above), then produce the visualization as an artifact.
 
-MANDATORY: BEFORE writing any dashboard, chart, or report HTML, call \
-`recall_skill("build-html-dashboard")` and follow the loaded output contract \
-(artifact registration, file layout, charting library, theme, data embedding). \
-Do NOT build dashboard HTML from memory of those rules — recall the skill in \
-every conversation that produces one. Recalling it too often is fine; \
-skipping it is not.\
+Normal path: `create_artifact(type="html-app", …)` then \
+`generate_artifact(slug, context)`. The generator writes the dashboard through a \
+verified pipeline and its own output contract — you do NOT recall a skill or \
+write the HTML yourself for this.
+
+Building it BY HAND is the exception — editing an existing dashboard, or \
+`generate_artifact` returned an error and the user asked you to continue \
+manually. Only then call `recall_skill("build-html-dashboard")` first and follow \
+the loaded output contract (charting library, theme, file layout, large-dataset \
+handling). Never write dashboard HTML by hand from memory of those rules.\
 """
 
 
@@ -331,33 +345,35 @@ inline numbers. The terminal is the primary display — make it look great there
 - Use markdown tables for tabular data. Keep columns aligned and readable.
 - Use bold/headers for section structure. Use bullet points for lists.
 - For large datasets, summarize the top N and offer to show more.
-- When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
-THEN build it as a self-contained HTML file with inlined CSS, JS, and data. \
-Register the artifact FIRST via `create_artifact(type="html-app", \
-primary="dashboard.html", ...)` and write into the returned `<artifact_path>` — \
-see the ARTIFACTS section above for the full contract. \
+- When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML \
+visualization, THEN produce it as an artifact: `create_artifact(type="html-app", \
+primary="dashboard.html", ...)` followed by `generate_artifact(slug, context)` — \
+see the ARTIFACTS section above. If you end up building it BY HAND instead \
+(editing an existing dashboard, or the generator failed and the user asked you \
+to continue), call `recall_skill("build-html-dashboard")` first and follow the \
+loaded output contract. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
-(create it if needed). \
-MANDATORY: call `recall_skill("build-html-dashboard")` BEFORE writing the HTML \
-and follow the loaded output contract (charting library, theme, file layout, \
-large-dataset handling). Recalling it too often is fine; skipping it is not.\
+(create it if needed).\
 """
 
 
 BACKEND_GENERATION_PROMPT = """\
 BACKEND & FULLSTACK APPLICATION GENERATION:
 
-Building a backend service, API, or fullstack web app (artifact types \
-`fullstack-stateless-app` / `fullstack-stateful-app`, launched via \
-`launch_backend`) follows a STRICT contract: a canonical FastAPI+Mangum \
-backend.py template, SECRETS handling, the `/api/*` route prefix, the \
-`static/` frontend layout, requirements.txt, and a launch/preview workflow. \
-The full procedure is NOT in this prompt — it lives in the \
-`build-fullstack-backend` skill. MANDATORY: call \
-`recall_skill("build-fullstack-backend")` BEFORE registering a fullstack \
-artifact or writing any backend code. Code written without it WILL fail \
-launch and deployment. If there is any chance the task involves a backend, \
-recall the skill first — recalling it too often is fine; skipping it is not.\
+Normal path: register the artifact (`fullstack-stateless-app` — prefer this — or \
+`fullstack-stateful-app`), then call `generate_artifact(slug, context)`. The \
+generator writes `backend.py`, `requirements.txt` and `static/index.html` \
+against a hard contract, verifies the backend by importing it and checking its \
+routes, then launches it and health-checks `/api/health`. You do NOT recall a \
+skill, write backend code, or call `launch_backend` yourself on this path.
+
+Backend code written BY HAND must follow that same strict contract — the \
+canonical FastAPI+Mangum `backend.py` template, `SECRETS` read at point of use, \
+the `/api/*` route prefix, the `static/` frontend layout, `requirements.txt`, \
+and the launch/preview workflow — or it WILL fail launch and deployment. The \
+full procedure is not in this prompt: if you are editing an existing fullstack \
+artifact, or the generator failed and the user asked you to continue manually, \
+call `recall_skill("build-fullstack-backend")` BEFORE touching any backend code.\
 """
 
 CONSOLIDATION_PROMPT = """\

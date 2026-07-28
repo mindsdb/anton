@@ -74,3 +74,38 @@ async def test_success_returns_json_unchanged(tmp_path: Path, monkeypatch):
     )
     assert '"files_written"' in out
     assert "generation failed" not in out
+
+
+async def test_handler_forwards_primary_to_generate(monkeypatch, tmp_path):
+    """The primary from metadata must reach the generator."""
+    import anton.core.tools.tool_handlers as th
+
+    captured = {}
+
+    async def fake_generate(**kw):
+        captured.update(kw)
+        return {"files_written": ["report.html"], "summary": "s", "trace": []}
+
+    monkeypatch.setattr(
+        "anton.core.tools.generate_artifact.generate", fake_generate, raising=False
+    )
+
+    class _Artifact:
+        type = "html-app"
+        slug = "a"
+        primary = "report.html"
+
+    class _Store:
+        def open(self, slug):
+            return _Artifact()
+
+        def folder_for(self, slug):
+            return tmp_path
+
+    monkeypatch.setattr(th, "_artifact_store", lambda session: _Store())
+
+    out = await th.handle_generate_artifact(
+        object(), {"slug": "a", "context": "## User request\nx"}
+    )
+    assert "report.html" in out
+    assert captured["primary"] == "report.html"

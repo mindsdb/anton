@@ -24,7 +24,12 @@ WRITE_FILE_SCHEMA: dict = {
         "Write a UTF-8 text file at the given path inside the artifact folder. "
         "Path is relative to the artifact root (e.g. \"dashboard.html\", "
         "\"static/index.html\", \"backend.py\"). Parent directories are "
-        "created automatically. Overwrites any existing file at the same path."
+        "created automatically.\n\n"
+        "`mode=\"w\"` (default) creates or overwrites the file. `mode=\"a\"` "
+        "appends to it, creating it first if needed — use append to build a "
+        "large file in several small calls instead of one huge one. A single "
+        "call whose `content` is too large gets cut off by the output limit and "
+        "is rejected, so keep each call well under ~6 KB."
     ),
     "input_schema": {
         "type": "object",
@@ -35,7 +40,12 @@ WRITE_FILE_SCHEMA: dict = {
             },
             "content": {
                 "type": "string",
-                "description": "Full UTF-8 contents to write.",
+                "description": "Full UTF-8 contents to write (or the chunk to append).",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["w", "a"],
+                "description": "\"w\" overwrite (default), \"a\" append.",
             },
         },
         "required": ["path", "content"],
@@ -118,12 +128,18 @@ def _sandboxed_path(root: Path, rel: str) -> Path | None:
     return candidate
 
 
-def write_file(root: Path, rel_path: str, content: str) -> dict:
+def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> dict:
     """Write ``content`` into ``<root>/<rel_path>``.
+
+    ``mode="a"`` appends (creating the file when absent) so the sub-generator can
+    build a large file in several small calls — a single call carrying a whole
+    dashboard gets truncated by the output-token limit (see the design spec, 3.1).
 
     Returns ``{"ok", "message", "written"?}`` where ``written`` is the
     relative path (string) when the write succeeded.
     """
+    if mode not in ("w", "a"):
+        return {"ok": False, "message": f"Error: `mode` must be \"w\" or \"a\" (received: {mode!r})."}
     target = _sandboxed_path(root, rel_path)
     if target is None:
         return {
@@ -137,12 +153,15 @@ def write_file(root: Path, rel_path: str, content: str) -> dict:
     if not isinstance(content, str):
         return {"ok": False, "message": "Error: `content` must be a string."}
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    with open(target, mode, encoding="utf-8") as f:
+        f.write(content)
     rel_written = str(target.relative_to(root.resolve()))
+    size = target.stat().st_size
+    verb = "Appended to" if mode == "a" else "Wrote"
     return {
         "ok": True,
         "written": rel_written,
-        "message": f"Wrote {rel_written} ({len(content)} bytes).",
+        "message": f"{verb} {rel_written} (+{len(content)} bytes, file now {size} bytes).",
     }
 
 

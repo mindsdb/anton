@@ -63,38 +63,77 @@ digraph artifact_generation {
 # Role / tool contract (shared across all artifact types)
 # ---------------------------------------------------------------------------
 
-_ROLE = """\
-You are a focused code-generator. Your ONLY job is to produce the files for
-one artifact by calling `write_file`, then call `finish` when done.
+# Common half: fits both the nodes that write files and the fetch node, which
+# does not. Everything about write_file lives in _ROLE_WRITE below.
+_ROLE_COMMON = """\
+You are a focused, single-purpose worker inside an artifact-generation pipeline.
+You do exactly the job your task section describes, then call `finish`.
 
-HARD RULES:
-- Call `write_file` exactly once per file with the COMPLETE contents.
-  Do NOT split a single file across multiple calls.
-- All `path` values are RELATIVE to the artifact folder — never write outside it.
-- Call `finish(summary="<one line>")` exactly once when all files are written.
-
-AVAILABLE TOOLS:
-- `write_file(path, content)` — write a UTF-8 text file at `<artifact>/<path>`.
-- `read_file(path)` — read a file you already wrote (for iterative refinement).
+ALWAYS-AVAILABLE TOOLS:
 - `scratchpad(action, name, ...)` — drive a persistent Python scratchpad
   (`exec`, `view`, `dump`, `install`, `reset`, `remove`). Use it to reach the
   real data described in the brief's `## Data` section.
-- `finish(summary)` — terminate generation with a one-line summary.
+- `finish(summary)` — terminate with a one-line summary.
+
+SCRATCHPAD DISCIPLINE (the same rules the main agent works under):
+- The scratchpad starts with a clean namespace — nothing is pre-imported. Put
+  every import the cell needs at the top of THAT cell. Re-importing is free and
+  makes the cell work even if an earlier one failed.
+- Each cell has a hard timeout of 120 seconds. On timeout the process is killed
+  and ALL state is lost — variables, imports, loaded data. Keep cells small;
+  split anything heavier across cells.
+- Always `print(...)` what you want to see: the tool captures stdout, and a bare
+  expression at the end of a cell returns nothing.
+- Connected data-source credentials arrive as environment variables named
+  `DS_<ENGINE>_<NAME>__<FIELD>` — read them from `os.environ`. NEVER read the
+  `data_vault` files directly.
+- If a cell fails the same way twice, change strategy instead of re-running it:
+  different library, different query shape, a smaller batch. Repeating an
+  identical failing cell only burns the round budget.
 
 USING DATA:
 - The brief's `## Data` section names the scratchpads and cells the main agent
-  already used, and what was done in them. Start by inspecting them with
-  `scratchpad(action="view", name="<pad>")` (or `dump`) to see existing cells
-  and outputs.
+  already used, and what was done in them. `## Data gathered so far`, when
+  present, already contains those cells — read it before running anything.
 - Use `scratchpad(action="exec", name="<pad>", code=...)` to pull or rebuild the
-  exact data you need (re-query, aggregate, reshape). Provide
+  data you need (re-query, aggregate, reshape). Provide
   `one_line_description` and `estimated_execution_time_seconds` on every `exec`.
-- For an html-app, EMBED the real data into the output file: print small results
-  to stdout and inline them in `write_file`, or for larger data `exec`-write a
-  file into the artifact folder and `read_file` it back.
+  Reuse the scratchpad name the brief gives you — a new name is an isolated
+  environment with none of the existing variables, imports or connection code.\
+"""
+
+# Write half: only for nodes that actually produce files. NOT mixed into the
+# fetch node — there the role is immediately followed by "Do NOT write any
+# artifact files", and the full _ROLE would contradict that instruction.
+_ROLE_WRITE = """\
+YOUR OUTPUT IS FILES: produce them by calling `write_file`, then call `finish`.
+
+HARD RULES:
+- Build every file with `write_file`. A large file MUST be written in several
+  chunks — one `mode="w"` call followed by `mode="a"` calls. A single call
+  carrying a whole file is cut off by the output limit and rejected.
+- All `path` values are RELATIVE to the artifact folder — never write outside it.
+- Call `finish(summary="<one line>")` exactly once when all files are written.
+
+FILE TOOLS:
+- `write_file(path, content, mode="w"|"a")` — write a UTF-8 text file at
+  `<artifact>/<path>`. `"w"` creates or overwrites, `"a"` appends (creating the
+  file when absent). Default is `"w"`.
+- `read_file(path)` — read a file you already wrote (for iterative refinement).
+
+DATA INTO FILES:
+- For an html-app, the real data goes INTO the output file — but as its own
+  chunk: print the serialised data in a scratchpad cell, then append it with
+  `write_file(path, content, mode="a")` as a single `<script>` block, separate
+  from the markup chunks. For a large dataset, aggregate it in the scratchpad
+  first; a dashboard almost never needs raw rows.
 - For a fullstack app, the generated backend queries the live source itself —
   use the scratchpad mainly to confirm the schema and a sample.\
 """
+
+# The name is kept: generator prompts mix it in whole, and three stage-1c tests
+# read `_ROLE` directly.
+_ROLE = _ROLE_COMMON + "\n\n" + _ROLE_WRITE
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +174,24 @@ VISUAL DESIGN (for every HTML file you produce):
   - Register `window.addEventListener('resize', () => chart.resize())` on every ECharts instance.
   - Tables wrapped in `<div style="overflow-x: auto;">` — never fixed widths.
 - SECURITY: NEVER embed API keys, tokens, passwords, or connection strings in HTML/JS.
-  Credentials were already used server-side; serialise only the resulting data.\
+  Credentials were already used server-side; serialise only the resulting data.
+
+HARD OUTPUT CONTRACT (a static verifier checks each of these; a violation
+fails the step and costs a regeneration):
+- Emit a complete HTML document with an explicit `<body>`...`</body>`.
+- Include `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
+- NEVER put an absolute URL in a `fetch()` call. Use relative paths only.
+- NEVER put an absolute URL in a resource reference either — no `<link
+  href="https://...">` for fonts or CSS, no `<img src="https://...">`. The ONLY
+  allowed absolute URL in the whole document is a `<script src="https://...">`
+  CDN library tag.
+- NEVER use the global name `window.__antonCommentsLayer`; it is reserved by the
+  host app.
+- NEVER write a universal `* { ... !important }` rule.
+- Keep every `z-index` at 1000 or below.
+- Give significant block containers (`div`, `section`, `table`, `main`,
+  `article`) stable `id` attributes — they are anchors the host app attaches
+  comments to.\
 """
 
 
@@ -150,6 +206,7 @@ Use this canonical skeleton verbatim, add routes inside `# === API routes ===`:
 
 ```python
 import argparse
+import os
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -165,6 +222,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# === Secrets ===
+# Keys are the canonical DS_<ENGINE>_<NAME>__<FIELD> names from the
+# `## Connected Data Sources` section. Locally each value comes from
+# os.environ; in the cloud the shared runner overlays the decrypted values
+# onto this dict before every request. READ a secret AT ITS POINT OF USE
+# inside the route — never copy it into a module-level variable at import
+# time. Leave SECRETS empty if the backend uses none.
+SECRETS = {
+    # "DS_POSTGRES_PROD_DB__PASSWORD": os.environ.get("DS_POSTGRES_PROD_DB__PASSWORD"),
+}
+
 # === API routes ===
 @app.get("/api/health")
 async def health():
@@ -172,6 +240,8 @@ async def health():
 
 @app.get("/api/hello")
 async def hello():
+    # Example secret use (read at point of use, not at import):
+    #   pw = SECRETS["DS_POSTGRES_PROD_DB__PASSWORD"]
     return {"hello": "world"}
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -198,10 +268,23 @@ CRITICAL RULES:
 - API routes MUST be registered BEFORE `app.mount("/", StaticFiles(...))`.
 - The backend MUST accept `--port` via argparse. NEVER hardcode a port.
 - Keep `Mangum(app, lifespan="off")`. Required for Lambda cold-start.
+- SECRETS: expose a module-level `SECRETS` dict keyed by the canonical
+  `DS_<ENGINE>_<NAME>__<FIELD>` name, each entry initialised from
+  `os.environ.get(...)`. Read a secret AT ITS POINT OF USE — `SECRETS["DS_..."]`
+  inside the route — and NEVER hoist it into a module-level variable at import
+  time: the import runs before the cloud overlay, so the value would be missed.
+  If a credential-backed resource is needed (DB pool, API client), build it
+  LAZILY on first request, never at module level.
 - Use `async def` for I/O-bound routes (DB queries, external HTTP).
-- STATELESS: no module-level mutable caches. Lambda globals are unreliable.
-- FILESYSTEM: assume read-only at runtime (Lambda). Only `/tmp` is writable.
 - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` work everywhere.
+- DATA SOURCE CREDENTIALS: the user's connected data sources are exposed as
+  environment variables named `DS_<ENGINE>_<NAME>__<FIELD>` (uppercase), e.g.
+  `DS_POSTGRES_PROD_DB__HOST`, `DS_HUBSPOT_MAIN__ACCESS_TOKEN`. Do NOT derive
+  these names yourself — the `## Connected Data Sources` section below lists the
+  full variable names verbatim (it writes the same pattern as
+  `DS_<ENGINE_NAME>__<FIELD>`; both describe the names printed there). Copy them
+  exactly. An invented `DS_*` key fails verification and cannot be recovered.
+  If no such section is present, the backend must not read any `DS_*` variable.
 
 `requirements.txt` — always include at minimum:
 ```
@@ -209,7 +292,48 @@ fastapi
 mangum
 uvicorn
 ```
-Add any other packages the backend imports, one per line (`pkg` or `pkg==1.2`).\
+Add any other packages the backend imports, one per line. Extras and version
+specifiers are fine (`uvicorn[standard]`, `fastapi>=0.100`). Only simple
+requirement lines are supported — `-r`, `-e`, `--index-url`, blank lines and
+`#` comments are ignored by the installer.
+
+DEPLOYMENT — why the SECRETS rules are shaped this way:
+- LOCAL: `python backend.py --port=NNN`. uvicorn serves the app and the
+  `static/` mount; secrets come from the `DS_*` env vars in SECRETS' defaults.
+- CLOUD: a shared runner overlays the decrypted secrets onto `backend.SECRETS`
+  and invokes `backend.handler` per request. The overlay happens AFTER import,
+  which is exactly why an import-time copy of a secret is empty in the cloud.
+  Statics are served separately, so the StaticFiles mount sits unused there.\
+"""
+
+
+# The ONE rule that differs between the two fullstack types. Selected by
+# `stateless` in build_backend_system_prompt — never both, never neither.
+_STATELESS_RULES = """\
+LOCAL STATE — this app MUST NOT persist anything between requests:
+- No local database (no sqlite), no local files used as storage, no on-disk
+  caches, no module-level mutable store carried across requests. In Lambda,
+  module globals may or may not survive an invocation — never rely on them.
+- Treat the filesystem as read-only and non-persistent. NEVER write into the
+  artifact folder at runtime. If a request genuinely needs scratch space, use
+  the OS temp dir via `tempfile` and treat it as ephemeral — gone the moment the
+  request ends.
+- Connecting to an EXTERNAL database or API to read/write data IS allowed — that
+  is a data source, not local state. Open a fresh connection per request and do
+  not cache results in memory across requests.\
+"""
+
+_STATEFUL_RULES = """\
+LOCAL STATE — this app MAY keep local on-disk state between requests:
+- A sqlite file (or similar) IS allowed. Keep it in the artifact root, next to
+  `backend.py`. Every other rule above still applies.
+- Know where it survives: run locally via `launch_backend`, the backend is one
+  long-lived process and the file persists across requests. In AWS Lambda the
+  filesystem is ephemeral and nothing is guaranteed between invocations — so the
+  local store is a local-run feature, not a deployment guarantee. Do not build
+  logic that silently corrupts data when the file turns up missing.
+- Never keep state ONLY in module-level Python variables — write it to the file,
+  so a restarted process picks it back up.\
 """
 
 
@@ -234,7 +358,10 @@ FRONTEND — `static/index.html`:
   // usage: fetch(api('/api/items'))
   ```
 - NEVER hardcode an absolute URL in the source.
-- Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.\
+- Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
+- `static/` is the ONLY folder the backend serves. ANY additional frontend asset
+  (separate CSS, JS, images, fonts, large data payloads) MUST live under
+  `static/` too — never at the artifact root, or it will 404 at runtime.\
 """
 
 
@@ -242,54 +369,74 @@ FRONTEND — `static/index.html`:
 # Public builders
 # ---------------------------------------------------------------------------
 
-def build_subagent_system_prompt(artifact_type: str, artifact_path: Path) -> str:
+# Mixed in everywhere _VISUAL_RULES is: chunked writing is needed by html-app and
+# by the fullstack frontend alike. It cannot live in _FRONTEND_RULES — that block
+# only goes to the fullstack branch.
+_WRITE_DISCIPLINE = """\
+WRITING A LARGE FILE (mandatory — a single big call cannot succeed):
+Your reply has a hard output limit. A `write_file` call carrying a whole
+dashboard exceeds it, gets cut off mid-argument, and is REJECTED — nothing is
+written and the round is wasted. Build the file in chunks instead:
+- First chunk: `write_file(path, content, mode="w")` — head, `<style>`, opening
+  `<body>`.
+- Every next chunk: `write_file(path, content, mode="a")` — one section per call:
+  the data block, then each chart's markup, then the scripts, then the closing
+  tags.
+- Keep each call's `content` well under ~6 KB. Several small calls in one reply
+  are fine and cost one round together.
+- Do NOT re-emit the whole file to "fix" something — append the remaining part.
+  To check what landed, `read_file` the path and look at its size, don't re-send
+  the content.
+- The final chunk must close every tag you opened, `</body></html>` included.
+
+PYTHON → JS STRING SAFETY (only when you build content inside a scratchpad cell):
+Escape sequences resolve in Python BEFORE the text reaches the file, so `'\\n'`
+inside a Python string becomes a real newline and breaks a JS string literal.
+Use raw strings (`r"..."`) for JS blocks, or double-escape. Writing the text
+directly through `write_file` avoids the problem entirely — prefer that.\
+"""
+
+HTML_APP_DEFAULT_PRIMARY = "dashboard.html"
+
+
+def build_subagent_system_prompt(
+    artifact_type: str,
+    artifact_path: Path,
+    *,
+    primary: str | None = None,
+) -> str:
+    """System prompt for the single-generator path — html-app only.
+
+    The fullstack types never reach here: `orchestrator._gen_verify_frontend`
+    calls this only in its non-fullstack branch, and fullstack generation uses
+    `build_backend_system_prompt` / `build_frontend_system_prompt` instead. The
+    fullstack branches that used to live here were a third copy of the backend
+    contract that nothing executed and no test covered.
+
+    `primary` is the filename the artifact was registered with. It may be None
+    (`Artifact.primary: str | None`, `artifacts/models.py:153`) — then the shared
+    default applies, the same one the orchestrator's cleanup step uses, so the
+    two never disagree about which file is the entry point.
+    """
     parts: list[str] = [_ROLE]
 
-    if artifact_type == "html-app":
+    if artifact_type != "html-app":
         parts.append(
-            "## Your task\n"
-            "Produce ONE self-contained HTML file (`dashboard.html` unless the "
-            "brief specifies a different name). Inline all CSS and JS. "
-            "All data must be embedded — no external local file references."
+            f"## Unsupported artifact type: {artifact_type!r}\n"
+            "This builder serves `html-app` only. Fullstack types use "
+            "`build_backend_system_prompt` / `build_frontend_system_prompt`."
         )
-        parts.append(_VISUAL_RULES)
+        return "\n\n".join(parts)
 
-    elif artifact_type == "fullstack-stateless-app":
-        parts.append(
-            "## Your task\n"
-            "Produce three files:\n"
-            "1. `backend.py` — FastAPI backend (see rules below).\n"
-            "2. `requirements.txt` — pip dependencies.\n"
-            "3. `static/index.html` — frontend that calls `/api/*` endpoints.\n"
-            "The backend is launched separately after you finish.\n"
-            "\n"
-            "STATELESS means the backend MUST NOT persist any state between "
-            "requests: no local database (e.g. sqlite), no local files written as "
-            "storage, no on-disk caches, and no in-process mutable store carried "
-            "across requests. Connecting to an EXTERNAL database or API to read/"
-            "write data IS allowed — open a fresh connection per request and do "
-            "not cache results in memory across requests."
-        )
-        parts.append(_BACKEND_RULES)
-        parts.append(_VISUAL_RULES)
-        parts.append(_FRONTEND_RULES)
-
-    elif artifact_type == "fullstack-stateful-app":
-        parts.append(
-            "## Your task\n"
-            "Produce three files:\n"
-            "1. `backend.py` — FastAPI backend (see rules below).\n"
-            "2. `requirements.txt` — pip dependencies.\n"
-            "3. `static/index.html` — frontend that calls `/api/*` endpoints.\n"
-            "The backend is launched separately after you finish."
-        )
-        parts.append(_BACKEND_RULES)
-        parts.append(_VISUAL_RULES)
-        parts.append(_FRONTEND_RULES)
-
-    else:
-        parts.append(f"## Unknown artifact type: {artifact_type!r}")
-
+    target = primary or HTML_APP_DEFAULT_PRIMARY
+    parts.append(
+        "## Your task\n"
+        f"Produce ONE self-contained HTML file named exactly `{target}`. "
+        "Inline all CSS and JS. All data must be embedded — no external local "
+        "file references."
+    )
+    parts.append(_VISUAL_RULES)
+    parts.append(_WRITE_DISCIPLINE)
     parts.append(
         "## Output folder\n"
         f"All `write_file` paths are relative to: `{artifact_path}`\n"
@@ -359,7 +506,12 @@ def build_api_spec_prompt(
 # Backend-only system prompt and kickoff (parallel fullstack-stateful-app)
 # ---------------------------------------------------------------------------
 
-def build_backend_system_prompt(artifact_path: Path, *, stateless: bool = False) -> str:
+def build_backend_system_prompt(
+    artifact_path: Path,
+    *,
+    stateless: bool = False,
+    datasource_context: str = "",
+) -> str:
     parts: list[str] = [_ROLE]
     parts.append(
         "## Your task\n"
@@ -370,18 +522,9 @@ def build_backend_system_prompt(artifact_path: Path, *, stateless: bool = False)
         "Implement every endpoint in the spec exactly as described."
     )
     parts.append(_BACKEND_RULES)
-    if stateless:
-        parts.append(
-            "## Stateless constraint\n"
-            "This app MUST NOT persist any state between requests. Each request is "
-            "handled independently with no server-side memory of previous ones.\n"
-            "Do NOT create or write to any local storage: no sqlite, no local files, "
-            "no on-disk caches, no in-process mutable state used as a store.\n"
-            "Connecting to an EXTERNAL database or API to read/write data IS allowed "
-            "(e.g. an external PostgreSQL/MySQL server) — that is not local state. "
-            "Open a fresh connection per request and do not cache results in memory "
-            "across requests."
-        )
+    parts.append(_STATELESS_RULES if stateless else _STATEFUL_RULES)
+    if datasource_context.strip():
+        parts.append(datasource_context.strip())
     parts.append(
         "## Output folder\n"
         f"All `write_file` paths are relative to: `{artifact_path}`\n"
@@ -418,6 +561,7 @@ def build_frontend_system_prompt(artifact_path: Path) -> str:
         "response shapes; use the `api()` helper for every fetch call."
     )
     parts.append(_VISUAL_RULES)
+    parts.append(_WRITE_DISCIPLINE)
     parts.append(_FRONTEND_RULES)
     parts.append(
         "## Output folder\n"
@@ -476,7 +620,12 @@ def build_data_enough_prompt(state) -> tuple[str, str]:
         "ALREADY enough data to build the artifact. If the task needs no external "
         "data at all (e.g. 'show the current time'), that counts as ENOUGH. "
         "Otherwise it is enough only when the source, schema, and a concrete "
-        "sample of every needed dataset are known. Answer strictly."
+        "sample of every needed dataset are known.\n\n"
+        "Anything under `## Data gathered so far` counts as already available, "
+        "regardless of who obtained it — a scratchpad cell the main agent ran "
+        "before calling this tool is just as good as one you would run yourself. "
+        "Do NOT ask for a re-fetch of something already shown there.\n\n"
+        "Answer strictly."
     )
     user = _brief_and_notes(state) + "\n\nIs there enough data? Answer with the verdict."
     return system, user
@@ -508,22 +657,36 @@ def build_can_fetch_prompt(state, required: str) -> tuple[str, str]:
     return system, user
 
 
-def build_fetch_data_system_prompt(artifact_path) -> str:
-    return "\n\n".join(
-        [
-            _ROLE,
-            _DATA_CONTEXT_HEADER
-            + "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
-            "run Python that pulls a small SAMPLE of the required data (query the "
-            "DB, call the API, read the file). Confirm the shape and types. Do NOT "
-            "write any artifact files. When done, call `finish(summary=...)` with a "
-            "precise description of WHICH scratchpad(s)/cell(s) you used, what each "
-            "produced, and the observed schema/sample — this summary is handed to "
-            "the next steps.",
-            "## Output folder\n"
-            f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`",
-        ]
+def build_fetch_data_system_prompt(
+    artifact_path, *, datasource_context: str = "", public_sources: str = ""
+) -> str:
+    parts = [
+        _ROLE_COMMON,
+        _DATA_CONTEXT_HEADER
+        + "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
+        "run Python that pulls a small SAMPLE of the required data (query the "
+        "DB, call the API, read the file). Confirm the shape and types. Do NOT "
+        "write any artifact files.\n\n"
+        "Fetch ONLY WHAT IS MISSING. `## Data gathered so far` may already show "
+        "cells the main agent ran — do not repeat them.\n\n"
+        "Work in the SAME scratchpad the brief names, not a new one: a fresh "
+        "name is an isolated environment, so its variables, imports and working "
+        "connection code do not exist there and you would rebuild them from "
+        "scratch.\n\n"
+        "When done, call `finish(summary=...)` with a "
+        "precise description of WHICH scratchpad(s)/cell(s) you used, what each "
+        "produced, and the observed schema/sample — this summary is handed to "
+        "the next steps.",
+    ]
+    if public_sources.strip():
+        parts.append(public_sources.strip())
+    if datasource_context.strip():
+        parts.append(datasource_context.strip())
+    parts.append(
+        "## Output folder\n"
+        f"(You will NOT write files here in this step.) Artifact folder: `{artifact_path}`"
     )
+    return "\n\n".join(parts)
 
 
 def build_fetch_data_kickoff(state) -> str:
@@ -567,6 +730,12 @@ def build_tech_spec_prompt(state) -> tuple[str, str]:
         "Markdown only (no code fences around the whole document). This document "
         "will be saved to `spec.md` and handed to the backend and frontend "
         "generators.\n\n"
+        "If the artifact shows data to a human (a dashboard, report or any "
+        "charted view), OPEN the specification with an `## Insights` section: "
+        "one line each, `<chart or element>: <the insight it conveys and why it "
+        "matters>`. Terse — a checklist, not prose, no design discussion. It "
+        "tells the frontend generator what each visual is FOR, which is the "
+        "difference between a polished page and a pile of charts.\n\n"
         + _TECH_SPEC_STACK
     )
     user = _brief_and_notes(state) + (

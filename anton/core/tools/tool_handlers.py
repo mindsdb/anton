@@ -321,6 +321,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
             artifact_path=folder,
             context=context,
             slug=slug,
+            primary=artifact.primary,
         )
     except Exception as exc:  # last-resort: never escalate to the dispatcher
         return _generation_failed(f"generator crashed: {exc}")

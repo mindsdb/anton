@@ -6,13 +6,18 @@ reuse `engine._run_loop`; verification uses `verifiers`.
 """
 from __future__ import annotations
 
+import inspect
+import re
+
 from . import engine, prompts
+from .prompts import HTML_APP_DEFAULT_PRIMARY
 from .state import (
     DATA_LOOP_MAX,
     DataVerdict,
     FetchVerdict,
     GenState,
     RequiredData,
+    VerifyResult,
 )
 
 
@@ -39,7 +44,9 @@ EXEC_OUTPUT_MAX = 300
 EXEC_NOTES_MAX = 8000
 
 
-def _render_exec_notes(execs: list[dict]) -> str:
+def _render_exec_notes(
+    execs: list[dict], *, header: str = "### Code executed while fetching"
+) -> str:
     """Deterministic record of the Python the fetch step ran.
 
     Appended to data_notes so later steps (tech spec, backend generation) see
@@ -66,7 +73,6 @@ def _render_exec_notes(execs: list[dict]) -> str:
         dropped += 1
     if not blocks:
         return ""
-    header = "### Code executed while fetching"
     if dropped:
         header += f" (first {dropped} cell(s) omitted for size)"
     return header + "\n" + "\n\n".join(blocks)
@@ -76,7 +82,11 @@ async def _fetch_data_sample(state: GenState) -> str:
     """Run a scratchpad loop that pulls a data sample; return its summary."""
     result = await engine._run_loop(
         session=state.session,
-        system=prompts.build_fetch_data_system_prompt(state.artifact_path),
+        system=prompts.build_fetch_data_system_prompt(
+            state.artifact_path,
+            datasource_context=_datasource_context(state.session),
+            public_sources=_public_data_sources_skill(state.session),
+        ),
         kickoff=prompts.build_fetch_data_kickoff(state),
         artifact_path=state.artifact_path,
         require_files=False,
@@ -93,8 +103,126 @@ async def _fetch_data_sample(state: GenState) -> str:
     return summary
 
 
+def _pads_dict(session) -> dict:
+    """Live scratchpad runtimes, or {} when this is not a real manager.
+
+    The `isinstance(..., dict)` check does double duty. The real
+    `ScratchpadManager.pads` is a genuine dict (`backends/manager.py:33` returns
+    `self._pads`), while in tests the session is an `AsyncMock` whose `pads` is a
+    mock. Rejecting it by type means we never call `.keys()` on it, so we never
+    create an un-awaited coroutine — one would surface as a RuntimeWarning at GC
+    time and pollute the output of every test using a mock session. See
+    `_list_connections`, where such a coroutine has to be closed by hand; here it
+    simply never comes into existence.
+    """
+    try:
+        pads = session._scratchpads.pads
+    except Exception:  # noqa: BLE001
+        return {}
+    return pads if isinstance(pads, dict) else {}
+
+
+def _pads_named_in_brief(session, brief: str) -> list[str]:
+    """Names of live scratchpads that the brief mentions.
+
+    Matching runs from the live pads to the brief text, not the other way round.
+    Persistent pads cannot be enumerated (`Cell` does not store its pad name,
+    `base.py:15-26`), and on this branch `get_or_create` does NOT materialise a
+    pad from replayed cells: `ChatSessionConfig.cells` is declared as `None`
+    (`session.py:261`) and no production caller sets it. So we work only with
+    what is already live in the process — and a false match costs a few tokens in
+    the notes rather than a venv provisioning.
+
+    Word boundaries are mandatory: a pad named `dash` would otherwise match the
+    word "dashboard", which a dashboard brief is guaranteed to contain.
+    """
+    matched = [
+        name
+        for name in _pads_dict(session)
+        if isinstance(name, str)
+        and name.strip()
+        and re.search(rf"\b{re.escape(name)}\b", brief)
+    ]
+    return sorted(matched)
+
+
+def _live_pad_names(session) -> list[str]:
+    """Live pad names — used only for the skip record. Never raises."""
+    return sorted(str(k) for k in _pads_dict(session))
+
+
+def _inspect_named_scratchpads(state: GenState) -> None:
+    """Read the cells of pads named in the brief into `data_notes`.
+
+    Reads `pad.cells` directly (`base.py:52`) rather than going through `dump`:
+    that returns a ready-made markdown string from `render_notebook()`, which
+    `_render_exec_notes` cannot consume, and it carries every cell's full code
+    with no truncation. `pad.cells` maps into the required shape as-is, so the
+    existing caps come for free.
+
+    The step is synchronous and side-effect free: no `await`, no `get_or_create`.
+    """
+    matched = _pads_named_in_brief(state.session, state.brief)
+    if not matched:
+        live = _live_pad_names(state.session)
+        detail = (
+            "no scratchpad named in the brief matched the live ones: "
+            + ", ".join(live)
+            if live
+            else "no live scratchpads in this session"
+        )
+        state.record("inspect_scratchpads", "skipped", detail)
+        return
+
+    pads = _pads_dict(state.session)
+    execs: list[dict] = []
+    for name in matched:
+        for cell in getattr(pads[name], "cells", None) or []:
+            code = getattr(cell, "code", "") or ""
+            if not code.strip():
+                continue
+            execs.append(
+                {
+                    "name": name,
+                    "code": code,
+                    # stdout or the error text: a failed cell would otherwise
+                    # land in the notes as code with no result — indistinguishable
+                    # from a successful one that printed nothing. "What was tried
+                    # and what did not work" is exactly what the inspection needs.
+                    "output": getattr(cell, "stdout", "") or getattr(cell, "error", "") or "",
+                }
+            )
+
+    # Own header: the default "### Code executed while fetching" would be a lie
+    # here — nothing was fetched, these are the main agent's cells. It would also
+    # contradict the `is_data_enough` instruction, which teaches the node to count
+    # this data as available "regardless of who obtained it".
+    notes = _render_exec_notes(
+        execs,
+        header="### Cells the main agent already ran in: " + ", ".join(matched),
+    )
+    if not notes:
+        state.record(
+            "inspect_scratchpads", "empty",
+            "pads named in the brief have no cells: " + ", ".join(matched),
+        )
+        return
+
+    state.data_notes = (state.data_notes + "\n\n" + notes).strip()
+    state.record(
+        "inspect_scratchpads", "done",
+        f"{len(execs)} cell(s) from {', '.join(matched)}",
+    )
+
+
 async def _data_phase(state: GenState) -> str | None:
-    """is_data_enough ↔ define_required_data → is_possible_to_fetch → fetch."""
+    """is_data_enough ↔ define_required_data → is_possible_to_fetch → fetch.
+
+    Before the first `is_data_enough`, inspect the pads named in the brief: what
+    the outer agent already gathered does not need gathering again. The phase
+    itself is not trimmed — only its input changes.
+    """
+    _inspect_named_scratchpads(state)
     last_reasoning = ""
     for _ in range(DATA_LOOP_MAX + 1):
         verdict: DataVerdict = await _decide(
@@ -162,8 +290,8 @@ async def _write_tech_spec(state: GenState) -> str | None:
         state.error = "make_tech_spec: model returned an empty specification."
         return state.error
     (state.artifact_path / "spec.md").write_text(body, encoding="utf-8")
-    if "spec.md" not in state.files_written:
-        state.files_written.append("spec.md")
+    if "spec.md" not in state.internal_files:
+        state.internal_files.append("spec.md")
     state.record("make_tech_spec", "done", "wrote spec.md")
     return None
 
@@ -194,10 +322,105 @@ async def _make_api_spec(state: GenState) -> str | None:
         return state.error
     state.api_spec = spec_or_err
     (state.artifact_path / "openapi.json").write_text(spec_or_err, encoding="utf-8")
-    if "openapi.json" not in state.files_written:
-        state.files_written.append("openapi.json")
+    if "openapi.json" not in state.internal_files:
+        state.internal_files.append("openapi.json")
     state.record("make_api_spec", "done", "wrote openapi.json")
     return None
+
+
+def _vault(session):
+    """The session's vault, or a local one. Mirrors _map_datasources and handle_update_artifact."""
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    return getattr(session, "_data_vault", None) or LocalDataVault()
+
+
+def _list_connections(vault) -> list[dict]:
+    """`list_connections()` as a list, or [] when this is not a real vault.
+
+    A returned coroutine is closed explicitly: in tests the session is an
+    `AsyncMock` whose `_data_vault` is truthy while `list_connections()` yields a
+    coroutine. Swallowing the TypeError is not enough — an abandoned coroutine
+    surfaces as a RuntimeWarning at GC time, outside any `catch_warnings` block.
+    """
+    try:
+        raw = vault.list_connections()
+    except Exception:  # noqa: BLE001
+        return []
+    if inspect.iscoroutine(raw):
+        raw.close()
+        return []
+    try:
+        return [c for c in raw if isinstance(c, dict)]
+    except TypeError:
+        return []
+
+
+def _datasource_context(session) -> str:
+    """The `## Connected Data Sources` section (DS_* names, no values), or ""."""
+    try:
+        vault = _vault(session)
+        if not _list_connections(vault):
+            return ""
+        from anton.utils.datasources import build_datasource_context
+
+        return build_datasource_context(vault) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_PUBLIC_SOURCES_SKILL = "public-data-sources"
+
+
+def _public_data_sources_skill(session) -> str:
+    """Body of the built-in public-data-sources skill, or "".
+
+    The catalog must not be copied into the prompt — it already lives in
+    `builtin_skills/public-data-sources/SKILL.md` and is maintained there. The
+    sub-generator has no `recall_skill`, so the body is fed in directly from the
+    same `SkillStore` the main agent uses.
+
+    In tests the session is an `AsyncMock`, and `store.load(...)` returns a
+    **coroutine**. Type-checking `declarative_md` alone is not enough: an
+    abandoned coroutine surfaces as a RuntimeWarning at GC time, in the output of
+    an arbitrary test rather than the one that created it. So it is closed
+    explicitly — the same treatment as in `_list_connections`. (In `_pads_dict` no
+    coroutine appears at all, because the mock is rejected by type before any
+    call; here the call is unavoidable.)
+    """
+    try:
+        store = getattr(session, "_skill_store", None)
+        skill = store.load(_PUBLIC_SOURCES_SKILL) if store is not None else None
+        if inspect.iscoroutine(skill):
+            skill.close()
+            return ""
+        body = getattr(skill, "declarative_md", None)
+        return body if isinstance(body, str) else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _known_connection_hints(session) -> list[str]:
+    """`<slug> → DS_<PREFIX>__<FIELD>` for every connection. Never raises.
+
+    Hands over the ready env prefix, not just the slug: turning `<engine>-<name>`
+    into `DS_<ENGINE>_<NAME>` sanitises special characters (`prod-db.eu` →
+    `PROD_DB_EU`, see `_slug_env_prefix`). Asking the model to derive it itself
+    means asking it to repeat exactly the normalisation it already got wrong —
+    otherwise it would not have reached this error.
+    """
+    try:
+        from anton.core.artifacts.models import DatasourceRef
+
+        hints = []
+        for c in _list_connections(_vault(session)):
+            if not (c.get("engine") and c.get("name")):
+                continue
+            ref = DatasourceRef(engine=c["engine"], name=c["name"])
+            hints.append(f"{ref.slug} → {ref.env_prefix}__<FIELD>")
+        return sorted(hints)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
@@ -247,8 +470,13 @@ async def _declare_datasources(state: GenState, refs: list) -> None:
 
 async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str | None:
     stateless = state.artifact_type == "fullstack-stateless-app"
-    system = prompts.build_backend_system_prompt(state.artifact_path, stateless=stateless)
+    system = prompts.build_backend_system_prompt(
+        state.artifact_path,
+        stateless=stateless,
+        datasource_context=_datasource_context(state.session),
+    )
     verdict = None  # guards the terminal message when no attempt ever verified
+    last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
     extra = ("\n\n" + extra_context) if extra_context else ""
     for attempt in range(GEN_VERIFY_MAX_RETRIES + 1):
         kickoff = prompts.build_backend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
@@ -265,6 +493,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         if isinstance(result, str):
             extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             state.record("generate_backend", "error", result)
+            last_loop_error = result
             continue
         for f in result["files_written"]:
             if f not in state.files_written:
@@ -283,9 +512,13 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
             # Spec: DS_* keys with no matching vault connection are errors.
             refs, unmapped = _map_datasources(state.session, ds_keys)
             if unmapped:
+                known = _known_connection_hints(state.session)
                 msg = (
                     "backend reads DS_* env keys with no matching vault "
                     "connection: " + ", ".join(unmapped)
+                    + ". Available connections and their env-var namespaces: "
+                    + ("; ".join(known) or "(none)")
+                    + ". Use one of those namespaces verbatim."
                 )
                 state.record("verify_backend", "fail", msg)
                 verdict.errors.append(msg)
@@ -303,7 +536,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
     detail = (
         "; ".join(verdict.errors)
         if verdict is not None
-        else "generation did not produce a verifiable backend"
+        else (last_loop_error or "generation did not produce a verifiable backend")
     )
     state.error = "Backend verification failed after retry: " + detail
     return state.error
@@ -313,12 +546,18 @@ def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
     if state.is_fullstack:
         entry = state.artifact_path / "static" / "index.html"
         return entry.read_text(encoding="utf-8") if entry.is_file() else None
-    # html-app: prefer an .html the loop just wrote.
-    for rel in written:
-        if rel.endswith(".html"):
-            p = state.artifact_path / rel
-            if p.is_file():
-                return p.read_text(encoding="utf-8")
+    # html-app: pick ONLY among what this run actually wrote. `primary` is the
+    # expectation, `written` is the fact, and the fact is what must be verified:
+    # otherwise, with no primary set, candidate #1 becomes the default
+    # `dashboard.html`, and a leftover file of that name from a previous
+    # generation would shadow the fresh `report.html`. Within what was written,
+    # primary takes priority — for the case where the loop wrote several .html.
+    written_html = [rel for rel in written if rel.endswith(".html")]
+    target = state.primary or HTML_APP_DEFAULT_PRIMARY
+    for rel in [r for r in written_html if r == target] + written_html:
+        p = state.artifact_path / rel
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
     return None
 
 
@@ -326,10 +565,28 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
     if state.is_fullstack:
         system = prompts.build_frontend_system_prompt(state.artifact_path)
     else:
-        system = prompts.build_subagent_system_prompt(state.artifact_type, state.artifact_path)
+        system = prompts.build_subagent_system_prompt(
+            state.artifact_type, state.artifact_path, primary=state.primary
+        )
     verdict = None  # guards the terminal message when no attempt ever verified
+    # The loop's failure reason (round budget, no tool calls) is kept separately:
+    # it cannot ride on VerifyResult — a variable argument breaks the contract
+    # lock's AST walk (test_no_unresolvable_rule_literals).
+    last_loop_error: str | None = None
     extra = ""
     for attempt in range(GEN_VERIFY_MAX_RETRIES + 1):
+        if attempt > 0:
+            # With append, a retry would extend the truncated remains of the
+            # previous attempt. Delete deterministically: the "first chunk is
+            # always mode=\"w\"" rule is in the prompt, but cannot be relied on.
+            # Only for attempt > 0: before the first attempt the file may well be
+            # a working previous version of the artifact.
+            entry = (
+                state.artifact_path / "static" / "index.html"
+                if state.is_fullstack
+                else state.artifact_path / (state.primary or HTML_APP_DEFAULT_PRIMARY)
+            )
+            entry.unlink(missing_ok=True)
         if state.is_fullstack:
             kickoff = prompts.build_frontend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
         else:
@@ -342,6 +599,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
         if isinstance(result, str):
             extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             state.record("generate_frontend", "error", result)
+            last_loop_error = result
             continue
         for f in result["files_written"]:
             if f not in state.files_written:
@@ -350,16 +608,35 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
 
         html = _read_frontend_html(state, result["files_written"])
         if html is None:
-            extra = ("\n\n## Verification failed\nNo HTML entry file was written. "
-                     "Write static/index.html (or the html-app page).")
-            state.record("verify_frontend", "fail", "no html file")
-            continue
-        verdict = verifiers.verify_frontend(html, is_fullstack=state.is_fullstack)
+            # One channel: this message rides on VerifyResult like every other
+            # check — otherwise the contract lock cannot see it and the terminal
+            # error loses its cause (verdict used to stay None).
+            verdict = VerifyResult(errors=[
+                "No HTML entry file was written. Write static/index.html "
+                "(or the html-app page)."
+            ])
+        else:
+            verdict = verifiers.verify_frontend(html, is_fullstack=state.is_fullstack)
         state.trace_log.verifier(
             node="verify_frontend", ok=verdict.ok,
             errors=list(verdict.errors), warnings=list(verdict.warnings),
         )
         if verdict.ok:
+            # The model may have named the file differently — bring metadata in
+            # line with the fact, or the renderer opens the wrong file. Only after
+            # successful verification: if both attempts fail, the attempt-1 cleanup
+            # deletes the file and a primary written earlier would dangle.
+            if not state.is_fullstack:
+                actual = next(
+                    (f for f in result["files_written"] if f.endswith(".html")), None
+                )
+                if actual and actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
+                    from anton.core.tools.tool_handlers import _artifact_store
+
+                    store = _artifact_store(state.session)
+                    if store is not None:
+                        store.update(state.slug, primary=actual)
+                    state.primary = actual
             state.record("verify_frontend", "ok", "; ".join(verdict.warnings))
             return None
         state.record("verify_frontend", "fail", "; ".join(verdict.errors))
@@ -371,7 +648,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
     detail = (
         "; ".join(verdict.errors)
         if verdict is not None
-        else "generation did not produce a verifiable frontend"
+        else (last_loop_error or "generation did not produce a verifiable frontend")
     )
     state.error = "Frontend verification failed after retry: " + detail
     return state.error
@@ -510,6 +787,9 @@ async def _run_and_verify_app(state: GenState) -> str | None:
 def _success(state: GenState) -> dict:
     return {
         "files_written": state.files_written,
+        # Generation input, not output: it physically sits in the artifact folder
+        # but is not an artifact for the user (see the design spec, 3.6).
+        "internal_files": state.internal_files,
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }

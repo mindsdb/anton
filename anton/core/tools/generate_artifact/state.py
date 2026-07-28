@@ -82,10 +82,16 @@ class GenState:
     slug: str
     brief: str
     is_fullstack: bool
+    # Entry-file name from the artifact metadata. May be None — `create_artifact`
+    # allows omitting it; HTML_APP_DEFAULT_PRIMARY then applies.
+    primary: str | None = None
     data_notes: str = ""
     data_iterations: int = 0
     api_spec: str | None = None
     files_written: list[str] = field(default_factory=list)
+    # Generation inputs (spec.md, openapi.json) rather than user-facing output:
+    # reported in a separate field so the agent does not present them as artifacts.
+    internal_files: list[str] = field(default_factory=list)
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
