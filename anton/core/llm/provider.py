@@ -3,7 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from anton.core.interaction.elicit import AskAnswer, AskRequest
 
 
 @dataclass
@@ -105,6 +108,31 @@ class StreamContextCompacted:
     message: str
 
 
+@dataclass
+class StreamAskUser:
+    """A question the user must answer before the turn can continue.
+
+    ``id`` is the question id the host echoes back with the answer — the
+    originating ``tool_use.id`` for a tool question, a prefixed uuid for one
+    raised by a sub-agent.
+    """
+
+    id: str
+    request: "AskRequest"
+
+
+@dataclass
+class StreamAskUserAnswered:
+    """Retires a previously published question.
+
+    Emitted so a client replaying the buffer from the start does not show
+    live buttons on a question that was already answered.
+    """
+
+    id: str
+    answer: "AskAnswer"
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -114,6 +142,8 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamAskUser
+    | StreamAskUserAnswered
 )
 
 

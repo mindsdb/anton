@@ -19,6 +19,7 @@ __all__ = [
     "AskOption",
     "AskRequest",
     "Elicitor",
+    "elicit",
     "validate_request",
 ]
 
@@ -122,3 +123,53 @@ def validate_request(request: AskRequest) -> bool:
     if any(not value for value in values):
         return False
     return len(set(values)) == len(values)
+
+
+async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
+    """Ask *request* and wait for the answer. The only path a question takes.
+
+    Called by the ``ask_user`` / ``select_path`` handlers and directly by
+    orchestrator code in ``generate_artifact``. Everything that decides
+    "there will be no question" happens before ``begin()``, so a card is
+    never published for a question that cannot be answered.
+    """
+    import time
+
+    from anton.core.llm.provider import (
+        StreamAskUser,
+        StreamAskUserAnswered,
+        StreamTaskProgress,
+    )
+
+    elicitor = getattr(session, "elicitor", None)
+    if elicitor is None or request.kind not in elicitor.supported_kinds:
+        return AskAnswer(status="unavailable")
+    if not validate_request(request):
+        return AskAnswer(status="unavailable")
+    # Only published kinds need a live stream. A path picker renders in the
+    # terminal, so gating it on the emitter would break select_path in every
+    # host that has none — including the non-streaming turn().
+    if request.kind == "choice" and session.emitter is None:
+        return AskAnswer(status="unavailable")
+    if session.question_count >= MAX_QUESTIONS_PER_TURN:
+        return AskAnswer(status="limit")
+    session.question_count += 1
+
+    await elicitor.begin(question_id, request)  # open the channel FIRST
+    watcher = getattr(session, "escape_watcher", None)
+    started = time.monotonic()
+    try:
+        # Stops the CLI spinner before anything is printed into it.
+        await session.emit(StreamTaskProgress(phase="interactive", message=""))
+        if watcher is not None:
+            watcher.pause()
+        if request.kind == "choice":
+            await session.emit(StreamAskUser(id=question_id, request=request))
+        answer = await elicitor.ask(question_id, request)
+        await session.emit(StreamAskUserAnswered(id=question_id, answer=answer))
+        return answer
+    finally:
+        session.answer_wait_s += time.monotonic() - started
+        if watcher is not None:
+            watcher.resume()
+        await elicitor.end(question_id)
