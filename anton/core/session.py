@@ -57,16 +57,12 @@ from anton.core.llm.tracing import (
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
-    CREATE_ARTIFACT_TOOL,
-    LAUNCH_BACKEND_TOOL,
-    LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
-    OPEN_ARTIFACT_TOOL,
     READ_IMAGE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
-    UPDATE_ARTIFACT_METADATA_TOOL,
+    SKILL_TOOL_BUNDLES,
     ToolDef,
 )
 from anton.core.interaction.selection import SelectionElicitor
@@ -955,6 +951,10 @@ class ChatSession:
             self._build_core_tools()
             for tool in self._extra_tools:
                 self.tool_registry.register_tool(tool)
+            # After extra tools: keeps on-demand bundles at the same tail
+            # position the live recall path uses, so tool order stays
+            # cache-stable across turns.
+            self._replay_tool_bundles_from_history()
         return self.tool_registry.dump()
 
     def _build_core_tools(self) -> None:
@@ -1008,17 +1008,43 @@ class ChatSession:
             from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL
             self.tool_registry.register_tool(WEB_FETCH_FALLBACK_TOOL)
 
-        # Artifacts — only register when a workspace is bound to the
-        # session. Bare-cwd CLI sessions without `resolve_workspace`
-        # have nowhere to write artifacts to, and the tool handlers
-        # would just return error strings — better to hide the tools
-        # entirely so the LLM doesn't try to use them.
-        if self._workspace is not None:
-            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
-            self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
-            self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
-            self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+        # Artifact tools are NOT registered here
+        #  they're unlocked on demand via `_register_tool_bundle`
+
+    def _replay_tool_bundles_from_history(self) -> None:
+        """Re-unlock bundles from prior `recall_skill` calls in the history.
+
+        Lets sticky tools survive a session rebuild (e.g. server restart). If
+        compaction evicted the call, the model re-recalls when next needed.
+        """
+        for msg in self._history:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("name") == "recall_skill"
+                ):
+                    label = (block.get("input") or {}).get("label")
+                    if isinstance(label, str):
+                        self._register_tool_bundle(label.strip())
+
+    def _register_tool_bundle(self, label: str) -> None:
+        """Register the tools a recalled skill unlocks (sticky for the session).
+
+        No-op if the label maps to no bundle. Artifact tools need a bound
+        workspace, else their handlers only error — keep them hidden.
+        register_tool dedups by name, so repeated recalls are safe.
+        """
+        bundle = SKILL_TOOL_BUNDLES.get(label)
+        if not bundle:
+            return
+        if self._workspace is None:
+            return
+        for tool in bundle:
+            self.tool_registry.register_tool(tool)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -1726,6 +1752,9 @@ class ChatSession:
                 skill = None
             if skill is None:
                 continue
+            # Unlock gated tools (ENG-764) before the skip below, so a preload
+            # registers the bundle even when it won't re-inject the body.
+            self._register_tool_bundle(skill.label)
             # Skip skills whose full body is already in context — mirrors
             # handle_recall_skill's stub path so a preload can't duplicate a
             # procedure the planning model already has (wasted tokens).
@@ -1886,6 +1915,10 @@ class ChatSession:
                 )
 
             self._append_history({"role": "user", "content": tool_results})
+
+            # Rebuild: a tool this round (e.g. recall_skill) may have
+            # registered new tools the follow-up must see.
+            tools = self._build_tools()
 
             # Get follow-up from LLM
             response = await self.plan_with_recovery(system=system, tools=tools)
@@ -2593,6 +2626,10 @@ class ChatSession:
                 self._acc_maybe_nudge(tool_results)
 
                 self._append_history({"role": "user", "content": tool_results})
+
+                # Rebuild: a tool this round (e.g. recall_skill) may have
+                # registered new tools the follow-up must see.
+                tools = self._build_tools()
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
