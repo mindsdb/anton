@@ -1965,6 +1965,7 @@ class ChatSession:
         task = asyncio.create_task(
             self.tool_registry.dispatch_tool(self, tc.name, tc.input)
         )
+        getter = None
         try:
             while True:
                 getter = asyncio.ensure_future(self.emitter.get())
@@ -1974,14 +1975,21 @@ class ChatSession:
                 if getter in done:
                     yield ("event", getter.result())
                     continue
-                getter.cancel()
                 break
             while not self.emitter.empty():
                 yield ("event", self.emitter.get_nowait())
             yield ("result", task.result())
         finally:
+            # Both futures, not just the dispatch: asyncio.wait cancels neither
+            # of its own (that is hazard 1's premise), so a Stop landing while
+            # we are parked in wait — a tool running without emitting, i.e. the
+            # common Stop — would leave a pending emitter.get() registered in
+            # the queue's _getters forever, and asyncio later logs
+            # "Task was destroyed but it is pending!".
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            if getter is not None:
+                getter.cancel()
+            await asyncio.gather(task, getter, return_exceptions=True)
 
     async def turn_stream(
         self,

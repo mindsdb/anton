@@ -41,7 +41,14 @@ def session(make_session):
 
 
 async def test_all_events_arrive_in_order_before_the_result(session):
-    """Hazard 2: including the ones queued in the last instant."""
+    """Hazard 2, base case: everything a running tool emits is forwarded, in
+    order, and all of it before the result.
+
+    Served entirely by the in-loop branch — this handler emits synchronously
+    while the dispatch is still running — so it says nothing about events
+    queued in the last instant. That claim belongs to the two dedicated
+    last-instant tests below.
+    """
 
     async def handler(sess, tc_input):
         for i in range(5):
@@ -79,8 +86,14 @@ async def test_an_event_queued_in_the_last_instant_is_not_dropped(session):
     tell whether the tail drain exists. This one pins the ordering that makes
     the tail drain meaningful: an event that reaches the queue only after the
     dispatch task is already done must still be forwarded, and it must be
-    forwarded before the result. An implementation that let `task in done`
-    win the race would drop it whether or not the tail drain is there.
+    forwarded before the result.
+
+    At THIS timing — the emit lands before `asyncio.wait`'s waiter is
+    resolved — the getter also completes, so `getter in done` is True and the
+    in-loop branch carries the event. That makes this a test of the getter's
+    priority over `task in done`, not of the tail drain: it passes with the
+    tail drain removed. Do not delete the tail drain on its authority; see
+    the one-hop-late test below, which fails without it.
     """
 
     async def handler(sess, tc_input):
@@ -88,6 +101,36 @@ async def test_an_event_queued_in_the_last_instant_is_not_dropped(session):
         # returned, i.e. after the dispatch task is done. This is the shape
         # of anything emitted by a sub-agent outliving its tool call.
         asyncio.create_task(sess.emit("late"))
+        return "done"
+
+    session.tool_registry.register_tool(
+        ToolDef(name="probe", description="", input_schema={}, handler=handler)
+    )
+    events, result = await _collect(session, _tc())
+    assert events == ["late"]
+    assert result == "done"
+
+
+async def test_an_event_emitted_one_hop_late_is_recovered_by_the_tail_drain(session):
+    """Hazard 2, the timing the tail drain exists for.
+
+    Resolving `asyncio.wait`'s waiter takes two `call_soon` hops:
+    `_on_completion` -> `waiter.set_result` -> the waiting coroutine's
+    `__wakeup`. An emit performed by a callback scheduled BETWEEN those two
+    hops — one `await asyncio.sleep(0)` later than the test above — schedules
+    the getter's own wakeup after the drain loop has already resumed. So the
+    getter is still pending, `getter in done` is False, the loop breaks, and
+    the item is sitting untouched in `Queue._queue` (`put_nowait`'s
+    `_wakeup_next` never hands it over). The tail drain is the only thing
+    that recovers it; without it the event is silently dropped.
+    """
+
+    async def handler(sess, tc_input):
+        async def _one_hop_late():
+            await asyncio.sleep(0)
+            await sess.emit("late")
+
+        asyncio.create_task(_one_hop_late())
         return "done"
 
     session.tool_registry.register_tool(
@@ -228,18 +271,44 @@ async def test_cancelling_while_parked_on_a_yield_still_cancels_the_tool(session
 
 
 async def test_no_task_is_left_running_after_the_helper_closes(session):
+    """Hazard 1: BOTH futures the helper owns must be gone afterwards.
+
+    Asserted on the specific futures, not on a count of `all_tasks()` with
+    slack: the helper owns exactly two, the dispatch task and the pending
+    `emitter.get()` it parks on, and a count-with-slack assertion passes
+    happily while leaking one of them. `asyncio.wait` cancels neither of its
+    own futures on cancellation, so the getter needs its own `cancel()` in the
+    helper's `finally` — otherwise it stays registered in the queue's
+    `_getters` and asyncio eventually logs "Task was destroyed but it is
+    pending!".
+
+    The Stop shape reproduced here is the common one: a tool that is running
+    and has not emitted, i.e. the helper parked inside `asyncio.wait`.
+    """
+    dispatch = {}
+
     async def handler(sess, tc_input):
+        dispatch["task"] = asyncio.current_task()
         await asyncio.sleep(3600)
 
     session.tool_registry.register_tool(
         ToolDef(name="probe", description="", input_schema={}, handler=handler)
     )
+    queue = session.emitter._queue
     before = len(asyncio.all_tasks())
     gen_task = asyncio.create_task(_collect(session, _tc()))
     await asyncio.sleep(0.05)
-    assert len(asyncio.all_tasks()) > before  # the dispatch task is running
+    # Parked in asyncio.wait: the tool is running, the getter is pending.
+    assert not dispatch["task"].done()
+    assert len(queue._getters) == 1
+
     gen_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await gen_task
     await asyncio.sleep(0.05)
-    assert len(asyncio.all_tasks()) <= before + 1
+
+    assert dispatch["task"].cancelled(), "the dispatch task outlived the helper"
+    assert not queue._getters, "a pending emitter.get() is still registered"
+    # No slack: `before` was taken with only the test's own task alive, and
+    # both of the helper's futures are now accounted for above.
+    assert len(asyncio.all_tasks()) == before
