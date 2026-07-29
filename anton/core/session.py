@@ -1941,6 +1941,48 @@ class ChatSession:
 
         return reply
 
+    async def _dispatch_draining(self, tc):
+        """Run one tool while forwarding whatever it emits out of band.
+
+        Yields ``("event", ev)`` for each out-of-band event, then
+        ``("result", result_text)``. Four details are load-bearing:
+
+        1. ``task.cancel()`` in ``finally`` — ``asyncio.wait`` does NOT
+           cancel its futures when the awaiting coroutine is cancelled, so
+           without this a Stop unwinds the turn while the tool keeps waiting
+           on a human for the full timeout, holding its answer channel open.
+        2. The tail drain — events queued immediately before the tool
+           returns (``StreamAskUserAnswered`` above all) would otherwise be
+           dropped, leaving a live card that can never be retired.
+        3. ``task.result()`` rather than a bare ``await`` — ``asyncio.wait``
+           never re-raises a completed task's exception, and the caller's
+           ``except Exception`` is what turns a tool failure into a tool
+           result for the model.
+        4. Callers must ``aclose()`` this generator: if the turn is
+           cancelled while we are suspended at a ``yield``, our ``finally``
+           only runs on finalization, which GC would otherwise defer.
+        """
+        task = asyncio.create_task(
+            self.tool_registry.dispatch_tool(self, tc.name, tc.input)
+        )
+        try:
+            while True:
+                getter = asyncio.ensure_future(self.emitter.get())
+                done, _ = await asyncio.wait(
+                    {task, getter}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if getter in done:
+                    yield ("event", getter.result())
+                    continue
+                getter.cancel()
+                break
+            while not self.emitter.empty():
+                yield ("event", self.emitter.get_nowait())
+            yield ("result", task.result())
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def turn_stream(
         self,
         user_input: str | list[dict],
@@ -2508,13 +2550,19 @@ class ChatSession:
                                     )
                         elif (
                             tc.name == "connect_new_datasource"
-                            or tc.name == "select_path"
                             or (
                                 tc.name == "publish_or_preview"
                                 and tc.input.get("action") == "publish"
                             )
                         ):
-                            # Interactive tool — pause spinner AND escape watcher
+                            # Interactive tool — pause spinner AND escape
+                            # watcher. `select_path` is deliberately NOT here:
+                            # elicit() owns its own spinner and watcher
+                            # handling, and EscapeWatcher._paused is a boolean
+                            # flag rather than a counter, so a nested pause
+                            # would let the first resume() hand the terminal
+                            # back while this branch still believed it was
+                            # paused.
                             yield StreamTaskProgress(
                                 phase="interactive",
                                 message="",
@@ -2522,9 +2570,15 @@ class ChatSession:
                             if self.escape_watcher:
                                 self.escape_watcher.pause()
                             try:
-                                result_text = await self.tool_registry.dispatch_tool(
-                                    self, tc.name, tc.input
-                                )
+                                agen = self._dispatch_draining(tc)
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            result_text = _payload
+                                finally:
+                                    await agen.aclose()
                             finally:
                                 if self.escape_watcher:
                                     self.escape_watcher.resume()
@@ -2538,14 +2592,26 @@ class ChatSession:
                                 phase="tool_start",
                                 message=tc.name,
                             )
-                            result_text = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
+                            self.answer_wait_s = 0.0
+                            agen = self._dispatch_draining(tc)
+                            try:
+                                async for _kind, _payload in agen:
+                                    if _kind == "event":
+                                        yield _payload
+                                    else:
+                                        result_text = _payload
+                            finally:
+                                await agen.aclose()
+                            # Human thinking time is not the tool's runtime:
+                            # a 4-minute ask_user would otherwise show up in
+                            # the CLI report and in telemetry as a slow tool.
+                            _tool_elapsed = (
+                                _time.monotonic() - _tool_t0 - self.answer_wait_s
                             )
-                            _tool_elapsed = _time.monotonic() - _tool_t0
                             yield StreamTaskProgress(
                                 phase="tool_done",
                                 message=tc.name,
-                                eta_seconds=_tool_elapsed,
+                                eta_seconds=max(_tool_elapsed, 0.0),
                             )
                             if (
                                 tc.name == "scratchpad"
