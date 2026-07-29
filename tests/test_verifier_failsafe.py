@@ -133,3 +133,64 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         assert any("how you'd like to proceed" in t for t in final_texts)
     finally:
         await session.close()
+
+
+async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(workspace):
+    """The ENG-1081 ladder can run dry: a verdict truncated at 2048 AND at the
+    4096 retry (narrating model, huge session) used to fall into the same
+    silent fake-COMPLETE this file exists to remove. Exhausted budgets are not
+    a verdict either — the honest-diagnosis path must fire for them too.
+    """
+    from anton.core.llm.provider import StructuredOutputError
+    from anton.core.session import _VERIFIER_TOKEN_BUDGETS
+
+    budgets_seen: list[int] = []
+
+    async def always_truncated(_schema, *, system, messages, max_tokens):
+        budgets_seen.append(max_tokens)
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_truncated)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamComplete(response=_text_response("Done running the script."))
+            ])
+        return _FakeAsyncIter([
+            StreamComplete(
+                response=_text_response(
+                    "I ran the script; an internal check failed — how would "
+                    "you like to proceed?"
+                )
+            )
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        events = [e async for e in session.turn_stream("run my script")]
+
+        assert budgets_seen == list(_VERIFIER_TOKEN_BUDGETS), (
+            "the ladder must exhaust every budget before giving up"
+        )
+        progress_msgs = [e.message for e in events if isinstance(e, StreamTaskProgress)]
+        assert "Checking in before continuing..." in progress_msgs, (
+            "exhausted budgets must fail toward the diagnosis, not a silent COMPLETE"
+        )
+        assert call_count == 3
+    finally:
+        await session.close()
