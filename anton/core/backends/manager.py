@@ -39,6 +39,76 @@ class ScratchpadManager:
         """Read-only view of the active scratchpad runtimes."""
         return self._pads
 
+    def _agent_pads_file(self):
+        """Where this conversation's agent-chosen pad names are recorded, or None.
+
+        Sits inside the namespace-snapshot directory so it is scoped per conversation
+        and reclaimed by the same cleanup (cowork-server prunes that directory on
+        conversation delete). Underscore-prefixed so the `*.pkl` snapshot glob skips it.
+
+        Returns None without a `session_id`. There is no correct shared bucket: the
+        snapshot dir would fall back to `_no-session`, so every unscoped conversation
+        (bare CLI, tests) would pool its pad names and the guard would start challenging
+        on names from unrelated past sessions. Better to keep the previous in-memory-only
+        behaviour than to persist into a bucket that isn't ours.
+        """
+        if not self._session_id:
+            return None
+        try:
+            from anton.core.backends.local import default_venvs_base, snapshot_dir
+
+            return snapshot_dir(
+                default_venvs_base(self._workspace_path), self._session_id
+            ) / "_agent_pads.json"
+        except Exception:
+            return None
+
+    def agent_pads(self) -> set[str]:
+        """Pad names the AGENT has exec'd in this conversation, including earlier turns.
+
+        The single-scratchpad guard needs this. It originally consulted only an
+        in-memory set on `ChatSession` — but cowork-server builds a fresh `ChatSession`
+        (and so a fresh manager) per user message, and the agent switches pad names
+        precisely *at* turn boundaries, so that set was always empty exactly when the
+        guard needed it. It fired 0 times across 676 cells of a real session that
+        accumulated 22 pad names (ENG-1124 Fix 5).
+
+        Deliberately NOT derived from `self._pads` or from the snapshot files: both
+        include system-created pads (the artifact backend launcher's slug pad), which
+        must never count against the agent. Only names the guard explicitly recorded.
+        """
+        path = self._agent_pads_file()
+        if path is None:
+            return set()
+        try:
+            import json
+
+            names = json.loads(path.read_text(encoding="utf-8"))
+            return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+        except (OSError, ValueError):
+            return set()
+
+    def record_agent_pad(self, name: str) -> None:
+        """Remember that the agent exec'd `name`, so a later turn's guard can see it.
+
+        Best-effort: losing this only returns the guard to its previous behaviour.
+        """
+        path = self._agent_pads_file()
+        if path is None or not name:
+            return
+        try:
+            import json
+
+            current = self.agent_pads()
+            if name in current:
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(sorted(current | {name})), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            pass
+
     @property
     def available_packages(self) -> list[str]:
         """Sorted list of installed package distribution names."""

@@ -81,6 +81,65 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
 _MAX_OUTPUT = 10_000
 
 
+# ── Namespace-snapshot layout (ENG-1124) ────────────────────────────────────
+# One derivation, shared by the writer (the runtime) and the single-scratchpad
+# guard (which needs to know which pads a conversation has already used, across
+# turns). Keeping it in one place is the point: if these two disagreed, the guard
+# would silently stop firing again.
+
+def default_venvs_base(workspace_path: Path | None) -> Path:
+    """Where a workspace's scratchpad venvs live."""
+    if workspace_path is not None:
+        return workspace_path / ".anton" / "scratchpad-venvs"
+    return Path("~/.anton/scratchpad-venvs").expanduser()
+
+
+def _safe_segment(value: str, fallback: str) -> str:
+    """A path-safe version of a model-chosen string.
+
+    Deliberately NOT case-folded or separator-collapsed — that would change which
+    pads share state, and belongs with the venv-path normalisation in ENG-1133.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value or "").strip("._") or fallback
+
+
+def snapshot_dir(venvs_base: Path, session_id: str | None) -> Path:
+    """Namespace-snapshot directory for one conversation.
+
+    Falls back to a shared `_no-session` bucket when the host supplies no session
+    id (bare CLI use, tests), where there is only one conversation anyway.
+    """
+    session = _safe_segment(session_id or "", "")
+    return venvs_base.parent / "scratchpad-sessions" / (session or "_no-session")
+
+
+def snapshot_file(venvs_base: Path, session_id: str | None, pad_name: str) -> Path | None:
+    """Snapshot path for one pad, or None if it would escape the snapshot root."""
+    base = snapshot_dir(venvs_base, session_id)
+    path = base / f"{_safe_segment(pad_name, 'scratchpad')}.pkl"
+    # Belt for the sanitiser: never hand back a path outside the snapshot root.
+    try:
+        path.resolve().relative_to(base.resolve())
+    except (ValueError, OSError):
+        return None
+    return path
+
+
+def pads_with_snapshots(venvs_base: Path, session_id: str | None) -> set[str]:
+    """Pad names this conversation has a saved namespace for.
+
+    This is what lets the single-scratchpad guard work across turns. The guard used
+    to consult only an in-memory set on `ChatSession`, which is rebuilt every turn —
+    and since the agent switches pad names precisely *at* turn boundaries, that set
+    was always empty when it mattered, so the guard never fired (ENG-1124 Fix 5).
+    The snapshot directory is the same fact, on disk, already maintained.
+    """
+    try:
+        return {p.stem for p in snapshot_dir(venvs_base, session_id).glob("*.pkl")}
+    except OSError:
+        return set()
+
+
 class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
@@ -124,12 +183,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
-        if _venvs_base is not None:
-            self._venvs_base = _venvs_base
-        elif workspace_path is not None:
-            self._venvs_base = workspace_path / ".anton" / "scratchpad-venvs"
-        else:
-            self._venvs_base = Path("~/.anton/scratchpad-venvs").expanduser()
+        self._venvs_base = (
+            _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
+        )
 
     def _session_snapshot_path(self) -> Path | None:
         """Where this pad's namespace snapshot lives, or None if it can't be written.
@@ -144,22 +200,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         Returns None when the directory cannot be created; the caller then leaves
         ANTON_SCRATCHPAD_SESSION_PATH unset so the failure is reported rather than silent.
         """
-        # The pad name is model-chosen and flows into a filesystem path, so contain it.
-        # Keep it recognisable but strip anything that could traverse or confuse a path.
-        # Deliberately NOT case-folded or separator-collapsed: that would change which
-        # pads share state, and belongs with the venv-path normalisation in ENG-1133.
-        safe_pad = re.sub(r"[^A-Za-z0-9._-]", "_", self.name).strip("._") or "scratchpad"
-        safe_session = re.sub(r"[^A-Za-z0-9._-]", "_", self._session_id or "").strip("._")
-        base = self._venvs_base.parent / "scratchpad-sessions" / (safe_session or "_no-session")
-        try:
-            base.mkdir(parents=True, exist_ok=True)
-        except OSError:
+        path = snapshot_file(self._venvs_base, self._session_id, self.name)
+        if path is None:
             return None
-        path = (base / f"{safe_pad}.pkl").resolve()
-        # Belt for the sanitiser above: never hand back a path outside the snapshot root.
         try:
-            path.relative_to(base.resolve())
-        except ValueError:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
             return None
         return path
 
