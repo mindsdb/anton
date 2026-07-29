@@ -29,6 +29,11 @@ class _Response:
     tool_calls: list[dict] = field(default_factory=list)
     # None = honour request's `stream` flag; True/False = override
     force_streaming: bool | None = None
+    # Reported as `usage.completion_tokens`. Set it equal to the request's
+    # `max_tokens` to emulate a truncated response — which is how the real
+    # MindsHub gateway presents one, since it still says
+    # `finish_reason: "stop"` at the cap (ENG-1082).
+    output_tokens: int = 10
 
 
 class StubServer:
@@ -81,6 +86,22 @@ class StubServer:
                 "arguments": {"status": status, "reason": reason},
             }],
             force_streaming=False,
+        ))
+        return self
+
+    def queue_verification_truncated(self, output_tokens: int = 2048) -> "StubServer":
+        """Queue a verdict call that narrated instead of calling the tool and ran
+        out of budget doing it (ENG-1081).
+
+        Text, no tool call, and `completion_tokens` equal to the verifier's first
+        budget — exactly what `mindshub_air`/`kimi`/`deepseek` return. The
+        session should retry with the larger budget rather than treating this as
+        a verdict.
+        """
+        self._queue.put(_Response(
+            content="Let me analyze this conversation carefully. The user asked for",
+            force_streaming=False,
+            output_tokens=output_tokens,
         ))
         return self
 
@@ -243,7 +264,11 @@ def _send_json(handler: BaseHTTPRequestHandler, resp: _Response) -> None:
             "message": message,
             "finish_reason": finish_reason,
         }],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": resp.output_tokens,
+            "total_tokens": 10 + resp.output_tokens,
+        },
     }
     body = json.dumps(data).encode()
     handler.send_response(200)

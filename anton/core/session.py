@@ -39,6 +39,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StructuredOutputError,
     TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
@@ -156,6 +157,81 @@ class _VerifierVerdict(BaseModel):
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
+
+
+# Output budgets for the verdict call: first attempt, then the retry used when
+# it comes back truncated (ENG-1081).
+#
+# Models that narrate before acting (`mindshub_air`/`kimi`, `deepseek`, `qwen`)
+# spend the budget on prose and never reach the forced tool call. The original
+# 256 truncated them on essentially every call — 98.6% of `mindshub_air` verdicts
+# in prod returned no tool call, which the fail-safe below turned into a silent
+# "task complete".
+#
+# 2048 is sized from a measured distribution, not one sample: 16 identical calls
+# spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is also
+# why there is no "this model can't do it" latch — one truncation is a tail
+# sample, not proof about the next turn — and why the 4096 retry exists rather
+# than a single bigger budget. 1024 was measurably too small. Nothing pays for
+# headroom it doesn't use; first-party models answer in 43–115 tokens either way.
+_VERIFIER_TOKEN_BUDGETS = (2048, 4096)
+
+# Appended to the verifier system prompt. Shortens the preamble on narrating
+# models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
+# budgets above. Tool name comes off the schema class so it can't go stale.
+_VERIFIER_NO_PREAMBLE = (
+    f"Call the {_VerifierVerdict.__name__} tool immediately as your first "
+    "action. Do not think out loud, restate the conversation, or explain your "
+    "reasoning before calling it — put your one-sentence justification in the "
+    "tool's `reason` field."
+)
+
+
+def _safe_error_detail(exc: BaseException) -> str:
+    """Describe an exception for logs without copying model or user content.
+
+    Neither ``str(exc)`` nor ``repr(exc)`` is safe here: a Pydantic
+    ``ValidationError`` embeds the rejected ``input_value`` — for the verifier
+    that's model-generated text derived from the user's conversation — and
+    provider exceptions can carry response bodies. Emits the exception type,
+    plus for validation errors the field locations and error codes only, which
+    is what actually identifies the failure.
+    """
+    # This runs *inside* an `except` handler, so it must not raise: an exception
+    # escaping here would turn a gracefully-handled verifier failure into a dead
+    # turn. Everything below is therefore wrapped, including the attribute reads
+    # (a custom exception can expose `status_code`/`errors` as a property that
+    # raises).
+    try:
+        name = type(exc).__name__
+    except Exception:  # pragma: no cover — defensive
+        return "unavailable"
+    try:
+        status = getattr(exc, "status_code", None)
+        if status is not None:
+            return f"{name}(status={status})"
+        errors = getattr(exc, "errors", None)
+        if callable(errors):
+            try:
+                details = errors(
+                    include_input=False, include_url=False, include_context=False
+                )
+            except TypeError:  # pydantic v1 has no include_* kwargs
+                details = errors()
+            # Only `loc` and `type` are ever read — `msg`/`input`/`ctx` can
+            # quote the rejected value.
+            fields = ",".join(
+                f"{'.'.join(str(p) for p in e.get('loc') or ())}:{e.get('type', '?')}"
+                for e in details
+            )
+            if fields:
+                return f"{name}({fields})"
+    except Exception:
+        # Anything odd about this exception object — a property that raises, an
+        # `errors()` that misbehaves — degrades to the type name, never a crash
+        # and never the message.
+        pass
+    return name
 
 
 def _render_tool_result_content(content, cap: int) -> str:
@@ -2656,25 +2732,64 @@ class ChatSession:
                 "You are a task-completion verifier. Decide whether the user's "
                 "request is complete, the assistant is waiting on the user, the work "
                 "is unfinished, or the assistant is blocked. Follow the status "
-                "definitions exactly."
+                "definitions exactly.\n\n"
+                # Models that narrate before acting spend the whole budget on
+                # prose and never reach the tool call (ENG-1081). Asking for the
+                # call first shortens the preamble; it does not eliminate it,
+                # which is why the budget below is generous as well.
+                + _VERIFIER_NO_PREAMBLE
             )
-            try:
-                verdict = await self._llm.generate_object_code(
-                    _VerifierVerdict,
-                    system=verifier_system,
-                    messages=verify_messages,
-                    max_tokens=256,
-                )
+            verdict = None
+            for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
+                try:
+                    verdict = await self._llm.generate_object_code(
+                        _VerifierVerdict,
+                        system=verifier_system,
+                        messages=verify_messages,
+                        max_tokens=budget,
+                    )
+                    break
+                except StructuredOutputError as exc:
+                    # A truncated verdict is a budget problem, not a verdict: the
+                    # model narrated past `budget` before it reached the tool call
+                    # (ENG-1081). Retry with more room. Any other structured-output
+                    # failure won't be fixed by a bigger budget, so don't pay for it.
+                    retrying = exc.truncated and attempt + 1 < len(
+                        _VERIFIER_TOKEN_BUDGETS
+                    )
+                    _verifier_log.info(
+                        "completion-verifier verdict=%s budget=%d output_tokens=%d "
+                        "stop_reason=%s retrying=%s",
+                        "TRUNCATED" if exc.truncated else "NO_TOOL_CALL",
+                        budget, exc.output_tokens, exc.stop_reason, retrying,
+                    )
+                    if not retrying:
+                        break
+                except Exception as exc:
+                    # Enough to tell the failure modes apart — four used to
+                    # collapse into one "verifier unavailable" line — but never
+                    # the exception message, which can carry conversation
+                    # content (ENG-1081).
+                    _verifier_log.info(
+                        "completion-verifier verdict=ERROR budget=%d error=%s",
+                        budget, _safe_error_detail(exc),
+                    )
+                    break
+
+            if verdict is not None:
                 status = verdict.status
                 reason = verdict.reason.strip()
-            except Exception:
+            else:
                 # Verifier failed — fail safe by treating the turn as done rather
                 # than forcing a continuation the user never asked for.
                 status, reason = "COMPLETE", "verifier unavailable"
 
             _verifier_log.info(
-                "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d reason=%s",
-                status, continuation, self._max_continuations, tool_round, reason,
+                # No `reason` — it's the model's free-text justification, derived
+                # from the user's conversation, and this is an ordinary app log.
+                # It stays in the Langfuse trace, where that content belongs.
+                "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d",
+                status, continuation, self._max_continuations, tool_round,
             )
 
             if status in ("COMPLETE", "WAITING"):
