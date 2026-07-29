@@ -30,6 +30,7 @@ from anton.core.llm.provider import (
     ModelUnavailableError,
     TokenLimitExceeded,
     TransientProviderError,
+    classify_transient,
 )
 
 
@@ -116,8 +117,6 @@ def test_429_fastapi_detail_maps_to_token_limit():
 def test_429_enveloped_detail_also_maps_to_token_limit():
     # If the gateway ever moves its 429 into the OpenAI envelope while keeping
     # the `detail` field, the SDK unwraps it to top level — still classified.
-    # (An envelope carrying only `message` — OpenAI's own quota dialect —
-    # deliberately stays generic; see the mapper docstring's known limits.)
     # Classified before the transient path (429+detail → quota), so ENG-673's
     # bare-429-is-transient change leaves this untouched.
     exc = _sdk_error(429, json_body={"error": {"detail": "Monthly limit exceeded for tokens: 5/5"}})
@@ -135,6 +134,40 @@ def test_bare_429_is_transient_fail_fast():
         _raise_for_status_error(exc, "sonnet")
     assert err.value.session_backoff is False
     assert "rate-limiting" in str(err.value).lower()
+
+
+def _openai_quota_429():
+    """OpenAI's own quota dialect, byte-shaped like the live body captured
+    from a zero-quota project key on 2026-07-28."""
+    return _sdk_error(429, json_body={"error": {
+        "message": (
+            "You exceeded your current quota, please check your plan and "
+            "billing details. For more information on this error, read the "
+            "docs: https://platform.openai.com/docs/guides/error-codes/api-errors."
+        ),
+        "type": "insufficient_quota",
+        "param": None,
+        "code": "insufficient_quota",
+    }})
+
+
+def test_429_insufficient_quota_maps_to_token_limit():
+    # BYOK OpenAI quota exhaustion is permanent for the identical request —
+    # it must fail fast as a billing error, never enter the retry loop and
+    # surface a misleading "provider overloaded" after the backoff budget.
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_for_status_error(_openai_quota_429(), "gpt-4o")
+    assert "platform.openai.com" in str(err.value)
+    # BYOK error: the remedy is the user's OpenAI billing, not a MindsHub plan.
+    assert "console.mindshub.ai" not in str(err.value)
+
+
+def test_429_insufficient_quota_never_transient():
+    # Defense for direct classify_transient callers (mid-stream paths): the
+    # quota 429 has no `detail`, so without the code-exact guard it would
+    # classify as a retryable plain rate-limit.
+    exc = _openai_quota_429()
+    assert classify_transient(429, exc.body, provider="openai", model="gpt-4o") is None
 
 
 def test_429_list_detail_stays_generic():

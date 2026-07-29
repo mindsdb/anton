@@ -72,10 +72,10 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     Known limits, on purpose: a wire body carrying BOTH a top-level
     ``detail`` and an ``error`` envelope loses the detail inside the SDK
     (the unwrap discards siblings of ``error``) — unrecoverable from
-    ``exc.body``, and no real dialect emits that shape. And a 429 whose
-    envelope carries only ``message`` (OpenAI's own quota dialect, e.g.
-    ``insufficient_quota``) stays generic: classifying arbitrary provider
-    messages as MindsHub quota would put an upsell CTA on BYOK errors.
+    ``exc.body``, and no real dialect emits that shape. OpenAI's own quota
+    dialect (429 + ``insufficient_quota`` code) maps to TokenLimitExceeded
+    with BYOK copy (OpenAI billing link, no MindsHub CTA) — detection is
+    code-exact so arbitrary provider messages never get quota treatment.
     """
     if exc.status_code == 401:
         raise ConnectionError(
@@ -93,6 +93,17 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         raise TokenLimitExceeded(msg) from exc
 
     code = body.get("code") or envelope.get("code")
+    etype = body.get("type") or envelope.get("type")
+    # OpenAI's own quota dialect (BYOK): permanent for the identical request, so
+    # retrying it as a rate limit just burns the session's backoff budget and
+    # surfaces a misleading "provider overloaded". No MindsHub CTA — the remedy
+    # is the user's OpenAI billing, not an upgrade.
+    if exc.status_code == 429 and "insufficient_quota" in (code, etype):
+        raise TokenLimitExceeded(
+            "Server returned 429 — your OpenAI quota is exhausted. Check your plan "
+            "and billing at https://platform.openai.com."
+        ) from exc
+
     if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
         if code == "model_access_denied":
             msg = (
