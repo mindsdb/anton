@@ -303,7 +303,7 @@ async def test_double_failure_is_recorded_in_history(workspace):
     assert any(
         m.get("role") == "assistant"
         and _TRUNCATION_FAILURE_NOTICE in str(m.get("content"))
-        for m in session._history
+        for m in session.history
     )
 
 
