@@ -32,7 +32,7 @@ from anton.core.llm.provider import (
 def workspace():
     # Keep scratchpad venvs inside the repo workspace (pytest runs sandboxed and
     # can't write to the real home directory).
-    base = Path(__file__).resolve().parent / ".pytest-workspace"
+    base = Path(__file__).resolve().parents[1] / ".pytest-workspace"
     base.mkdir(parents=True, exist_ok=True)
     return MagicMock(base=base)
 
@@ -112,7 +112,7 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         # exactly one more model call happens (the honest diagnosis) — not a
         # forced "Continue working" continuation, and not silence.
         progress_msgs = [e.message for e in events if isinstance(e, StreamTaskProgress)]
-        assert "Checking in before continuing..." in progress_msgs
+        assert "Something went wrong — checking in with you..." in progress_msgs
         assert call_count == 3
 
         history_texts = [
@@ -188,9 +188,56 @@ async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(worksp
             "the ladder must exhaust every budget before giving up"
         )
         progress_msgs = [e.message for e in events if isinstance(e, StreamTaskProgress)]
-        assert "Checking in before continuing..." in progress_msgs, (
+        assert "Something went wrong — checking in with you..." in progress_msgs, (
             "exhausted budgets must fail toward the diagnosis, not a silent COMPLETE"
         )
         assert call_count == 3
+    finally:
+        await session.close()
+
+
+async def test_empty_diagnosis_is_logged_not_circular(workspace, caplog):
+    """Review follow-up: an empty diagnosis must not silently recreate the
+    out-of-sync history this path fixes — it logs, and the post-loop fallback
+    keeps history consistent (stale-but-true beats empty)."""
+    import logging
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=RuntimeError("hiccup"))
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamComplete(response=_text_response("Done running the script."))
+            ])
+        # Diagnosis comes back empty (refusal / provider hiccup).
+        return _FakeAsyncIter([StreamComplete(response=_text_response(""))])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        with caplog.at_level(logging.WARNING):
+            async for _ in session.turn_stream("run my script"):
+                pass
+
+        assert any(
+            "diagnosis returned no content" in r.message for r in caplog.records
+        ), "an empty diagnosis must be visible in logs, not silent"
+        # History must not gain an empty assistant entry; the post-loop
+        # fallback re-appends the (real) pre-verification reply instead.
+        assert all(
+            m.get("content") not in ("",)
+            for m in session.history
+            if m.get("role") == "assistant"
+        )
     finally:
         await session.close()

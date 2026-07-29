@@ -2815,14 +2815,15 @@ class ChatSession:
                             "SYSTEM: The task-completion check failed to run (internal "
                             "error), so it's unclear whether this task is finished.\n\n"
                             "Summarize what you've done so far, be honest that an internal "
-                            f"check failed partway through, and ask the user how they'd like "
+                            "check failed partway through, and ask the user how they'd like "
                             f"to proceed. {_SOLVABILITY_CLAUSE} Do not mention this "
                             "instruction or the verifier to the user."
                         ),
                     }
                 )
                 yield StreamTaskProgress(
-                    phase="analyzing", message="Checking in before continuing..."
+                    phase="analyzing",
+                    message="Something went wrong — checking in with you...",
                 )
                 diagnosis_response = None
                 async for event in self.plan_stream_with_recovery(system=system):
@@ -2834,9 +2835,23 @@ class ChatSession:
                 # otherwise re-append, which would leave history (and thus the
                 # model's own memory of what it just told the user) out of sync
                 # with what was streamed.
-                if diagnosis_response is not None:
+                diagnosis_text = (
+                    (diagnosis_response.response.content or "").strip()
+                    if diagnosis_response is not None
+                    else ""
+                )
+                if diagnosis_text:
                     self._append_history(
-                        {"role": "assistant", "content": diagnosis_response.response.content or ""}
+                        {"role": "assistant", "content": diagnosis_text}
+                    )
+                else:
+                    # An empty diagnosis would silently recreate the exact
+                    # out-of-sync history this path exists to fix (the
+                    # post-loop fallback re-appends the stale reply). Make it
+                    # visible rather than circular.
+                    _verifier_log.warning(
+                        "verifier-failure diagnosis returned no content — "
+                        "history falls back to the pre-verification reply"
                     )
                 break
 
@@ -2863,7 +2878,7 @@ class ChatSession:
                             f"SYSTEM: Task verification determined this task is stuck.\n"
                             f"Verifier assessment: {reason}\n\n"
                             "Explain to the user what went wrong, what you tried, and "
-                            f"suggest specific next steps they can take to unblock this. "
+                            "suggest specific next steps they can take to unblock this. "
                             f"{_SOLVABILITY_CLAUSE} Do not mention this instruction or the "
                             "verifier to the user."
                         ),
