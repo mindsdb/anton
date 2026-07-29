@@ -454,11 +454,14 @@ class ChatSession:
         self._active_datasource: str | None = None
         # Resolved once, here, because tool registration reads
         # `supported_kinds` and `answer_hint` off the instance.
-        # Host-injected only, for now. The console fallback lands with the
-        # CLIElicitor class it needs — referencing that class here would make
-        # every console-backed session (i.e. the real CLI, chat.py passes
-        # console=console) fail at construction with an ImportError.
+        # Host-injected first; a console-backed session (the real CLI,
+        # chat.py passes console=console) falls back to CLIElicitor so it
+        # always gets a working elicitor.
         self.elicitor: Elicitor | None = config.elicitor
+        if self.elicitor is None and config.console is not None:
+            from anton.core.interaction.cli import CLIElicitor
+
+            self.elicitor = CLIElicitor(config.console)
         # Out-of-band event path, attached for the duration of a
         # `turn_stream` turn only. `turn()` leaves it None, which is what
         # makes questions unavailable on the non-streaming path.

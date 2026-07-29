@@ -25,6 +25,7 @@ from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.core.llm.provider import (
     ModelUnavailableError,
     TokenLimitExceeded,
+    StreamAskUser,
     StreamComplete,
     StreamContextCompacted,
     StreamTaskProgress,
@@ -1876,6 +1877,8 @@ async def _chat_loop(
                             display.on_tool_use_delta(event.id, event.json_delta)
                         elif isinstance(event, StreamToolUseEnd):
                             display.on_tool_use_end(event.id)
+                        elif isinstance(event, StreamAskUser):
+                            display.show_question(event.request)
                         elif isinstance(event, StreamTaskProgress):
                             display.update_progress(
                                 event.phase, event.message, event.eta_seconds

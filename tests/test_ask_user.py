@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -126,13 +127,16 @@ async def test_session_emit_forwards_to_the_attached_emitter(make_session):
     assert await session.emitter.get() == "ev"
 
 
-def test_console_only_session_constructs(make_session):
-    """Regression: chat.py builds the real session with console=console, so
-    anything unimportable in that path breaks every CLI run at construction."""
+def test_console_only_session_gets_the_cli_elicitor(make_session):
+    """Regression: chat.py builds the real session with console=console, so a
+    broken fallback here breaks every CLI run at construction time."""
     from rich.console import Console
 
+    from anton.core.interaction.cli import CLIElicitor
+
     session = make_session(console=Console(quiet=True))
-    assert session.elicitor is None  # host-injected only until CLIElicitor exists
+    assert isinstance(session.elicitor, CLIElicitor)
+    assert "choice" in session.elicitor.supported_kinds
 
 
 # ─── elicit() lifecycle ─────────────────────────────────────────────────
@@ -520,3 +524,137 @@ def test_registration_copies_the_tooldef_instead_of_mutating_the_singleton(make_
     assert "HINT-A" in _desc(session_a)
     assert "HINT-B" in _desc(session_b)
     assert ASK_USER_TOOL.description == pristine  # module singleton untouched
+
+
+# ─── CLI elicitor ───────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def cli_elicitor():
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    return CLIElicitor(Console(quiet=True))
+
+
+async def test_cli_elicitor_satisfies_the_protocol(cli_elicitor):
+    assert cli_elicitor.supported_kinds == ("choice", "path")
+    assert cli_elicitor.timeout_s is None
+    assert isinstance(cli_elicitor.answer_hint, str) and cli_elicitor.answer_hint
+    assert await cli_elicitor.begin("q1", _choice()) is None
+    assert await cli_elicitor.end("q1") is None
+
+
+async def test_cli_choice_maps_a_number_to_the_option_value(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="2")
+    )
+    answer = await cli_elicitor.ask("q1", _choice())
+    assert answer == AskAnswer(status="answered", values=("my",))
+
+
+async def test_cli_choice_accepts_a_comma_list_for_many(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="1, 2")
+    )
+    answer = await cli_elicitor.ask("q1", _choice(select="many"))
+    assert answer.values == ("pg", "my")
+
+
+async def test_cli_choice_keeps_only_the_first_pick_when_select_is_one(
+    cli_elicitor, monkeypatch
+):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="2,1")
+    )
+    answer = await cli_elicitor.ask("q1", _choice())
+    assert answer.values == ("my",)
+
+
+async def test_cli_choice_treats_free_text_as_a_custom_answer(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="clickhouse")
+    )
+    answer = await cli_elicitor.ask("q1", _choice())
+    assert answer == AskAnswer(status="answered", text="clickhouse")
+
+
+async def test_cli_choice_escape_and_empty_input_are_cancelled(cli_elicitor, monkeypatch):
+    for value in (None, "", "   "):
+        monkeypatch.setattr(
+            "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value=value)
+        )
+        assert (await cli_elicitor.ask("q1", _choice())).status == "cancelled"
+
+
+def test_show_question_renders_numbered_options_with_icons():
+    from rich.console import Console
+
+    from anton.chat_ui import StreamDisplay
+
+    console = Console(record=True, width=100)
+    display = StreamDisplay(console)
+    display.show_question(
+        AskRequest(
+            prompt="Which one?",
+            options=(
+                AskOption(value="/a", label="a.csv", kind="file"),
+                AskOption(value="/b", label="b", kind="folder", detail="12 files"),
+            ),
+        )
+    )
+    text = console.export_text()
+    assert "Which one?" in text
+    assert "1." in text and "a.csv" in text
+    assert "2." in text and "b" in text
+    assert "12 files" in text
+    assert "📄" in text and "📁" in text
+
+
+# ─── goal mode: without_ask_user ────────────────────────────────────────
+
+
+def test_without_ask_user_hides_it_then_restores_it(make_session):
+    """An autonomous loop must never block on a human. run_goal_loop gets an
+    already-built session, so the registry is the only lever — and the tool has
+    to come back, because the interactive chat owns that same session."""
+    from anton.commands.goal import without_ask_user
+
+    session = make_session(elicitor=_RecordingElicitor())
+    session._build_tools()
+    registry = session.tool_registry
+    original = next(t for t in registry.get_tool_defs() if t.name == "ask_user")
+
+    with without_ask_user(registry) as stashed:
+        assert stashed is original
+        assert "ask_user" not in {t["name"] for t in registry.dump()}
+        # select_path is untouched — it degrades on its own and cannot block.
+        assert "select_path" in {t["name"] for t in registry.dump()}
+
+    restored = next(t for t in registry.dump() if t["name"] == "ask_user")
+    assert restored["description"] == original.description
+
+
+def test_without_ask_user_restores_on_an_exception(make_session):
+    from anton.commands.goal import without_ask_user
+
+    session = make_session(elicitor=_RecordingElicitor())
+    session._build_tools()
+    registry = session.tool_registry
+    with pytest.raises(RuntimeError):
+        with without_ask_user(registry):
+            raise RuntimeError("goal loop died")
+    assert "ask_user" in {t["name"] for t in registry.dump()}
+
+
+def test_without_ask_user_is_a_noop_when_the_tool_is_absent(make_session):
+    """Headless sessions never registered it in the first place."""
+    from anton.commands.goal import without_ask_user
+
+    session = make_session()  # no elicitor, no console
+    session._build_tools()
+    before = {t["name"] for t in session.tool_registry.dump()}
+    with without_ask_user(session.tool_registry) as stashed:
+        assert stashed is None
+    assert {t["name"] for t in session.tool_registry.dump()} == before

@@ -296,6 +296,22 @@ class StreamDisplay:
         self._console.print(Markdown(content))
         self._start_spinner()
 
+    def show_question(self, request) -> None:
+        """Print a numbered option list for a published ask_user question.
+
+        The spinner was already stopped by the preceding
+        StreamTaskProgress(phase="interactive"), so this writes to a quiet
+        console. The elicitor only reads the reply.
+        """
+        self._console.print(f"\n[bold]{request.prompt}[/]")
+        for index, option in enumerate(request.options, start=1):
+            icon = "📁" if option.kind == "folder" else "📄" if option.kind == "file" else ""
+            prefix = f"{icon} " if icon else ""
+            detail = f"  [dim]{option.detail}[/]" if option.detail else ""
+            self._console.print(f"  [bold]{index}[/]. {prefix}{option.label}{detail}")
+        if request.select == "many":
+            self._console.print("  [dim]Pick one or more.[/]")
+
     def show_tool_execution(self, task: str) -> None:
         """Backward-compatible wrapper — delegates to on_tool_use_start."""
         self.on_tool_use_start(f"_compat_{id(task)}", task)
