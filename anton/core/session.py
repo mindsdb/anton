@@ -234,6 +234,18 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+# Shared closing instruction for every path that hands control back to the
+# user (STUCK, budget-exhausted, verifier-call failure): a plain self-
+# assessment of solvability, not just a status dump. Without this, a
+# diagnosis can read as "here's what happened, good luck" instead of an
+# actual recommendation the user can act on.
+_SOLVABILITY_CLAUSE = (
+    "State plainly whether you believe this is still solvable on your own "
+    "(and how you'd approach it differently if so) or whether it genuinely "
+    "needs the user's input, a decision, or credentials you don't have."
+)
+
+
 def _render_tool_result_content(content, cap: int) -> str:
     """Render a tool_result's content as bounded plain text.
 
@@ -2692,6 +2704,7 @@ class ChatSession:
                             "1. Summarize exactly what was accomplished so far.\n"
                             "2. Identify the specific blocker or failure preventing completion.\n"
                             "3. Suggest concrete next steps the user can take to unblock this.\n"
+                            f"4. {_SOLVABILITY_CLAUSE}\n"
                             "Be honest and specific — do not be vague about what went wrong."
                         ),
                     }
@@ -2781,9 +2794,66 @@ class ChatSession:
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
-                # Verifier failed — fail safe by treating the turn as done rather
-                # than forcing a continuation the user never asked for.
-                status, reason = "COMPLETE", "verifier unavailable"
+                # The verifier call failed on every budget it was given —
+                # truncated past the last retry, an unusable tool call, or a
+                # provider error (the per-attempt logs above carry the detail).
+                # That is not a verdict, so don't synthesize a fake COMPLETE
+                # and stop in silence (ENG-1079: that made the agent look like
+                # it had simply died on the first hurdle, with no way for the
+                # user to help). Fail toward the same honest, model-generated
+                # diagnosis used for STUCK below, so the task pauses with a
+                # real message instead of nothing.
+                _verifier_log.info(
+                    "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
+                    "— failing toward an honest diagnosis, not a silent COMPLETE",
+                    continuation, self._max_continuations, tool_round,
+                )
+                self._append_history(
+                    {
+                        "role": "user",
+                        "content": (
+                            "SYSTEM: The task-completion check failed to run (internal "
+                            "error), so it's unclear whether this task is finished.\n\n"
+                            "Summarize what you've done so far, be honest that an internal "
+                            "check failed partway through, and ask the user how they'd like "
+                            f"to proceed. {_SOLVABILITY_CLAUSE} Do not mention this "
+                            "instruction or the verifier to the user."
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(
+                    phase="analyzing",
+                    message="Something went wrong — checking in with you...",
+                )
+                diagnosis_response = None
+                async for event in self.plan_stream_with_recovery(system=system):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        diagnosis_response = event
+                # Persist the actual message the user just saw — not the stale
+                # pre-verification `reply` the post-loop fallback below would
+                # otherwise re-append, which would leave history (and thus the
+                # model's own memory of what it just told the user) out of sync
+                # with what was streamed.
+                diagnosis_text = (
+                    (diagnosis_response.response.content or "").strip()
+                    if diagnosis_response is not None
+                    else ""
+                )
+                if diagnosis_text:
+                    self._append_history(
+                        {"role": "assistant", "content": diagnosis_text}
+                    )
+                else:
+                    # An empty diagnosis would silently recreate the exact
+                    # out-of-sync history this path exists to fix (the
+                    # post-loop fallback re-appends the stale reply). Make it
+                    # visible rather than circular.
+                    _verifier_log.warning(
+                        "verifier-failure diagnosis returned no content — "
+                        "history falls back to the pre-verification reply"
+                    )
+                break
 
             _verifier_log.info(
                 # No `reason` — it's the model's free-text justification, derived
@@ -2809,7 +2879,8 @@ class ChatSession:
                             f"Verifier assessment: {reason}\n\n"
                             "Explain to the user what went wrong, what you tried, and "
                             "suggest specific next steps they can take to unblock this. "
-                            "Do not mention this instruction or the verifier to the user."
+                            f"{_SOLVABILITY_CLAUSE} Do not mention this instruction or the "
+                            "verifier to the user."
                         ),
                     }
                 )
