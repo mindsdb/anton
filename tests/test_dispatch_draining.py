@@ -309,6 +309,58 @@ async def test_no_task_is_left_running_after_the_helper_closes(session):
 
     assert dispatch["task"].cancelled(), "the dispatch task outlived the helper"
     assert not queue._getters, "a pending emitter.get() is still registered"
-    # No slack: `before` was taken with only the test's own task alive, and
-    # both of the helper's futures are now accounted for above.
-    assert len(asyncio.all_tasks()) == before
+    # Upper bound only: any unrelated task that happened to be alive at
+    # `before` and finished during the test would push the count below it and
+    # fail for a reason that has nothing to do with the helper. The real
+    # guarantee is the two assertions above, which name the futures.
+    assert len(asyncio.all_tasks()) <= before
+
+
+async def test_an_event_emitted_while_the_host_handles_the_result_is_not_lost(session):
+    """The in-loop ``getter.cancel()`` before ``break``, not just the one in
+    ``finally``.
+
+    Between ``break`` and the ``finally`` the helper suspends: the tail drain
+    yields, and then ``yield ("result", ...)``. A getter that is doomed but
+    still registered in the queue's ``_getters`` is handed any event emitted
+    while the host is processing one of those yields — ``Queue.put_nowait``
+    -> ``_wakeup_next`` sets that pending getter's result instead of leaving
+    the item in ``_queue``. The helper never reads that result (it has already
+    broken out of the loop), ``gather`` in the ``finally`` swallows it, and the
+    event is gone: not delivered, and not even left in the queue for a later
+    drain to recover.
+
+    Cancelling in the loop makes the inner waiter already-done, so
+    ``_wakeup_next`` skips it and the item stays in ``_queue``. Without the
+    in-loop cancel this fails with an empty queue and no delivery.
+    """
+
+    async def handler(sess, tc_input):
+        return "done"
+
+    session.tool_registry.register_tool(
+        ToolDef(name="probe", description="", input_schema={}, handler=handler)
+    )
+    queue = session.emitter._queue
+
+    events, result = [], None
+    agen = session._dispatch_draining(_tc())
+    try:
+        async for kind, payload in agen:
+            if kind == "event":
+                events.append(payload)
+            else:
+                result = payload
+                # Emitted while the helper is parked AT the ("result", ...)
+                # yield, i.e. exactly the window the in-loop cancel closes.
+                await session.emitter.emit("post")
+                await asyncio.sleep(0)
+    finally:
+        await agen.aclose()
+
+    assert result == "done"
+    leftover_in_queue = list(queue._queue)
+    assert "post" in events or leftover_in_queue == ["post"], (
+        "the event emitted while the host handled the result was swallowed: "
+        f"events={events!r} leftover_in_queue={leftover_in_queue!r}"
+    )

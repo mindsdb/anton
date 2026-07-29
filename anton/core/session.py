@@ -1947,13 +1947,23 @@ class ChatSession:
         Yields ``("event", ev)`` for each out-of-band event, then
         ``("result", result_text)``. Four details are load-bearing:
 
-        1. ``task.cancel()`` in ``finally`` — ``asyncio.wait`` does NOT
-           cancel its futures when the awaiting coroutine is cancelled, so
-           without this a Stop unwinds the turn while the tool keeps waiting
-           on a human for the full timeout, holding its answer channel open.
+        1. Cancelling BOTH futures in ``finally`` — ``asyncio.wait`` does NOT
+           cancel its futures when the awaiting coroutine is cancelled. Without
+           ``task.cancel()`` a Stop unwinds the turn while the tool keeps
+           waiting on a human for the full timeout, holding its answer channel
+           open; without ``getter.cancel()`` the pending ``emitter.get()``
+           stays registered in the queue's ``_getters`` and asyncio later logs
+           "Task was destroyed but it is pending!".
         2. The tail drain — events queued immediately before the tool
            returns (``StreamAskUserAnswered`` above all) would otherwise be
-           dropped, leaving a live card that can never be retired.
+           dropped, leaving a live card that can never be retired. It is
+           reachable because resolving ``asyncio.wait``'s waiter takes two
+           ``call_soon`` hops (``_on_completion`` -> ``waiter.set_result`` ->
+           our ``__wakeup``): an emit landing between those hops leaves the
+           item sitting in ``Queue._queue`` with the getter still pending, so
+           the loop breaks past it and only the tail drain recovers it. Pinned
+           by ``test_an_event_emitted_one_hop_late_is_recovered_by_the_tail_drain``
+           — that test is the reason to not delete this loop.
         3. ``task.result()`` rather than a bare ``await`` — ``asyncio.wait``
            never re-raises a completed task's exception, and the caller's
            ``except Exception`` is what turns a tool failure into a tool
@@ -1965,7 +1975,6 @@ class ChatSession:
         task = asyncio.create_task(
             self.tool_registry.dispatch_tool(self, tc.name, tc.input)
         )
-        getter = None
         try:
             while True:
                 getter = asyncio.ensure_future(self.emitter.get())
@@ -1975,6 +1984,12 @@ class ChatSession:
                 if getter in done:
                     yield ("event", getter.result())
                     continue
+                # Cancel here, not only in the `finally`: the yields below are
+                # suspension points, and a doomed-but-still-registered getter
+                # would be handed any event emitted while the host processes
+                # them. `gather` would then discard that event, and it would
+                # not even be left in the queue for a later drain to recover.
+                getter.cancel()
                 break
             while not self.emitter.empty():
                 yield ("event", self.emitter.get_nowait())
@@ -1987,8 +2002,7 @@ class ChatSession:
             # the queue's _getters forever, and asyncio later logs
             # "Task was destroyed but it is pending!".
             task.cancel()
-            if getter is not None:
-                getter.cancel()
+            getter.cancel()
             await asyncio.gather(task, getter, return_exceptions=True)
 
     async def turn_stream(
