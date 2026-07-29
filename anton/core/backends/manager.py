@@ -66,11 +66,12 @@ class ScratchpadManager:
         and reclaimed by the same cleanup (cowork-server prunes that directory on
         conversation delete). Underscore-prefixed so the `*.pkl` snapshot glob skips it.
 
-        Returns None without a `session_id`. There is no correct shared bucket: the
-        snapshot dir would fall back to `_no-session`, so every unscoped conversation
-        (bare CLI, tests) would pool its pad names and the guard would start challenging
-        on names from unrelated past sessions. Better to keep the previous in-memory-only
-        behaviour than to persist into a bucket that isn't ours.
+        Returns None without a `session_id`, matching `snapshot_dir`, which refuses to
+        hand out a directory at all when the conversation scope is unknown. That is also
+        the behaviour this record wants on its own terms: anything shared across unscoped
+        conversations (bare CLI, tests) would pool their pad names, and the guard would
+        start challenging on names from unrelated past sessions. Unscoped callers keep the
+        previous in-memory-only behaviour.
         """
         if not self._session_id:
             return None

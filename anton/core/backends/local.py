@@ -215,10 +215,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         named scratchpads would overwrite each other, and without the conversation
         segment two conversations in the same workspace that happen to use the same pad
         name would read each other's variables — a correctness bug and a confidentiality
-        one. Falls back to a shared `_no-session` bucket when the host supplies no
-        session id (bare CLI use, tests), where there is only one conversation anyway.
+        one.
 
-        Returns None when the directory cannot be created; the caller then leaves
+        Returns None when there is nowhere safe to write: no session id, or one that is
+        not already path-safe. There is deliberately no shared fallback bucket — see
+        `snapshot_dir` for why (the unscoped `CredentialProbe` would leave `DS_*`
+        credentials in it). Bare CLI use and tests therefore get no snapshot at all,
+        keeping their namespace in memory as before.
+
+        Also returns None when the directory cannot be created; the caller then leaves
         ANTON_SCRATCHPAD_SESSION_PATH unset so the failure is reported rather than silent.
         """
         path = snapshot_file(self._venvs_base, self._session_id, self.name)
