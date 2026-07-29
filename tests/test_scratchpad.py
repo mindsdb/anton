@@ -1296,3 +1296,69 @@ class TestSessionPersistence:
             assert list(snapshot.parent.glob("*.tmp")) == []
         finally:
             await pad.cleanup()
+
+    async def test_one_unpicklable_object_does_not_lose_the_rest(self, tmp_path, monkeypatch):
+        """A live DB connection must not take the whole namespace down with it.
+
+        Pickling is all-or-nothing per file, so before this a single unpicklable value
+        lost everything. The objects that fail are exactly the ones long stateful tasks
+        hold — `sqlite3.Connection`, sockets (SMTP for a mail campaign), generators — so
+        the workloads that most need persistence were the ones getting none of it.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(name="withconn", _venvs_base=venvs_base, session_id="c")
+        await pad.start()
+        cell = await pad.execute(
+            "import sqlite3\n"
+            "conn = sqlite3.connect(':memory:')\n"
+            "master_df = {'a': [1, 2, 3]}\n"
+            "rates = 0.458\n"
+        )
+        assert cell.error is None
+        # Reported, naming the casualty, and never on `error`.
+        assert "conn" in cell.logs and "could not be preserved" in cell.logs
+        await pad.close()
+
+        pad2 = make_scratchpad(name="withconn", _venvs_base=venvs_base, session_id="c")
+        await pad2.start()
+        try:
+            cell = await pad2.execute(
+                "print(master_df['a'], rates, 'conn' in dir())"
+            )
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "[1, 2, 3] 0.458 False"
+        finally:
+            await pad2.cleanup()
+
+    async def test_unpicklable_warning_is_not_repeated_every_cell(self, tmp_path, monkeypatch):
+        """Told once, not on every cell — and the per-key scan runs once, not per cell."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        pad = make_scratchpad(name="quiet", _venvs_base=tmp_path / "venvs", session_id="c")
+        await pad.start()
+        try:
+            first = await pad.execute("import socket\nsck = socket.socket()\nkeep = 1")
+            assert "could not be preserved" in first.logs
+            second = await pad.execute("print('again')")
+            assert "could not be preserved" not in (second.logs or "")
+        finally:
+            await pad.cleanup()
+
+    async def test_rebinding_an_unpicklable_name_to_data_is_retried(self, tmp_path, monkeypatch):
+        """The skip is keyed on the object, not the name — a rebind must be persisted."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(name="rebind", _venvs_base=venvs_base, session_id="c")
+        await pad.start()
+        await pad.execute("import socket\nthing = socket.socket()")
+        await pad.execute("thing = 'now just a string'")
+        await pad.close()
+
+        pad2 = make_scratchpad(name="rebind", _venvs_base=venvs_base, session_id="c")
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(thing)")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "now just a string"
+        finally:
+            await pad2.cleanup()

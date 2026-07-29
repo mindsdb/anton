@@ -60,6 +60,15 @@ _INJECTED_HELPER_NAMES = frozenset(
 # Populated once, after all injections, with the objects actually injected.
 _INJECTED_HELPERS: dict = {}
 
+# Names whose value dill could not pickle, mapped to the id() of the value that failed.
+# Pickling is all-or-nothing per file, so ONE unpicklable object used to lose the whole
+# namespace — and the objects that fail are exactly the ones long stateful tasks hold:
+# DB connections (`sqlite3.Connection`, psycopg2, pyodbc), sockets (SMTP for a mail
+# campaign), and generators. Verified with dill 0.4.1. Remembering the offenders keeps
+# the expensive per-key scan to the first cell that hits one; keying on id() means a
+# rebind to something picklable is retried rather than excluded forever.
+_UNPICKLABLE: dict = {}
+
 # Persistence notes for the next cell's `logs`. Deliberately NOT `error` — a snapshot
 # problem must not make the cell look failed, or it would feed the consecutive-error
 # circuit breaker and the resilience nudge.
@@ -124,15 +133,30 @@ class _CappedWriter:
         self._fh.flush()
 
 
-def _dump_namespace(ns: dict) -> str | None:
-    if not PERSIST_SESSION or not SESSION_PATH:
-        return None
-    payload = {
+def _snapshot_payload(ns: dict) -> dict:
+    """The subset of `ns` worth persisting."""
+    return {
         k: v
         for k, v in ns.items()
         if k not in _SESSION_EXCLUDE_ALWAYS
+        # Injected helpers are skipped by IDENTITY, not by name: if the agent rebinds
+        # `sample` or `progress` to its own data, that value is data and gets saved.
         and not (k in _INJECTED_HELPERS and v is _INJECTED_HELPERS[k])
+        # Known-unpicklable, and still the same object that failed before.
+        and _UNPICKLABLE.get(k) != id(v)
     }
+
+
+def _write_snapshot(payload: dict, tmp_path: str) -> None:
+    """Serialise `payload` to `tmp_path`, aborting past the size cap."""
+    with open(tmp_path, "wb") as f:
+        dill.dump(payload, _CappedWriter(f, SESSION_MAX_BYTES))
+
+
+def _dump_namespace(ns: dict) -> str | None:
+    if not PERSIST_SESSION or not SESSION_PATH:
+        return None
+    payload = _snapshot_payload(ns)
     # Include the pid: a pad can briefly overlap with its own replacement, and two
     # writers sharing one .tmp would corrupt each other's snapshot.
     tmp_path = f"{SESSION_PATH}.{os.getpid()}.tmp"
@@ -141,8 +165,7 @@ def _dump_namespace(ns: dict) -> str | None:
         # by the inactivity watchdog mid-cell), so writing straight to SESSION_PATH
         # would eventually leave a torn pickle that the next process fails to load.
         # os.replace is atomic within a filesystem.
-        with open(tmp_path, "wb") as f:
-            dill.dump(payload, _CappedWriter(f, SESSION_MAX_BYTES))
+        _write_snapshot(payload, tmp_path)
         os.replace(tmp_path, SESSION_PATH)
         return None
     except _TooBig:
@@ -157,11 +180,40 @@ def _dump_namespace(ns: dict) -> str | None:
             "instead of holding them in memory."
         )
     except Exception:
+        first_failure = traceback.format_exc()
+        # Save what we can instead of losing everything to one bad object. Only reached
+        # the first time a given object fails; after that it is pre-excluded above.
+        dropped = []
+        for key in list(payload):
+            try:
+                dill.dumps(payload[key])
+            except Exception:
+                _UNPICKLABLE[key] = id(payload[key])
+                dropped.append(key)
+                payload.pop(key)
+        if not dropped:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            return "Failed to dump scratchpad session.\n" + first_failure
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        return "Failed to dump scratchpad session.\n" + traceback.format_exc()
+            _write_snapshot(payload, tmp_path)
+            os.replace(tmp_path, SESSION_PATH)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            return "Failed to dump scratchpad session.\n" + first_failure
+        return (
+            "Scratchpad session saved, but these variables could not be preserved and "
+            "will be undefined if this scratchpad restarts: "
+            + ", ".join(sorted(dropped))
+            + ". Objects holding live resources (database connections, sockets, "
+            "generators) cannot be saved — recreate them rather than relying on them "
+            "persisting."
+        )
 
 
 # Persistent namespace across cells. Keep the load note — discarding it is how the
