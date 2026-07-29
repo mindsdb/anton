@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from anton.core.interaction.elicit import AskAnswer
+from anton.core.interaction.elicit import MAX_QUESTIONS_PER_TURN, AskAnswer
 from anton.core.tools.tool_handlers import handle_select_path
 
 
@@ -161,6 +161,113 @@ async def test_browse_resolves_a_typed_folder(tmp_path):
     )
     assert result["status"] == "resolved"
     assert result["path"] == str(target.resolve())
+
+
+class _StatusElicitor:
+    """Terminal-free stand-in: always answers with a scripted non-answered status."""
+
+    supported_kinds = ("choice", "path")
+    answer_hint = "hint"
+    timeout_s = None
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        self.requests: list = []
+
+    async def begin(self, question_id, request):
+        return None
+
+    async def end(self, question_id):
+        return None
+
+    async def ask(self, question_id, request):
+        self.requests.append(request)
+        return AskAnswer(status=self.status)
+
+
+async def test_browse_limit_is_error_not_cancelled(tmp_path):
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _StatusElicitor("limit")), {"prompt": "Find the folder"}
+        )
+    )
+    assert result["status"] == "error"
+    assert "dismissed" not in result["message"]
+
+
+async def test_browse_timeout_is_error(tmp_path):
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _StatusElicitor("timeout")), {"prompt": "Find the folder"}
+        )
+    )
+    assert result["status"] == "error"
+
+
+async def test_browse_unavailable_is_picker_unavailable(tmp_path):
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _StatusElicitor("unavailable")), {"prompt": "Find the folder"}
+        )
+    )
+    assert result["status"] == "picker_unavailable"
+
+
+async def test_pick_ambiguous_limit_is_error_not_cancelled(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _StatusElicitor("limit")),
+            {"prompt": "Which one?", "pattern": "**/report.csv"},
+        )
+    )
+    assert result["status"] == "error"
+    assert "dismissed" not in result["message"]
+
+
+async def test_pick_ambiguous_timeout_is_error(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _StatusElicitor("timeout")),
+            {"prompt": "Which one?", "pattern": "**/report.csv"},
+        )
+    )
+    assert result["status"] == "error"
+
+
+async def test_pick_ambiguous_unavailable_is_picker_unavailable(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _StatusElicitor("unavailable")),
+            {"prompt": "Which one?", "pattern": "**/report.csv"},
+        )
+    )
+    assert result["status"] == "picker_unavailable"
+
+
+async def test_browse_budget_exhausted_through_real_elicit_is_error(tmp_path):
+    """Drives the real elicit() budget check (not a faked status) so the path
+    that actually produced the defect is pinned: exhausting question_count
+    before asking must not be reported to the model as a dismissed picker.
+    """
+    session = _session(tmp_path, _FakeElicitor("irrelevant"))
+    session.question_count = MAX_QUESTIONS_PER_TURN
+    result = json.loads(
+        await handle_select_path(session, {"prompt": "Find the folder"})
+    )
+    assert result["status"] == "error"
+    assert "dismissed" not in result["message"]
 
 
 async def test_elicitor_exception_becomes_error_status(tmp_path):

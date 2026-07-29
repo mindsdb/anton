@@ -693,6 +693,36 @@ def _chosen_path(answer) -> "str | None":
     return (answer.text or "").strip() or None
 
 
+def _path_answer_failure(answer) -> "str | None":
+    """Map a non-``answered`` outcome onto ``select_path``'s own status, or None.
+
+    Collapsing every failure into ``cancelled`` would tell the model "the user
+    dismissed the picker" when the user was never asked — the per-turn question
+    budget was spent, the question timed out, or no host could render it. The
+    model's documented reaction to ``cancelled`` is to ask how to proceed, so a
+    false ``cancelled`` costs a turn on a question nobody ever saw.
+    """
+    if answer.status == "answered":
+        return None
+    if answer.status == "cancelled":
+        return _status(
+            "cancelled",
+            "The user dismissed the picker without choosing. Ask how they would like to proceed.",
+        )
+    if answer.status == "unavailable":
+        return _status(
+            "picker_unavailable",
+            "An interactive picker is unavailable here; ask the user for the path in plain text.",
+        )
+    if answer.status == "limit":
+        return _status(
+            "error",
+            "Too many questions this turn; choose a path yourself and state which you picked, "
+            "or ask in plain text.",
+        )
+    return _status("error", f"The picker did not return a selection ({answer.status}).")
+
+
 def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
     """Resolve the browse-mode starting directory (defaults to the project root)."""
     raw = (tc_input.get("start_dir") or "").strip()
@@ -751,6 +781,9 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
 
     root = _selection_root(session)
     elicitor = getattr(session, "elicitor", None)
+    # Early-out only: elicit() re-checks kind support itself and answers
+    # "unavailable" (mapped to picker_unavailable below) if this check were
+    # ever removed or bypassed, so this is not the sole guard.
     can_pick = elicitor is not None and "path" in getattr(elicitor, "supported_kinds", ())
     timeout_s = getattr(elicitor, "timeout_s", None)
     has_candidates = isinstance(tc_input.get("candidates"), list) and bool(tc_input.get("candidates"))
@@ -776,6 +809,9 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         except Exception as exc:  # noqa: BLE001 — the picker is host code
             _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
             return _status("error", f"Selection failed: {exc}")
+        failure = _path_answer_failure(answer)
+        if failure is not None:
+            return failure
         browse_root = Path(request.root) if request.root else root
         return _finalize_browse_choice(_chosen_path(answer), kind, browse_root)
 
@@ -808,9 +844,10 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     except Exception as exc:  # noqa: BLE001
         _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
         return _status("error", f"Selection failed: {exc}")
+    failure = _path_answer_failure(answer)
+    if failure is not None:
+        return failure
     chosen = _chosen_path(answer)
-    if chosen is None:
-        return _status("cancelled", "The user dismissed the picker without choosing. Ask how they would like to proceed.")
     if chosen not in {option.value for option in options}:
         return _status("invalid", "The returned selection was not one of the offered options.")
     return _status("resolved", path=chosen)
