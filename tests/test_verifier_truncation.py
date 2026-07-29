@@ -34,6 +34,7 @@ from anton.core.llm.provider import (
     Usage,
 )
 from anton.core.session import (
+    _VERIFIER_JUDGMENT_RUBRIC,
     _VERIFIER_TOKEN_BUDGETS,
     ChatSession,
     ChatSessionConfig,
@@ -492,6 +493,46 @@ async def test_verifier_prompt_forbids_preamble(workspace):
 
     assert "immediately as your first action" in seen["system"]
     assert "Do not think out loud" in seen["system"]
+
+
+async def test_verifier_prompt_judges_final_outcome_not_intermediate_errors(workspace):
+    """ENG-1134: the recovery-aware rubric reaches the verifier, and the old
+    blanket 'any errored tool → not COMPLETE' rule is gone. That rule made the
+    verifier flag a turn INCOMPLETE whenever an earlier tool call errored — even
+    when the model recovered and answered — forcing a redundant continuation that
+    re-streamed the whole answer 2-3x."""
+    seen: dict = {}
+
+    async def fake_verdict(_schema, *, system, messages, max_tokens):
+        seen["prompt"] = str(messages[-1].get("content", ""))
+        return _VerifierVerdict(status="COMPLETE", reason="done")
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=fake_verdict)
+
+    session = _session_that_uses_a_tool(mock_llm, workspace)
+    try:
+        async for _ in session.turn_stream("compare two stocks"):
+            pass
+    finally:
+        await session.close()
+
+    prompt = seen["prompt"]
+    # The recovery-aware rubric reaches the verifier verbatim…
+    assert _VERIFIER_JUDGMENT_RUBRIC in prompt
+    assert "recovered another way" in prompt
+    # …and the old over-eager phrasing is gone.
+    assert "means INCOMPLETE or STUCK, not COMPLETE" not in prompt
+
+
+def test_verdict_schema_treats_recovered_errors_as_complete():
+    """The COMPLETE definition itself carries the recovery principle — the schema
+    field description doubles as the verifier's instructions (ENG-716/1134)."""
+    desc = _VerifierVerdict.model_fields["status"].description
+    assert "Judge the FINAL delivered outcome" in desc
+    assert "RECOVERED" in desc
+    # The hallucinated-success safeguard is preserved.
+    assert "implied success" in desc
 
 
 # --------------------------------------------------------------------------

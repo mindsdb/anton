@@ -144,15 +144,24 @@ class _VerifierVerdict(BaseModel):
 
     status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
         description=(
-            "Classify the assistant's latest message against the user's request:\n"
-            "- COMPLETE: the requested task is done. A finished task followed by an "
-            "optional 'want me to…?' offer is still COMPLETE.\n"
+            "Classify the assistant's latest message against the user's request. "
+            "Judge the FINAL delivered outcome, not every intermediate step taken "
+            "to reach it:\n"
+            "- COMPLETE: the requested task is done and the assistant delivered a "
+            "usable answer. A tool that errored or returned nothing but that the "
+            "assistant RECOVERED from — it got the needed data another way, or the "
+            "failed step wasn't essential to the answer — is still COMPLETE; do NOT "
+            "mark a turn incomplete just because an earlier tool call failed. A "
+            "finished task followed by an optional 'want me to…?' offer is still "
+            "COMPLETE.\n"
             "- WAITING: the assistant's latest message asks the user a question it "
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
             "unfinished; the correct action is to wait for the user's reply.\n"
             "- INCOMPLETE: the assistant stopped partway through the requested task "
-            "WITHOUT asking the user anything, and could keep going on its own.\n"
+            "WITHOUT asking the user anything, and could keep going on its own — "
+            "including when it implied success but the data its answer actually "
+            "depends on errored or came back empty and was never recovered.\n"
             "- STUCK: a hard blocker prevents completion (missing credentials, an "
             "unavailable service, or a permission the assistant does not have)."
         )
@@ -185,6 +194,25 @@ _VERIFIER_NO_PREAMBLE = (
     "action. Do not think out loud, restate the conversation, or explain your "
     "reasoning before calling it — put your one-sentence justification in the "
     "tool's `reason` field."
+)
+
+# Judgment rubric appended to the per-turn verify message. Keys the "errored
+# tool → not COMPLETE" logic off the FINAL answer's dependency on the failed
+# data, not the mere presence of an errored tool result in the transcript —
+# without this, a turn where the model tried a tool, it failed, and the model
+# recovered another way and answered correctly was judged INCOMPLETE and forced
+# into a redundant continuation that re-streamed the whole answer (ENG-1134).
+# The hallucinated-success safeguard is preserved: implying success while the
+# data the answer relies on errored/came back empty is still INCOMPLETE.
+_VERIFIER_JUDGMENT_RUBRIC = (
+    "Which status applies? Judge the FINAL outcome, not every intermediate step. "
+    "An errored or empty tool result only makes the task INCOMPLETE or STUCK when "
+    "the assistant's final answer depends on data that never arrived and was not "
+    "recovered another way. A tool that failed but the assistant worked around — "
+    "getting what it needed elsewhere, or the failed step being inessential — and "
+    "then answered from is COMPLETE. Conversely, an assistant that implied success "
+    "while the data its answer relies on errored or came back empty is INCOMPLETE, "
+    "not COMPLETE."
 )
 
 
@@ -2726,9 +2754,7 @@ class ChatSession:
                         "Assess the conversation below (tool results are truncated) and "
                         "decide the status of the USER's most recent request.\n\n"
                         f"{request_header}{transcript}\n\n"
-                        "Which status applies? A tool the task depended on that returned "
-                        "an error — or returned no usable data while the assistant implied "
-                        "success — means INCOMPLETE or STUCK, not COMPLETE."
+                        + _VERIFIER_JUDGMENT_RUBRIC
                     ),
                 },
             ]
