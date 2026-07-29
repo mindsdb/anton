@@ -240,11 +240,21 @@ async def handle_skill_save(
     console.print("[anton.cyan](anton)[/] Drafting a skill from recent work…")
 
     try:
-        draft: _SkillDraft = await session._llm.generate_object(
+        from anton.core.llm.structured import (
+            generate_with_truncation_retry,
+            no_preamble_instruction,
+        )
+
+        # A skill draft is a real document, and narrating models spend
+        # 245–1,654+ tokens on prose before the forced call — 1500 sat inside
+        # that range (ENG-1084).
+        draft: _SkillDraft = await generate_with_truncation_retry(
+            session._llm.generate_object,
             _SkillDraft,
-            system=_DRAFT_SYSTEM_PROMPT,
+            system=_DRAFT_SYSTEM_PROMPT + no_preamble_instruction(_SkillDraft),
             messages=[{"role": "user", "content": user_prompt}],
-            max_tokens=1500,
+            budgets=(2048, 8192),
+            subsystem="skill-draft",
         )
     except Exception as exc:
         console.print()

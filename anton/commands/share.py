@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import logging
 import os
 import re
 import tempfile
@@ -59,24 +60,38 @@ async def _generate_meta(
     session_id: str,
 ) -> tuple[str, str]:
     try:
+        from anton.core.llm.structured import (
+            generate_with_truncation_retry,
+            no_preamble_instruction,
+        )
+
         conversation_text = _format_history_for_llm(history)
-        result = await llm_client.generate_object_code(
+        # 300 was tighter than the verifier's infamous 256 (ENG-1081), for a
+        # call asked to produce a whole-session distillation — narrating
+        # models could never finish it (ENG-1084).
+        result = await generate_with_truncation_retry(
+            llm_client.generate_object_code,
             _SessionMeta,
             system=(
                 "You are producing a portable context distillation of an analytical session. "
                 "For the summary: cover the goal, key discoveries, any corrections or dead ends, "
                 "and where the analysis currently stands. Every distinct finding should appear once. "
                 "No filler, no repetition, no omissions of meaningful conclusions."
+                + no_preamble_instruction(_SessionMeta)
             ),
             messages=[{
                 "role": "user",
                 "content": f"Distill this analytical session:\n\n{conversation_text}",
             }],
-            max_tokens=300,
+            subsystem="session-share-meta",
         )
 
         return result.title, result.summary
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "session-share-meta failed (%s) — using the fallback title",
+            type(exc).__name__,
+        )
         return f"session-{session_id}", ""
 
 

@@ -70,6 +70,10 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from anton.core.backends.base import Cell
+from anton.core.llm.structured import (
+    generate_with_truncation_retry,
+    no_preamble_instruction,
+)
 from anton.core.memory.base import Engram
 
 if TYPE_CHECKING:
@@ -280,7 +284,10 @@ class Cerebellum:
         try:
             lessons = await self._run_diff(cells)
         except Exception as exc:
-            _log.warning("cerebellum diff pass failed: %s", exc)
+            # Type name only: a ValidationError's message embeds the rejected
+            # model output, which is derived from the user's conversation and
+            # doesn't belong in app logs (ENG-1084).
+            _log.warning("cerebellum diff pass failed (%s)", type(exc).__name__)
             return []
 
         if not lessons:
@@ -289,7 +296,9 @@ class Cerebellum:
         try:
             await self._encode_lessons(lessons)
         except Exception as exc:
-            _log.warning("cerebellum failed to encode lessons: %s", exc)
+            _log.warning(
+                "cerebellum failed to encode lessons (%s)", type(exc).__name__
+            )
 
         return lessons
 
@@ -345,11 +354,16 @@ class Cerebellum:
         )
         prompt = _DIFF_USER_TEMPLATE.format(cells_block=cells_block)
 
-        result: _DiffPassResult = await self._llm.generate_object_code(
+        # 600 sat inside the measured narration range (245–1,654+ tokens of
+        # prose before the forced call on narrating models), so the diff pass
+        # truncated routinely and flush() logged it away (ENG-1084).
+        result: _DiffPassResult = await generate_with_truncation_retry(
+            self._llm.generate_object_code,
             _DiffPassResult,
-            system=_DIFF_SYSTEM_PROMPT,
+            system=_DIFF_SYSTEM_PROMPT + no_preamble_instruction(_DiffPassResult),
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=600,
+            log=_log,
+            subsystem="cerebellum-diff",
         )
 
         # Convert the validated Pydantic drafts to the public dataclass

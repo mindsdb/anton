@@ -252,11 +252,21 @@ async def handle_add_custom_datasource(
     )
 
     try:
-        spec: _CustomDatasourceSpec = await session._llm.generate_object(
+        from anton.core.llm.structured import (
+            generate_with_truncation_retry,
+            no_preamble_instruction,
+        )
+
+        # 1024 sat inside the measured narration range (245–1,654+) — the
+        # shared ladder gives narrating models room to reach the forced call
+        # (ENG-1084).
+        spec: _CustomDatasourceSpec = await generate_with_truncation_retry(
+            session._llm.generate_object,
             _CustomDatasourceSpec,
-            system="You are a data source connection expert.",
+            system="You are a data source connection expert."
+            + no_preamble_instruction(_CustomDatasourceSpec),
             messages=[{"role": "user", "content": llm_prompt}],
-            max_tokens=1024,
+            subsystem="custom-datasource-spec",
         )
     except Exception:
         console.print(
