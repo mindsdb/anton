@@ -115,3 +115,12 @@ async def test_session_emit_forwards_to_the_attached_emitter(make_session):
     session.emitter = TurnEmitter()
     await session.emit("ev")
     assert await session.emitter.get() == "ev"
+
+
+def test_console_only_session_constructs(make_session):
+    """Regression: chat.py builds the real session with console=console, so
+    anything unimportable in that path breaks every CLI run at construction."""
+    from rich.console import Console
+
+    session = make_session(console=Console(quiet=True))
+    assert session.elicitor is None  # host-injected only until CLIElicitor exists
