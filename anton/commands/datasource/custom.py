@@ -9,6 +9,10 @@ from pydantic import BaseModel, Field
 
 from anton.connect_collector import extract_variables
 from anton.commands.datasource.helpers import show_credential_help
+from anton.core.llm.structured import (
+    generate_with_truncation_retry,
+    no_preamble_instruction,
+)
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
 from anton.utils.datasources import persist_custom_engine
 from anton.utils.prompt import prompt_or_cancel
@@ -252,11 +256,6 @@ async def handle_add_custom_datasource(
     )
 
     try:
-        from anton.core.llm.structured import (
-            generate_with_truncation_retry,
-            no_preamble_instruction,
-        )
-
         # 1024 sat inside the measured narration range (245–1,654+) — the
         # shared ladder gives narrating models room to reach the forced call
         # (ENG-1084).

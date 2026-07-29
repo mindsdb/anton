@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 from rich.console import Console
 
+from anton.core.llm.structured import (
+    generate_with_truncation_retry,
+    no_preamble_instruction,
+)
+
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
     from anton.core.llm.client import LLMClient
@@ -60,11 +65,6 @@ async def _generate_meta(
     session_id: str,
 ) -> tuple[str, str]:
     try:
-        from anton.core.llm.structured import (
-            generate_with_truncation_retry,
-            no_preamble_instruction,
-        )
-
         conversation_text = _format_history_for_llm(history)
         # 300 was tighter than the verifier's infamous 256 (ENG-1081), for a
         # call asked to produce a whole-session distillation — narrating

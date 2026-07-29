@@ -27,6 +27,11 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 
+from anton.core.llm.structured import (
+    generate_with_truncation_retry,
+    no_preamble_instruction,
+)
+
 from anton.core.memory.skills import (
     Skill,
     SkillStats,
@@ -240,11 +245,6 @@ async def handle_skill_save(
     console.print("[anton.cyan](anton)[/] Drafting a skill from recent work…")
 
     try:
-        from anton.core.llm.structured import (
-            generate_with_truncation_retry,
-            no_preamble_instruction,
-        )
-
         # A skill draft is a real document, and narrating models spend
         # 245–1,654+ tokens on prose before the forced call — 1500 sat inside
         # that range (ENG-1084).
