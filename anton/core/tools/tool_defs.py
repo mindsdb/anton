@@ -1,4 +1,5 @@
 from anton.core.tools.tool_handlers import (
+    handle_ask_user,
     handle_create_artifact,
     handle_launch_backend,
     handle_list_artifacts,
@@ -501,4 +502,77 @@ SELECT_PATH_TOOL = ToolDef(
         "required": ["prompt"],
     },
     handler=handle_select_path,
+)
+
+
+ASK_USER_TOOL = ToolDef(
+    name="ask_user",
+    description=(
+        "Ask the user to choose between concrete options, and get their answer "
+        "back as the tool result within this same turn. Use this INSTEAD of "
+        "writing the question as text and ending your turn, whenever the "
+        "answers form a short closed set (which database, which table, which "
+        "of these three approaches).\n\n"
+        "Give 2-10 options with unique `value`s. `value` is what comes back to "
+        "you; `label` is what the user sees. Set `select` to 'many' when more "
+        "than one answer makes sense.\n\n"
+        'Returns {"status":"answered","values":["<value>"]} — or "text" when the '
+        'user typed their own answer instead of picking, possibly alongside '
+        '"values". Other statuses: "cancelled" (the user declined to answer), '
+        '"timeout", "error". On cancelled/timeout/error do NOT call this tool '
+        "again for the same question: either proceed on an assumption you state "
+        "out loud, or ask in plain text and end your turn.\n\n"
+        "Ask one question at a time."
+    ),
+    prompt=(
+        "When you need the user to pick between concrete alternatives, call the "
+        "`ask_user` tool instead of writing the options as text and stopping. "
+        "The answer arrives as the tool result, so you keep working in the same "
+        "turn. Open-ended questions still go in plain text with the turn ended."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "One short line asking what to choose, e.g. "
+                "'Which database should I read from?'.",
+            },
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 10,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "value": {
+                            "type": "string",
+                            "description": "What is returned to you on selection. Unique.",
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "What the user sees. Defaults to `value`.",
+                        },
+                        "detail": {
+                            "type": "string",
+                            "description": "Optional second line of context.",
+                        },
+                    },
+                    "required": ["value"],
+                },
+                "description": "The choices, 2-10 of them.",
+            },
+            "select": {
+                "type": "string",
+                "enum": ["one", "many"],
+                "description": "Whether the user picks one option or several. Default 'one'.",
+            },
+            "allow_custom": {
+                "type": "boolean",
+                "description": "Whether a free-form answer is useful here. Default true.",
+            },
+        },
+        "required": ["question", "options"],
+    },
+    handler=handle_ask_user,
 )

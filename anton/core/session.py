@@ -57,6 +57,7 @@ from anton.core.llm.tracing import (
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
+    ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
@@ -999,8 +1000,27 @@ class ChatSession:
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
         # Interactive file/folder disambiguation — always available; degrades
-        # to a plain-text prompt when no elicitor/console is present.
+        # to picker_unavailable (and still auto-resolves a single candidate)
+        # when no elicitor supports path questions.
         self.tool_registry.register_tool(SELECT_PATH_TOOL)
+
+        # Multiple-choice questions — only when some host can actually render
+        # them. Without this the model would ask into a void. The cowork kill
+        # switch works by withholding the elicitor, so it needs no case here.
+        if self.elicitor is not None and "choice" in self.elicitor.supported_kinds:
+            # Copy, don't mutate: ToolDefs are module-level singletons and the
+            # hint is per-host, so an in-place edit would leak across every
+            # session sharing this process.
+            self.tool_registry.register_tool(
+                replace(
+                    ASK_USER_TOOL,
+                    description=(
+                        ASK_USER_TOOL.description
+                        + "\n\n"
+                        + self.elicitor.answer_hint
+                    ),
+                )
+            )
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)

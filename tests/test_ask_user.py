@@ -4,6 +4,7 @@ handler, and registration gating."""
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -20,6 +21,8 @@ from anton.core.llm.provider import (
     StreamAskUserAnswered,
     StreamTaskProgress,
 )
+from anton.core.tools.tool_defs import ASK_USER_TOOL
+from anton.core.tools.tool_handlers import build_ask_request, handle_ask_user
 
 
 def _choice(**over) -> AskRequest:
@@ -345,3 +348,175 @@ async def test_answer_wait_is_credited_when_ask_is_cancelled(make_session):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert session.answer_wait_s > 1.0
+
+
+# ─── the tool ───────────────────────────────────────────────────────────
+
+_TC_INPUT = {
+    "question": "Which database should I read from?",
+    "options": [
+        {"value": "pg", "label": "postgres"},
+        {"value": "my", "label": "mysql", "detail": "read replica"},
+    ],
+}
+
+
+def test_build_ask_request_maps_the_schema():
+    request = build_ask_request(_TC_INPUT, timeout_s=300)
+    assert request.prompt == "Which database should I read from?"
+    assert request.kind == "choice"
+    assert request.timeout_s == 300
+    assert request.select == "one"
+    assert request.allow_custom is True
+    assert [o.value for o in request.options] == ["pg", "my"]
+    assert request.options[1].detail == "read replica"
+
+
+def test_build_ask_request_honours_select_and_allow_custom():
+    request = build_ask_request(
+        {**_TC_INPUT, "select": "many", "allow_custom": False}, timeout_s=None
+    )
+    assert (request.select, request.allow_custom) == ("many", False)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {},
+        {"question": "q"},
+        {"question": "q", "options": "not-a-list"},
+        {"question": "q", "options": [{"label": "no value"}]},
+        {**_TC_INPUT, "select": "several"},
+    ],
+    ids=["empty", "no-options", "options-not-a-list", "option-without-value", "bad-select"],
+)
+def test_build_ask_request_returns_none_on_junk(bad):
+    assert build_ask_request(bad, timeout_s=None) is None
+
+
+async def test_handler_serializes_each_status(make_session):
+    cases = [
+        (AskAnswer(status="answered", values=("pg",)), {"status": "answered", "values": ["pg"]}),
+        (AskAnswer(status="answered", text="clickhouse"), {"status": "answered", "text": "clickhouse"}),
+        (
+            AskAnswer(status="answered", values=("pg", "my"), text="and duckdb"),
+            {"status": "answered", "values": ["pg", "my"], "text": "and duckdb"},
+        ),
+        (AskAnswer(status="cancelled"), {"status": "cancelled"}),
+        (AskAnswer(status="timeout"), {"status": "timeout"}),
+    ]
+    for answer, expected in cases:
+        session = _wired(make_session, _RecordingElicitor(answer=answer))
+        assert json.loads(await handle_ask_user(session, _TC_INPUT)) == expected
+
+
+async def test_handler_maps_internal_statuses_onto_error(make_session):
+    session = _wired(make_session, _RecordingElicitor(answer=AskAnswer(status="unavailable")))
+    result = json.loads(await handle_ask_user(session, _TC_INPUT))
+    assert result["status"] == "error"
+    assert "message" in result
+
+    session = _wired(make_session, _RecordingElicitor())
+    session.question_count = MAX_QUESTIONS_PER_TURN
+    limited = json.loads(await handle_ask_user(session, _TC_INPUT))
+    assert limited["status"] == "error"
+    assert "limit" in limited["message"]
+
+
+async def test_handler_rejects_junk_before_touching_the_elicitor(make_session):
+    elicitor = _RecordingElicitor()
+    session = _wired(make_session, elicitor)
+    result = json.loads(await handle_ask_user(session, {"question": "q"}))
+    assert result["status"] == "error"
+    assert elicitor.calls == []
+
+
+async def test_handler_emits_one_telemetry_event_per_outcome(make_session, monkeypatch):
+    """Real `send_event(settings, action, **extra)` takes only string extras
+    and a settings object — not the (name, props) shape a first draft of
+    this test assumed. Verified against every existing call site
+    (anton/tools.py, anton/chat.py, anton/cli.py): each does a local
+    `from anton.analytics import send_event` right before calling it, so
+    patching the module attribute here is picked up correctly.
+    """
+    sent: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "anton.analytics.send_event",
+        lambda settings, action, **extra: sent.append((action, extra)),
+    )
+    for answer, expected in [
+        (AskAnswer(status="answered", values=("pg",)), "answered"),
+        (AskAnswer(status="cancelled"), "cancelled"),
+        (AskAnswer(status="timeout"), "timeout"),
+    ]:
+        sent.clear()
+        session = _wired(make_session, _RecordingElicitor(answer=answer))
+        await handle_ask_user(session, _TC_INPUT)
+        names = [name for name, _ in sent]
+        assert names == ["ask_user_asked", f"ask_user_{expected}"]
+        assert sent[0][1]["select"] == "one"
+        assert sent[0][1]["options"] == "2"
+
+
+async def test_handler_survives_send_event_raising(make_session, monkeypatch):
+    """Analytics must never break a turn: even if send_event itself raises,
+    handle_ask_user still returns a normal tool result."""
+
+    def _raise(settings, action, **extra):
+        raise RuntimeError("analytics backend is down")
+
+    monkeypatch.setattr("anton.analytics.send_event", _raise)
+    session = _wired(make_session, _RecordingElicitor())
+    result = json.loads(await handle_ask_user(session, _TC_INPUT))
+    assert result["status"] == "answered"
+
+
+# ─── registration gating ────────────────────────────────────────────────
+
+
+def _tool_names(session) -> set[str]:
+    session._build_tools()
+    return {t["name"] for t in session.tool_registry.dump()}
+
+
+def test_ask_user_absent_without_an_elicitor_or_console(make_session):
+    session = make_session()
+    names = _tool_names(session)
+    assert "ask_user" not in names
+    assert "select_path" in names  # always registered, degrades on its own
+
+
+def test_ask_user_present_when_the_elicitor_supports_choice(make_session):
+    session = make_session(elicitor=_RecordingElicitor())
+    assert "ask_user" in _tool_names(session)
+
+
+def test_ask_user_absent_for_a_path_only_elicitor(make_session):
+    class _PathOnly(_RecordingElicitor):
+        supported_kinds = ("path",)
+
+    session = make_session(elicitor=_PathOnly())
+    names = _tool_names(session)
+    assert "ask_user" not in names
+    assert "select_path" in names
+
+
+def test_registration_copies_the_tooldef_instead_of_mutating_the_singleton(make_session):
+    class _A(_RecordingElicitor):
+        answer_hint = "HINT-A"
+
+    class _B(_RecordingElicitor):
+        answer_hint = "HINT-B"
+
+    pristine = ASK_USER_TOOL.description
+    session_a = make_session(elicitor=_A())
+    session_b = make_session(elicitor=_B())
+    session_a._build_tools()
+    session_b._build_tools()
+
+    def _desc(session):
+        return next(t["description"] for t in session.tool_registry.dump() if t["name"] == "ask_user")
+
+    assert "HINT-A" in _desc(session_a)
+    assert "HINT-B" in _desc(session_b)
+    assert ASK_USER_TOOL.description == pristine  # module singleton untouched

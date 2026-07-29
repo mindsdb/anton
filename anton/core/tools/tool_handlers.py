@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -805,3 +806,129 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     if chosen not in {option.value for option in options}:
         return _status("invalid", "The returned selection was not one of the offered options.")
     return _status("resolved", path=chosen)
+
+
+# ---------------------------------------------------------------------------
+# ask_user — a multiple-choice question answered inside the current turn
+# ---------------------------------------------------------------------------
+
+
+def build_ask_request(tc_input: dict, timeout_s: "int | None"):
+    """Parse the tool input into an ``AskRequest``, or None if it is junk.
+
+    Parsing only — the well-formedness rules (option count, uniqueness) live
+    in ``validate_request`` so the orchestrator, which builds requests in
+    Python and never comes through here, gets them too.
+    """
+    from anton.core.interaction.elicit import AskOption, AskRequest
+
+    question = (tc_input.get("question") or "").strip()
+    if not question:
+        return None
+
+    raw_options = tc_input.get("options")
+    if not isinstance(raw_options, list) or not raw_options:
+        return None
+    options = []
+    for raw in raw_options:
+        if not isinstance(raw, dict):
+            return None
+        value = (raw.get("value") or "").strip()
+        if not value:
+            return None
+        options.append(
+            AskOption(
+                value=value,
+                label=(raw.get("label") or value).strip(),
+                detail=(raw.get("detail") or "").strip(),
+            )
+        )
+
+    select = (tc_input.get("select") or "one").strip().lower()
+    if select not in ("one", "many"):
+        return None
+
+    allow_custom = tc_input.get("allow_custom")
+    return AskRequest(
+        prompt=question,
+        kind="choice",
+        timeout_s=timeout_s,
+        options=tuple(options),
+        select=select,
+        allow_custom=True if allow_custom is None else bool(allow_custom),
+    )
+
+
+_ASK_USER_UNAVAILABLE = (
+    "Interactive questions are unavailable here, or the question was malformed "
+    "(it needs 2-10 options with unique values). Ask in plain text instead and "
+    "end your turn."
+)
+_ASK_USER_LIMIT = (
+    "Question limit reached for this turn; proceed on a stated assumption "
+    "instead of asking again."
+)
+
+
+def _ask_user_telemetry_settings(session: "ChatSession"):
+    """Best-effort settings object for `send_event`, mirroring the pattern
+    already used at every other call site (see `anton/tools.py`)."""
+    settings = getattr(session, "_settings", None)
+    if settings is not None:
+        return settings
+    try:
+        from anton.config.settings import AntonSettings
+
+        return AntonSettings()
+    except Exception:
+        return None
+
+
+def _send_ask_user_event(session: "ChatSession", action: str, props: dict) -> None:
+    """Fire one telemetry event. Never raises — analytics must not break a turn."""
+    try:
+        settings = _ask_user_telemetry_settings(session)
+        if not settings:
+            return
+        from anton.analytics import send_event
+
+        send_event(settings, action, **props)
+    except Exception:
+        pass
+
+
+async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
+    """Ask the user to choose, and return the answer as the tool result."""
+    from anton.core.interaction.elicit import elicit
+
+    elicitor = getattr(session, "elicitor", None)
+    request = build_ask_request(
+        tc_input, timeout_s=getattr(elicitor, "timeout_s", None)
+    )
+    if request is None:
+        return _status("error", _ASK_USER_UNAVAILABLE)
+
+    # send_event only accepts string extras (see every existing call site).
+    props = {"select": request.select, "options": str(len(request.options))}
+    _send_ask_user_event(session, "ask_user_asked", props)
+
+    # The question id doubles as the correlation key the host echoes back
+    # with the answer. The originating tool_use.id is not visible here
+    # (dispatch_tool passes only name + input), so mint one.
+    question_id = f"ask:{uuid.uuid4().hex}"
+    answer = await elicit(session, question_id, request)
+    _send_ask_user_event(session, f"ask_user_{answer.status}", props)
+
+    if answer.status == "limit":
+        return _status("error", _ASK_USER_LIMIT)
+    if answer.status == "unavailable":
+        return _status("error", _ASK_USER_UNAVAILABLE)
+    if answer.status in ("cancelled", "timeout"):
+        return _status(answer.status)
+
+    extra: dict = {}
+    if answer.values:
+        extra["values"] = list(answer.values)
+    if answer.text:
+        extra["text"] = answer.text
+    return _status("answered", **extra)
