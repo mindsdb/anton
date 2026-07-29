@@ -502,3 +502,29 @@ SELECT_PATH_TOOL = ToolDef(
     },
     handler=handle_select_path,
 )
+
+
+# ---------------------------------------------------------------------------
+# Skill → tool-bundle activation (ENG-764)
+# ---------------------------------------------------------------------------
+# These tools are NOT registered at session start. They enter the registry
+# only when the model recalls one of the mapped skills, keeping ~1.3k tokens
+# of schemas out of the `tools` array for sessions that never produce
+# artifacts. Registration is sticky for the session (see ChatSession).
+
+ARTIFACT_TOOL_BUNDLE: list[ToolDef] = [
+    CREATE_ARTIFACT_TOOL,
+    LIST_ARTIFACTS_TOOL,
+    OPEN_ARTIFACT_TOOL,
+    UPDATE_ARTIFACT_METADATA_TOOL,
+    LAUNCH_BACKEND_TOOL,
+]
+
+# Skill label → tools that skill unlocks. The two build-* skills map to the
+# same bundle so jumping straight into a dashboard/backend also unlocks the
+# artifact tools without a separate `artifacts` recall.
+SKILL_TOOL_BUNDLES: dict[str, list[ToolDef]] = {
+    "artifacts": ARTIFACT_TOOL_BUNDLE,
+    "build-html-dashboard": ARTIFACT_TOOL_BUNDLE,
+    "build-fullstack-backend": ARTIFACT_TOOL_BUNDLE,
+}
