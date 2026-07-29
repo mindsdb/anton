@@ -1,15 +1,27 @@
 """Mid-turn human interaction primitives for the agent loop.
 
-Currently this package hosts file/folder disambiguation (the ``select_path``
-tool). The agent depends only on the abstract :class:`SelectionElicitor`
-strategy; each host (CLI, cowork-server harness, …) supplies a concrete
-implementation, so the core never learns how the prompt is surfaced.
+The agent depends only on the abstract :class:`Elicitor` strategy and the
+shared :func:`elicit` entry point; each host (CLI, cowork-server harness, …)
+supplies a concrete implementation, so the core never learns how a question
+is surfaced.
 """
 
-from anton.core.interaction.selection import (
-    SelectionElicitor,
-    SelectionOption,
-    SelectionRequest,
+from anton.core.interaction.elicit import (
+    AskAnswer,
+    AskOption,
+    AskRequest,
+    Elicitor,
+    elicit,
+    validate_request,
 )
+from anton.core.interaction.emitter import TurnEmitter
 
-__all__ = ["SelectionElicitor", "SelectionOption", "SelectionRequest"]
+__all__ = [
+    "AskAnswer",
+    "AskOption",
+    "AskRequest",
+    "Elicitor",
+    "TurnEmitter",
+    "elicit",
+    "validate_request",
+]

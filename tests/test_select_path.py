@@ -12,25 +12,53 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from anton.core.interaction.elicit import AskAnswer
 from anton.core.tools.tool_handlers import handle_select_path
 
 
 class _FakeElicitor:
     """Terminal-free stand-in: returns a scripted choice."""
 
+    supported_kinds = ("choice", "path")
+    answer_hint = "hint"
+    timeout_s = None
+
     def __init__(self, chosen: str | None) -> None:
         self.chosen = chosen
         self.requests: list = []
 
-    async def elicit(self, request):
+    async def begin(self, question_id, request):
+        return None
+
+    async def end(self, question_id):
+        return None
+
+    async def ask(self, question_id, request):
         self.requests.append(request)
-        return self.chosen
+        if self.chosen is None:
+            return AskAnswer(status="cancelled")
+        return AskAnswer(status="answered", values=(self.chosen,))
+
+
+async def _noop_emit(event):
+    """Stand in for ChatSession.emit, which is a no-op with no emitter attached.
+
+    elicit() calls ``await session.emit(...)`` unconditionally, so a fake
+    session without this method raises AttributeError before ever reaching
+    elicitor.ask().
+    """
+    return None
 
 
 def _session(tmp_path: Path, elicitor=None):
     return SimpleNamespace(
         _console=None,
-        selection_elicitor=elicitor,
+        elicitor=elicitor,
+        emitter=None,
+        emit=_noop_emit,
+        question_count=0,
+        answer_wait_s=0.0,
+        escape_watcher=None,
         _workspace=SimpleNamespace(base=tmp_path),
     )
 
@@ -137,7 +165,17 @@ async def test_browse_resolves_a_typed_folder(tmp_path):
 
 async def test_elicitor_exception_becomes_error_status(tmp_path):
     class _Boom:
-        async def elicit(self, request):
+        supported_kinds = ("choice", "path")
+        answer_hint = "hint"
+        timeout_s = None
+
+        async def begin(self, question_id, request):
+            return None
+
+        async def end(self, question_id):
+            return None
+
+        async def ask(self, question_id, request):
             raise RuntimeError("picker died")
 
     target = tmp_path / "data"

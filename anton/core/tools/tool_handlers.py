@@ -670,31 +670,27 @@ def _collect_selection_candidates(tc_input: dict, root: "Path", kind: str) -> "l
 
 
 def _selection_option(path: "Path", root: "Path"):
-    """Build a display option for *path* (label = path relative to the root)."""
-    from anton.core.interaction.selection import SelectionOption
+    """One picker entry for *path*, labelled relative to the project root."""
+    from anton.core.interaction.elicit import AskOption
 
     try:
         label = str(path.relative_to(root))
     except ValueError:
         label = str(path)
-    return SelectionOption(
+    return AskOption(
         value=str(path),
         label=label,
         kind="folder" if path.is_dir() else "file",
     )
 
 
-def _resolve_selection_elicitor(session: "ChatSession"):
-    """The host-injected elicitor, falling back to a terminal picker on the CLI."""
-    elicitor = getattr(session, "selection_elicitor", None)
-    if elicitor is not None:
-        return elicitor
-    console = getattr(session, "_console", None)
-    if console is None:
+def _chosen_path(answer) -> "str | None":
+    """The single path an ``AskAnswer`` carries, or None if there is none."""
+    if answer.status != "answered":
         return None
-    from anton.core.interaction.cli import CLISelectionElicitor
-
-    return CLISelectionElicitor(console)
+    if answer.values:
+        return answer.values[0]
+    return (answer.text or "").strip() or None
 
 
 def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
@@ -712,15 +708,6 @@ def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
 def _status(status: str, message: str = "", **extra) -> str:
     """Serialize a select_path tool result, omitting an empty message."""
     return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
-
-
-async def _run_elicitor(elicitor, request):
-    """Run the elicitor, returning (chosen, error_json). error_json is None on success."""
-    try:
-        return await elicitor.elicit(request), None
-    except Exception as exc:
-        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
-        return None, _status("error", f"Selection failed: {exc}")
 
 
 def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
@@ -755,7 +742,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     The result is fed back as the tool result, so the agent continues without a
     separate user message.
     """
-    from anton.core.interaction.selection import SelectionRequest
+    from anton.core.interaction.elicit import AskRequest, elicit
 
     prompt = (tc_input.get("prompt") or "Select a file or folder.").strip()
     kind = (tc_input.get("kind") or "any").strip().lower()
@@ -763,23 +750,34 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         kind = "any"
 
     root = _selection_root(session)
-    elicitor = _resolve_selection_elicitor(session)
+    elicitor = getattr(session, "elicitor", None)
+    can_pick = elicitor is not None and "path" in getattr(elicitor, "supported_kinds", ())
+    timeout_s = getattr(elicitor, "timeout_s", None)
     has_candidates = isinstance(tc_input.get("candidates"), list) and bool(tc_input.get("candidates"))
     has_pattern = bool((tc_input.get("pattern") or "").strip())
 
     # ── browse — locate an unspecified path ──────────────────────────────
     if not has_candidates and not has_pattern:
-        if elicitor is None:
+        if not can_pick:
             return _status(
                 "picker_unavailable",
                 "An interactive picker is unavailable here; ask the user for the path in plain text.",
             )
-        request = SelectionRequest(
-            prompt=prompt, kind=kind, mode="browse", root=str(_browse_start_dir(tc_input, root))
+        request = AskRequest(
+            prompt=prompt,
+            kind="path",
+            timeout_s=timeout_s,
+            path_kind=kind,
+            path_mode="browse",
+            root=str(_browse_start_dir(tc_input, root)),
         )
-        chosen, error = await _run_elicitor(elicitor, request)
+        try:
+            answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+        except Exception as exc:  # noqa: BLE001 — the picker is host code
+            _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+            return _status("error", f"Selection failed: {exc}")
         browse_root = Path(request.root) if request.root else root
-        return error or _finalize_browse_choice(chosen, kind, browse_root)
+        return _finalize_browse_choice(_chosen_path(answer), kind, browse_root)
 
     # ── pick — disambiguate concrete candidates within the project ───────
     candidates = _collect_selection_candidates(tc_input, root, kind)
@@ -790,7 +788,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         )
     if len(candidates) == 1:
         return _status("resolved", auto_resolved=True, path=str(candidates[0]))
-    if elicitor is None:
+    if not can_pick:
         return _status(
             "picker_unavailable",
             "An interactive picker is unavailable here; ask the user which of these paths they meant.",
@@ -798,9 +796,19 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         )
 
     options = tuple(_selection_option(p, root) for p in candidates)
-    chosen, error = await _run_elicitor(elicitor, SelectionRequest(prompt=prompt, options=options, kind=kind))
-    if error:
-        return error
+    request = AskRequest(
+        prompt=prompt,
+        kind="path",
+        timeout_s=timeout_s,
+        options=options,
+        path_kind=kind,
+    )
+    try:
+        answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+        return _status("error", f"Selection failed: {exc}")
+    chosen = _chosen_path(answer)
     if chosen is None:
         return _status("cancelled", "The user dismissed the picker without choosing. Ask how they would like to proceed.")
     if chosen not in {option.value for option in options}:
