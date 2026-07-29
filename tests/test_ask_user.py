@@ -3,6 +3,8 @@ handler, and registration gating."""
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from anton.core.interaction.elicit import (
@@ -63,3 +65,53 @@ def test_path_request_ignores_choice_rules():
 
 def test_budget_constant_is_three():
     assert MAX_QUESTIONS_PER_TURN == 3
+
+
+# ─── TurnEmitter + session wiring ───────────────────────────────────────
+
+
+async def test_turn_emitter_is_fifo_and_drains():
+    from anton.core.interaction.emitter import TurnEmitter
+
+    emitter = TurnEmitter()
+    assert emitter.empty() is True
+    await emitter.emit("a")
+    await emitter.emit("b")
+    assert emitter.empty() is False
+    assert await emitter.get() == "a"
+    assert emitter.get_nowait() == "b"
+    assert emitter.empty() is True
+
+
+async def test_turn_emitter_never_blocks_the_producer():
+    """Unbounded by contract: a bounded queue would deadlock a tool that
+    emits while nothing is draining."""
+    from anton.core.interaction.emitter import TurnEmitter
+
+    emitter = TurnEmitter()
+    for i in range(1000):
+        await asyncio.wait_for(emitter.emit(i), timeout=1)
+    assert emitter.empty() is False
+
+
+def test_session_exposes_the_new_public_attributes(make_session):
+    session = make_session()
+    assert session.emitter is None
+    assert session.question_count == 0
+    assert session.answer_wait_s == 0.0
+    assert session.escape_watcher is None
+    assert not hasattr(session, "selection_elicitor")
+
+
+async def test_session_emit_is_a_noop_without_an_emitter(make_session):
+    session = make_session()
+    await session.emit("anything")  # must not raise
+
+
+async def test_session_emit_forwards_to_the_attached_emitter(make_session):
+    from anton.core.interaction.emitter import TurnEmitter
+
+    session = make_session()
+    session.emitter = TurnEmitter()
+    await session.emit("ev")
+    assert await session.emitter.get() == "ev"

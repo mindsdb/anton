@@ -1858,7 +1858,7 @@ async def _chat_loop(
 
             try:
                 async with EscapeWatcher(on_cancel=display.show_cancelling) as esc:
-                    session._escape_watcher = esc
+                    session.escape_watcher = esc
                     async for event in session.turn_stream(message_content):
                         if esc.cancelled.is_set():
                             session._cancel_event.set()

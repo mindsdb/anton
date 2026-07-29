@@ -110,7 +110,7 @@ async def run_goal_loop(
 
             try:
                 async with EscapeWatcher(on_cancel=display.show_cancelling) as esc:
-                    session._escape_watcher = esc
+                    session.escape_watcher = esc
                     async for event in session.turn_stream(continuation_msg):
                         if esc.cancelled.is_set():
                             session._cancel_event.set()

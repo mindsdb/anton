@@ -69,7 +69,8 @@ from anton.core.tools.tool_defs import (
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
-from anton.core.interaction.selection import SelectionElicitor
+from anton.core.interaction.elicit import Elicitor
+from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -370,7 +371,12 @@ class ChatSessionConfig:
     # so resuming a conversation days later still reports the real "now".
     # None → fall back to today.
     started_at: datetime | None = None
-    selection_elicitor: SelectionElicitor | None = None
+    # Strategy for mid-turn questions (`ask_user`, `select_path`). Hosts
+    # inject a concrete elicitor — a GUI card in cowork-server, a terminal
+    # prompt on the CLI. None + a console falls back to the CLI elicitor;
+    # None + no console means questions are unavailable and the tools that
+    # need one are not registered.
+    elicitor: Elicitor | None = None
     # Cheap front-model routing (ENG-648). None (default) defers to the
     # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
     # explicit bool to override per session.
@@ -443,13 +449,23 @@ class ChatSession:
         # langfuse propagation in the provider layer).
         self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
-        self._escape_watcher: EscapeWatcher | None = None
+        self.escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
-        # Strategy for mid-turn file/folder disambiguation (the `select_path`
-        # tool). Hosts inject a concrete elicitor — a streaming GUI picker in
-        # cowork-server, a terminal picker on the CLI. None falls back to the
-        # console picker (CLI) or a graceful no-op (headless).
-        self.selection_elicitor: SelectionElicitor | None = config.selection_elicitor
+        # Resolved once, here, because tool registration reads
+        # `supported_kinds` and `answer_hint` off the instance.
+        self.elicitor: Elicitor | None = config.elicitor
+        if self.elicitor is None and config.console is not None:
+            from anton.core.interaction.cli import CLIElicitor
+
+            self.elicitor = CLIElicitor(config.console)
+        # Out-of-band event path, attached for the duration of a
+        # `turn_stream` turn only. `turn()` leaves it None, which is what
+        # makes questions unavailable on the non-streaming path.
+        self.emitter = None
+        self.question_count = 0
+        # Seconds spent waiting on humans during the current tool dispatch,
+        # subtracted from the tool's reported elapsed time.
+        self.answer_wait_s = 0.0
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -1024,6 +1040,14 @@ class ChatSession:
         """Clean up scratchpads and other resources."""
         await self._reap_tracked_backends()
         await self._scratchpads.close_all()
+
+    async def emit(self, event) -> None:
+        """Push an out-of-band event to the host, if one is listening.
+
+        A no-op without an emitter, so callers never need to guard.
+        """
+        if self.emitter is not None:
+            await self.emitter.emit(event)
 
     async def _reap_tracked_backends(self) -> None:
         """Terminate every backend launched via launch_backend.
@@ -1925,6 +1949,34 @@ class ChatSession:
         trace_tags: list[str] | None = None,
         trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        """Streaming turn. Owns the out-of-band emitter's lifetime.
+
+        The emitter exists only for the duration of one streaming turn, which
+        is what makes questions unavailable on the non-streaming `turn()`
+        path: nothing there would render them.
+        """
+        self.emitter = TurnEmitter()
+        self.question_count = 0
+        self.answer_wait_s = 0.0
+        try:
+            async for event in self._turn_stream_inner(
+                user_input,
+                turn_id=turn_id,
+                trace_tags=trace_tags,
+                trace_metadata=trace_metadata,
+            ):
+                yield event
+        finally:
+            self.emitter = None
+
+    async def _turn_stream_inner(
+        self,
+        user_input: str | list[dict],
+        *,
+        turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive.
 
         `turn_id` lets the host (cowork, CLI, …) tag the turn with its
@@ -2467,15 +2519,15 @@ class ChatSession:
                                 phase="interactive",
                                 message="",
                             )
-                            if self._escape_watcher:
-                                self._escape_watcher.pause()
+                            if self.escape_watcher:
+                                self.escape_watcher.pause()
                             try:
                                 result_text = await self.tool_registry.dispatch_tool(
                                     self, tc.name, tc.input
                                 )
                             finally:
-                                if self._escape_watcher:
-                                    self._escape_watcher.resume()
+                                if self.escape_watcher:
+                                    self.escape_watcher.resume()
                             yield StreamTaskProgress(
                                 phase="analyzing",
                                 message="Analyzing results...",
