@@ -267,6 +267,8 @@ async def test_path_questions_are_not_published(make_session):
     kinds = [type(e).__name__ for e in _drain(session.emitter)]
     assert "StreamAskUser" not in kinds
     assert "StreamTaskProgress" in kinds  # the spinner still has to stop
+    # Symmetric: no card was published, so nothing is retired either.
+    assert "StreamAskUserAnswered" not in kinds
 
 
 async def test_rate_limit_publishes_nothing_and_never_opens_a_channel(make_session):
@@ -307,12 +309,39 @@ async def test_end_runs_when_ask_is_cancelled(make_session):
     assert "end:q1" in elicitor.calls
 
 
-async def test_answer_wait_is_accumulated_on_the_session(make_session):
+async def test_answer_wait_accumulates_rather_than_overwrites(make_session):
+    """A later task subtracts this from a tool's elapsed time, so a regression
+    from += to = would silently under-report every question after the first."""
+
     class _Slow(_RecordingElicitor):
         async def ask(self, question_id, request):
             await asyncio.sleep(0.05)
             return AskAnswer(status="answered", values=("pg",))
 
     session = _wired(make_session, _Slow())
+    session.answer_wait_s = 5.0
     await elicit(session, "q1", _choice())
-    assert session.answer_wait_s >= 0.05
+    assert session.answer_wait_s >= 5.05
+
+
+async def test_answer_wait_is_credited_when_ask_raises(make_session):
+    session = _wired(make_session, _RecordingElicitor(raises=RuntimeError("boom")))
+    session.answer_wait_s = 1.0
+    with pytest.raises(RuntimeError):
+        await elicit(session, "q1", _choice())
+    assert session.answer_wait_s > 1.0
+
+
+async def test_answer_wait_is_credited_when_ask_is_cancelled(make_session):
+    class _Hangs(_RecordingElicitor):
+        async def ask(self, question_id, request):
+            await asyncio.sleep(3600)
+
+    session = _wired(make_session, _Hangs())
+    session.answer_wait_s = 1.0
+    task = asyncio.create_task(elicit(session, "q1", _choice()))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert session.answer_wait_s > 1.0

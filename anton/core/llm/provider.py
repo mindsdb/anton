@@ -118,7 +118,7 @@ class StreamAskUser:
     """
 
     id: str
-    request: "AskRequest"
+    request: AskRequest
 
 
 @dataclass
@@ -130,7 +130,7 @@ class StreamAskUserAnswered:
     """
 
     id: str
-    answer: "AskAnswer"
+    answer: AskAnswer
 
 
 StreamEvent = (

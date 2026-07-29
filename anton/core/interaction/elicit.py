@@ -10,6 +10,7 @@ widget yet).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -133,8 +134,9 @@ async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
     "there will be no question" happens before ``begin()``, so a card is
     never published for a question that cannot be answered.
     """
-    import time
-
+    # Deferred: breaks an import cycle (provider.py imports from this module
+    # under TYPE_CHECKING; a top-level import here would be circular at
+    # runtime).
     from anton.core.llm.provider import (
         StreamAskUser,
         StreamAskUserAnswered,
@@ -151,22 +153,44 @@ async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
     # host that has none — including the non-streaming turn().
     if request.kind == "choice" and session.emitter is None:
         return AskAnswer(status="unavailable")
+    # Checked before begin(): if this ran after, a question over budget would
+    # still open a channel and publish a card that can never be answered —
+    # nothing emits StreamAskUserAnswered to retire it, and the "expired"
+    # state does not apply while the run is still alive.
     if session.question_count >= MAX_QUESTIONS_PER_TURN:
         return AskAnswer(status="limit")
     session.question_count += 1
 
+    # begin() sits outside the try/finally on purpose: if it fails there is
+    # no channel to end, so end() must not run. The budget above is
+    # intentionally consumed even if this then fails — a future editor
+    # should not "fix" that by decrementing it back.
+    #
+    # It also has to run before anything below it: if an answer arrived
+    # before the channel existed, the host would 404 it, the frontend would
+    # leave answer mode, and the turn would hang until the timeout.
     await elicitor.begin(question_id, request)  # open the channel FIRST
     watcher = getattr(session, "escape_watcher", None)
     started = time.monotonic()
     try:
-        # Stops the CLI spinner before anything is printed into it.
-        await session.emit(StreamTaskProgress(phase="interactive", message=""))
         if watcher is not None:
+            # Paused before any emit so an emit() raising can't leave a
+            # pause() unmatched by a resume().
             watcher.pause()
-        if request.kind == "choice":
+        # Stops the CLI spinner before anything is printed into it: Rich
+        # Live is still running, so printed options would collide with the
+        # spinner otherwise.
+        await session.emit(StreamTaskProgress(phase="interactive", message=""))
+        # Symmetric on purpose: retiring a card that was never published
+        # would hand the host an "answered" event for an id it has never
+        # seen. Path questions render in the terminal and publish nothing,
+        # so they stay silent on both halves.
+        published = request.kind == "choice"
+        if published:
             await session.emit(StreamAskUser(id=question_id, request=request))
         answer = await elicitor.ask(question_id, request)
-        await session.emit(StreamAskUserAnswered(id=question_id, answer=answer))
+        if published:
+            await session.emit(StreamAskUserAnswered(id=question_id, answer=answer))
         return answer
     finally:
         session.answer_wait_s += time.monotonic() - started
