@@ -461,6 +461,7 @@ class ChatSession:
             coding_base_url=coding_conn.base_url or "",
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
+            session_id=config.session_id,
         )
 
         self.tool_registry = ToolRegistry()

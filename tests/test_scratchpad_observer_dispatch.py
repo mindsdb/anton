@@ -420,3 +420,83 @@ class TestSingleScratchpadGuard:
         session._scratchpads.pads = {"my-artifact-slug": MagicMock()}
         result = await handle_scratchpad(session, self._exec("dash"))
         assert _CHALLENGE_MARK not in result
+
+    @pytest.mark.asyncio
+    async def test_challenges_a_name_first_used_in_an_EARLIER_turn(self, tmp_path):
+        """The guard must see pads from previous turns (ENG-1124 Fix 5).
+
+        A fresh `ChatSession` — and so a fresh `ScratchpadManager` and an empty
+        `_agent_scratchpad_names` — is built for every user message, and the agent
+        switches pad names precisely *at* turn boundaries. Before this, the guard's
+        memory was always blank at exactly that moment, so it never fired: 0 challenges
+        across 676 cells of a real session that ended up with 22 pad names.
+        """
+        from anton.core.backends.manager import ScratchpadManager
+
+        def _mgr(pad):
+            pad.start = AsyncMock()
+            return ScratchpadManager(
+                runtime_factory=lambda **kw: pad,
+                coding_provider="", coding_model="", coding_api_key="", coding_base_url="",
+                workspace_path=tmp_path, session_id="conv-1",
+            )
+
+        # Turn 1: the agent uses "forecast". Nothing to challenge.
+        s1, pad1 = _fake_session()
+        s1._scratchpads = _mgr(pad1)
+        r1 = await handle_scratchpad(s1, self._exec("forecast"))
+        assert _CHALLENGE_MARK not in r1
+
+        # Turn 2: brand-new session + manager (empty in-memory set), and the agent asks
+        # for a different name. This is the case that used to sail through.
+        # A brand-new session: whatever the guard tracks in memory starts clean, which
+        # is exactly the condition that used to let the switch through unchallenged.
+        s2, pad2 = _fake_session()
+        s2._scratchpads = _mgr(pad2)
+        r2 = await handle_scratchpad(s2, self._exec("Forecast"))
+        assert _CHALLENGE_MARK in r2
+        assert "forecast" in r2, "the challenge should name the pad it wants reused"
+
+    @pytest.mark.asyncio
+    async def test_reusing_an_earlier_turns_name_is_not_challenged(self, tmp_path):
+        """Coming back to the same pad in a later turn must stay silent."""
+        from anton.core.backends.manager import ScratchpadManager
+
+        def _mgr(pad):
+            pad.start = AsyncMock()
+            return ScratchpadManager(
+                runtime_factory=lambda **kw: pad,
+                coding_provider="", coding_model="", coding_api_key="", coding_base_url="",
+                workspace_path=tmp_path, session_id="conv-2",
+            )
+
+        s1, pad1 = _fake_session()
+        s1._scratchpads = _mgr(pad1)
+        await handle_scratchpad(s1, self._exec("forecast"))
+
+        s2, pad2 = _fake_session()
+        s2._scratchpads = _mgr(pad2)
+        r2 = await handle_scratchpad(s2, self._exec("forecast"))
+        assert _CHALLENGE_MARK not in r2
+
+    @pytest.mark.asyncio
+    async def test_other_conversations_pads_do_not_count(self, tmp_path):
+        """The record is per conversation — another conversation's pads are irrelevant."""
+        from anton.core.backends.manager import ScratchpadManager
+
+        def _mgr(pad, session_id):
+            pad.start = AsyncMock()
+            return ScratchpadManager(
+                runtime_factory=lambda **kw: pad,
+                coding_provider="", coding_model="", coding_api_key="", coding_base_url="",
+                workspace_path=tmp_path, session_id=session_id,
+            )
+
+        s1, pad1 = _fake_session()
+        s1._scratchpads = _mgr(pad1, "conv-a")
+        await handle_scratchpad(s1, self._exec("alpha"))
+
+        s2, pad2 = _fake_session()
+        s2._scratchpads = _mgr(pad2, "conv-b")
+        r2 = await handle_scratchpad(s2, self._exec("beta"))
+        assert _CHALLENGE_MARK not in r2, "a different conversation must start clean"

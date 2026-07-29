@@ -258,4 +258,9 @@ class ScratchpadRuntimeFactory(Protocol):
         coding_api_key: str,
         coding_base_url: str,
         workspace_path: Path | None,
+        # Conversation/session identifier, when the host supplies one. Scopes the
+        # namespace snapshot so two conversations in one workspace can reuse the same
+        # pad name without reading each other's state (ENG-1124). Optional so hosts
+        # and test doubles that predate it keep working.
+        session_id: str | None = None,
     ) -> ScratchpadRuntime: ...
