@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import hashlib
 import re
 import shutil
 import sys
@@ -113,31 +114,31 @@ def snapshot_dir(venvs_base: Path, session_id: str | None) -> Path:
     return venvs_base.parent / "scratchpad-sessions" / (session or "_no-session")
 
 
+def _pad_filename(pad_name: str) -> str:
+    """An injective, length-bounded filename for a pad.
+
+    `_safe_segment` alone is NOT injective — it maps every unsafe character to `_`, so
+    `'my pad'`, `'my_pad'` and `'my/pad'` all collapse to `my_pad` and would share one
+    snapshot, meaning one pad loads another's namespace. Appending a digest of the
+    ORIGINAL name keeps distinct pads distinct. Also truncated, because a pad name is
+    model-chosen and most filesystems cap a path component at 255 bytes — an
+    over-long name would fail the write instead of saving state.
+    """
+    stem = _safe_segment(pad_name, "scratchpad")[:80]
+    digest = hashlib.sha1((pad_name or "").encode("utf-8")).hexdigest()[:8]
+    return f"{stem}-{digest}.pkl"
+
+
 def snapshot_file(venvs_base: Path, session_id: str | None, pad_name: str) -> Path | None:
     """Snapshot path for one pad, or None if it would escape the snapshot root."""
     base = snapshot_dir(venvs_base, session_id)
-    path = base / f"{_safe_segment(pad_name, 'scratchpad')}.pkl"
+    path = base / _pad_filename(pad_name)
     # Belt for the sanitiser: never hand back a path outside the snapshot root.
     try:
         path.resolve().relative_to(base.resolve())
     except (ValueError, OSError):
         return None
     return path
-
-
-def pads_with_snapshots(venvs_base: Path, session_id: str | None) -> set[str]:
-    """Pad names this conversation has a saved namespace for.
-
-    This is what lets the single-scratchpad guard work across turns. The guard used
-    to consult only an in-memory set on `ChatSession`, which is rebuilt every turn —
-    and since the agent switches pad names precisely *at* turn boundaries, that set
-    was always empty when it mattered, so the guard never fired (ENG-1124 Fix 5).
-    The snapshot directory is the same fact, on disk, already maintained.
-    """
-    try:
-        return {p.stem for p in snapshot_dir(venvs_base, session_id).glob("*.pkl")}
-    except OSError:
-        return set()
 
 
 class LocalScratchpadRuntime(ScratchpadRuntime):
@@ -187,7 +188,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
 
-    def _session_snapshot_path(self) -> Path | None:
+    def _session_snapshot_path(self, *, create: bool = False) -> Path | None:
         """Where this pad's namespace snapshot lives, or None if it can't be written.
 
         Scoped per conversation *and* per pad. Both matter: without the pad segment two
@@ -201,8 +202,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         ANTON_SCRATCHPAD_SESSION_PATH unset so the failure is reported rather than silent.
         """
         path = snapshot_file(self._venvs_base, self._session_id, self.name)
-        if path is None:
-            return None
+        if path is None or not create:
+            return path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -554,7 +555,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # Cowork process can write to. Every save failed and every failure was
         # discarded, so state never survived a turn. This is the only place that knows
         # the pad name, so it is where the path is composed.
-        snapshot = self._session_snapshot_path()
+        snapshot = self._session_snapshot_path(create=True)
         if snapshot is not None:
             env["ANTON_SCRATCHPAD_SESSION_PATH"] = str(snapshot)
         else:

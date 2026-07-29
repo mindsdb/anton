@@ -40,23 +40,25 @@ except ValueError:
     # A malformed override must never stop the scratchpad from booting.
     SESSION_MAX_BYTES = _SESSION_MAX_DEFAULT
 
-# Names this module re-injects on every boot. Excluded from the snapshot because they
-# are rebuilt fresh anyway, and some (`get_llm`, `web_search`, `query_minds_data`)
-# close over live network clients that must not be pickled or carried between
-# processes. Agent-authored functions and data are NOT excluded — those are the whole
-# point, and dill handles them (including nested references between them).
-_SESSION_EXCLUDE = frozenset(
-    {
-        "__builtins__",
-        "_anton_explainability_queries",
-        "get_llm",
-        "agentic_loop",
-        "web_search",
-        "query_minds_data",
-        "progress",
-        "sample",
-    }
+# Never snapshot these: rebuilt on every boot, and per-cell state.
+_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_queries"})
+
+# Helpers this module injects. They are excluded because they are rebuilt fresh each
+# boot and some (`get_llm`, `web_search`, `query_minds_data`) close over live network
+# clients that must not be pickled or carried between processes.
+#
+# Excluded BY IDENTITY, not by name (`_INJECTED_HELPERS` below). Excluding by name
+# silently destroyed agent data: `sample` and `progress` are perfectly ordinary
+# variable names (`sample = df.sample(100)`), and a name-based skip meant the agent's
+# value was dropped from the snapshot and then re-injected as the helper on the next
+# turn — so `print(sample)` returned `<function sample>` with no error. If the agent
+# rebinds one of these names, its value is data and gets persisted like any other.
+_INJECTED_HELPER_NAMES = frozenset(
+    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
 )
+
+# Populated once, after all injections, with the objects actually injected.
+_INJECTED_HELPERS: dict = {}
 
 # Persistence notes for the next cell's `logs`. Deliberately NOT `error` — a snapshot
 # problem must not make the cell look failed, or it would feed the consecutive-error
@@ -94,10 +96,43 @@ def _load_namespace() -> tuple[dict, str | None]:
         )
 
 
+class _TooBig(Exception):
+    """Raised mid-write once the snapshot passes SESSION_MAX_BYTES."""
+
+
+class _CappedWriter:
+    """File wrapper that aborts the write once it exceeds `limit` bytes.
+
+    Checking the size *after* serialising bounded what we keep but not what it cost:
+    a multi-GB namespace still paid a full serialise + write on every cell before being
+    deleted, which is the exact cost the cap exists to avoid. Failing fast mid-write
+    bounds both.
+    """
+
+    def __init__(self, fh, limit: int) -> None:
+        self._fh = fh
+        self._limit = limit
+        self.written = 0
+
+    def write(self, chunk) -> int:
+        self.written += len(chunk)
+        if self.written > self._limit:
+            raise _TooBig()
+        return self._fh.write(chunk)
+
+    def flush(self) -> None:
+        self._fh.flush()
+
+
 def _dump_namespace(ns: dict) -> str | None:
     if not PERSIST_SESSION or not SESSION_PATH:
         return None
-    payload = {k: v for k, v in ns.items() if k not in _SESSION_EXCLUDE}
+    payload = {
+        k: v
+        for k, v in ns.items()
+        if k not in _SESSION_EXCLUDE_ALWAYS
+        and not (k in _INJECTED_HELPERS and v is _INJECTED_HELPERS[k])
+    }
     # Include the pid: a pad can briefly overlap with its own replacement, and two
     # writers sharing one .tmp would corrupt each other's snapshot.
     tmp_path = f"{SESSION_PATH}.{os.getpid()}.tmp"
@@ -107,18 +142,20 @@ def _dump_namespace(ns: dict) -> str | None:
         # would eventually leave a torn pickle that the next process fails to load.
         # os.replace is atomic within a filesystem.
         with open(tmp_path, "wb") as f:
-            dill.dump(payload, f)
-        size = os.path.getsize(tmp_path)
-        if size > SESSION_MAX_BYTES:
-            os.unlink(tmp_path)
-            return (
-                f"Scratchpad session NOT saved: snapshot is {size:,} bytes, over the "
-                f"{SESSION_MAX_BYTES:,}-byte cap. Variables will not survive a restart "
-                "of this scratchpad — write large results to disk (or an artifact) "
-                "instead of holding them in memory."
-            )
+            dill.dump(payload, _CappedWriter(f, SESSION_MAX_BYTES))
         os.replace(tmp_path, SESSION_PATH)
         return None
+    except _TooBig:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return (
+            f"Scratchpad session NOT saved: the namespace exceeds the "
+            f"{SESSION_MAX_BYTES:,}-byte snapshot cap. Variables will not survive a "
+            "restart of this scratchpad — write large results to disk (or an artifact) "
+            "instead of holding them in memory."
+        )
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -452,9 +489,9 @@ if _scratchpad_model:
             )
             return response.content
 
-        namespace["get_llm"] = get_llm
-        namespace["agentic_loop"] = agentic_loop
-        namespace["web_search"] = web_search
+        namespace.setdefault("get_llm", get_llm)
+        namespace.setdefault("agentic_loop", agentic_loop)
+        namespace.setdefault("web_search", web_search)
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 
@@ -541,7 +578,7 @@ if _minds_datasource and _minds_api_key and _minds_url:
                     "error_message": str(e),
                 }
 
-        namespace["query_minds_data"] = query_minds_data
+        namespace.setdefault("query_minds_data", query_minds_data)
     except Exception:
         pass  # Minds query not available — not fatal
 
@@ -560,7 +597,7 @@ def progress(message=""):
     _real_stdout.flush()
 
 
-namespace["progress"] = progress
+namespace.setdefault("progress", progress)
 
 
 def sample(var, mode="preview", _name=None):
@@ -761,7 +798,7 @@ def _truncate_sample(text, max_chars):
     return text[:max_chars] + f"\n... (truncated, {len(text)} chars total)"
 
 
-namespace["sample"] = sample
+namespace.setdefault("sample", sample)
 
 # --- Logging capture ---
 # Libraries like httpx, urllib3, etc. use Python logging. By default these
@@ -790,6 +827,10 @@ class _CellLogHandler(_logging.Handler):
 _cell_log_handler = _CellLogHandler()
 _logging.root.addHandler(_cell_log_handler)
 _logging.root.setLevel(_logging.INFO)
+
+# All injections are done. Record the helper objects so `_dump_namespace` can tell
+# "this is still our helper" from "the agent rebound this name to its own data".
+_INJECTED_HELPERS = {k: namespace[k] for k in _INJECTED_HELPER_NAMES if k in namespace}
 
 while True:
     lines = []

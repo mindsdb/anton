@@ -1108,9 +1108,9 @@ class TestSessionPersistence:
         await pad.start()
         try:
             cell = await pad.execute("blob = 'x' * 200000\nprint('made')")
+            # Reported, and NEVER on `error` — that would feed the circuit breaker.
             assert cell.error is None
-            assert "over the" in cell.logs and "cap" in cell.logs
-            assert "NOT saved" in cell.logs
+            assert "NOT saved" in cell.logs and "cap" in cell.logs
         finally:
             await pad.cleanup()
 
@@ -1120,9 +1120,7 @@ class TestSessionPersistence:
         venvs_base = tmp_path / "venvs"
         pad = make_scratchpad(name="nopath", _venvs_base=venvs_base)
         # Simulate an unwritable snapshot dir — start() then leaves the env var unset.
-        monkeypatch.setattr(
-            pad, "_session_snapshot_path", lambda: None
-        )
+        monkeypatch.setattr(pad, "_session_snapshot_path", lambda **kw: None)
         await pad.start()
         try:
             cell = await pad.execute("print('ran')")
@@ -1211,3 +1209,90 @@ class TestSessionPersistence:
         assert snapshot is not None and snapshot.exists()
         await pad.cleanup()
         assert not snapshot.exists()
+
+    async def test_agent_variable_shadowing_a_helper_name_survives(self, tmp_path, monkeypatch):
+        """Adversarial: `sample` is both an injected helper and a plausible variable.
+
+        Excluding helpers from the snapshot *by name* silently destroyed the agent's
+        data — `sample = df.sample(100)` came back as `<function sample>` on the next
+        turn, with no error. Two things are needed: exclude helpers by identity (so a
+        rebound name is treated as data), and inject with `setdefault` (because the
+        injections run after the snapshot is loaded and would otherwise clobber it).
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(name="shadow", _venvs_base=venvs_base, session_id="c")
+        await pad.start()
+        await pad.execute("sample = [1, 2, 3]\nprogress = 0.5")
+        await pad.close()
+
+        pad2 = make_scratchpad(name="shadow", _venvs_base=venvs_base, session_id="c")
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(sample, progress)")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "[1, 2, 3] 0.5"
+        finally:
+            await pad2.cleanup()
+
+    async def test_helpers_still_injected_for_a_pad_that_never_rebound_them(
+        self, tmp_path, monkeypatch
+    ):
+        """The other direction: `setdefault` must not stop the helpers being injected."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        pad = make_scratchpad(name="fresh", _venvs_base=tmp_path / "venvs", session_id="c")
+        await pad.start()
+        try:
+            cell = await pad.execute("print(callable(sample), callable(progress))")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "True True"
+        finally:
+            await pad.cleanup()
+
+    async def test_pad_names_that_sanitise_alike_do_not_share_a_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        """Adversarial: `'my pad'` and `'my_pad'` both sanitise to `my_pad`.
+
+        Without a digest in the filename they shared one snapshot, so one pad loaded
+        the other's namespace — the same cross-contamination the per-conversation
+        scoping exists to prevent, just within a conversation.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        a = make_scratchpad(name="my pad", _venvs_base=venvs_base, session_id="c")
+        await a.start()
+        await a.execute("who = 'space'")
+        await a.close()
+
+        b = make_scratchpad(name="my_pad", _venvs_base=venvs_base, session_id="c")
+        await b.start()
+        try:
+            cell = await b.execute("print('who' in dir())")
+            assert cell.stdout.strip() == "False", "distinct pads must not share a snapshot"
+        finally:
+            await b.cleanup()
+
+    async def test_oversized_snapshot_aborts_the_write_instead_of_finishing_it(
+        self, tmp_path, monkeypatch
+    ):
+        """The cap must bound the COST, not just what we keep.
+
+        Writing the whole pickle and then deleting it meant a huge namespace paid a
+        full serialise + write on every cell — the exact cost the cap exists to avoid.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_SESSION_MAX_BYTES", "4096")
+        pad = make_scratchpad(name="huge", _venvs_base=tmp_path / "venvs", session_id="c")
+        await pad.start()
+        try:
+            cell = await pad.execute("blob = 'x' * 500000\nprint('made')")
+            assert cell.error is None
+            assert "NOT saved" in cell.logs and "cap" in cell.logs
+            snapshot = pad._session_snapshot_path()
+            assert snapshot is not None
+            # No snapshot, and no abandoned temp file left behind.
+            assert not snapshot.exists()
+            assert list(snapshot.parent.glob("*.tmp")) == []
+        finally:
+            await pad.cleanup()
