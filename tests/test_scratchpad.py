@@ -1052,7 +1052,7 @@ class TestSessionPersistence:
         """Variables, imports and agent-defined functions survive a pad restart."""
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
         venvs_base = tmp_path / "venvs"
-        pad = make_scratchpad(name="persist", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="persist", _venvs_base=venvs_base, session_id="c")
         await pad.start()
         cell = await pad.execute(
             "import json\n"
@@ -1064,7 +1064,7 @@ class TestSessionPersistence:
         assert cell.error is None
         await pad.close()
 
-        pad2 = make_scratchpad(name="persist", _venvs_base=venvs_base)
+        pad2 = make_scratchpad(name="persist", _venvs_base=venvs_base, session_id="c")
         await pad2.start()
         try:
             # This is the exact shape that failed for the reporting customer:
@@ -1082,12 +1082,12 @@ class TestSessionPersistence:
         """A different pad name must not see another pad's namespace."""
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
         venvs_base = tmp_path / "venvs"
-        pad = make_scratchpad(name="pad-one", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="pad-one", _venvs_base=venvs_base, session_id="c")
         await pad.start()
         await pad.execute("secret = 'one'")
         await pad.close()
 
-        other = make_scratchpad(name="pad-two", _venvs_base=venvs_base)
+        other = make_scratchpad(name="pad-two", _venvs_base=venvs_base, session_id="c")
         await other.start()
         try:
             cell = await other.execute("print('secret' in dir())")
@@ -1104,7 +1104,7 @@ class TestSessionPersistence:
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
         monkeypatch.setenv("ANTON_SCRATCHPAD_SESSION_MAX_BYTES", "2048")
         venvs_base = tmp_path / "venvs"
-        pad = make_scratchpad(name="too-big", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="too-big", _venvs_base=venvs_base, session_id="c")
         await pad.start()
         try:
             cell = await pad.execute("blob = 'x' * 200000\nprint('made')")
@@ -1118,7 +1118,7 @@ class TestSessionPersistence:
         """Persistence on but no path → say so, don't silently no-op (the ENG-1124 bug)."""
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
         venvs_base = tmp_path / "venvs"
-        pad = make_scratchpad(name="nopath", _venvs_base=venvs_base)
+        pad = make_scratchpad(name="nopath", _venvs_base=venvs_base, session_id="c")
         # Simulate an unwritable snapshot dir — start() then leaves the env var unset.
         monkeypatch.setattr(pad, "_session_snapshot_path", lambda **kw: None)
         await pad.start()
@@ -1362,3 +1362,70 @@ class TestSessionPersistence:
             assert cell.stdout.strip() == "now just a string"
         finally:
             await pad2.cleanup()
+
+    async def test_no_persistence_without_a_session_id(self, tmp_path, monkeypatch):
+        """A runtime with no conversation scope must not persist anywhere.
+
+        There used to be a shared `_no-session` fallback bucket. That is a
+        confidentiality boundary, not a convenience: cowork-server's transient
+        `CredentialProbe` builds a `ChatSession` with **no** session id and parses `DS_*`
+        datasource credentials in the scratchpad, and `ANTON_SCRATCHPAD_PERSIST_SESSION`
+        is process-global — so a probe inherits it once any normal chat has enabled it.
+        With a shared bucket those credentials reach disk on a predictable path and a
+        later probe reusing the pad name reloads them.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        pad = make_scratchpad(name="unscoped", _venvs_base=venvs_base)  # no session_id
+        await pad.start()
+        try:
+            cell = await pad.execute("secret = 'DS_POSTGRES_PROD__PASSWORD'")
+            assert cell.error is None
+            # Says so rather than silently pretending to persist.
+            assert "ANTON_SCRATCHPAD_SESSION_PATH is unset" in cell.logs
+            assert pad._session_snapshot_path() is None
+            # And nothing was written anywhere under the snapshot tree.
+            sessions = venvs_base.parent / "scratchpad-sessions"
+            assert not sessions.exists() or list(sessions.rglob("*.pkl")) == []
+        finally:
+            await pad.cleanup()
+
+    async def test_a_non_path_safe_session_id_is_refused(self, tmp_path, monkeypatch):
+        """`_safe_segment` is not injective, so refuse rather than transform.
+
+        `tenant/a` and `tenant_a` would sanitise to one directory. Transforming the id
+        would also break the path cowork-server computes when it prunes, so the id must
+        be path-safe as supplied. A UUID — what every real host passes — is unchanged.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        for bad in ["tenant/a", "../escape", ".hidden", "a b"]:
+            pad = make_scratchpad(name="p", _venvs_base=tmp_path / "venvs", session_id=bad)
+            assert pad._session_snapshot_path() is None, bad
+        ok = make_scratchpad(
+            name="p", _venvs_base=tmp_path / "venvs",
+            session_id="e08a7ebd-e83c-4353-b0b9-550280b5bdd0",
+        )
+        assert ok._session_snapshot_path() is not None
+
+    async def test_value_survives_repeated_restarts_not_just_one(self, tmp_path, monkeypatch):
+        """Regression: the helper-identity fix worked for exactly ONE restart.
+
+        `_INJECTED_HELPERS` was built from `namespace` *after* injection, so on the first
+        restore it recorded the agent's own restored value as though it were our helper —
+        and the next dump then excluded it. `sample` came back correct on turn 2 and was
+        `<function sample>` from turn 3 on. Caught in review; my original test only did
+        one restart.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        first = make_scratchpad(name="many", _venvs_base=venvs_base, session_id="c")
+        await first.start()
+        await first.execute("sample = [1, 2, 3]")
+        await first.close()
+
+        for _ in range(3):
+            pad = make_scratchpad(name="many", _venvs_base=venvs_base, session_id="c")
+            await pad.start()
+            cell = await pad.execute("print(repr(sample))")
+            await pad.close()
+            assert cell.stdout.strip() == "[1, 2, 3]", cell.stdout

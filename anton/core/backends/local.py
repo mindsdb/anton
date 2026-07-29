@@ -104,14 +104,32 @@ def _safe_segment(value: str, fallback: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", value or "").strip("._") or fallback
 
 
-def snapshot_dir(venvs_base: Path, session_id: str | None) -> Path:
-    """Namespace-snapshot directory for one conversation.
+def snapshot_dir(venvs_base: Path, session_id: str | None) -> Path | None:
+    """Namespace-snapshot directory for one conversation, or None if it must not persist.
 
-    Falls back to a shared `_no-session` bucket when the host supplies no session
-    id (bare CLI use, tests), where there is only one conversation anyway.
+    Requires a session id, and requires that id to be path-safe as supplied. There is
+    deliberately NO shared fallback bucket:
+
+    * A shared bucket is a confidentiality boundary, not a convenience. Cowork's
+      transient `CredentialProbe` builds a `ChatSession` with **no** session id and
+      parses `DS_*` datasource credentials in the scratchpad — and
+      `ANTON_SCRATCHPAD_PERSIST_SESSION` is process-global, so a probe inherits it once
+      any normal chat has switched it on. With a shared bucket those credentials land on
+      disk under a predictable path and a later probe reusing the pad name reloads them.
+    * `_safe_segment` is not injective, so `tenant/a` and `tenant_a` would resolve to one
+      directory. Rather than transform the id (which would break the path cowork-server
+      computes when it prunes), refuse anything that is not already path-safe. A UUID —
+      what every real host passes — is unchanged, so this enforces the cross-repo
+      invariant instead of merely documenting it.
+
+    The cost is that bare CLI use gets no cross-process persistence. That is the right
+    trade: the CLI is one long-lived process, so its namespace lives in memory anyway.
     """
-    session = _safe_segment(session_id or "", "")
-    return venvs_base.parent / "scratchpad-sessions" / (session or "_no-session")
+    if not session_id:
+        return None
+    if _safe_segment(session_id, "") != session_id:
+        return None
+    return venvs_base.parent / "scratchpad-sessions" / session_id
 
 
 def _pad_filename(pad_name: str) -> str:
@@ -130,8 +148,10 @@ def _pad_filename(pad_name: str) -> str:
 
 
 def snapshot_file(venvs_base: Path, session_id: str | None, pad_name: str) -> Path | None:
-    """Snapshot path for one pad, or None if it would escape the snapshot root."""
+    """Snapshot path for one pad, or None if it must not or cannot be persisted."""
     base = snapshot_dir(venvs_base, session_id)
+    if base is None:
+        return None
     path = base / _pad_filename(pad_name)
     # Belt for the sanitiser: never hand back a path outside the snapshot root.
     try:

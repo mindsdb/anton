@@ -57,8 +57,24 @@ _INJECTED_HELPER_NAMES = frozenset(
     {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
 )
 
-# Populated once, after all injections, with the objects actually injected.
+# The helper objects this boot actually created, recorded by `_inject_helper` at the
+# point of definition. It must NOT be built from `namespace` after injection: on a
+# restore the namespace already holds the agent's own value under that name, and
+# `setdefault` leaves it there — so reading it back recorded the agent's DATA as though
+# it were our helper, and the next dump then excluded it. Symptom: the value survived
+# exactly one restart and became `<function sample>` on the second.
 _INJECTED_HELPERS: dict = {}
+
+
+def _inject_helper(name: str, fn) -> None:
+    """Expose a helper to scratchpad code, and remember the object we injected.
+
+    `setdefault`, not assignment: injections run after `_load_namespace`, so a plain
+    assign would clobber an agent value restored under this name. Recording and
+    injecting in one place keeps the two from drifting apart — that drift was the bug.
+    """
+    _INJECTED_HELPERS[name] = fn
+    namespace.setdefault(name, fn)
 
 # Names whose value dill could not pickle, mapped to the id() of the value that failed.
 # Pickling is all-or-nothing per file, so ONE unpicklable object used to lose the whole
@@ -541,9 +557,9 @@ if _scratchpad_model:
             )
             return response.content
 
-        namespace.setdefault("get_llm", get_llm)
-        namespace.setdefault("agentic_loop", agentic_loop)
-        namespace.setdefault("web_search", web_search)
+        _inject_helper("get_llm", get_llm)
+        _inject_helper("agentic_loop", agentic_loop)
+        _inject_helper("web_search", web_search)
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 
@@ -630,7 +646,7 @@ if _minds_datasource and _minds_api_key and _minds_url:
                     "error_message": str(e),
                 }
 
-        namespace.setdefault("query_minds_data", query_minds_data)
+        _inject_helper("query_minds_data", query_minds_data)
     except Exception:
         pass  # Minds query not available — not fatal
 
@@ -649,7 +665,7 @@ def progress(message=""):
     _real_stdout.flush()
 
 
-namespace.setdefault("progress", progress)
+_inject_helper("progress", progress)
 
 
 def sample(var, mode="preview", _name=None):
@@ -850,7 +866,7 @@ def _truncate_sample(text, max_chars):
     return text[:max_chars] + f"\n... (truncated, {len(text)} chars total)"
 
 
-namespace.setdefault("sample", sample)
+_inject_helper("sample", sample)
 
 # --- Logging capture ---
 # Libraries like httpx, urllib3, etc. use Python logging. By default these
@@ -880,9 +896,6 @@ _cell_log_handler = _CellLogHandler()
 _logging.root.addHandler(_cell_log_handler)
 _logging.root.setLevel(_logging.INFO)
 
-# All injections are done. Record the helper objects so `_dump_namespace` can tell
-# "this is still our helper" from "the agent rebound this name to its own data".
-_INJECTED_HELPERS = {k: namespace[k] for k in _INJECTED_HELPER_NAMES if k in namespace}
 
 while True:
     lines = []
