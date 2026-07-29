@@ -442,8 +442,12 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
         )
     if status_code == 429 and not b.get("detail"):
-        # Plain rate-limit ("slow down"), NOT an out-of-quota 429 (that carries a
-        # `detail` and is mapped to TokenLimitExceeded upstream of this call).
+        # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
+        # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
+        # ``insufficient_quota``); the guard here is defense for direct callers —
+        # a billing failure is permanent and must never enter the retry loop.
+        if etype == "insufficient_quota":
+            return None
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
             provider=provider, code="rate_limited", session_backoff=False, model=model,
