@@ -1,0 +1,150 @@
+"""Characterization tests for select_path — written BEFORE the elicit()
+migration so the refactor cannot change observable behaviour silently.
+
+The tool's JSON result is a contract with the LLM: statuses resolved /
+invalid / no_matches / cancelled / picker_unavailable / error, plus the
+auto_resolved and path fields. Nothing here may change in Task 7.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from anton.core.tools.tool_handlers import handle_select_path
+
+
+class _FakeElicitor:
+    """Terminal-free stand-in: returns a scripted choice."""
+
+    def __init__(self, chosen: str | None) -> None:
+        self.chosen = chosen
+        self.requests: list = []
+
+    async def elicit(self, request):
+        self.requests.append(request)
+        return self.chosen
+
+
+def _session(tmp_path: Path, elicitor=None):
+    return SimpleNamespace(
+        _console=None,
+        selection_elicitor=elicitor,
+        _workspace=SimpleNamespace(base=tmp_path),
+    )
+
+
+async def test_pick_single_candidate_auto_resolves_without_elicitor(tmp_path):
+    (tmp_path / "report.csv").write_text("a,b\n")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path), {"prompt": "Which one?", "pattern": "*.csv"}
+        )
+    )
+    assert result["status"] == "resolved"
+    assert result["auto_resolved"] is True
+    assert result["path"].endswith("report.csv")
+
+
+async def test_pick_no_candidates_reports_no_matches(tmp_path):
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path), {"prompt": "Which one?", "pattern": "*.parquet"}
+        )
+    )
+    assert result["status"] == "no_matches"
+
+
+async def test_pick_ambiguous_without_elicitor_is_picker_unavailable(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path), {"prompt": "Which one?", "pattern": "**/report.csv"}
+        )
+    )
+    assert result["status"] == "picker_unavailable"
+    assert len(result["candidates"]) == 2
+
+
+async def test_pick_ambiguous_resolves_through_elicitor(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    chosen = str((tmp_path / "b" / "report.csv").resolve())
+    elicitor = _FakeElicitor(chosen)
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, elicitor),
+            {"prompt": "Which one?", "pattern": "**/report.csv"},
+        )
+    )
+    assert result == {"status": "resolved", "path": chosen}
+    assert len(elicitor.requests[0].options) == 2
+
+
+async def test_pick_cancelled(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _FakeElicitor(None)),
+            {"prompt": "Which one?", "pattern": "**/report.csv"},
+        )
+    )
+    assert result["status"] == "cancelled"
+
+
+async def test_pick_rejects_a_path_that_was_never_offered(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _FakeElicitor("/etc/passwd")),
+            {"prompt": "Which one?", "pattern": "**/report.csv"},
+        )
+    )
+    assert result["status"] == "invalid"
+
+
+async def test_browse_without_elicitor_is_picker_unavailable(tmp_path):
+    result = json.loads(
+        await handle_select_path(_session(tmp_path), {"prompt": "Find the folder"})
+    )
+    assert result["status"] == "picker_unavailable"
+
+
+async def test_browse_resolves_a_typed_folder(tmp_path):
+    target = tmp_path / "data"
+    target.mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _FakeElicitor(str(target.resolve()))),
+            {"prompt": "Find the folder", "kind": "folder"},
+        )
+    )
+    assert result["status"] == "resolved"
+    assert result["path"] == str(target.resolve())
+
+
+async def test_elicitor_exception_becomes_error_status(tmp_path):
+    class _Boom:
+        async def elicit(self, request):
+            raise RuntimeError("picker died")
+
+    target = tmp_path / "data"
+    target.mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _Boom()), {"prompt": "Find the folder"}
+        )
+    )
+    assert result["status"] == "error"
