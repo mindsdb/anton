@@ -20,6 +20,7 @@ from .provider import (
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolUseDelta,
     StreamToolUseEnd,
@@ -964,6 +965,17 @@ class OpenAIProvider(LLMProvider):
                     content_text += delta.content
                     yield StreamTextDelta(text=delta.content)
 
+                # Reasoning content — chat.completions has no first-party
+                # reasoning-summary field (that's Responses-API-only), but
+                # `reasoning_content` is the de facto convention several
+                # OpenAI-compatible reasoning gateways use (DeepSeek, vLLM's
+                # reasoning parser, and possibly the mdb.ai passthrough for
+                # non-Anthropic reasoning models). Read defensively via
+                # getattr since the SDK's Delta model doesn't declare it.
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    yield StreamReasoningDelta(text=reasoning_delta)
+
                 # Tool call deltas
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
@@ -1123,7 +1135,14 @@ class OpenAIProvider(LLMProvider):
         if system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
-            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            # "summary": "auto" asks the Responses API to also stream a
+            # natural-language summary of the reasoning itself (as
+            # response.reasoning_summary_text.delta events) — without it,
+            # reasoning happens server-side but is never surfaced to us at
+            # all. Safe to always pair with effort: only sent when effort
+            # is already set, which is itself gated to reasoning-capable
+            # models by the caller (see AntonSettings.planning_reasoning_effort).
+            kwargs["reasoning"] = {"effort": self._reasoning_effort, "summary": "auto"}
 
         merged_tools: list[dict] = []
         if tools:
@@ -1224,6 +1243,14 @@ class OpenAIProvider(LLMProvider):
                     if delta:
                         content_text += delta
                         yield StreamTextDelta(text=delta)
+
+                # The model's own reasoning summary — not the final answer.
+                # Only arrives when `reasoning.summary` was requested (see
+                # _build_responses_kwargs, gated on self._reasoning_effort).
+                elif etype == "response.reasoning_summary_text.delta":
+                    delta = getattr(event, "delta", "")
+                    if delta:
+                        yield StreamReasoningDelta(text=delta)
 
                 # New output item (could be a function_call, server-tool call,
                 # or message). We only need to react when a function_call
