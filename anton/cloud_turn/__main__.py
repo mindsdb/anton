@@ -93,11 +93,28 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
     a bare ``turn_completed``. Any failure (parse or turn) -> one ``turn_failed``
     with a scrubbed error string.
+
+    A background ticker emits a bare ``heartbeat`` event every
+    ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
+    keep the controller's stall timer reset. It is cancelled once the turn
+    ends. ``emit`` is a synchronous ``os.write`` with no ``await`` inside, so
+    the ticker and the delta loop cannot interleave mid-line - no lock needed.
     """
     from anton.core.llm.provider import StreamTextDelta
 
     builder = session_builder or build_cloud_chat_session
     session = None
+    interval = float(os.environ.get("ANTON_CLOUD_TURN_HEARTBEAT_SECONDS", "5"))
+
+    async def _heartbeat() -> None:
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                emit({"kind": "heartbeat"})
+        except asyncio.CancelledError:
+            return
+
+    hb = asyncio.create_task(_heartbeat())
     try:
         req = TurnRequestV1.from_json(raw_line)
         session = builder(req)
@@ -110,6 +127,9 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         logger.exception("cloud turn failed")
         emit({"kind": "turn_failed", "error": _scrub(exc)})
     finally:
+        hb.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await hb
         if session is not None:
             await _close(session)
 
