@@ -22,12 +22,19 @@ Like sleep, consolidation is:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
 from anton.core.llm.prompts import CONSOLIDATION_PROMPT
+from anton.core.llm.structured import (
+    generate_with_truncation_retry,
+    no_preamble_instruction,
+)
 from anton.core.memory.base import Engram
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
@@ -165,13 +172,24 @@ class Consolidator:
         session_summary = "\n".join(summary_lines)
 
         try:
-            result: _ConsolidatedLessons = await llm_client.generate_object_code(
+            # Consolidation feeds in a whole scratchpad session, and narration
+            # scales with input — observed filling 2,048 exactly in prod on
+            # `mindshub_air` (ENG-1084). The ladder's 4,096 retry covers it.
+            result: _ConsolidatedLessons = await generate_with_truncation_retry(
+                llm_client.generate_object_code,
                 _ConsolidatedLessons,
-                system=CONSOLIDATION_PROMPT,
+                system=CONSOLIDATION_PROMPT
+                + no_preamble_instruction(_ConsolidatedLessons),
                 messages=[{"role": "user", "content": session_summary}],
-                max_tokens=2048,
+                log=logger,
+                subsystem="consolidation",
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "consolidation failed (%s) — no lessons extracted from this "
+                "session",
+                type(exc).__name__,
+            )
             return []
 
         engrams: list[Engram] = []
