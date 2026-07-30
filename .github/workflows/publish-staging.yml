@@ -1,0 +1,83 @@
+name: Staging pre-release and publish to PyPI
+
+# RC stream: validate every push to staging, cut a PEP 440 pre-release tag,
+# and publish the immutable package consumed by cowork-server staging.
+#
+# PyPI Trusted Publishing binds authorization to this top-level workflow
+# filename. Register `publish-staging.yml` for the `anton-agent` project with
+# GitHub environment `pypi`; no API token or other long-lived credential is
+# required.
+#
+# run-tree-ok: PyPI Trusted Publishing binds to this top-level workflow file.
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+concurrency:
+  group: staging-prerelease-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate package source
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - name: Run unit and stub e2e tests
+        run: uv run --extra dev pytest tests/ -v
+
+  release:
+    needs: validate
+    if: github.ref == 'refs/heads/staging'
+    permissions:
+      contents: write  # tag push + release creation
+    uses: mindsdb/github-actions/.github/workflows/calver-release.yml@main
+    with:
+      calver-major: "2"
+      prerelease: true
+      runs-on: ubuntu-latest
+
+  publish:
+    name: Publish immutable pre-release to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # required for trusted publisher (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          fetch-depth: 0  # hatch-vcs needs tags to derive version
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  notify:
+    needs: [validate, release, publish]
+    if: ${{ github.ref == 'refs/heads/staging' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
+    permissions:
+      contents: read
+      actions: read
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "staging prerelease"
+      status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
+      runs-on: ubuntu-latest
+    secrets: inherit

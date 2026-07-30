@@ -1,4 +1,8 @@
 name: Staging Unfreeze
+
+# run-tree-ok: release-train hook runs only when a main-targeted PR closes;
+# ordinary PR validation does not handle that event action.
+
 on:
   pull_request:
     types: [closed]
