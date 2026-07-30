@@ -19,11 +19,16 @@ like how the PFC coordinates retrieval from multiple brain memory systems.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from anton.core.llm.structured import (
+    generate_with_truncation_retry,
+    no_preamble_instruction,
+)
 from anton.core.memory.base import HippocampusProtocol
 from anton.core.memory.base import Engram
 from anton.core.memory.hippocampus import Hippocampus
@@ -31,6 +36,8 @@ from anton.core.memory.hippocampus import Hippocampus
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
     from anton.core.memory.episodes import EpisodicMemory
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,15 +484,29 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             return
 
         try:
-            result: _CompactionResult = await self._llm.generate_object_code(
+            # Compaction echoes the kept entries back, so its output scales
+            # with the file — the ladder starts at the old fixed budget and
+            # buys one doubling on truncation (ENG-1084).
+            result: _CompactionResult = await generate_with_truncation_retry(
+                self._llm.generate_object_code,
                 _CompactionResult,
-                system=_COMPACTION_PROMPT,
+                system=_COMPACTION_PROMPT + no_preamble_instruction(_CompactionResult),
                 messages=[{"role": "user", "content": "\n".join(entries)}],
-                max_tokens=4096,
+                budgets=(4096, 8192),
+                log=logger,
+                subsystem="memory-compaction",
             )
             kept = result.kept or entries
-        except Exception:
-            return  # Don't corrupt memory on failure
+        except Exception as exc:
+            # Don't corrupt memory on failure — but never silently: an
+            # unlogged swallow made a dead memory subsystem indistinguishable
+            # from a working one (ENG-1084). Type name only; the message can
+            # quote conversation-derived content.
+            logger.warning(
+                "memory-compaction failed (%s) — keeping the file as-is",
+                type(exc).__name__,
+            )
+            return
 
         if not kept:
             return
@@ -527,16 +548,26 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             return
 
         try:
-            result: _IdentityFacts = await self._llm.generate_object_code(
+            # 512 sat inside the measured narration range (245–1,654+), so
+            # narrating models truncated on essentially every pass and the
+            # silent except below hid it — confirmed live in prod on
+            # `mindshub_air` (ENG-1084).
+            result: _IdentityFacts = await generate_with_truncation_retry(
+                self._llm.generate_object_code,
                 _IdentityFacts,
-                system=_IDENTITY_EXTRACT_PROMPT,
+                system=_IDENTITY_EXTRACT_PROMPT + no_preamble_instruction(_IdentityFacts),
                 messages=[{"role": "user", "content": user_message}],
-                max_tokens=512,
+                log=logger,
+                subsystem="identity-extraction",
             )
             facts = result.facts
             if not facts:
                 return
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "identity-extraction failed (%s) — no facts stored this pass",
+                type(exc).__name__,
+            )
             return
 
         self.global_hc.rewrite_identity(facts)
