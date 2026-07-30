@@ -20,6 +20,7 @@ from .provider import (
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolUseDelta,
     StreamToolUseEnd,
@@ -72,10 +73,10 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     Known limits, on purpose: a wire body carrying BOTH a top-level
     ``detail`` and an ``error`` envelope loses the detail inside the SDK
     (the unwrap discards siblings of ``error``) — unrecoverable from
-    ``exc.body``, and no real dialect emits that shape. And a 429 whose
-    envelope carries only ``message`` (OpenAI's own quota dialect, e.g.
-    ``insufficient_quota``) stays generic: classifying arbitrary provider
-    messages as MindsHub quota would put an upsell CTA on BYOK errors.
+    ``exc.body``, and no real dialect emits that shape. OpenAI's own quota
+    dialect (429 + ``insufficient_quota`` code) maps to TokenLimitExceeded
+    with BYOK copy (OpenAI billing link, no MindsHub CTA) — detection is
+    code-exact so arbitrary provider messages never get quota treatment.
     """
     if exc.status_code == 401:
         raise ConnectionError(
@@ -93,6 +94,17 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         raise TokenLimitExceeded(msg) from exc
 
     code = body.get("code") or envelope.get("code")
+    etype = body.get("type") or envelope.get("type")
+    # OpenAI's own quota dialect (BYOK): permanent for the identical request, so
+    # retrying it as a rate limit just burns the session's backoff budget and
+    # surfaces a misleading "provider overloaded". No MindsHub CTA — the remedy
+    # is the user's OpenAI billing, not an upgrade.
+    if exc.status_code == 429 and "insufficient_quota" in (code, etype):
+        raise TokenLimitExceeded(
+            "Server returned 429 — your OpenAI quota is exhausted. Check your plan "
+            "and billing at https://platform.openai.com."
+        ) from exc
+
     if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
         if code == "model_access_denied":
             msg = (
@@ -953,6 +965,17 @@ class OpenAIProvider(LLMProvider):
                     content_text += delta.content
                     yield StreamTextDelta(text=delta.content)
 
+                # Reasoning content — chat.completions has no first-party
+                # reasoning-summary field (that's Responses-API-only), but
+                # `reasoning_content` is the de facto convention several
+                # OpenAI-compatible reasoning gateways use (DeepSeek, vLLM's
+                # reasoning parser, and possibly the mdb.ai passthrough for
+                # non-Anthropic reasoning models). Read defensively via
+                # getattr since the SDK's Delta model doesn't declare it.
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    yield StreamReasoningDelta(text=reasoning_delta)
+
                 # Tool call deltas
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
@@ -1112,7 +1135,14 @@ class OpenAIProvider(LLMProvider):
         if system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
-            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            # "summary": "auto" asks the Responses API to also stream a
+            # natural-language summary of the reasoning itself (as
+            # response.reasoning_summary_text.delta events) — without it,
+            # reasoning happens server-side but is never surfaced to us at
+            # all. Safe to always pair with effort: only sent when effort
+            # is already set, which is itself gated to reasoning-capable
+            # models by the caller (see AntonSettings.planning_reasoning_effort).
+            kwargs["reasoning"] = {"effort": self._reasoning_effort, "summary": "auto"}
 
         merged_tools: list[dict] = []
         if tools:
@@ -1213,6 +1243,14 @@ class OpenAIProvider(LLMProvider):
                     if delta:
                         content_text += delta
                         yield StreamTextDelta(text=delta)
+
+                # The model's own reasoning summary — not the final answer.
+                # Only arrives when `reasoning.summary` was requested (see
+                # _build_responses_kwargs, gated on self._reasoning_effort).
+                elif etype == "response.reasoning_summary_text.delta":
+                    delta = getattr(event, "delta", "")
+                    if delta:
+                        yield StreamReasoningDelta(text=delta)
 
                 # New output item (could be a function_call, server-tool call,
                 # or message). We only need to react when a function_call

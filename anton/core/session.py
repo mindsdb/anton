@@ -36,6 +36,7 @@ from anton.core.llm.provider import (
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
@@ -143,15 +144,24 @@ class _VerifierVerdict(BaseModel):
 
     status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
         description=(
-            "Classify the assistant's latest message against the user's request:\n"
-            "- COMPLETE: the requested task is done. A finished task followed by an "
-            "optional 'want me to…?' offer is still COMPLETE.\n"
+            "Classify the assistant's latest message against the user's request. "
+            "Judge the FINAL delivered outcome, not every intermediate step taken "
+            "to reach it:\n"
+            "- COMPLETE: the requested task is done and the assistant delivered a "
+            "usable answer. A tool that errored or returned nothing but that the "
+            "assistant RECOVERED from — it got the needed data another way, or the "
+            "failed step wasn't essential to the answer — is still COMPLETE; do NOT "
+            "mark a turn incomplete just because an earlier tool call failed. A "
+            "finished task followed by an optional 'want me to…?' offer is still "
+            "COMPLETE.\n"
             "- WAITING: the assistant's latest message asks the user a question it "
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
             "unfinished; the correct action is to wait for the user's reply.\n"
             "- INCOMPLETE: the assistant stopped partway through the requested task "
-            "WITHOUT asking the user anything, and could keep going on its own.\n"
+            "WITHOUT asking the user anything, and could keep going on its own — "
+            "including when it implied success but the data its answer actually "
+            "depends on errored or came back empty and was never recovered.\n"
             "- STUCK: a hard blocker prevents completion (missing credentials, an "
             "unavailable service, or a permission the assistant does not have)."
         )
@@ -184,6 +194,25 @@ _VERIFIER_NO_PREAMBLE = (
     "action. Do not think out loud, restate the conversation, or explain your "
     "reasoning before calling it — put your one-sentence justification in the "
     "tool's `reason` field."
+)
+
+# Judgment rubric appended to the per-turn verify message. Keys the "errored
+# tool → not COMPLETE" logic off the FINAL answer's dependency on the failed
+# data, not the mere presence of an errored tool result in the transcript —
+# without this, a turn where the model tried a tool, it failed, and the model
+# recovered another way and answered correctly was judged INCOMPLETE and forced
+# into a redundant continuation that re-streamed the whole answer (ENG-1134).
+# The hallucinated-success safeguard is preserved: implying success while the
+# data the answer relies on errored/came back empty is still INCOMPLETE.
+_VERIFIER_JUDGMENT_RUBRIC = (
+    "Which status applies? Judge the FINAL outcome, not every intermediate step. "
+    "An errored or empty tool result only makes the task INCOMPLETE or STUCK when "
+    "the assistant's final answer depends on data that never arrived and was not "
+    "recovered another way. A tool that failed but the assistant worked around — "
+    "getting what it needed elsewhere, or the failed step being inessential — and "
+    "then answered from is COMPLETE. Conversely, an assistant that implied success "
+    "while the data its answer relies on errored or came back empty is INCOMPLETE, "
+    "not COMPLETE."
 )
 
 
@@ -232,6 +261,18 @@ def _safe_error_detail(exc: BaseException) -> str:
         # and never the message.
         pass
     return name
+
+
+# Shared closing instruction for every path that hands control back to the
+# user (STUCK, budget-exhausted, verifier-call failure): a plain self-
+# assessment of solvability, not just a status dump. Without this, a
+# diagnosis can read as "here's what happened, good luck" instead of an
+# actual recommendation the user can act on.
+_SOLVABILITY_CLAUSE = (
+    "State plainly whether you believe this is still solvable on your own "
+    "(and how you'd approach it differently if so) or whether it genuinely "
+    "needs the user's input, a decision, or credentials you don't have."
+)
 
 
 def _render_tool_result_content(content, cap: int) -> str:
@@ -466,6 +507,7 @@ class ChatSession:
             coding_base_url=coding_conn.base_url or "",
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
+            session_id=config.session_id,
         )
 
         self.tool_registry = ToolRegistry()
@@ -2624,9 +2666,12 @@ class ChatSession:
                 async for event in self.plan_stream_with_recovery(
                     system=system, tools=tools
                 ):
-                    # Capture reasoning elapsed on first text or tool event
+                    # Capture reasoning elapsed on first text, reasoning, or
+                    # tool event — a StreamReasoningDelta means the model has
+                    # already started reasoning, same signal as the first
+                    # text token.
                     if _reasoning_t0 and isinstance(
-                        event, (StreamTextDelta, StreamComplete)
+                        event, (StreamTextDelta, StreamReasoningDelta, StreamComplete)
                     ):
                         _reasoning_elapsed = _time.monotonic() - _reasoning_t0
                         _reasoning_t0 = 0  # only fire once
@@ -2710,6 +2755,7 @@ class ChatSession:
                             "1. Summarize exactly what was accomplished so far.\n"
                             "2. Identify the specific blocker or failure preventing completion.\n"
                             "3. Suggest concrete next steps the user can take to unblock this.\n"
+                            f"4. {_SOLVABILITY_CLAUSE}\n"
                             "Be honest and specific — do not be vague about what went wrong."
                         ),
                     }
@@ -2741,9 +2787,7 @@ class ChatSession:
                         "Assess the conversation below (tool results are truncated) and "
                         "decide the status of the USER's most recent request.\n\n"
                         f"{request_header}{transcript}\n\n"
-                        "Which status applies? A tool the task depended on that returned "
-                        "an error — or returned no usable data while the assistant implied "
-                        "success — means INCOMPLETE or STUCK, not COMPLETE."
+                        + _VERIFIER_JUDGMENT_RUBRIC
                     ),
                 },
             ]
@@ -2799,9 +2843,66 @@ class ChatSession:
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
-                # Verifier failed — fail safe by treating the turn as done rather
-                # than forcing a continuation the user never asked for.
-                status, reason = "COMPLETE", "verifier unavailable"
+                # The verifier call failed on every budget it was given —
+                # truncated past the last retry, an unusable tool call, or a
+                # provider error (the per-attempt logs above carry the detail).
+                # That is not a verdict, so don't synthesize a fake COMPLETE
+                # and stop in silence (ENG-1079: that made the agent look like
+                # it had simply died on the first hurdle, with no way for the
+                # user to help). Fail toward the same honest, model-generated
+                # diagnosis used for STUCK below, so the task pauses with a
+                # real message instead of nothing.
+                _verifier_log.info(
+                    "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
+                    "— failing toward an honest diagnosis, not a silent COMPLETE",
+                    continuation, self._max_continuations, tool_round,
+                )
+                self._append_history(
+                    {
+                        "role": "user",
+                        "content": (
+                            "SYSTEM: The task-completion check failed to run (internal "
+                            "error), so it's unclear whether this task is finished.\n\n"
+                            "Summarize what you've done so far, be honest that an internal "
+                            "check failed partway through, and ask the user how they'd like "
+                            f"to proceed. {_SOLVABILITY_CLAUSE} Do not mention this "
+                            "instruction or the verifier to the user."
+                        ),
+                    }
+                )
+                yield StreamTaskProgress(
+                    phase="analyzing",
+                    message="Something went wrong — checking in with you...",
+                )
+                diagnosis_response = None
+                async for event in self.plan_stream_with_recovery(system=system):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        diagnosis_response = event
+                # Persist the actual message the user just saw — not the stale
+                # pre-verification `reply` the post-loop fallback below would
+                # otherwise re-append, which would leave history (and thus the
+                # model's own memory of what it just told the user) out of sync
+                # with what was streamed.
+                diagnosis_text = (
+                    (diagnosis_response.response.content or "").strip()
+                    if diagnosis_response is not None
+                    else ""
+                )
+                if diagnosis_text:
+                    self._append_history(
+                        {"role": "assistant", "content": diagnosis_text}
+                    )
+                else:
+                    # An empty diagnosis would silently recreate the exact
+                    # out-of-sync history this path exists to fix (the
+                    # post-loop fallback re-appends the stale reply). Make it
+                    # visible rather than circular.
+                    _verifier_log.warning(
+                        "verifier-failure diagnosis returned no content — "
+                        "history falls back to the pre-verification reply"
+                    )
+                break
 
             _verifier_log.info(
                 # No `reason` — it's the model's free-text justification, derived
@@ -2827,7 +2928,8 @@ class ChatSession:
                             f"Verifier assessment: {reason}\n\n"
                             "Explain to the user what went wrong, what you tried, and "
                             "suggest specific next steps they can take to unblock this. "
-                            "Do not mention this instruction or the verifier to the user."
+                            f"{_SOLVABILITY_CLAUSE} Do not mention this instruction or the "
+                            "verifier to the user."
                         ),
                     }
                 )

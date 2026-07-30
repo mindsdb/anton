@@ -16,6 +16,7 @@ from .provider import (
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolUseDelta,
     StreamToolUseEnd,
@@ -262,6 +263,11 @@ class AnthropicProvider(LLMProvider):
                                 "json_parts": [],
                             }
                             yield StreamToolUseStart(id=block.id, name=block.name)
+                        elif block.type in ("thinking", "redacted_thinking"):
+                            # Adaptive thinking (triggered by output_config.effort,
+                            # set above when self._reasoning_effort is configured)
+                            # — the model's own reasoning, not the final answer.
+                            blocks[idx] = {"type": "thinking"}
                         else:
                             blocks[idx] = {"type": "text"}
 
@@ -278,6 +284,10 @@ class AnthropicProvider(LLMProvider):
                                 yield StreamToolUseDelta(
                                     id=info["id"], json_delta=delta.partial_json
                                 )
+                        elif delta.type == "thinking_delta":
+                            yield StreamReasoningDelta(text=delta.thinking)
+                        # signature_delta carries only a verification signature
+                        # for the thinking block, no user-facing text — ignored.
 
                     elif event.type == "content_block_stop":
                         idx = event.index

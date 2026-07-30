@@ -78,24 +78,45 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
     # A new name spins up a separate, empty process — state from the existing
     # pad isn't visible there — a common source of wasted rounds (re-import,
     # re-fetch, shuffling state across pads). Challenge a new name when the
-    # agent already has a working scratchpad this session, unless it confirms
-    # it needs isolation. Tracked names are ones the agent has exec'd here —
-    # NOT session._scratchpads.pads, which also holds system-created pads
-    # (e.g. the artifact backend launcher's slug pad), which must never count
-    # against the agent. Challenge AT MOST ONCE per session: the challenge is
-    # not an error (it resets no streak), so re-challenging every new name
-    # could loop to the round cap with nothing to stop it; one firm nudge is
-    # the enforcement, then respect the model's choice. `is True` (not
-    # truthiness) so a MagicMock attr in tests doesn't read as "challenged".
+    # agent already has a working scratchpad, unless it confirms it needs
+    # isolation.
+    #
+    # `seen` must include pads used in EARLIER TURNS (ENG-1124 Fix 5). This guard
+    # originally consulted only the in-memory set below — but cowork-server builds a
+    # fresh `ChatSession` per user message, and the agent switches pad names precisely
+    # *at* turn boundaries (measured: 37 of 39 turns used exactly one name). So the set
+    # was always empty exactly when the guard needed it, and it fired 0 times across
+    # 676 cells of a real session that accumulated 22 pad names. The manager keeps a
+    # small per-conversation record on disk so a later turn can still see them.
+    #
+    # Still NOT `session._scratchpads.pads`, and not the snapshot files either: both
+    # include system-created pads (the artifact backend launcher's slug pad), which must
+    # never count against the agent. `agent_pads()` returns only names this guard
+    # explicitly recorded.
+    #
+    # Challenge AT MOST ONCE PER TURN (the flag lives on the per-turn session): the
+    # challenge is not an error (it resets no streak), so re-challenging every new name
+    # could loop to the round cap with nothing to stop it. One firm nudge, then respect
+    # the model's choice — and a later turn gets a fresh chance to nudge again. `is
+    # True` (not truthiness) so a MagicMock attr in tests doesn't read as "challenged".
     seen = getattr(session, "_agent_scratchpad_names", None)
     if not isinstance(seen, set):
         seen = set()
         session._agent_scratchpad_names = seen
+    manager = getattr(session, "_scratchpads", None)
+    known = set(seen)
+    if manager is not None and hasattr(manager, "agent_pads"):
+        try:
+            persisted = manager.agent_pads()
+            if isinstance(persisted, set):
+                known |= persisted
+        except Exception:
+            pass
     confirm_new = bool(tc_input.get("confirm_new_scratchpad", False))
     challenged_before = getattr(session, "_scratchpad_challenged", False) is True
-    if name not in seen and seen and not confirm_new and not challenged_before:
+    if name not in known and known and not confirm_new and not challenged_before:
         session._scratchpad_challenged = True
-        existing = "', '".join(sorted(seen))
+        existing = "', '".join(sorted(known))
         return (
             f"You already have an active scratchpad ('{existing}') with live state "
             f"(imports, variables, fetched data). Starting a new one named '{name}' "
@@ -106,6 +127,11 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
             "confirm_new_scratchpad=true."
         )
     seen.add(name)
+    if manager is not None and hasattr(manager, "record_agent_pad"):
+        try:
+            manager.record_agent_pad(name)
+        except Exception:
+            pass
 
     pad = await session._scratchpads.get_or_create(name)
 
