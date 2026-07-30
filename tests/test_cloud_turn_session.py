@@ -21,7 +21,7 @@ from anton.cloud_turn.session import (
     build_cloud_chat_session,
     resolve_trusted_workspace_path,
 )
-from anton.core.backends.local import sanitized_scratchpad_runtime_factory
+from anton.core.backends.local import local_scratchpad_runtime_factory
 
 
 class _FakeSession:
@@ -64,9 +64,9 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.web_fetch_enabled is False
 
 
-def test_scratchpad_uses_sanitized_factory_and_is_workspace_bound(tmp_path, monkeypatch):
+def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
-    assert cfg.runtime_factory is sanitized_scratchpad_runtime_factory
+    assert cfg.runtime_factory is local_scratchpad_runtime_factory
     assert cfg.workspace is not None
     assert cfg.harness == "cloud"
     assert cfg.session_id == "conv_1"
@@ -226,60 +226,8 @@ def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):
     assert {"launch_backend", "select_path", "scratchpad", "create_artifact"} <= names
 
 
-def test_sanitized_env_contract(monkeypatch):
-    from anton.core.backends.local import _SCRATCHPAD_ENV_ALLOWLIST, _sanitized_parent_env
-
-    required = {"PATH": "/usr/bin:/bin", "HOME": "/home/anton", "TMPDIR": "/tmp/x",
-                "LANG": "en_US.UTF-8", "SSL_CERT_FILE": "/etc/ssl/cert.pem"}
-    for k, v in required.items():
-        assert k in _SCRATCHPAD_ENV_ALLOWLIST, f"{k} must be in the contract"
-        monkeypatch.setenv(k, v)
-    secrets = {"ANTHROPIC_API_KEY": "sk-ant-x", "ANTON_MINDS_API_KEY": "anton-x",
-               "ANTON_GATEWAY_TOKEN": "gw-x", "DS_POSTGRES_MAIN__PASSWORD": "ds-x",
-               "OPENAI_API_KEY": "sk-oai-x", "SOME_RANDOM_SECRET": "nope"}
-    for k, v in secrets.items():
-        monkeypatch.setenv(k, v)
-
-    env = _sanitized_parent_env()
-    for k, v in required.items():
-        assert env.get(k) == v
-    for k in secrets:
-        assert k not in env
-    assert set(env) <= set(_SCRATCHPAD_ENV_ALLOWLIST)
-
-
-async def test_sanitized_scratchpad_cannot_read_secret_env(tmp_path, monkeypatch):
-    """Real subprocess: with the sanitized factory, secret sentinels in the
-    parent env must be UNREADABLE from cell code."""
-    import json
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SENTINEL")
-    monkeypatch.setenv("ANTON_GATEWAY_TOKEN", "GATEWAY-SENTINEL")
-    monkeypatch.setenv("DS_POSTGRES_MAIN__PASSWORD", "DATASOURCE-SENTINEL")
-
-    pad = sanitized_scratchpad_runtime_factory(
-        name="cloud-sanitize", coding_provider="anthropic", coding_model="",
-        coding_api_key="", coding_base_url="", cells=None, workspace_path=tmp_path,
-    )
-    await pad.start()
-    try:
-        cell = await pad.execute(
-            "import os, json\n"
-            "keys = ['ANTHROPIC_API_KEY','ANTON_GATEWAY_TOKEN','DS_POSTGRES_MAIN__PASSWORD']\n"
-            "print(json.dumps({k: os.environ.get(k) for k in keys}))"
-        )
-        assert cell.error is None, cell.error
-        seen = json.loads(cell.stdout.strip())
-        assert all(v is None for v in seen.values()), f"secret leaked: {seen}"
-    finally:
-        await pad.close()
-
-
-async def test_desktop_scratchpad_env_unchanged(tmp_path, monkeypatch):
-    """Regression: sanitize_env=False (desktop default) STILL inherits the
-    parent env - the sanitizer is strictly opt-in."""
-    from anton.core.backends.local import local_scratchpad_runtime_factory
-
+async def test_scratchpad_inherits_parent_env(tmp_path, monkeypatch):
+    """The scratchpad subprocess inherits the parent env (no sanitizing)."""
     monkeypatch.setenv("MY_DESKTOP_SENTINEL", "DESKTOP-VISIBLE")
     pad = local_scratchpad_runtime_factory(
         name="desktop-env", coding_provider="anthropic", coding_model="",

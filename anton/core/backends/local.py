@@ -77,47 +77,6 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     return env
 
 
-# Sanitized scratchpad env contract: in sanitize_env mode the child inherits
-# ONLY these non-secret names (and only if the parent has them) — never a
-# provider key, ANTON_* credential, gateway token, or datasource secret.
-# Python runtime vars (PYTHONUTF8, PYTHONPATH) are set explicitly in start(),
-# never inherited, so nothing can redirect imports.
-_SCRATCHPAD_ENV_ALLOWLIST = frozenset(
-    {
-        # process / tooling
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        # temp dirs
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        # locale / tty
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "LANGUAGE",
-        "TZ",
-        "TERM",
-        # TLS trust roots (HTTPS verification from cell code)
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        # Windows: required for subprocess/socket startup
-        "SYSTEMROOT",
-        "SYSTEMDRIVE",
-    }
-)
-
-
-def _sanitized_parent_env() -> dict[str, str]:
-    """Parent env reduced to the non-secret allowlist."""
-    return {k: v for k, v in os.environ.items() if k in _SCRATCHPAD_ENV_ALLOWLIST}
-
-
 _MAX_OUTPUT = 10_000
 
 
@@ -136,7 +95,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_base_url: str,
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
-        sanitize_env: bool = False,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -156,9 +114,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # is a "where to put scratchpad venvs" hint; the explicit
         # arg is "the agent's project, when known".
         self._explicit_workspace_path: Path | None = workspace_path
-        # Cloud/headless: build the child env from the non-secret allowlist.
-        # Default False = desktop behaviour (full inherited env) unchanged.
-        self._sanitize_env: bool = sanitize_env
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -435,64 +390,60 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         os.close(fd)
         self._boot_path = path
 
-        # Force UTF-8 in the child (ENG-824). In sanitized mode the base is the
-        # non-secret allowlist, not the full parent env.
-        env = _utf8_env(
-            _sanitized_parent_env() if self._sanitize_env else os.environ
-        )
+        # Force UTF-8 in the child (ENG-824).
+        env = _utf8_env(os.environ)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
-        # Provider-credential propagation is desktop-only; sanitized mode
-        # withholds every model key (nested get_llm() is off in the cloud pod).
-        if not self._sanitize_env:
-            if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
-                env["ANTHROPIC_API_KEY"] = env["ANTON_ANTHROPIC_API_KEY"]
-            if "OPENAI_API_KEY" not in env and "ANTON_OPENAI_API_KEY" in env:
-                env["OPENAI_API_KEY"] = env["ANTON_OPENAI_API_KEY"]
-            if "OPENAI_BASE_URL" not in env and "ANTON_OPENAI_BASE_URL" in env:
-                env["OPENAI_BASE_URL"] = env["ANTON_OPENAI_BASE_URL"]
-            if (
-                "OPENAI_API_KEY" not in env
-                and "ANTON_MINDS_API_KEY" in env
-                and self._coding_provider == "openai-compatible"
-            ):
-                env["OPENAI_API_KEY"] = env["ANTON_MINDS_API_KEY"]
-            if (
-                "OPENAI_BASE_URL" not in env
-                and "ANTON_MINDS_URL" in env
-                and self._coding_provider == "openai-compatible"
-            ):
-                # Host-aware (ENG-436): api.mindshub.ai serves /v1, legacy
-                # mdb.ai serves /api/v1. The previous hardcoded /api/v1 was
-                # wrong for mindshub. Mirrors config/settings.py +
-                # cowork-server minds_chat_base_url.
-                _minds_base = env["ANTON_MINDS_URL"].rstrip("/")
-                if _minds_base.endswith("/v1"):
-                    env["OPENAI_BASE_URL"] = _minds_base
-                elif "mdb.ai" in _minds_base:
-                    env["OPENAI_BASE_URL"] = f"{_minds_base}/api/v1"
-                else:
-                    env["OPENAI_BASE_URL"] = f"{_minds_base}/v1"
-            if self._coding_api_key:
-                sdk_key = {
-                    "anthropic": "ANTHROPIC_API_KEY",
-                    "openai": "OPENAI_API_KEY",
-                    "openai-compatible": "OPENAI_API_KEY",
-                }.get(self._coding_provider, "")
-                if sdk_key:
-                    env[sdk_key] = self._coding_api_key
-            if self._coding_provider in ("openai", "openai-compatible"):
-                base_url = (
-                    self._coding_base_url
-                    or env.get("ANTON_OPENAI_BASE_URL")
-                    or env.get("OPENAI_BASE_URL")
-                    or ""
-                )
-                if base_url:
-                    env["OPENAI_BASE_URL"] = base_url
-                    env["ANTON_OPENAI_BASE_URL"] = base_url
+        # Propagate provider credentials from the ANTON_* names into the SDK
+        # names the scratchpad's nested get_llm() expects.
+        if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
+            env["ANTHROPIC_API_KEY"] = env["ANTON_ANTHROPIC_API_KEY"]
+        if "OPENAI_API_KEY" not in env and "ANTON_OPENAI_API_KEY" in env:
+            env["OPENAI_API_KEY"] = env["ANTON_OPENAI_API_KEY"]
+        if "OPENAI_BASE_URL" not in env and "ANTON_OPENAI_BASE_URL" in env:
+            env["OPENAI_BASE_URL"] = env["ANTON_OPENAI_BASE_URL"]
+        if (
+            "OPENAI_API_KEY" not in env
+            and "ANTON_MINDS_API_KEY" in env
+            and self._coding_provider == "openai-compatible"
+        ):
+            env["OPENAI_API_KEY"] = env["ANTON_MINDS_API_KEY"]
+        if (
+            "OPENAI_BASE_URL" not in env
+            and "ANTON_MINDS_URL" in env
+            and self._coding_provider == "openai-compatible"
+        ):
+            # Host-aware (ENG-436): api.mindshub.ai serves /v1, legacy
+            # mdb.ai serves /api/v1. The previous hardcoded /api/v1 was
+            # wrong for mindshub. Mirrors config/settings.py +
+            # cowork-server minds_chat_base_url.
+            _minds_base = env["ANTON_MINDS_URL"].rstrip("/")
+            if _minds_base.endswith("/v1"):
+                env["OPENAI_BASE_URL"] = _minds_base
+            elif "mdb.ai" in _minds_base:
+                env["OPENAI_BASE_URL"] = f"{_minds_base}/api/v1"
+            else:
+                env["OPENAI_BASE_URL"] = f"{_minds_base}/v1"
+        if self._coding_api_key:
+            sdk_key = {
+                "anthropic": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "openai-compatible": "OPENAI_API_KEY",
+            }.get(self._coding_provider, "")
+            if sdk_key:
+                env[sdk_key] = self._coding_api_key
+        if self._coding_provider in ("openai", "openai-compatible"):
+            base_url = (
+                self._coding_base_url
+                or env.get("ANTON_OPENAI_BASE_URL")
+                or env.get("OPENAI_BASE_URL")
+                or ""
+            )
+            if base_url:
+                env["OPENAI_BASE_URL"] = base_url
+                env["ANTON_OPENAI_BASE_URL"] = base_url
         uv = self._find_uv()
         if uv:
             env["ANTON_UV_PATH"] = uv
@@ -866,28 +817,4 @@ def local_scratchpad_runtime_factory(
         coding_base_url=coding_base_url,
         cells=cells,
         workspace_path=workspace_path,
-    )
-
-
-def sanitized_scratchpad_runtime_factory(
-    *,
-    name: str,
-    coding_provider: str,
-    coding_model: str,
-    coding_api_key: str,
-    coding_base_url: str,
-    cells: list[Cell] | None,
-    workspace_path: Path | None,
-) -> ScratchpadRuntime:
-    """Cloud/headless factory: like the local factory but with
-    ``sanitize_env=True`` so the child env carries no secrets."""
-    return LocalScratchpadRuntime(
-        name=name,
-        coding_provider=coding_provider,
-        coding_model=coding_model,
-        coding_api_key=coding_api_key,
-        coding_base_url=coding_base_url,
-        cells=cells,
-        workspace_path=workspace_path,
-        sanitize_env=True,
     )

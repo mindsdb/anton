@@ -10,9 +10,6 @@ Safety posture (all internal — nothing here is on the wire):
 * Trusted pod-side workspace mount, never taken from the request.
 * No dotenv loading (``AntonSettings(_env_file=None)``, shared into Workspace).
 * Personal memory / connectors / data-vault / disk history OFF.
-* Scratchpad subprocess env built from a non-secret allowlist, so generated
-  code can't read the provider key (interim until the Plan-5 gateway removes
-  the key from the pod entirely).
 * Only reviewed, headless-safe tools are exposed (scratchpad + artifacts).
 """
 
@@ -77,7 +74,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     trusted pod mount, NOT ``request.workspace_path``.
     """
     from anton.config.settings import AntonSettings
-    from anton.core.backends.local import sanitized_scratchpad_runtime_factory
+    from anton.core.backends.local import local_scratchpad_runtime_factory
     from anton.core.llm.client import LLMClient
     from anton.core.session import ChatSession, ChatSessionConfig
     from anton.workspace import Workspace
@@ -117,7 +114,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         history_store=None,                 # disk history OFF (DB authoritative)
         tools=[],                           # no host connector/publish tools
         tool_allowlist=CLOUD_TOOL_ALLOWLIST,          # only reviewed tools survive the build
-        runtime_factory=sanitized_scratchpad_runtime_factory,  # secret-free scratchpad env
+        runtime_factory=local_scratchpad_runtime_factory,
         web_search_enabled=False,
         web_fetch_enabled=False,
     )
