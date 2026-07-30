@@ -1,30 +1,54 @@
-name: Auto-release on push to main
+name: Publish stable and staging releases
 
-permissions:
-  contents: write
+# One immutable package stream per release-train branch:
+#   main    -> stable PyPI releases
+#   staging -> PyPI rc pre-releases
+#
+# Both streams intentionally publish from this workflow file so the existing
+# PyPI Trusted Publisher identity (`release.yml`, environment `pypi`) covers
+# both without adding another long-lived credential or publisher.
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   workflow_dispatch:
 
 concurrency:
-  group: auto-release-${{ github.ref }}
+  group: anton-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate package source
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - name: Run unit and stub e2e tests
+        run: uv run --extra dev pytest tests/ -v
+
   auto-release:
+    needs: validate
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+    permissions:
+      contents: write  # tag push + release creation
     uses: mindsdb/github-actions/.github/workflows/calver-release.yml@main
     with:
       calver-major: "2"
+      prerelease: ${{ github.ref == 'refs/heads/staging' }}
       runs-on: ubuntu-latest
 
   publish:
-    name: Publish to PyPI
+    name: Publish immutable package to PyPI
     needs: auto-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
       id-token: write  # required for trusted publisher (OIDC)
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +71,13 @@ jobs:
 
   e2e:
     needs: auto-release
+    # Keep the existing live release test on the stable stream. Running it for
+    # every staging commit would consume external API capacity; staging already
+    # passed the full unit + stub-e2e suite in `validate` before its rc was
+    # created.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
     uses: ./.github/workflows/tests_e2e_release.yml
     with:
       tag: ${{ needs.auto-release.outputs.tag }}
@@ -58,14 +89,14 @@ jobs:
     # One job covers both outcomes: a `uses:` job cannot branch on status, so
     # the aggregate result picks the failed or recovered message, and a
     # cancelled run stays silent.
-    needs: [auto-release, publish, e2e]
+    needs: [validate, auto-release, publish, e2e]
     if: ${{ !cancelled() && !contains(needs.*.result, 'cancelled') }}
     permissions:
       contents: read
       actions: read  # the prior-run lookup behind the recovery message
     uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
     with:
-      env-name: "release"
+      env-name: ${{ github.ref == 'refs/heads/staging' && 'staging prerelease' || 'release' }}
       status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
       runs-on: ubuntu-latest
     secrets: inherit
