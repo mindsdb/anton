@@ -27,6 +27,7 @@ import pytest
 
 from anton.core.llm.openai import _raise_for_status_error
 from anton.core.llm.provider import (
+    EndpointConfigurationError,
     ModelUnavailableError,
     TokenLimitExceeded,
     TransientProviderError,
@@ -348,8 +349,11 @@ def test_404_bad_endpoint_is_config_error_not_model_unavailable():
     # also 404s, with a body that says nothing about the model — that must NOT
     # become "switch models". FastAPI-style {"detail": "Not Found"}.
     exc = _sdk_error(404, json_body={"detail": "Not Found"})
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(EndpointConfigurationError) as err:
         _raise_for_status_error(exc, "sonnet")
+    # A distinct type (still a ConnectionError) so the CLI defaults it to `setup`,
+    # not `retry` — retry re-sends the same misrouted request (ENG-1145 review).
+    assert isinstance(err.value, ConnectionError)
     assert not isinstance(err.value, ModelUnavailableError)
     assert "endpoint" in str(err.value).lower()
     assert "Switch models" not in str(err.value)
@@ -358,7 +362,22 @@ def test_404_bad_endpoint_is_config_error_not_model_unavailable():
 def test_404_html_body_is_config_error():
     # An nginx/proxy 404 returns HTML (SDK stores it as a string body, not dict).
     exc = _sdk_error(404, text_body="<html>404 Not Found</html>")
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(EndpointConfigurationError) as err:
         _raise_for_status_error(exc, "sonnet")
     assert not isinstance(err.value, ModelUnavailableError)
     assert "endpoint" in str(err.value).lower()
+
+
+def test_404_model_message_without_terminator_is_normalized():
+    # A model-oriented 404 whose provider message has NO trailing punctuation
+    # must not run into the appended sentence ("...available Switch models").
+    # The mapper normalizes the terminator rather than trusting the provider's
+    # punctuation (ENG-1145 review).
+    exc = _sdk_error(404, json_body={"error": {
+        "message": "models/foo is no longer available",  # no period
+        "status": "NOT_FOUND",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "foo")
+    assert "available. Switch models" in str(err.value)
+    assert "available Switch" not in str(err.value)

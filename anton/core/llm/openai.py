@@ -14,6 +14,7 @@ from anton.utils.datasources import scrub_credentials
 from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
@@ -155,18 +156,30 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
                 or "does not exist" in msg_l
             )
         )
-        detail = f" {provider_msg.strip()}" if isinstance(provider_msg, str) and provider_msg.strip() else ""
+        # Provider message as a leading-space fragment with a normalized
+        # terminator, so the appended copy reads cleanly whether or not the
+        # provider punctuated its own message (Gemini's ends in a period; a raw
+        # proxy/FastAPI detail may not). Named `suffix`, not `detail`: the `detail`
+        # bound above is the FastAPI 429 detail, and reusing the name would leak
+        # this 404-local value into any branch added after this block.
+        clean = provider_msg.strip() if isinstance(provider_msg, str) else ""
+        if clean and clean[-1] not in ".!?":
+            clean += "."
+        suffix = f" {clean}" if clean else ""
         if model_specific:
+            reason = f":{suffix}" if suffix else "."
             raise ModelUnavailableError(
-                f"The model '{model}' isn't available:{detail} Switch models in Settings.",
+                f"The model '{model}' isn't available{reason} Switch models in Settings.",
                 code="model_not_found", model=model,
             ) from exc
-        # Not model-specific → almost always a misrouted/misconfigured endpoint.
-        # Permanent for this request (retrying won't help), but the remedy is the
-        # endpoint config, not the model — so don't send the user to switch models.
-        raise ConnectionError(
+        # Not model-specific → almost always a misrouted/misconfigured endpoint
+        # (bad base URL, missing /v1, proxy route). Permanent for this request,
+        # but the remedy is the endpoint config, not the model — a distinct type
+        # so the CLI defaults it to `setup` (fix provider/endpoint), not `retry`,
+        # and never to "switch models" (ENG-1145 review).
+        raise EndpointConfigurationError(
             f"The model endpoint returned 404 — check the endpoint URL and model "
-            f"configuration.{detail}"
+            f"configuration.{suffix}"
         ) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
