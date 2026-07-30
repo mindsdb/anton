@@ -68,7 +68,7 @@ from anton.commands.skills import (
     handle_skills_list,
 )
 from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
-from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
+from anton.tools import DEFAULT_SESSION_TOOLS
 from anton.utils.prompt import (
     prompt_or_cancel,
     prompt_minds_api_key,
@@ -1357,7 +1357,7 @@ async def _chat_loop(
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
-        tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
+        tools=list(DEFAULT_SESSION_TOOLS),
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,
     ))
