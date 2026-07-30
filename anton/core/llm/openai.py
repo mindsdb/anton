@@ -131,25 +131,43 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
 
-    # A 404 from an OpenAI-compatible endpoint means the model id isn't served
-    # here — retired, not enabled for this key, or never existed — which is
-    # permanent for this request, NOT the transient outage the generic branch
-    # below implies ("try again in a moment"). Surface the provider's own copy
-    # so the user switches models instead of retrying; Google's is e.g.
-    # "models/gemini-2.5-flash is no longer available to new users." (ENG-1145)
+    # A 404 needs care: this mapper is shared by direct OpenAI, Gemini, MindsHub,
+    # Azure, and arbitrary OpenAI-compatible endpoints, so a bare 404 does NOT by
+    # itself mean the model is missing — a wrong base URL, a missing ``/v1``, a
+    # reverse-proxy route, or an unsupported API path all 404 too, and there
+    # "switch models" is the wrong remedy. Only treat it as model-not-found when
+    # the structured body actually points at the model: OpenAI's
+    # ``code="model_not_found"``, or a model-oriented message (Gemini's
+    # ``status="NOT_FOUND"`` with "models/<id> is not found / no longer
+    # available"). Everything else is surfaced as an endpoint/configuration
+    # failure carrying the provider's own words. (ENG-1145 review)
     if exc.status_code == 404:
         provider_msg = envelope.get("message") or body.get("message")
-        if isinstance(provider_msg, str) and provider_msg.strip():
-            msg = (
-                f"The model '{model}' isn't available: {provider_msg.strip()} "
-                "Switch models in Settings."
+        msg_l = provider_msg.lower() if isinstance(provider_msg, str) else ""
+        status_str = str(body.get("status") or envelope.get("status") or "").upper()
+        model_specific = code == "model_not_found" or (
+            "model" in msg_l
+            and (
+                status_str == "NOT_FOUND"
+                or "not found" in msg_l
+                or "not available" in msg_l
+                or "no longer available" in msg_l
+                or "does not exist" in msg_l
             )
-        else:
-            msg = (
-                f"The model '{model}' isn't available at this endpoint. "
-                "Switch to a supported model in Settings."
-            )
-        raise ModelUnavailableError(msg, code="model_not_found", model=model) from exc
+        )
+        detail = f" {provider_msg.strip()}" if isinstance(provider_msg, str) and provider_msg.strip() else ""
+        if model_specific:
+            raise ModelUnavailableError(
+                f"The model '{model}' isn't available:{detail} Switch models in Settings.",
+                code="model_not_found", model=model,
+            ) from exc
+        # Not model-specific → almost always a misrouted/misconfigured endpoint.
+        # Permanent for this request (retrying won't help), but the remedy is the
+        # endpoint config, not the model — so don't send the user to switch models.
+        raise ConnectionError(
+            f"The model endpoint returned 404 — check the endpoint URL and model "
+            f"configuration.{detail}"
+        ) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the

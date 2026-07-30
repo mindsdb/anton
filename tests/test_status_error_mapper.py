@@ -328,3 +328,37 @@ def test_404_gemini_array_body_unwrapped_and_surfaced():
         _raise_for_status_error(exc, "gemini-2.5-flash")
     assert "no longer available to new users" in str(err.value)
     assert "Switch models in Settings" in str(err.value)
+
+
+def test_404_openai_model_not_found_code_maps_to_model_unavailable():
+    # OpenAI's unknown-model 404 carries code=model_not_found (SDK-unwrapped to
+    # the top level) — model-specific, so "switch models" is the right remedy.
+    exc = _sdk_error(404, json_body={"error": {
+        "message": "The model `gpt-x` does not exist or you do not have access to it.",
+        "type": "invalid_request_error",
+        "code": "model_not_found",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "gpt-x")
+    assert err.value.code == "model_not_found"
+
+
+def test_404_bad_endpoint_is_config_error_not_model_unavailable():
+    # A misrouted/misconfigured endpoint (bad base URL, missing /v1, proxy path)
+    # also 404s, with a body that says nothing about the model — that must NOT
+    # become "switch models". FastAPI-style {"detail": "Not Found"}.
+    exc = _sdk_error(404, json_body={"detail": "Not Found"})
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, ModelUnavailableError)
+    assert "endpoint" in str(err.value).lower()
+    assert "Switch models" not in str(err.value)
+
+
+def test_404_html_body_is_config_error():
+    # An nginx/proxy 404 returns HTML (SDK stores it as a string body, not dict).
+    exc = _sdk_error(404, text_body="<html>404 Not Found</html>")
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, ModelUnavailableError)
+    assert "endpoint" in str(err.value).lower()
