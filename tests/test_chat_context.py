@@ -291,7 +291,7 @@ class TestRuntimeContext:
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
-        assert "WAIT for the reply" in system_prompt
+        assert "never ask in text and act in the same turn" in system_prompt
 
 
 class TestMindsSetupRecovery:

@@ -588,6 +588,144 @@ async def test_cli_choice_escape_and_empty_input_are_cancelled(cli_elicitor, mon
         assert (await cli_elicitor.ask("q1", _choice())).status == "cancelled"
 
 
+# ─── CLI elicitor — _ask_path (browse mode) ─────────────────────────────
+
+
+def _path_request(**over) -> AskRequest:
+    base = dict(prompt="Pick a folder", kind="path", path_mode="browse", root="/home/user")
+    base.update(over)
+    return AskRequest(**base)
+
+
+async def test_cli_browse_prints_prompt_and_root_and_returns_the_typed_path(monkeypatch):
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    console = Console(record=True, width=100)
+    elicitor = CLIElicitor(console)
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="/home/user/docs")
+    )
+
+    answer = await elicitor.ask("q1", _path_request())
+
+    assert answer == AskAnswer(status="answered", values=("/home/user/docs",))
+    text = console.export_text()
+    assert "Pick a folder" in text
+    assert "/home/user" in text
+
+
+async def test_cli_browse_with_no_root_prints_no_starting_at_line(monkeypatch):
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    console = Console(record=True, width=100)
+    elicitor = CLIElicitor(console)
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="/tmp/x")
+    )
+
+    await elicitor.ask("q1", _path_request(root=""))
+
+    assert "starting at" not in console.export_text()
+
+
+async def test_cli_browse_escape_is_cancelled(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value=None)
+    )
+    answer = await cli_elicitor.ask("q1", _path_request())
+    assert answer.status == "cancelled"
+
+
+async def test_cli_browse_empty_or_whitespace_answer_is_cancelled(cli_elicitor, monkeypatch):
+    for value in ("", "   "):
+        monkeypatch.setattr(
+            "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value=value)
+        )
+        answer = await cli_elicitor.ask("q1", _path_request())
+        assert answer.status == "cancelled"
+
+
+# ─── CLI elicitor — _ask_path (pick mode) ───────────────────────────────
+
+
+def _pick_request(**over) -> AskRequest:
+    base = dict(
+        prompt="Which file?",
+        kind="path",
+        path_mode="pick",
+        options=(
+            AskOption(value="/a", label="a.csv", kind="file"),
+            AskOption(value="/b", label="b", kind="folder", detail="12 files"),
+        ),
+    )
+    base.update(over)
+    return AskRequest(**base)
+
+
+async def test_cli_pick_renders_numbered_options_with_icons_and_detail(monkeypatch):
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    console = Console(record=True, width=100)
+    elicitor = CLIElicitor(console)
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="1")
+    )
+
+    await elicitor.ask("q1", _pick_request())
+
+    text = console.export_text()
+    lines = text.splitlines()
+    file_line = next(line for line in lines if "a.csv" in line)
+    folder_line = next(line for line in lines if line.strip().startswith("2."))
+    assert "Which file?" in text
+    assert "1." in file_line and "📄" in file_line
+    assert "b" in folder_line and "📁" in folder_line
+    assert "12 files" in folder_line
+
+
+async def test_cli_pick_valid_number_selects_the_matching_option_value(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="2")
+    )
+    answer = await cli_elicitor.ask("q1", _pick_request())
+    assert answer == AskAnswer(status="answered", values=("/b",))
+
+
+async def test_cli_pick_non_numeric_reply_is_cancelled(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="foo")
+    )
+    answer = await cli_elicitor.ask("q1", _pick_request())
+    assert answer.status == "cancelled"
+
+
+async def test_cli_pick_out_of_range_number_is_cancelled(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="99")
+    )
+    answer = await cli_elicitor.ask("q1", _pick_request())
+    assert answer.status == "cancelled"
+
+
+async def test_cli_pick_escape_is_cancelled(cli_elicitor, monkeypatch):
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value=None)
+    )
+    answer = await cli_elicitor.ask("q1", _pick_request())
+    assert answer.status == "cancelled"
+
+
+async def test_cli_pick_with_no_options_is_cancelled(cli_elicitor):
+    answer = await cli_elicitor.ask("q1", _pick_request(options=()))
+    assert answer.status == "cancelled"
+
+
 def test_show_question_renders_numbered_options_with_icons():
     from rich.console import Console
 
@@ -658,3 +796,19 @@ def test_without_ask_user_is_a_noop_when_the_tool_is_absent(make_session):
     with without_ask_user(session.tool_registry) as stashed:
         assert stashed is None
     assert {t["name"] for t in session.tool_registry.dump()} == before
+
+
+# ─── prompt discipline ──────────────────────────────────────────────────
+
+
+def test_both_disciplines_carve_out_an_exception_for_ask_user():
+    """The existing 'never ask and act in the same turn' rule contradicts a
+    blocking tool, so the model would ignore ask_user without this."""
+    from anton.core.llm.prompts import (
+        CONVERSATION_DISCIPLINE_ACT_FIRST,
+        CONVERSATION_DISCIPLINE_ASK_FIRST,
+    )
+
+    for discipline in (CONVERSATION_DISCIPLINE_ACT_FIRST, CONVERSATION_DISCIPLINE_ASK_FIRST):
+        assert "ask_user" in discipline
+        assert "same turn" in discipline
