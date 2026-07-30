@@ -105,6 +105,21 @@ class StreamContextCompacted:
     message: str
 
 
+@dataclass
+class StreamReasoningDelta:
+    """A chunk of the model's own extended-thinking/reasoning text.
+
+    NOT part of the final answer — Anthropic's `thinking_delta` content
+    blocks (surfaced via `output_config.effort`'s adaptive thinking) and
+    OpenAI's `response.reasoning_summary_text.delta` Responses-API events
+    both map to this. Kept distinct from `StreamTextDelta` so the harness
+    layer can route it to a separate "current thought" channel instead of
+    the persisted answer body.
+    """
+
+    text: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -114,6 +129,7 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamReasoningDelta
 )
 
 
@@ -312,6 +328,36 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+class StructuredOutputError(ValueError):
+    """Raised when a forced-tool-call structured-output call yields no usable call.
+
+    ``truncated`` says whether a retry can help: ``True`` means the model spent
+    the ``max_tokens`` budget narrating before it reached the tool call (the
+    narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``, ``qwen`` — do
+    this deterministically under a tight budget, ENG-1081); ``False`` means the
+    provider errored, refused, or returned nothing, and a bigger budget won't
+    fix it. See `structured.looks_truncated` for how that's decided.
+
+    Subclasses ``ValueError`` so call sites catching the documented ``ValueError``
+    from ``generate_object``/``generate_object_code`` keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        truncated: bool = False,
+        output_tokens: int = 0,
+        max_tokens: int = 0,
+        stop_reason: str | None = None,
+    ):
+        super().__init__(message)
+        self.truncated = truncated
+        self.output_tokens = output_tokens
+        self.max_tokens = max_tokens
+        self.stop_reason = stop_reason
+
+
 class TransientProviderError(ConnectionError):
     """Raised when the provider fails in a way that a retry might fix.
 
@@ -412,8 +458,12 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
         )
     if status_code == 429 and not b.get("detail"):
-        # Plain rate-limit ("slow down"), NOT an out-of-quota 429 (that carries a
-        # `detail` and is mapped to TokenLimitExceeded upstream of this call).
+        # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
+        # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
+        # ``insufficient_quota``); the guard here is defense for direct callers —
+        # a billing failure is permanent and must never enter the retry loop.
+        if etype == "insufficient_quota":
+            return None
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
             provider=provider, code="rate_limited", session_backoff=False, model=model,

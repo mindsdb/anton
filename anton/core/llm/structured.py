@@ -1,8 +1,10 @@
 """Shared schema-building / response-unwrapping for structured LLM output.
 
-Two pure helper functions that turn a Pydantic model (or `list[Model]`)
-into the inputs needed for a forced tool-call, and validate the LLM's
-response back into a typed Python instance.
+Pure helper functions that turn a Pydantic model (or `list[Model]`) into
+the inputs needed for a forced tool-call and validate the LLM's response
+back into a typed Python instance — plus the shared budget ladder
+(`generate_with_truncation_retry`) every forced-schema call site runs
+through so narrating models get room to reach the call (ENG-1084).
 
 Used by:
 
@@ -27,7 +29,183 @@ the subprocess already imports from `anton.core.*` at boot.
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import Any, Awaitable, Callable, NoReturn
+
+from .provider import StructuredOutputError
+
+
+# Default output-budget ladder for forced-schema calls: first attempt, then
+# one retry used only when the first came back truncated. Sized by the same
+# measurement as the completion verifier's (ENG-1081): narrating models
+# (`mindshub_air`/kimi, `deepseek`) spend 245–1,654+ tokens on prose before
+# reaching the forced tool call — and the narration scales with the input, so
+# a consolidation pass over a whole scratchpad session was observed filling
+# 2,048 exactly (ENG-1084). Non-narrating models answer these calls in tens
+# of tokens and never pay for the headroom.
+DEFAULT_STRUCTURED_BUDGETS: tuple[int, ...] = (2048, 4096)
+
+
+def no_preamble_instruction(schema_class) -> str:
+    """System-prompt suffix that asks for the forced tool call first.
+
+    Shortens the preamble on narrating models but is NOT sufficient alone
+    (measured 0/3 at a 256 budget even with it — ENG-1081), so it pairs with
+    the budget ladder rather than replacing it. Tool name comes off the
+    schema class so it can't go stale.
+    """
+    name = getattr(schema_class, "__name__", str(schema_class))
+    return (
+        f"\n\nCall the {name} tool immediately as your first action. Do not "
+        "think out loud, restate the conversation, or explain your reasoning "
+        "before calling it — put any brief justification in the tool's fields."
+    )
+
+
+async def generate_with_truncation_retry(
+    generate: Callable[..., Awaitable[Any]],
+    schema_class,
+    *,
+    system: str,
+    messages: list[dict],
+    budgets: tuple[int, ...] = DEFAULT_STRUCTURED_BUDGETS,
+    log: logging.Logger | None = None,
+    subsystem: str = "structured-output",
+):
+    """Run a forced-schema call through the ENG-1081 budget ladder.
+
+    ``generate`` is a bound ``LLMClient.generate_object`` /
+    ``generate_object_code``. Each budget in ``budgets`` is tried in order;
+    a retry is bought ONLY for a truncated attempt
+    (``StructuredOutputError.truncated`` — the model narrated past the budget
+    before reaching the tool call). Any other failure — provider error,
+    schema mismatch, a model that declines the call outright — is re-raised
+    immediately: a bigger budget cannot fix it, so don't pay for one
+    (measured: fable returns an unusable ``{}`` call at 8 output tokens
+    regardless of budget, ENG-1095).
+
+    Exists because ENG-1084 found seven `generate_object*` call sites that
+    each hand-rolled a single tight budget with no retry — 512/600 sat
+    *inside* the measured narration range, so identity extraction, the
+    cerebellum diff pass and session consolidation silently returned nothing
+    for every narrating-model user. One ladder, shared, instead of an eighth
+    hand-rolled copy.
+
+    Logging stays content-safe: budgets, token counts and the truncation
+    verdict only — never the exception message, which can quote model output
+    derived from the user's conversation.
+    """
+    logger = log or logging.getLogger(__name__)
+    last_exc: StructuredOutputError | None = None
+    for attempt, budget in enumerate(budgets):
+        try:
+            return await generate(
+                schema_class, system=system, messages=messages, max_tokens=budget
+            )
+        except StructuredOutputError as exc:
+            retrying = exc.truncated and attempt + 1 < len(budgets)
+            logger.warning(
+                "%s: forced %s call failed (%s, budget=%d, output_tokens=%s) "
+                "retrying=%s",
+                subsystem,
+                getattr(schema_class, "__name__", schema_class),
+                "TRUNCATED" if exc.truncated else "NO_TOOL_CALL",
+                budget,
+                exc.output_tokens,
+                retrying,
+            )
+            if not retrying:
+                raise
+            last_exc = exc
+    # Only reachable with an empty `budgets`; treat as a caller bug but keep
+    # the contract (raise, never return None silently).
+    raise last_exc or StructuredOutputError(
+        "generate_with_truncation_retry called with no budgets",
+        truncated=False,
+        output_tokens=0,
+        max_tokens=0,
+        stop_reason=None,
+    )
+
+
+def looks_truncated(response, budget: int) -> bool:
+    """True if `response` was cut off by the `max_tokens` budget.
+
+    Token count first, because the MindsHub gateway reports
+    ``finish_reason: "stop"`` at the cap for most aliases (ENG-1082) — the
+    standard ``"length"`` check can't be relied on there. Both dialects are
+    honoured when reported: OpenAI says ``"length"``, Anthropic ``"max_tokens"``.
+    No usage information → ``False``; without evidence we don't buy a retry.
+    """
+    usage = getattr(response, "usage", None)
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    stop_reason = getattr(response, "stop_reason", None)
+    return stop_reason in ("length", "max_tokens") or (
+        budget > 0 and output_tokens >= budget
+    )
+
+
+def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoReturn:
+    """Raise `StructuredOutputError` explaining *why* the tool call is unusable.
+
+    Covers both shapes of the same underlying problem:
+
+    - **No tool call at all** — the model narrated in plain ``content`` until
+      the budget ran out.
+    - **A damaged tool call** — the budget ran out *inside* the call's JSON
+      arguments, so ``safe_parse_tool_input`` salvaged a partial dict and set
+      ``parse_error``, and validation then fails. Without this, that case
+      surfaces as a bare ``ValidationError``, which reads like a schema bug and
+      never gets the retry a truncation deserves (ENG-1081).
+
+    Lives here, next to `build_structured_tool`/`unwrap_structured_response`,
+    because both structured-output paths must classify the failure the same
+    way — the async `LLMClient._generate_object_with` and the sync
+    `_ScratchpadLLM.generate_object` in the scratchpad subprocess. Keeping it
+    in one of the two callers is how they drift (ENG-1081).
+
+    A forced tool call can come back empty for two very different reasons:
+
+    - **Truncated** — the model narrated in plain ``content`` and ran out of
+      ``budget`` before reaching the call. Retrying with more room usually
+      works. Models served through MindsHub's Fireworks aliases
+      (``mindshub_air``/``kimi``, ``deepseek``) narrate before acting, so a
+      tight budget fails them.
+    - **Anything else** — the provider errored, refused, or returned nothing.
+      A bigger budget won't help.
+
+    See `looks_truncated` for how truncation is detected.
+
+    Args:
+        response: The provider's ``LLMResponse``.
+        tool_name: Name of the forced tool, for the message.
+        budget: The ``max_tokens`` the call was given.
+
+    Raises:
+        StructuredOutputError: Always. ``.truncated`` carries the verdict.
+    """
+    usage = getattr(response, "usage", None)
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    stop_reason = getattr(response, "stop_reason", None)
+    truncated = looks_truncated(response, budget)
+    what = (
+        "returned an unusable tool call for"
+        if getattr(response, "tool_calls", None)
+        else "did not return a tool call for"
+    )
+    detail = (
+        f" (truncated: {output_tokens}/{budget} output tokens spent before the "
+        "call was complete)."
+        if truncated
+        else "."
+    )
+    raise StructuredOutputError(
+        f"LLM {what} forced schema {tool_name}{detail}",
+        truncated=truncated,
+        output_tokens=output_tokens,
+        max_tokens=budget,
+        stop_reason=stop_reason,
+    )
 
 
 def build_structured_tool(schema_class) -> tuple[dict, type, bool]:
