@@ -83,7 +83,16 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
-    body = exc.body if isinstance(exc.body, dict) else {}
+    # Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-
+    # element ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare
+    # object; the SDK stores whatever it parsed. Unwrap the list here or every
+    # structured check below (auth / quota / model) silently misses on Gemini
+    # and the error falls through to the generic "temporarily unavailable"
+    # message — the exact reason ENG-1145 surfaced as an opaque 404.
+    raw_body = exc.body
+    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
+        raw_body = raw_body[0]
+    body = raw_body if isinstance(raw_body, dict) else {}
     envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
@@ -121,6 +130,26 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
                 "upgrading your plan may enable it."
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    # A 404 from an OpenAI-compatible endpoint means the model id isn't served
+    # here — retired, not enabled for this key, or never existed — which is
+    # permanent for this request, NOT the transient outage the generic branch
+    # below implies ("try again in a moment"). Surface the provider's own copy
+    # so the user switches models instead of retrying; Google's is e.g.
+    # "models/gemini-2.5-flash is no longer available to new users." (ENG-1145)
+    if exc.status_code == 404:
+        provider_msg = envelope.get("message") or body.get("message")
+        if isinstance(provider_msg, str) and provider_msg.strip():
+            msg = (
+                f"The model '{model}' isn't available: {provider_msg.strip()} "
+                "Switch models in Settings."
+            )
+        else:
+            msg = (
+                f"The model '{model}' isn't available at this endpoint. "
+                "Switch to a supported model in Settings."
+            )
+        raise ModelUnavailableError(msg, code="model_not_found", model=model) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the

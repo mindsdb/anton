@@ -292,3 +292,39 @@ def test_500_is_transient_fail_fast():
         _raise_for_status_error(exc, "sonnet")
     assert err.value.session_backoff is False
     assert "returned 500" in str(err.value)
+
+
+# ── 404 model-not-found (ENG-1145) ────────────────────────────────────
+
+
+def test_404_object_body_maps_to_model_unavailable():
+    # A 404 is "model isn't served here", NOT a transient outage — it must be a
+    # ModelUnavailableError (permanent, no retry copy), surfacing the provider's
+    # message so the user switches models rather than waiting.
+    exc = _sdk_error(404, json_body={"error": {
+        "message": "models/foo is not found for API version v1beta.",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "foo")
+    assert err.value.code == "model_not_found"
+    assert "is not found" in str(err.value)
+    assert "temporarily unavailable" not in str(err.value)
+    assert not isinstance(err.value, TransientProviderError)
+
+
+def test_404_gemini_array_body_unwrapped_and_surfaced():
+    # Gemini's OpenAI-compat CHAT errors arrive as a single-element ARRAY, which
+    # the SDK stores verbatim (exc.body is a list, not a dict). The mapper must
+    # unwrap it, or the model-not-found reason is lost to the generic message —
+    # the exact ENG-1145 symptom ("Server returned 404 ... temporarily
+    # unavailable" instead of Google's real copy).
+    exc = _sdk_error(404, json_body=[{"error": {
+        "message": "This model models/gemini-2.5-flash is no longer available to new users.",
+        "code": 404,
+        "status": "NOT_FOUND",
+    }}])
+    assert isinstance(exc.body, list)  # pin the SDK behavior this fix relies on
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "gemini-2.5-flash")
+    assert "no longer available to new users" in str(err.value)
+    assert "Switch models in Settings" in str(err.value)
