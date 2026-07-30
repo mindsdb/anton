@@ -492,6 +492,20 @@ class ModelUnavailableError(ConnectionError):
         self.model = model
 
 
+class EndpointConfigurationError(ConnectionError):
+    """Raised when a request fails in a way that points at the endpoint
+    configuration — a wrong base URL, a missing ``/v1``, a reverse-proxy route,
+    or an unsupported API path — rather than at the model or a transient outage.
+
+    Permanent for the identical request (a retry re-sends it to the same broken
+    route), and the remedy is the provider *setup* flow (fix the base URL /
+    route), NOT switching models and NOT waiting. Subclasses ConnectionError so
+    legacy call sites that only know the ConnectionError mapping keep working;
+    the interactive CLI reads the type to default such a failure to ``setup``
+    rather than ``retry`` (ENG-1145 review).
+    """
+
+
 @dataclass
 class ProviderConnectionInfo:
     """Serializable provider connection details.

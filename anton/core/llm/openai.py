@@ -14,6 +14,7 @@ from anton.utils.datasources import scrub_credentials
 from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
@@ -83,7 +84,16 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
-    body = exc.body if isinstance(exc.body, dict) else {}
+    # Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-
+    # element ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare
+    # object; the SDK stores whatever it parsed. Unwrap the list here or every
+    # structured check below (auth / quota / model) silently misses on Gemini
+    # and the error falls through to the generic "temporarily unavailable"
+    # message — the exact reason ENG-1145 surfaced as an opaque 404.
+    raw_body = exc.body
+    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
+        raw_body = raw_body[0]
+    body = raw_body if isinstance(raw_body, dict) else {}
     envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
@@ -121,6 +131,56 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
                 "upgrading your plan may enable it."
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    # A 404 needs care: this mapper is shared by direct OpenAI, Gemini, MindsHub,
+    # Azure, and arbitrary OpenAI-compatible endpoints, so a bare 404 does NOT by
+    # itself mean the model is missing — a wrong base URL, a missing ``/v1``, a
+    # reverse-proxy route, or an unsupported API path all 404 too, and there
+    # "switch models" is the wrong remedy. Only treat it as model-not-found when
+    # the structured body actually points at the model: OpenAI's
+    # ``code="model_not_found"``, or a model-oriented message (Gemini's
+    # ``status="NOT_FOUND"`` with "models/<id> is not found / no longer
+    # available"). Everything else is surfaced as an endpoint/configuration
+    # failure carrying the provider's own words. (ENG-1145 review)
+    if exc.status_code == 404:
+        provider_msg = envelope.get("message") or body.get("message")
+        msg_l = provider_msg.lower() if isinstance(provider_msg, str) else ""
+        status_str = str(body.get("status") or envelope.get("status") or "").upper()
+        model_specific = code == "model_not_found" or (
+            "model" in msg_l
+            and (
+                status_str == "NOT_FOUND"
+                or "not found" in msg_l
+                or "not available" in msg_l
+                or "no longer available" in msg_l
+                or "does not exist" in msg_l
+            )
+        )
+        # Provider message as a leading-space fragment with a normalized
+        # terminator, so the appended copy reads cleanly whether or not the
+        # provider punctuated its own message (Gemini's ends in a period; a raw
+        # proxy/FastAPI detail may not). Named `suffix`, not `detail`: the `detail`
+        # bound above is the FastAPI 429 detail, and reusing the name would leak
+        # this 404-local value into any branch added after this block.
+        clean = provider_msg.strip() if isinstance(provider_msg, str) else ""
+        if clean and clean[-1] not in ".!?":
+            clean += "."
+        suffix = f" {clean}" if clean else ""
+        if model_specific:
+            reason = f":{suffix}" if suffix else "."
+            raise ModelUnavailableError(
+                f"The model '{model}' isn't available{reason} Switch models in Settings.",
+                code="model_not_found", model=model,
+            ) from exc
+        # Not model-specific → almost always a misrouted/misconfigured endpoint
+        # (bad base URL, missing /v1, proxy route). Permanent for this request,
+        # but the remedy is the endpoint config, not the model — a distinct type
+        # so the CLI defaults it to `setup` (fix provider/endpoint), not `retry`,
+        # and never to "switch models" (ENG-1145 review).
+        raise EndpointConfigurationError(
+            f"The model endpoint returned 404 — check the endpoint URL and model "
+            f"configuration.{suffix}"
+        ) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the

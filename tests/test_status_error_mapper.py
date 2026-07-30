@@ -27,6 +27,7 @@ import pytest
 
 from anton.core.llm.openai import _raise_for_status_error
 from anton.core.llm.provider import (
+    EndpointConfigurationError,
     ModelUnavailableError,
     TokenLimitExceeded,
     TransientProviderError,
@@ -292,3 +293,91 @@ def test_500_is_transient_fail_fast():
         _raise_for_status_error(exc, "sonnet")
     assert err.value.session_backoff is False
     assert "returned 500" in str(err.value)
+
+
+# ── 404 model-not-found (ENG-1145) ────────────────────────────────────
+
+
+def test_404_object_body_maps_to_model_unavailable():
+    # A 404 is "model isn't served here", NOT a transient outage — it must be a
+    # ModelUnavailableError (permanent, no retry copy), surfacing the provider's
+    # message so the user switches models rather than waiting.
+    exc = _sdk_error(404, json_body={"error": {
+        "message": "models/foo is not found for API version v1beta.",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "foo")
+    assert err.value.code == "model_not_found"
+    assert "is not found" in str(err.value)
+    assert "temporarily unavailable" not in str(err.value)
+    assert not isinstance(err.value, TransientProviderError)
+
+
+def test_404_gemini_array_body_unwrapped_and_surfaced():
+    # Gemini's OpenAI-compat CHAT errors arrive as a single-element ARRAY, which
+    # the SDK stores verbatim (exc.body is a list, not a dict). The mapper must
+    # unwrap it, or the model-not-found reason is lost to the generic message —
+    # the exact ENG-1145 symptom ("Server returned 404 ... temporarily
+    # unavailable" instead of Google's real copy).
+    exc = _sdk_error(404, json_body=[{"error": {
+        "message": "This model models/gemini-2.5-flash is no longer available to new users.",
+        "code": 404,
+        "status": "NOT_FOUND",
+    }}])
+    assert isinstance(exc.body, list)  # pin the SDK behavior this fix relies on
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "gemini-2.5-flash")
+    assert "no longer available to new users" in str(err.value)
+    assert "Switch models in Settings" in str(err.value)
+
+
+def test_404_openai_model_not_found_code_maps_to_model_unavailable():
+    # OpenAI's unknown-model 404 carries code=model_not_found (SDK-unwrapped to
+    # the top level) — model-specific, so "switch models" is the right remedy.
+    exc = _sdk_error(404, json_body={"error": {
+        "message": "The model `gpt-x` does not exist or you do not have access to it.",
+        "type": "invalid_request_error",
+        "code": "model_not_found",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "gpt-x")
+    assert err.value.code == "model_not_found"
+
+
+def test_404_bad_endpoint_is_config_error_not_model_unavailable():
+    # A misrouted/misconfigured endpoint (bad base URL, missing /v1, proxy path)
+    # also 404s, with a body that says nothing about the model — that must NOT
+    # become "switch models". FastAPI-style {"detail": "Not Found"}.
+    exc = _sdk_error(404, json_body={"detail": "Not Found"})
+    with pytest.raises(EndpointConfigurationError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    # A distinct type (still a ConnectionError) so the CLI defaults it to `setup`,
+    # not `retry` — retry re-sends the same misrouted request (ENG-1145 review).
+    assert isinstance(err.value, ConnectionError)
+    assert not isinstance(err.value, ModelUnavailableError)
+    assert "endpoint" in str(err.value).lower()
+    assert "Switch models" not in str(err.value)
+
+
+def test_404_html_body_is_config_error():
+    # An nginx/proxy 404 returns HTML (SDK stores it as a string body, not dict).
+    exc = _sdk_error(404, text_body="<html>404 Not Found</html>")
+    with pytest.raises(EndpointConfigurationError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, ModelUnavailableError)
+    assert "endpoint" in str(err.value).lower()
+
+
+def test_404_model_message_without_terminator_is_normalized():
+    # A model-oriented 404 whose provider message has NO trailing punctuation
+    # must not run into the appended sentence ("...available Switch models").
+    # The mapper normalizes the terminator rather than trusting the provider's
+    # punctuation (ENG-1145 review).
+    exc = _sdk_error(404, json_body={"error": {
+        "message": "models/foo is no longer available",  # no period
+        "status": "NOT_FOUND",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_for_status_error(exc, "foo")
+    assert "available. Switch models" in str(err.value)
+    assert "available Switch" not in str(err.value)
