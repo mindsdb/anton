@@ -183,11 +183,26 @@ def _mock_skill_store():
 
 
 class TestSessionThalamus:
-    async def test_thalamus_off_by_default(self):
+    async def test_thalamus_on_by_default(self):
+        # Router is on by default (ANTON_ROUTER_ENABLED); no explicit
+        # router_enabled needed. The gate runs and, delegating, hands the
+        # turn to the planning model.
+        llm = make_mock_llm()
+        llm.plan = AsyncMock(return_value=_response("Hey!"))
+        llm.gate = AsyncMock(return_value=_response("", tool_calls=[_delegate_call()]))
+        session = ChatSession(ChatSessionConfig(llm_client=llm))
+        reply = await session.turn("hi")
+        assert reply == "Hey!"
+        llm.gate.assert_called_once()
+        llm.plan.assert_called_once()
+
+    async def test_router_disabled_skips_gate(self):
         llm = make_mock_llm()
         llm.plan = AsyncMock(return_value=_response("Hey!"))
         llm.gate = AsyncMock()
-        session = ChatSession(ChatSessionConfig(llm_client=llm))
+        session = ChatSession(
+            ChatSessionConfig(llm_client=llm, router_enabled=False)
+        )
         reply = await session.turn("hi")
         assert reply == "Hey!"
         llm.gate.assert_not_called()

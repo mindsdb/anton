@@ -177,6 +177,16 @@ class StubServer:
                 except Exception:
                     body = {}
 
+                # Router gate (ENG-648): the thalamus call carries exactly one
+                # tool, `delegate`. Answer it with a canned delegate so the turn
+                # falls through to the planning model, and neither log it nor
+                # consume the scenario queue — keeping the router transparent to
+                # scenarios written before it existed. Routing itself is covered
+                # by the unit tests.
+                if _is_gate_request(body):
+                    _send_gate_delegate(self, body)
+                    return
+
                 with stub._lock:
                     stub._log.append(body)
 
@@ -198,6 +208,26 @@ class StubServer:
                 pass  # suppress server access logs
 
         return Handler
+
+
+def _is_gate_request(body: dict) -> bool:
+    """True for the router's thalamus call — its only tool is `delegate`."""
+    tools = body.get("tools") or []
+    names = {(t.get("function") or {}).get("name") for t in tools if isinstance(t, dict)}
+    return names == {"delegate"}
+
+
+def _send_gate_delegate(handler: BaseHTTPRequestHandler, body: dict) -> None:
+    """Answer a gate request with a delegate tool call (hand off to planning)."""
+    resp = _Response(tool_calls=[{
+        "id": f"call_{uuid.uuid4().hex[:8]}",
+        "name": "delegate",
+        "arguments": {"reason": "stub: always delegate"},
+    }])
+    if bool(body.get("stream", False)):
+        _send_sse(handler, resp)
+    else:
+        _send_json(handler, resp)
 
 
 def _send_sse(handler: BaseHTTPRequestHandler, resp: _Response) -> None:

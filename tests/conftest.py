@@ -27,6 +27,19 @@ def make_mock_llm() -> AsyncMock:
     # Default test posture: no native web tools — fallback tools also off
     # unless a specific test configures otherwise via ChatSessionConfig.
     mock.planning_provider.native_web_tools = MagicMock(return_value=set())
+    # Router is on by default (ANTON_ROUTER_ENABLED). Give the gate a
+    # delegate-by-default response so tests that only exercise the planning
+    # model don't have to configure it — the turn falls straight through to
+    # `plan`/`plan_stream`, exactly as before the router existed. Tests that
+    # assert routing behavior override `mock.gate` explicitly.
+    mock.gate = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[],
+            usage=Usage(input_tokens=0, output_tokens=0),
+            stop_reason="end_turn",
+        )
+    )
     return mock
 
 

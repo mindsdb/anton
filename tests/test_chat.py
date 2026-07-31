@@ -93,13 +93,15 @@ class TestChatSessionStreaming:
         async for event in session.turn_stream("hi"):
             events.append(event)
 
-        # Should have 2 text deltas + 1 complete
+        # 2 text deltas from planning. Completes: the router gate emits its
+        # own (delegate) StreamComplete for token accounting, then planning
+        # emits the final one — the last carries the answer.
         text_deltas = [e for e in events if isinstance(e, StreamTextDelta)]
         completes = [e for e in events if isinstance(e, StreamComplete)]
         assert len(text_deltas) == 2
         assert text_deltas[0].text == "Hello "
         assert text_deltas[1].text == "world!"
-        assert len(completes) == 1
+        assert completes[-1].response.content == "Hello world!"
 
         # History: user + assistant
         assert len(session.history) == 2
