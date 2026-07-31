@@ -17,6 +17,15 @@ class CoreSettings(BaseSettings):
     # and the router treats truncation as "delegate".
     router_max_tokens: int = 1024
 
+    # Output-token budget per planning/coding LLM call. Was a hardcoded
+    # fallback in LLMClient.from_settings (always 8192, because this field
+    # didn't exist — ENG-1042 Fix 4); now configurable via ANTON_MAX_TOKENS
+    # or a host overlay (cowork-server). Reasoning models spend internal
+    # thinking from this same budget, so raising it is the blunt mitigation
+    # for answers that die at the cap; the session's truncation recovery
+    # retries one-off at double this value.
+    max_tokens: int = 8192
+
     # Session orchestration tuning
     max_tool_rounds: int = 25
     max_continuations: int = 3

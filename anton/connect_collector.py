@@ -18,10 +18,15 @@ This mirrors the LLM-returns-JSON pattern already used by
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
+from anton.core.llm.structured import (
+    generate_with_truncation_retry,
+    no_preamble_instruction,
+)
 from anton.core.datasources.datasource_registry import (
     AuthMethod,
     DatasourceEngine,
@@ -32,6 +37,8 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from anton.core.session import ChatSession
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -247,13 +254,24 @@ async def extract_variables(
     )
 
     try:
-        extraction: _ExtractionResult = await session._llm.generate_object(
+        # 512 sat inside the measured narration range, so narrating models
+        # truncated before the forced call and the swallow below silently
+        # dropped the user's pasted credentials (ENG-1084).
+        extraction: _ExtractionResult = await generate_with_truncation_retry(
+            session._llm.generate_object,
             _ExtractionResult,
-            system=_SYSTEM_PROMPT,
+            system=_SYSTEM_PROMPT + no_preamble_instruction(_ExtractionResult),
             messages=[{"role": "user", "content": user_prompt}],
-            max_tokens=512,
+            log=logger,
+            subsystem="credential-extraction",
         )
-    except Exception:
+    except Exception as exc:
+        # Type name only — the exception message can quote the user's pasted
+        # text, which here is credentials.
+        logger.warning(
+            "credential-extraction failed (%s) — falling back to manual entry",
+            type(exc).__name__,
+        )
         return result
 
     # Filter and normalize variables — only keep keys that match the

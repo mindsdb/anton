@@ -403,10 +403,12 @@ Do NOT extract trivial observations. Only encode genuinely reusable knowledge.
 """
 
 RESILIENCE_NUDGE = (
-    "\n\nSYSTEM: This tool has failed twice in a row. Before retrying the same approach or "
-    "asking the user for help, try a creative workaround — different headers/user-agent, "
-    "a public API, archive.org, an alternate library, or a completely different data source. "
-    "Only involve the user if the problem truly requires something only they can provide."
+    "\n\nSYSTEM: This tool has failed twice in a row. Before retrying the same approach, "
+    "try one or two more genuine workarounds — different headers/user-agent, a public API, "
+    "archive.org, an alternate library, or a different data source. If those also fail, "
+    "STOP and tell the user exactly what failed and what you need — do NOT fabricate a "
+    "result, claim success, or silently give up. Once real options are exhausted, asking "
+    "the user is the correct move."
 )
 
 # Scratchpad failures need different advice than the generic (scrape/fetch)

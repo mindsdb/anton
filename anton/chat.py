@@ -23,6 +23,7 @@ from anton.clipboard import (
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.core.llm.provider import (
+    EndpointConfigurationError,
     ModelUnavailableError,
     TokenLimitExceeded,
     StreamComplete,
@@ -68,7 +69,7 @@ from anton.commands.skills import (
     handle_skills_list,
 )
 from anton.commands.share import handle_share_export, handle_share_import, handle_share_status, handle_share_history
-from anton.tools import CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL
+from anton.tools import DEFAULT_SESSION_TOOLS
 from anton.utils.prompt import (
     prompt_or_cancel,
     prompt_minds_api_key,
@@ -1357,7 +1358,7 @@ async def _chat_loop(
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
-        tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
+        tools=list(DEFAULT_SESSION_TOOLS),
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,
     ))
@@ -1970,13 +1971,15 @@ async def _chat_loop(
                     "  (anton) Switch LLM provider, update API key, or retry?",
                     choices=["setup", "retry", "s", "r"],
                     choices_display="setup/retry",
-                    # A ModelUnavailableError is a deterministic plan/kill-switch
-                    # gate — retrying re-sends the same doomed request — so steer
-                    # the default to "setup" (switch model / provider). Other
-                    # ConnectionErrors (transient) keep retry as the default.
+                    # ModelUnavailableError (plan/kill-switch gate) and
+                    # EndpointConfigurationError (wrong base URL / route) are both
+                    # deterministic for the identical request — retrying re-sends a
+                    # doomed call — so steer the default to "setup" (switch model /
+                    # provider / fix endpoint). Other ConnectionErrors (transient)
+                    # keep retry as the default.
                     default=(
                         "setup"
-                        if isinstance(exc, ModelUnavailableError)
+                        if isinstance(exc, (ModelUnavailableError, EndpointConfigurationError))
                         else ("retry" if isinstance(exc, ConnectionError) else "setup")
                     ),
                 )

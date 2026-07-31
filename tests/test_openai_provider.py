@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -670,3 +671,134 @@ class TestOpenAICompatibleFlavorResolution:
             )
             client = LLMClient.from_settings(settings)
             assert client._planning_provider._flavor == OpenAIProvider.FLAVOR_OPENAI
+
+
+async def _fake_async_iter(items):
+    for item in items:
+        yield item
+
+
+class TestResponsesAPIReasoningSummary:
+    """ENG-1109: the Responses API only streams a reasoning summary when
+    explicitly asked for it via `reasoning.summary` — check the request
+    kwargs carry it, and that the resulting delta event maps correctly."""
+
+    def test_build_responses_kwargs_requests_summary_when_effort_set(self):
+        with patch("anton.core.llm.openai.openai"):
+            provider = OpenAIProvider(
+                api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI, reasoning_effort="high",
+            )
+            kwargs = provider._build_responses_kwargs(
+                model="gpt-5", system="s", messages=[{"role": "user", "content": "hi"}],
+                tools=None, tool_choice=None, max_tokens=100, native_web_tools=None,
+            )
+            assert kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    def test_build_responses_kwargs_omits_reasoning_when_effort_unset(self):
+        with patch("anton.core.llm.openai.openai"):
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+            kwargs = provider._build_responses_kwargs(
+                model="gpt-5", system="s", messages=[{"role": "user", "content": "hi"}],
+                tools=None, tool_choice=None, max_tokens=100, native_web_tools=None,
+            )
+            assert "reasoning" not in kwargs
+
+    async def test_stream_maps_reasoning_summary_delta_not_output_text(self):
+        from anton.core.llm.provider import StreamReasoningDelta, StreamTextDelta
+
+        events = [
+            SimpleNamespace(type="response.reasoning_summary_text.delta", delta="Checking the docs first."),
+            SimpleNamespace(type="response.output_text.delta", delta="The real answer."),
+            SimpleNamespace(type="response.completed", response=SimpleNamespace(usage=None, status="completed")),
+        ]
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.responses.create = AsyncMock(return_value=_fake_async_iter(events))
+
+            provider = OpenAIProvider(
+                api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI, reasoning_effort="high",
+            )
+            yielded = [
+                e async for e in provider.stream(
+                    model="gpt-5", system="s", messages=[{"role": "user", "content": "hi"}],
+                )
+            ]
+
+        assert [e for e in yielded if isinstance(e, StreamReasoningDelta)] == [
+            StreamReasoningDelta(text="Checking the docs first.")
+        ]
+        assert [e for e in yielded if isinstance(e, StreamTextDelta)] == [
+            StreamTextDelta(text="The real answer.")
+        ]
+
+
+class TestChatCompletionsReasoningContent:
+    """ENG-1109: mdb.ai passthrough / openai-compatible reasoning gateways —
+    `delta.reasoning_content` is read best-effort, never crashes when the
+    SDK's Delta model doesn't declare the field."""
+
+    async def test_stream_reads_reasoning_content_delta(self):
+        from anton.core.llm.provider import StreamReasoningDelta, StreamTextDelta
+
+        reasoning_chunk = MagicMock()
+        reasoning_chunk.usage = None
+        reasoning_chunk.choices = [MagicMock(delta=MagicMock(content=None, tool_calls=None), finish_reason=None)]
+        reasoning_chunk.choices[0].delta.reasoning_content = "Thinking about the best approach."
+
+        text_chunk = MagicMock()
+        text_chunk.usage = None
+        text_chunk.choices = [MagicMock(delta=MagicMock(content="Final answer.", tool_calls=None), finish_reason="stop")]
+        text_chunk.choices[0].delta.reasoning_content = None
+
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_fake_async_iter([reasoning_chunk, text_chunk])
+            )
+
+            provider = OpenAIProvider(
+                api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, reasoning_effort="high",
+            )
+            yielded = [
+                e async for e in provider.stream(
+                    model="claude-sonnet-4-6", system="s", messages=[{"role": "user", "content": "hi"}],
+                )
+            ]
+
+        assert [e for e in yielded if isinstance(e, StreamReasoningDelta)] == [
+            StreamReasoningDelta(text="Thinking about the best approach.")
+        ]
+        assert [e for e in yielded if isinstance(e, StreamTextDelta)] == [
+            StreamTextDelta(text="Final answer.")
+        ]
+
+    async def test_stream_tolerates_missing_reasoning_content_field(self):
+        # A Delta object that doesn't declare `reasoning_content` at all
+        # (e.g. a real openai.types.chat.ChoiceDelta from a non-reasoning
+        # model) must not raise — getattr's default covers this, but a
+        # plain SimpleNamespace (no attr at all, unlike MagicMock which
+        # auto-vivifies) is the real test that we're not assuming the
+        # field always exists.
+        chunk = SimpleNamespace(
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="hi", tool_calls=None),
+                finish_reason="stop",
+            )],
+        )
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(return_value=_fake_async_iter([chunk]))
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+            yielded = [
+                e async for e in provider.stream(
+                    model="claude-sonnet-4-6", system="s", messages=[{"role": "user", "content": "hi"}],
+                )
+            ]
+        from anton.core.llm.provider import StreamReasoningDelta, StreamTextDelta
+        assert [e for e in yielded if isinstance(e, StreamReasoningDelta)] == []
+        assert [e for e in yielded if isinstance(e, StreamTextDelta)] == [StreamTextDelta(text="hi")]

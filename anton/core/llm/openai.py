@@ -14,12 +14,14 @@ from anton.utils.datasources import scrub_credentials
 from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolUseDelta,
     StreamToolUseEnd,
@@ -72,17 +74,26 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     Known limits, on purpose: a wire body carrying BOTH a top-level
     ``detail`` and an ``error`` envelope loses the detail inside the SDK
     (the unwrap discards siblings of ``error``) — unrecoverable from
-    ``exc.body``, and no real dialect emits that shape. And a 429 whose
-    envelope carries only ``message`` (OpenAI's own quota dialect, e.g.
-    ``insufficient_quota``) stays generic: classifying arbitrary provider
-    messages as MindsHub quota would put an upsell CTA on BYOK errors.
+    ``exc.body``, and no real dialect emits that shape. OpenAI's own quota
+    dialect (429 + ``insufficient_quota`` code) maps to TokenLimitExceeded
+    with BYOK copy (OpenAI billing link, no MindsHub CTA) — detection is
+    code-exact so arbitrary provider messages never get quota treatment.
     """
     if exc.status_code == 401:
         raise ConnectionError(
             "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
-    body = exc.body if isinstance(exc.body, dict) else {}
+    # Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-
+    # element ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare
+    # object; the SDK stores whatever it parsed. Unwrap the list here or every
+    # structured check below (auth / quota / model) silently misses on Gemini
+    # and the error falls through to the generic "temporarily unavailable"
+    # message — the exact reason ENG-1145 surfaced as an opaque 404.
+    raw_body = exc.body
+    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
+        raw_body = raw_body[0]
+    body = raw_body if isinstance(raw_body, dict) else {}
     envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
@@ -93,6 +104,17 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         raise TokenLimitExceeded(msg) from exc
 
     code = body.get("code") or envelope.get("code")
+    etype = body.get("type") or envelope.get("type")
+    # OpenAI's own quota dialect (BYOK): permanent for the identical request, so
+    # retrying it as a rate limit just burns the session's backoff budget and
+    # surfaces a misleading "provider overloaded". No MindsHub CTA — the remedy
+    # is the user's OpenAI billing, not an upgrade.
+    if exc.status_code == 429 and "insufficient_quota" in (code, etype):
+        raise TokenLimitExceeded(
+            "Server returned 429 — your OpenAI quota is exhausted. Check your plan "
+            "and billing at https://platform.openai.com."
+        ) from exc
+
     if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
         if code == "model_access_denied":
             msg = (
@@ -109,6 +131,56 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
                 "upgrading your plan may enable it."
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    # A 404 needs care: this mapper is shared by direct OpenAI, Gemini, MindsHub,
+    # Azure, and arbitrary OpenAI-compatible endpoints, so a bare 404 does NOT by
+    # itself mean the model is missing — a wrong base URL, a missing ``/v1``, a
+    # reverse-proxy route, or an unsupported API path all 404 too, and there
+    # "switch models" is the wrong remedy. Only treat it as model-not-found when
+    # the structured body actually points at the model: OpenAI's
+    # ``code="model_not_found"``, or a model-oriented message (Gemini's
+    # ``status="NOT_FOUND"`` with "models/<id> is not found / no longer
+    # available"). Everything else is surfaced as an endpoint/configuration
+    # failure carrying the provider's own words. (ENG-1145 review)
+    if exc.status_code == 404:
+        provider_msg = envelope.get("message") or body.get("message")
+        msg_l = provider_msg.lower() if isinstance(provider_msg, str) else ""
+        status_str = str(body.get("status") or envelope.get("status") or "").upper()
+        model_specific = code == "model_not_found" or (
+            "model" in msg_l
+            and (
+                status_str == "NOT_FOUND"
+                or "not found" in msg_l
+                or "not available" in msg_l
+                or "no longer available" in msg_l
+                or "does not exist" in msg_l
+            )
+        )
+        # Provider message as a leading-space fragment with a normalized
+        # terminator, so the appended copy reads cleanly whether or not the
+        # provider punctuated its own message (Gemini's ends in a period; a raw
+        # proxy/FastAPI detail may not). Named `suffix`, not `detail`: the `detail`
+        # bound above is the FastAPI 429 detail, and reusing the name would leak
+        # this 404-local value into any branch added after this block.
+        clean = provider_msg.strip() if isinstance(provider_msg, str) else ""
+        if clean and clean[-1] not in ".!?":
+            clean += "."
+        suffix = f" {clean}" if clean else ""
+        if model_specific:
+            reason = f":{suffix}" if suffix else "."
+            raise ModelUnavailableError(
+                f"The model '{model}' isn't available{reason} Switch models in Settings.",
+                code="model_not_found", model=model,
+            ) from exc
+        # Not model-specific → almost always a misrouted/misconfigured endpoint
+        # (bad base URL, missing /v1, proxy route). Permanent for this request,
+        # but the remedy is the endpoint config, not the model — a distinct type
+        # so the CLI defaults it to `setup` (fix provider/endpoint), not `retry`,
+        # and never to "switch models" (ENG-1145 review).
+        raise EndpointConfigurationError(
+            f"The model endpoint returned 404 — check the endpoint URL and model "
+            f"configuration.{suffix}"
+        ) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
@@ -953,6 +1025,17 @@ class OpenAIProvider(LLMProvider):
                     content_text += delta.content
                     yield StreamTextDelta(text=delta.content)
 
+                # Reasoning content — chat.completions has no first-party
+                # reasoning-summary field (that's Responses-API-only), but
+                # `reasoning_content` is the de facto convention several
+                # OpenAI-compatible reasoning gateways use (DeepSeek, vLLM's
+                # reasoning parser, and possibly the mdb.ai passthrough for
+                # non-Anthropic reasoning models). Read defensively via
+                # getattr since the SDK's Delta model doesn't declare it.
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    yield StreamReasoningDelta(text=reasoning_delta)
+
                 # Tool call deltas
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
@@ -1112,7 +1195,14 @@ class OpenAIProvider(LLMProvider):
         if system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
-            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            # "summary": "auto" asks the Responses API to also stream a
+            # natural-language summary of the reasoning itself (as
+            # response.reasoning_summary_text.delta events) — without it,
+            # reasoning happens server-side but is never surfaced to us at
+            # all. Safe to always pair with effort: only sent when effort
+            # is already set, which is itself gated to reasoning-capable
+            # models by the caller (see AntonSettings.planning_reasoning_effort).
+            kwargs["reasoning"] = {"effort": self._reasoning_effort, "summary": "auto"}
 
         merged_tools: list[dict] = []
         if tools:
@@ -1213,6 +1303,14 @@ class OpenAIProvider(LLMProvider):
                     if delta:
                         content_text += delta
                         yield StreamTextDelta(text=delta)
+
+                # The model's own reasoning summary — not the final answer.
+                # Only arrives when `reasoning.summary` was requested (see
+                # _build_responses_kwargs, gated on self._reasoning_effort).
+                elif etype == "response.reasoning_summary_text.delta":
+                    delta = getattr(event, "delta", "")
+                    if delta:
+                        yield StreamReasoningDelta(text=delta)
 
                 # New output item (could be a function_call, server-tool call,
                 # or message). We only need to react when a function_call
