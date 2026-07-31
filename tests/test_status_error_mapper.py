@@ -565,3 +565,17 @@ def test_429_wallet_code_never_transient():
     body = {"message": "allowance exhausted", "type": "rate_limit_error",
             "code": "included_allowance_exhausted"}
     assert classify_transient(429, body, provider="gw", model="sonnet") is None
+
+
+def test_unhashable_code_never_crashes_the_classifier():
+    # A hostile/buggy OpenAI-compatible endpoint sending a NON-STRING `code`
+    # (e.g. a list) must fall through to the generic mapping — frozenset
+    # membership hashes the value, so without the isinstance guard this
+    # raised TypeError from inside the error classifier (ENG-1169 review).
+    assert wallet_denial_code({"code": ["wallet_empty"]}) is None
+    assert wallet_denial_code({"error": {"code": {"c": "wallet_empty"}}}) is None
+    exc = _sdk_error(402, json_body={"error": {"message": "denied", "code": ["wallet_empty"]}})
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert classify_transient(429, {"code": ["wallet_empty"]}) is not None  # plain-429 path intact

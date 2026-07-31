@@ -28,6 +28,7 @@ from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.provider import (
     StreamComplete,
     StreamTextDelta,
+    TokenLimitExceeded,
     TransientProviderError,
 )
 
@@ -187,3 +188,51 @@ async def test_e2e_openai_midstream_error_is_transient():
     assert exc.session_backoff is True
     # server_error is in the transient set → classified by type, not a fallback.
     assert exc.code in ("server_error", "stream_error")
+
+
+# --------------------------------------------------------------------------- #
+# ENG-1169 — a wallet denial smuggled into an open stream fails fast to the
+# credits card, never the stream_error backoff / provider_overloaded card.
+# --------------------------------------------------------------------------- #
+
+# OpenAI chat.completions: one good chunk, then an SSE `error` carrying the M3
+# gate's wallet code. Surfaced by the SDK as a bare openai.APIError.
+_OAI_MIDSTREAM_WALLET = _sse(
+    'data: {"id":"1","object":"chat.completion.chunk","choices":'
+    '[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}\n\n',
+    'data: {"error":{"message":"Your wallet has no balance to cover the model '
+    '\'sonnet\'.","type":"invalid_request_error","code":"wallet_empty"}}\n\n',
+)
+
+# Same, but the error ALSO carries a transient-looking `type` — the wallet
+# code must win (permanent-first): without the ordering guard this would
+# classify as api_error → 30s backoff → provider_overloaded.
+_OAI_MIDSTREAM_WALLET_TRANSIENT_TYPE = _sse(
+    'data: {"error":{"message":"Your wallet has no balance.",'
+    '"type":"api_error","code":"wallet_empty"}}\n\n',
+)
+
+
+async def test_e2e_openai_midstream_wallet_denial_is_token_limit():
+    prov = _openai_provider(_static(_OAI_MIDSTREAM_WALLET))
+    with pytest.raises(TokenLimitExceeded) as ei:
+        await _drain(prov)
+    assert "credit" in str(ei.value).lower()
+    assert "billing" in str(ei.value)
+
+
+async def test_e2e_openai_midstream_wallet_beats_transient_type():
+    prov = _openai_provider(_static(_OAI_MIDSTREAM_WALLET_TRANSIENT_TYPE))
+    with pytest.raises(TokenLimitExceeded):
+        await _drain(prov)
+
+
+async def test_e2e_openai_midstream_allowance_denial_is_token_limit():
+    body = _sse(
+        'data: {"error":{"message":"Your included token allowance is exhausted.",'
+        '"type":"rate_limit_error","code":"included_allowance_exhausted"}}\n\n',
+    )
+    prov = _openai_provider(_static(body))
+    with pytest.raises(TokenLimitExceeded) as ei:
+        await _drain(prov)
+    assert "allowance" in str(ei.value).lower()

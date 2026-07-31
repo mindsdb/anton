@@ -1131,6 +1131,24 @@ class OpenAIProvider(LLMProvider):
             # must classify it here or it surfaces as an opaque generic error on
             # the OpenAI/MindsHub path (ENG-673, Sam's review). Body type sits at
             # the top level (SDK-unwrapped); classify_transient handles that shape.
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1141,15 +1159,6 @@ class OpenAIProvider(LLMProvider):
                     transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
                 )
                 raise transient from exc
-            # Out-of-credits smuggled into an open stream (defensive — the M3
-            # gate denies pre-stream today): permanent, so it must fail fast
-            # onto the credits card, not enter the 30s stream_error backoff
-            # and surface as a misleading "provider overloaded" (ENG-1169).
-            if wallet_denial_code(getattr(exc, "body", None)):
-                raise TokenLimitExceeded(
-                    "You're out of MindsHub credits. Add credits at "
-                    "https://console.mindshub.ai/settings/organization/billing to continue."
-                ) from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
                 provider="The model provider", code="stream_error",
@@ -1434,6 +1443,24 @@ class OpenAIProvider(LLMProvider):
             # Bare mid-stream SSE error (no status_code) — not an APIStatusError,
             # so it slips past the handlers above; the SDK already consumed the
             # 200 and never retried it → the session must back off (ENG-673).
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1444,15 +1471,6 @@ class OpenAIProvider(LLMProvider):
                     transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
                 )
                 raise transient from exc
-            # Out-of-credits smuggled into an open stream (defensive — the M3
-            # gate denies pre-stream today): permanent, so it must fail fast
-            # onto the credits card, not enter the 30s stream_error backoff
-            # and surface as a misleading "provider overloaded" (ENG-1169).
-            if wallet_denial_code(getattr(exc, "body", None)):
-                raise TokenLimitExceeded(
-                    "You're out of MindsHub credits. Add credits at "
-                    "https://console.mindshub.ai/settings/organization/billing to continue."
-                ) from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
                 provider="The model provider", code="stream_error",

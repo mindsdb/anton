@@ -442,7 +442,10 @@ def wallet_denial_code(body: Any) -> str | None:
     b = body if isinstance(body, dict) else {}
     err = b.get("error") if isinstance(b.get("error"), dict) else {}
     code = b.get("code") or err.get("code")
-    return code if code in _WALLET_DENIAL_CODES else None
+    # isinstance first: `in` on a frozenset HASHES the value, so a hostile/buggy
+    # endpoint sending a list `code` would otherwise TypeError the classifier
+    # (every other wire-value membership check in these mappers uses tuples).
+    return code if isinstance(code, str) and code in _WALLET_DENIAL_CODES else None
 
 
 def classify_transient(
