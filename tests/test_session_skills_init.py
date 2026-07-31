@@ -66,7 +66,6 @@ class TestPromptBuilderReceivesStore:
         builder = ChatSystemPromptBuilder()
         prompt = builder.build(
             conversation_started="2026-04-10T12:00:00+00:00",
-            current_datetime="2026-04-10",
             system_prompt_context=SystemPromptContext(runtime_context="test"),
             proactive_dashboards=False,
             output_dir="",
@@ -79,7 +78,6 @@ class TestPromptBuilderReceivesStore:
         builder = ChatSystemPromptBuilder()
         prompt = builder.build(
             conversation_started="2026-04-10T12:00:00+00:00",
-            current_datetime="2026-04-10",
             system_prompt_context=SystemPromptContext(runtime_context="test"),
             proactive_dashboards=False,
             output_dir="",
