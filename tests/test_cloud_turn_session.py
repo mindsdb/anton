@@ -130,8 +130,13 @@ def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
 
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
     # Back-compat: no llm block on the request means env-based settings, same
-    # as before this request field existed.
-    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
+    # as before this request field existed. Hermetic env: earlier tests that
+    # exercise the connect flow export ANTON_* into this process via
+    # Workspace.set_secret (deliberate for the CLI), which would leak in here.
+    import os
+    for k in list(os.environ):
+        if k.startswith("ANTON_"):
+            monkeypatch.delenv(k, raising=False)
     _, cfg = _build(tmp_path, monkeypatch)
     assert cfg.settings.planning_provider == "anthropic"
 
