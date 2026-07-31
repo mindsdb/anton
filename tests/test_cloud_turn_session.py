@@ -108,6 +108,26 @@ def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     assert "mindshub.ai" in (s.openai_base_url or "")
 
 
+def test_llm_block_coding_model_applied(tmp_path, monkeypatch):
+    # Without this the pod keeps the built-in (paid) coding default and every
+    # coding-model call 402s on an unfunded wallet.
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
+             "base_url": "https://api.mindshub.ai/v1", "coding_model": "mindshub_air"},
+    )
+    assert cfg.settings.coding_model == "mindshub_air"
+
+
+def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
+             "base_url": "https://api.mindshub.ai/v1"},
+    )
+    assert cfg.settings.coding_model  # built-in default survives
+
+
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
     # Back-compat: no llm block on the request means env-based settings, same
     # as before this request field existed.

@@ -99,6 +99,10 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
             minds_api_key=llm["api_key"],
             minds_url=llm["base_url"],
         )
+        # Coding model follows the turn credential; otherwise the pod keeps
+        # the built-in default, which the turn key may not be allowed to pay for.
+        if llm.get("coding_model"):
+            settings_kwargs["coding_model"] = llm["coding_model"]
     settings = AntonSettings(**settings_kwargs)
     settings.resolve_workspace(str(base))
     if request.model:
