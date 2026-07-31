@@ -3,7 +3,7 @@ so the live clock no longer sits in the (cached) system prompt."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from anton.core.session import _stamp_user_content
 
@@ -28,3 +28,11 @@ def test_empty_string_passes_through():
 def test_list_content_passes_through_unchanged():
     blocks = [{"type": "text", "text": "hi"}, {"type": "image", "source": {}}]
     assert _stamp_user_content(blocks, _NOW) == blocks
+
+
+def test_utc_aware_datetime_renders_utc_wall_clock():
+    # The call site passes datetime.now(timezone.utc); strftime must emit the
+    # UTC wall-clock (no offset), matching cowork-server's UTC created_at stamp.
+    # A local-time datetime would drift by the TZ offset — the ENG-1092 bug.
+    dt = datetime(2026, 7, 31, 15, 14, tzinfo=timezone.utc)
+    assert _stamp_user_content("x", dt) == "[2026-07-31 15:14] x"

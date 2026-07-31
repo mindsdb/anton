@@ -4,7 +4,7 @@ import asyncio
 import random
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -177,7 +177,9 @@ def _stamp_user_content(
     — so the cache-stable prefix (system + tools + settled history) stays
     byte-identical across turns. The format matches cowork-server's history
     stamp (``anton_harness/harness.py``), so a message reads the same whether
-    it's this turn's live input or replayed from persisted history.
+    it's this turn's live input or replayed from persisted history — the caller
+    MUST pass a UTC ``now`` to match that history stamp (built from the DB's
+    UTC ``created_at``); a local-time stamp would drift by the TZ offset.
 
     Only string content is stamped; mixed image/file turns pass through
     unchanged, mirroring cowork-server's behaviour.
@@ -2029,7 +2031,7 @@ class ChatSession:
         """
         self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
-        stamped_input = _stamp_user_content(user_input, datetime.now())
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
         self._append_history({"role": "user", "content": stamped_input})
 
         # Log user input to episodic memory
