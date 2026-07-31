@@ -112,9 +112,11 @@ class StreamContextCompacted:
 class StreamAskUser:
     """A question the user must answer before the turn can continue.
 
-    ``id`` is the question id the host echoes back with the answer — the
-    originating ``tool_use.id`` for a tool question, a prefixed uuid for one
-    raised by a sub-agent.
+    ``id`` is the question id the host echoes back with the answer, and an
+    opaque correlation/dedup key as far as the host is concerned: a minted
+    uuid, prefixed by origin (``ask:``, ``path:``). It is deliberately NOT the
+    originating ``tool_use.id``, which a tool handler cannot see —
+    ``dispatch_tool`` passes only the tool name and input.
     """
 
     id: str

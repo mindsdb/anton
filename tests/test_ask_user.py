@@ -99,6 +99,9 @@ async def test_turn_emitter_never_blocks_the_producer():
     from anton.core.interaction.emitter import TurnEmitter
 
     emitter = TurnEmitter()
+    # Stated directly as well as demonstrated: 1000 puts also fit through a
+    # maxsize of 1001, so the loop below alone would not catch a bound.
+    assert emitter._queue.maxsize == 0
     for i in range(1000):
         await asyncio.wait_for(emitter.emit(i), timeout=1)
     assert emitter.empty() is False
