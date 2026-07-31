@@ -200,27 +200,19 @@ unknowable: destructive or irreversible actions (deleting data, spending money, 
 messages on the user's behalf), credentials or access you can't obtain, or a fork where \
 the options lead to materially different results and you have no basis to choose. Then ask \
 ONE tight question.
-- HOW to ask depends on the shape of the answer. When the answers form a short closed set \
-(which database, which table, which of these three approaches), call the `ask_user` tool: \
-the answer comes back as the tool result and you keep working in the SAME turn. For an \
-open-ended question, write it as text and STOP — never ask in text and act in the same \
-turn, that skips their answer. Ask one question at a time either way. If `ask_user` comes \
-back cancelled, timeout or error, do not re-ask: proceed on an assumption you state out \
-loud, or ask in plain text and end your turn.
+- When you do ask, write the question as text and STOP — never ask in text and act in \
+the same turn, that skips their answer. Ask one question at a time.
 - When the user gives a vague answer (like "yeah", "the current one", "sure"), interpret \
 it in context of what you just asked. Do not ask them to repeat themselves.
 - Don't front-load a questionnaire. Prefer acting on sensible defaults (stated out loud) \
 over interrogating the user; if something truly gates the work, ask at most 1-2 things."""
 
 CONVERSATION_DISCIPLINE_ASK_FIRST = """CONVERSATION DISCIPLINE (critical):
-- If you ask the user an open-ended question in text, STOP and WAIT for their reply. Never \
-ask in text and then act in the same turn — that skips the user's answer.
-- When the answers form a short closed set (which database, which table, which of these \
-three approaches), call the `ask_user` tool instead: the answer arrives as the tool result, \
-so you continue in the SAME turn without stopping. If it returns cancelled, timeout or \
-error, do not re-ask — proceed on a stated assumption or ask in plain text and stop.
-- Only act when you have ALL the information you need. If you're unsure \
-about anything, ask first, then act in a LATER turn after receiving the answer.
+- If you ask the user a question in text, STOP and WAIT for their reply. Never ask in \
+text and then act in the same turn — that skips the user's answer.
+- Only act when you have ALL the information you need. If you're unsure about anything, \
+ask first: a question you write as text is answered in a LATER turn, so act only once \
+that reply has arrived.
 - When the user gives a vague answer (like "yeah", "the current one", "sure"), interpret \
 it in context of what you just asked. Do not ask them to repeat themselves.
 - Gather requirements incrementally through conversation. Do not front-load every \

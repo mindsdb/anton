@@ -801,14 +801,59 @@ def test_without_ask_user_is_a_noop_when_the_tool_is_absent(make_session):
 # ─── prompt discipline ──────────────────────────────────────────────────
 
 
-def test_both_disciplines_carve_out_an_exception_for_ask_user():
-    """The existing 'never ask and act in the same turn' rule contradicts a
-    blocking tool, so the model would ignore ask_user without this."""
+def test_neither_discipline_commands_a_tool_that_may_be_absent():
+    """The discipline text is injected unconditionally (see prompt_builder), but
+    `ask_user` is registered only when an elicitor advertises "choice" — goal
+    mode explicitly unregisters it, and headless/telegram runs never had it. So
+    the carve-out lives in `ASK_USER_TOOL.prompt`, which is emitted only for
+    registered tools, and the discipline text keeps only the unconditional
+    STOP-on-text rule."""
     from anton.core.llm.prompts import (
         CONVERSATION_DISCIPLINE_ACT_FIRST,
         CONVERSATION_DISCIPLINE_ASK_FIRST,
     )
 
     for discipline in (CONVERSATION_DISCIPLINE_ACT_FIRST, CONVERSATION_DISCIPLINE_ASK_FIRST):
-        assert "ask_user" in discipline
-        assert "same turn" in discipline
+        assert "ask_user" not in discipline
+        assert "STOP" in discipline
+    assert "ask_user" in ASK_USER_TOOL.prompt
+    assert "SAME turn" in ASK_USER_TOOL.prompt
+
+
+def test_ask_first_discipline_scopes_its_later_turn_rule_to_text_questions():
+    """The unqualified "ask first, then act in a LATER turn" bullet re-imposed
+    exactly the stop that `ask_user` removes, and was the more categorical of
+    the two rules. It has to name text as the thing that defers."""
+    from anton.core.llm.prompts import CONVERSATION_DISCIPLINE_ASK_FIRST
+
+    later_turn = [
+        line
+        for line in CONVERSATION_DISCIPLINE_ASK_FIRST.splitlines()
+        if "LATER turn" in line
+    ]
+    assert len(later_turn) == 1
+    assert "text" in later_turn[0]
+
+
+def test_the_ask_user_carve_out_reaches_the_prompt_only_when_the_tool_is_there():
+    """End to end through the real builder: with the tool registered the
+    carve-out is present; without it, the built prompt never mentions
+    `ask_user`."""
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+
+    def _build(tool_defs):
+        return ChatSystemPromptBuilder().build(
+            conversation_started="2026-07-31T12:00:00+00:00",
+            current_datetime="2026-07-31T12:00:00+00:00",
+            system_prompt_context=SystemPromptContext(runtime_context="test"),
+            proactive_dashboards=False,
+            output_dir="",
+            tool_defs=tool_defs,
+        )
+
+    with_tool = _build([ASK_USER_TOOL])
+    assert "ask_user" in with_tool
+    assert "SAME turn" in with_tool
+
+    without_tool = _build([])
+    assert "ask_user" not in without_tool

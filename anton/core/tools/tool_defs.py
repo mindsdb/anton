@@ -524,11 +524,26 @@ ASK_USER_TOOL = ToolDef(
         "out loud, or ask in plain text and end your turn.\n\n"
         "Ask one question at a time."
     ),
+    # This is where the carve-out from CONVERSATION DISCIPLINE's "never ask and
+    # act in the same turn" rule lives. It belongs here rather than in the
+    # discipline text because that text is injected unconditionally, while
+    # `ask_user` is registered only when an elicitor advertises "choice" —
+    # headless runs, the telegram adapter and goal mode have no such tool, and
+    # a prompt commanding a tool that is not in the tool list is worse than no
+    # prompt. `ToolDef.prompt` is emitted only for registered tools, which is
+    # exactly the condition needed.
     prompt=(
-        "When you need the user to pick between concrete alternatives, call the "
-        "`ask_user` tool instead of writing the options as text and stopping. "
-        "The answer arrives as the tool result, so you keep working in the same "
-        "turn. Open-ended questions still go in plain text with the turn ended."
+        "HOW to ask depends on the shape of the answer. When the answers form a "
+        "short closed set (which database, which table, which of these three "
+        "approaches), call the `ask_user` tool instead of writing the options as "
+        "text and stopping: the answer comes back as the tool result, so you keep "
+        "working in the SAME turn. The conversation-discipline rule about stopping "
+        "after you ask applies to questions you write as TEXT — an `ask_user` "
+        "answer arrives inside the current turn, so continue with it immediately. "
+        "Open-ended questions still go in plain text with the turn ended. Ask one "
+        "question at a time either way. If `ask_user` comes back cancelled, "
+        "timeout or error, do not re-ask: proceed on an assumption you state out "
+        "loud, or ask in plain text and end your turn."
     ),
     input_schema={
         "type": "object",
