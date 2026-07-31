@@ -1998,6 +1998,10 @@ class ChatSession:
         task = asyncio.create_task(
             self.tool_registry.dispatch_tool(self, tc.name, tc.input)
         )
+        # Bound before the try: the `finally` cancels it, and if the first
+        # `ensure_future` below raised, an unbound name there would turn the
+        # real cause into a NameError.
+        getter = None
         try:
             while True:
                 getter = asyncio.ensure_future(self.emitter.get())
@@ -2025,8 +2029,11 @@ class ChatSession:
             # the queue's _getters forever, and asyncio later logs
             # "Task was destroyed but it is pending!".
             task.cancel()
-            getter.cancel()
-            await asyncio.gather(task, getter, return_exceptions=True)
+            pending = [task]
+            if getter is not None:
+                getter.cancel()
+                pending.append(getter)
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def turn_stream(
         self,
@@ -2624,6 +2631,10 @@ class ChatSession:
                                             result_text = _payload
                                 finally:
                                     await agen.aclose()
+                                # See the twin drain on the general branch
+                                # below.
+                                while not self.emitter.empty():
+                                    yield self.emitter.get_nowait()
                             finally:
                                 if self.escape_watcher:
                                     self.escape_watcher.resume()
@@ -2647,6 +2658,22 @@ class ChatSession:
                                         result_text = _payload
                             finally:
                                 await agen.aclose()
+                            # Anything a tool queued after the helper handed us
+                            # the result — a background task outliving its tool
+                            # call — would otherwise sit in the queue until the
+                            # next tool's drain, or forever if this was the last
+                            # tool of the turn, leaving a published card that is
+                            # never retired. Not reachable by any tool today
+                            # (every ask_user emit happens inside elicit(),
+                            # before the handler returns, and a
+                            # generate_artifact sub-agent runs inside the drained
+                            # window too), so this is a guard for the next one.
+                            #
+                            # An ordinary in-loop yield, deliberately NOT in a
+                            # `finally`: you cannot yield from an async
+                            # generator's finally.
+                            while not self.emitter.empty():
+                                yield self.emitter.get_nowait()
                             # Human thinking time is not the tool's runtime:
                             # a 4-minute ask_user would otherwise show up in
                             # the CLI report and in telemetry as a slow tool.

@@ -316,6 +316,31 @@ async def test_no_task_is_left_running_after_the_helper_closes(session):
     assert len(asyncio.all_tasks()) <= before
 
 
+async def test_a_failure_opening_the_first_getter_reports_its_own_cause(session):
+    """The ``finally`` cancels ``getter``, which the first
+    ``ensure_future(self.emitter.get())`` is what binds. If that call itself
+    raises, an unbound ``getter`` in the ``finally`` replaces the real cause
+    with a ``NameError`` and the tool failure the model sees names the wrong
+    thing entirely. Unreachable with the real ``TurnEmitter``; reachable for any
+    future emitter, so it is initialised to None and guarded.
+    """
+
+    async def handler(sess, tc_input):
+        return "done"
+
+    session.tool_registry.register_tool(
+        ToolDef(name="probe", description="", input_schema={}, handler=handler)
+    )
+
+    class _BrokenEmitter(TurnEmitter):
+        def get(self):  # not a coroutine -> ensure_future raises TypeError
+            return object()
+
+    session.emitter = _BrokenEmitter()
+    with pytest.raises(TypeError):  # not NameError
+        await _collect(session, _tc())
+
+
 async def test_an_event_emitted_while_the_host_handles_the_result_is_not_lost(session):
     """The in-loop ``getter.cancel()`` before ``break``, not just the one in
     ``finally``.
@@ -333,6 +358,10 @@ async def test_an_event_emitted_while_the_host_handles_the_result_is_not_lost(se
     Cancelling in the loop makes the inner waiter already-done, so
     ``_wakeup_next`` skips it and the item stays in ``_queue``. Without the
     in-loop cancel this fails with an empty queue and no delivery.
+
+    The consumer below mirrors the real caller in ``_stream_and_handle_tools``,
+    including its post-``aclose()`` drain, which is what turns "delivered or at
+    least still recoverable from the queue" into an unconditional "delivered".
     """
 
     async def handler(sess, tc_input):
@@ -357,10 +386,164 @@ async def test_an_event_emitted_while_the_host_handles_the_result_is_not_lost(se
                 await asyncio.sleep(0)
     finally:
         await agen.aclose()
+    # The caller's end-of-turn drain.
+    while not session.emitter.empty():
+        events.append(session.emitter.get_nowait())
 
     assert result == "done"
-    leftover_in_queue = list(queue._queue)
-    assert "post" in events or leftover_in_queue == ["post"], (
+    assert "post" in events, (
         "the event emitted while the host handled the result was swallowed: "
-        f"events={events!r} leftover_in_queue={leftover_in_queue!r}"
+        f"events={events!r} leftover_in_queue={list(queue._queue)!r}"
+    )
+
+
+# ─── turn_stream: the per-turn guards around the dispatch loop ───────────
+
+
+def _script_one_tool_call(session, tool_name="probe", rounds=1):
+    """Scripted `plan_stream_with_recovery`: call *tool_name* once per turn,
+    then end the turn. The seam is the streaming planner — `turn_stream` never
+    reaches the non-streaming `plan_with_recovery`."""
+    from anton.core.llm.provider import (
+        LLMResponse,
+        StreamComplete,
+        StreamToolUseEnd,
+        StreamToolUseStart,
+        ToolCall,
+        Usage,
+    )
+
+    # Keep the completion verifier out of these turns: it would call the mock
+    # LLM's generate_object_code and leave an unawaited-coroutine warning.
+    session._verify_min_tool_rounds = 99
+    state = {"n": 0}
+
+    async def _plan_stream(system=None, tools=None, **kwargs):
+        state["n"] += 1
+        if state["n"] % (rounds + 1) == 1:
+            yield StreamToolUseStart(id="tu_1", name=tool_name)
+            yield StreamToolUseEnd(id="tu_1")
+            yield StreamComplete(
+                response=LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id="tu_1", name=tool_name, input={})],
+                    usage=Usage(input_tokens=1, output_tokens=1),
+                    stop_reason="tool_use",
+                )
+            )
+            return
+        yield StreamComplete(
+            response=LLMResponse(
+                content="done",
+                tool_calls=[],
+                usage=Usage(input_tokens=1, output_tokens=1),
+                stop_reason="end_turn",
+            )
+        )
+
+    session.plan_stream_with_recovery = _plan_stream
+
+
+async def test_turn_stream_attaches_the_emitter_for_the_turn_and_detaches_after(
+    make_session,
+):
+    """`turn_stream` owns the emitter's lifetime, and both halves matter.
+
+    Attached: without `self.emitter = TurnEmitter()` nothing a tool emits out of
+    band can reach the host, and `elicit()` refuses every choice question as
+    unavailable.
+
+    Detached: without `self.emitter = None` in the `finally`, a later
+    non-streaming `turn()` inherits a stale emitter, so `elicit()` passes its own
+    availability gate and blocks on a question nobody will ever see — the exact
+    failure that gate exists to prevent.
+    """
+    session = make_session()
+    seen = {}
+
+    async def handler(sess, tc_input):
+        seen["emitter"] = sess.emitter
+        return "ok"
+
+    session.tool_registry.register_tool(
+        ToolDef(name="probe", description="", input_schema={}, handler=handler)
+    )
+    _script_one_tool_call(session)
+
+    assert session.emitter is None  # before the turn
+    async for _ in session.turn_stream("go"):
+        pass
+
+    assert seen["emitter"] is not None, "no emitter was attached for the turn"
+    assert isinstance(seen["emitter"], TurnEmitter)
+    assert session.emitter is None, "the emitter outlived the streaming turn"
+
+
+async def test_turn_stream_resets_the_question_budget_each_turn(make_session):
+    """Per TURN, not per session: without the reset, `ask_user` dies permanently
+    after the third question of a session and nothing else notices."""
+    from anton.core.interaction.elicit import MAX_QUESTIONS_PER_TURN
+
+    session = make_session()
+    counts = []
+
+    async def handler(sess, tc_input):
+        counts.append(sess.question_count)
+        # Spend the whole budget, as three questions in one turn would.
+        sess.question_count = MAX_QUESTIONS_PER_TURN
+        return "ok"
+
+    session.tool_registry.register_tool(
+        ToolDef(name="probe", description="", input_schema={}, handler=handler)
+    )
+    _script_one_tool_call(session)
+
+    async for _ in session.turn_stream("first"):
+        pass
+    async for _ in session.turn_stream("second"):
+        pass
+
+    assert counts == [0, 0], (
+        "the second turn inherited a spent question budget, so ask_user would be "
+        f"permanently unavailable: {counts!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["probe", "connect_new_datasource"],
+    ids=["general-branch", "interactive-branch"],
+)
+async def test_the_dispatch_loop_drains_what_the_helper_left_behind(
+    make_session, tool_name
+):
+    """The end-of-turn drain after `agen.aclose()`, at both call sites.
+
+    A stub helper stands in for the reachable-tomorrow case: a tool that queues
+    an event after the helper has already handed over the result (a background
+    task outliving its tool call). No tool does that today — every `ask_user`
+    emit happens inside `elicit()` before the handler returns, and a
+    `generate_artifact` sub-agent runs inside the drained window too — so the
+    stub is the only way to reach the window at all. Without the drain the event
+    sits in the queue until the next tool's drain, or forever if this was the
+    last tool of the turn, leaving a published card that is never retired.
+    """
+    session = make_session()
+    session.tool_registry.register_tool(
+        ToolDef(name=tool_name, description="", input_schema={}, handler=None)
+    )
+    _script_one_tool_call(session, tool_name=tool_name)
+
+    async def _stub_draining(tc):
+        yield ("result", "ok")
+        # Queued after the result was handed over — past the helper's own tail
+        # drain, so only the caller's drain can still deliver it.
+        session.emitter._queue.put_nowait("left-behind")
+
+    session._dispatch_draining = _stub_draining
+
+    events = [ev async for ev in session.turn_stream("go")]
+    assert "left-behind" in events, (
+        "an event left in the queue after the helper returned was never "
+        f"forwarded: {[type(e).__name__ for e in events]!r}"
     )
