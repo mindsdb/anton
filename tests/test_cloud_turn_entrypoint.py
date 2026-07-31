@@ -34,6 +34,24 @@ def test_from_json_history_defaults_empty():
     assert req.workspace_path is None and req.model is None
 
 
+def test_from_json_passes_through_llm_block():
+    """The per-turn MindsHub credential block survives the wire round-trip."""
+    req = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "c", "input": "hi",
+        "llm": {"provider": "minds-cloud", "api_key": "mdb_turnkey",
+                "base_url": "https://api.mindshub.ai/v1"},
+    }))
+    assert req.llm == {
+        "provider": "minds-cloud", "api_key": "mdb_turnkey",
+        "base_url": "https://api.mindshub.ai/v1",
+    }
+
+
+def test_from_json_llm_defaults_none():
+    req = TurnRequestV1.from_json('{"protocol_version":1,"conversation_id":"c","input":"hi"}')
+    assert req.llm is None
+
+
 # ── streaming event emission ─────────────────────────────────────────────────
 
 class _FakeSession:

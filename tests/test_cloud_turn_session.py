@@ -92,6 +92,30 @@ def test_model_override_applied(tmp_path, monkeypatch):
     assert cfg.settings.planning_model == "claude-opus-4-8"
 
 
+def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
+    # No minds env set; the credential must come from the request's llm block.
+    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
+    monkeypatch.delenv("ANTON_PLANNING_PROVIDER", raising=False)
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
+             "base_url": "https://api.mindshub.ai/v1"},
+    )
+    s = cfg.settings
+    assert s.planning_provider == "openai-compatible"  # minds-cloud maps to this
+    assert s.coding_provider == "openai-compatible"
+    assert s.openai_api_key == "mdb_turnkey"
+    assert "mindshub.ai" in (s.openai_base_url or "")
+
+
+def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
+    # Back-compat: no llm block on the request means env-based settings, same
+    # as before this request field existed.
+    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.settings.planning_provider == "anthropic"
+
+
 # ── trusted workspace path (never from the wire) ─────────────────────────────
 
 def test_request_workspace_path_is_ignored_trusted_mount_used(tmp_path, monkeypatch):

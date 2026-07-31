@@ -31,6 +31,9 @@ class TurnRequestV1:
     #: DB-authoritative ordered history ({"role","content"} dicts). The pod never
     #: loads its own history; cowork-server owns persistence.
     history: list = field(default_factory=list)
+    #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"}).
+    #: MVP: always MindsHub (provider="minds-cloud"). None falls back to env settings.
+    llm: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -42,4 +45,5 @@ class TurnRequestV1:
             workspace_path=d.get("workspace_path"),
             model=d.get("model"),
             history=d.get("history") or [],
+            llm=d.get("llm"),
         )

@@ -84,7 +84,22 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     # `_env_file=None`: never load the AntonSettings .env chain (~/.anton/.env,
     # ~/.cowork/.env, /workspace/.env). Same object passed to Workspace so it
     # doesn't build a second, dotenv-loading one.
-    settings = AntonSettings(_env_file=None)
+    #
+    # When the request carries a per-turn `llm` block (cowork's short-TTL
+    # MindsHub turn key), fold it in here so it wins over any env-based
+    # config: the existing minds-cloud -> openai-compatible derivation in
+    # AntonSettings.model_post_init then points the client at MindsHub with
+    # the turn key, never a long-lived pod credential.
+    llm = request.llm or {}
+    settings_kwargs: dict = {"_env_file": None}
+    if llm:
+        settings_kwargs.update(
+            planning_provider=llm["provider"],
+            coding_provider=llm["provider"],
+            minds_api_key=llm["api_key"],
+            minds_url=llm["base_url"],
+        )
+    settings = AntonSettings(**settings_kwargs)
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
