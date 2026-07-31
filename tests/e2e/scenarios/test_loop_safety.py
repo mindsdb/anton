@@ -123,6 +123,74 @@ def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
     ), "verifier did not receive the current request header"
 
 
+@pytest.mark.stub_only
+def test_stuck_verdict_diagnoses_without_continuation(cfg, stub, tmp_path):
+    # STUCK was the one verdict with no end-to-end coverage at all — the stub
+    # helper existed and nothing called it. It is also one of the two paths
+    # ENG-1155 refactors, so pin the behaviour before touching it: a hard
+    # blocker must produce a real diagnosis and must NOT force a continuation.
+    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "c", "code": "print(1)"})
+    stub.queue_text("I tried to connect but there are no credentials. STUCK_REPLY")
+    stub.queue_verification_stuck("no database credentials are configured")
+    stub.queue_text("STUCK_DIAGNOSIS: no DB credentials — set DB_URL and I'll retry.")
+    result = run_anton(["--folder", str(tmp_path)], ["query my database", "exit"],
+                       env=base_env(stub), timeout=cfg.timeout(30))
+
+    assert_exit_ok(result)
+    assert_not_output(result, "Traceback (most recent call last)")
+    # The user reads the diagnosis, not the rejected reply, as the turn's answer.
+    assert_output(result, "STUCK_DIAGNOSIS")
+    # STUCK is a stop, not unfinished work.
+    assert not any(
+        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        for r in stub.requests
+    ), "STUCK verdict must not trigger a continuation injection"
+    assert any(
+        "determined this task is stuck" in json.dumps(r.get("messages", []))
+        for r in stub.requests
+    ), f"STUCK diagnosis request not found. Request count: {stub.request_count}"
+
+
+@pytest.mark.stub_only
+def test_stuck_diagnosis_reaches_the_next_turns_history(cfg, stub, tmp_path):
+    # ENG-1155: the diagnosis is streamed to the user but never captured, so the
+    # post-loop fallback re-appends the stale pre-verification reply instead.
+    # Observable end-to-end: on the NEXT turn the model is handed a history in
+    # which it never said the thing the user just read — and said the rejected
+    # reply twice.
+    stub.queue_tool_call("scratchpad", {"action": "exec", "name": "c", "code": "print(1)"})
+    stub.queue_text("I tried to connect but there are no credentials. STUCK_REPLY")
+    stub.queue_verification_stuck("no database credentials are configured")
+    stub.queue_text("STUCK_DIAGNOSIS: no DB credentials — set DB_URL and I'll retry.")
+    # Second turn: single text round, so it stops below verify_min_tool_rounds
+    # and needs no verdict. Its request carries the history we care about.
+    stub.queue_text("Understood. SECOND_TURN_DONE")
+    result = run_anton(["--folder", str(tmp_path)],
+                       ["query my database", "ok thanks", "exit"],
+                       env=base_env(stub), timeout=cfg.timeout(40))
+
+    assert_exit_ok(result)
+    assert_not_output(result, "Traceback (most recent call last)")
+    assert_output(result, "SECOND_TURN_DONE")
+
+    followups = [
+        json.dumps(r.get("messages", []))
+        for r in stub.requests
+        if "ok thanks" in json.dumps(r.get("messages", []))
+    ]
+    assert followups, f"follow-up turn never reached the model. Count: {stub.request_count}"
+    history = followups[0]
+    stale = history.count("STUCK_REPLY")
+    assert "STUCK_DIAGNOSIS" in history, (
+        "the diagnosis the user read is absent from the next turn's history — "
+        f"the model has no memory of what it just told the user (stale reply "
+        f"appears {stale}x)"
+    )
+    assert stale <= 1, (
+        f"the rejected pre-verification reply was appended {stale}x"
+    )
+
+
 def test_session_exits_within_timeout(cfg, stub, tmp_path):
     stub.queue_text("Quick reply. QUICK_EXIT")
     stub.queue_verification_ok()

@@ -18,7 +18,7 @@ import pytest
 
 from tests.conftest import make_mock_llm
 
-from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
@@ -192,6 +192,132 @@ async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(worksp
             "exhausted budgets must fail toward the diagnosis, not a silent COMPLETE"
         )
         assert call_count == 3
+    finally:
+        await session.close()
+
+
+def _assistant_texts(session) -> list[str]:
+    return [
+        m["content"] for m in session.history
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+    ]
+
+
+async def test_stuck_diagnosis_is_persisted_as_streamed(workspace):
+    """ENG-1155: the STUCK path streams a model-generated diagnosis but never
+    captures it, so the post-loop fallback re-appends the *stale
+    pre-verification* reply. History — and therefore the model's memory of what
+    it just told the user — ends up out of sync on exactly the turn where the
+    user is being asked to make a decision.
+
+    #276 fixed this for the verifier-failure path; STUCK never got the same
+    treatment.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="STUCK", reason="missing credentials")
+    )
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            # Pre-verification reply. The user never sees this as the turn's
+            # final word — the diagnosis below is what actually gets streamed.
+            return _FakeAsyncIter([
+                StreamComplete(response=_text_response("STALE_PRE_VERIFICATION_REPLY"))
+            ])
+        # The STUCK diagnosis — this is what the user reads.
+        return _FakeAsyncIter([
+            StreamComplete(
+                response=_text_response(
+                    "DIAGNOSIS: I couldn't reach the database — no credentials are "
+                    "configured. Add DB_URL and I'll retry."
+                )
+            )
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        async for _ in session.turn_stream("query my database"):
+            pass
+
+        assert call_count == 3, "the STUCK path must generate a diagnosis"
+        texts = _assistant_texts(session)
+        assert any("DIAGNOSIS:" in t for t in texts), (
+            "the diagnosis the user actually read is missing from history"
+        )
+        # The turn's last assistant word in history must be what was streamed,
+        # not the reply the verifier rejected.
+        assert "DIAGNOSIS:" in texts[-1], (
+            f"history ends on the stale reply, not the diagnosis: {texts[-1]!r}"
+        )
+        assert sum("STALE_PRE_VERIFICATION_REPLY" in t for t in texts) <= 1, (
+            "the stale reply was appended twice (2831 + the post-loop fallback)"
+        )
+    finally:
+        await session.close()
+
+
+async def test_budget_exhausted_diagnosis_is_persisted_as_streamed(workspace):
+    """ENG-1155, same desync on the budget-exhausted path. `_max_continuations
+    = 0` makes the very first verification hit the exhausted branch, which
+    fires before any verdict call.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=AssertionError("no verdict call on the exhausted path")
+    )
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamComplete(response=_text_response("STALE_PRE_VERIFICATION_REPLY"))
+            ])
+        return _FakeAsyncIter([
+            StreamComplete(
+                response=_text_response(
+                    "DIAGNOSIS: I tried three times and the export step keeps "
+                    "failing. Here's what you can do next."
+                )
+            )
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session._max_continuations = 0
+    try:
+        async for _ in session.turn_stream("export my data"):
+            pass
+
+        assert call_count == 3, "the budget-exhausted path must generate a diagnosis"
+        texts = _assistant_texts(session)
+        assert any("DIAGNOSIS:" in t for t in texts), (
+            "the diagnosis the user actually read is missing from history"
+        )
+        assert "DIAGNOSIS:" in texts[-1], (
+            f"history ends on the stale reply, not the diagnosis: {texts[-1]!r}"
+        )
+        assert sum("STALE_PRE_VERIFICATION_REPLY" in t for t in texts) <= 1, (
+            "the stale reply was appended twice (2831 + the post-loop fallback)"
+        )
     finally:
         await session.close()
 
