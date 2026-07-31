@@ -555,3 +555,13 @@ def test_anthropic_byok_402_stays_generic():
     with pytest.raises(ConnectionError) as err:
         _raise_anthropic(exc, model="claude-sonnet")
     assert not isinstance(err.value, TokenLimitExceeded)
+
+
+def test_429_wallet_code_never_transient():
+    # Defense for direct classify_transient callers (the mid-stream paths):
+    # the M3 allowance 429 has no `detail`, so without the code-exact guard
+    # it would classify as a retryable plain rate-limit — same precedent as
+    # the insufficient_quota guard above (ENG-1169 self-review).
+    body = {"message": "allowance exhausted", "type": "rate_limit_error",
+            "code": "included_allowance_exhausted"}
+    assert classify_transient(429, body, provider="gw", model="sonnet") is None

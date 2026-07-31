@@ -484,9 +484,12 @@ def classify_transient(
     if status_code == 429 and not b.get("detail"):
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
         # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
-        # ``insufficient_quota``); the guard here is defense for direct callers —
-        # a billing failure is permanent and must never enter the retry loop.
+        # ``insufficient_quota``, the M3 gate's allowance 429 carries a wallet
+        # code); the guards here are defense for direct callers — a billing
+        # failure is permanent and must never enter the retry loop (ENG-1169).
         if etype == "insufficient_quota":
+            return None
+        if wallet_denial_code(b):
             return None
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
