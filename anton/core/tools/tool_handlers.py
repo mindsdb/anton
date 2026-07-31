@@ -971,9 +971,18 @@ async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
     if answer.status in ("cancelled", "timeout"):
         return _status(answer.status)
 
-    extra: dict = {}
-    if answer.values:
-        extra["values"] = list(answer.values)
-    if answer.text:
-        extra["text"] = answer.text
-    return _status("answered", **extra)
+    if answer.status == "answered":
+        extra: dict = {}
+        if answer.values:
+            extra["values"] = list(answer.values)
+        if answer.text:
+            extra["text"] = answer.text
+        return _status("answered", **extra)
+
+    # Explicit rather than a fall-through to "answered": `Elicitor` is a
+    # structural Protocol implemented out of tree, so an unlisted status (a
+    # host-side typo, a future status) is reachable without touching this
+    # repo — and telling the LLM the user answered and chose nothing is the
+    # worst failure shape a decision tool has. Same shape as
+    # `_path_answer_failure`.
+    return _status("error", f"The question did not return an answer ({answer.status}).")

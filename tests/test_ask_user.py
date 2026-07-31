@@ -300,6 +300,44 @@ async def test_end_runs_when_ask_raises(make_session):
     assert session.escape_watcher.events == ["pause", "resume"]
 
 
+async def test_a_raising_ask_still_retires_the_published_card(make_session):
+    """handle_ask_user does not catch, so a raising ask() becomes a tool failure
+    and the TURN CONTINUES. The frontend retires a card only on
+    StreamAskUserAnswered — its expired-card fallback keys on there being no
+    in-flight run, which is false here — so without a retirement the user is
+    left clicking live buttons and gets a 404 for a question the agent has
+    already moved past."""
+    elicitor = _RecordingElicitor(raises=RuntimeError("boom"))
+    session = _wired(make_session, elicitor)
+    with pytest.raises(RuntimeError):
+        await elicit(session, "q1", _choice())
+
+    events = _drain(session.emitter)
+    assert [type(e).__name__ for e in events] == [
+        "StreamTaskProgress",
+        "StreamAskUser",
+        "StreamAskUserAnswered",
+    ]
+    assert events[-1].id == "q1"
+    # "error" is one of the pinned tool-result statuses, so this is not a
+    # contract change.
+    assert events[-1].answer.status == "error"
+
+
+async def test_a_raising_ask_retires_nothing_for_an_unpublished_path_question(
+    make_session,
+):
+    """Symmetry with the success path: a path question publishes no card, so
+    there is nothing to retire and handing the host an 'answered' event for an
+    id it has never seen would be a bug."""
+    session = _wired(make_session, _RecordingElicitor(raises=RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        await elicit(session, "q1", AskRequest(prompt="Pick a folder", kind="path"))
+    kinds = [type(e).__name__ for e in _drain(session.emitter)]
+    assert "StreamAskUser" not in kinds
+    assert "StreamAskUserAnswered" not in kinds
+
+
 async def test_end_runs_when_ask_is_cancelled(make_session):
     class _Hangs(_RecordingElicitor):
         async def ask(self, question_id, request):
@@ -425,6 +463,22 @@ async def test_handler_maps_internal_statuses_onto_error(make_session):
     limited = json.loads(await handle_ask_user(session, _TC_INPUT))
     assert limited["status"] == "error"
     assert "limit" in limited["message"]
+
+
+async def test_handler_reports_an_unlisted_status_as_error_not_answered(make_session):
+    """`Elicitor` is a structural Protocol implemented out of tree, so a status
+    nobody here anticipated — a host-side typo, a future status, the "error" the
+    retirement event now carries — is reachable without touching this repo. An
+    if-chain that falls through to `_status("answered")` would tell the LLM the
+    user answered and chose nothing, which is the worst failure shape a decision
+    tool has."""
+    session = _wired(
+        make_session, _RecordingElicitor(answer=AskAnswer(status="wat", values=("pg",)))
+    )
+    result = json.loads(await handle_ask_user(session, _TC_INPUT))
+    assert result["status"] == "error"
+    assert "wat" in result["message"]
+    assert "values" not in result
 
 
 async def test_handler_rejects_junk_before_touching_the_elicitor(make_session):
@@ -632,6 +686,25 @@ async def test_cli_browse_with_no_root_prints_no_starting_at_line(monkeypatch):
     assert "starting at" not in console.export_text()
 
 
+async def test_cli_browse_escapes_rich_markup_in_the_prompt_and_root(monkeypatch):
+    """`root` is a filesystem path, so a directory named "[dim]" would be
+    swallowed and one containing "[/]" would raise MarkupError out of ask()."""
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    console = Console(record=True, width=120)
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="/tmp/x")
+    )
+    await CLIElicitor(console).ask(
+        "q1", _path_request(prompt="Pick [bold]a[/] folder", root="/tmp/[dim]/[/]")
+    )
+    text = console.export_text()
+    assert "Pick [bold]a[/] folder" in text
+    assert "/tmp/[dim]/[/]" in text
+
+
 async def test_cli_browse_escape_is_cancelled(cli_elicitor, monkeypatch):
     monkeypatch.setattr(
         "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value=None)
@@ -687,6 +760,34 @@ async def test_cli_pick_renders_numbered_options_with_icons_and_detail(monkeypat
     assert "1." in file_line and "📄" in file_line
     assert "b" in folder_line and "📁" in folder_line
     assert "12 files" in folder_line
+
+
+async def test_cli_pick_escapes_rich_markup_in_filesystem_controlled_text(monkeypatch):
+    """Labels and details here come from the filesystem: a directory named
+    "[dim]" would be swallowed as a Rich tag, and one containing "[/]" would
+    raise MarkupError out of ask() while the tool is mid-dispatch."""
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    console = Console(record=True, width=120)
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="1")
+    )
+    await CLIElicitor(console).ask(
+        "q1",
+        _pick_request(
+            prompt="Which [bold]file[/]?",
+            options=(
+                AskOption(value="/a", label="[dim]a.csv", kind="file", detail="[/]"),
+                AskOption(value="/b", label="b [/]", kind="folder"),
+            ),
+        ),
+    )
+    text = console.export_text()
+    assert "Which [bold]file[/]?" in text
+    assert "[dim]a.csv" in text
+    assert "b [/]" in text
 
 
 async def test_cli_pick_valid_number_selects_the_matching_option_value(cli_elicitor, monkeypatch):
@@ -748,6 +849,32 @@ def test_show_question_renders_numbered_options_with_icons():
     assert "2." in text and "b" in text
     assert "12 files" in text
     assert "📄" in text and "📁" in text
+
+
+def test_show_question_escapes_rich_markup_in_model_controlled_text():
+    """Labels and prompts are model-controlled. Unescaped, "[recommended] pg"
+    renders as " pg" — the user picks from a mangled list — and a "[/]" anywhere
+    raises MarkupError out of show_question, killing the turn while the tool is
+    mid-dispatch."""
+    from rich.console import Console
+
+    from anton.chat_ui import StreamDisplay
+
+    console = Console(record=True, width=120)
+    StreamDisplay(console).show_question(
+        AskRequest(
+            prompt="Which [bold]one[/] to use?",
+            options=(
+                AskOption(value="pg", label="[recommended] postgres", detail="[dim]fast[/]"),
+                AskOption(value="my", label="mysql [/]"),
+            ),
+        )
+    )
+    text = console.export_text()
+    assert "[recommended] postgres" in text
+    assert "Which [bold]one[/] to use?" in text
+    assert "[dim]fast[/]" in text
+    assert "mysql [/]" in text
 
 
 # ─── goal mode: without_ask_user ────────────────────────────────────────

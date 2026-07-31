@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Callable
 
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.spinner import Spinner
 from rich.text import Text
 
@@ -302,13 +303,20 @@ class StreamDisplay:
         The spinner was already stopped by the preceding
         StreamTaskProgress(phase="interactive"), so this writes to a quiet
         console. The elicitor only reads the reply.
+
+        Prompt, label and detail are escaped: they are model-controlled, and a
+        plausible label like "[recommended] postgres" would otherwise be
+        rendered as a Rich tag and swallowed, while one containing "[/]" would
+        raise MarkupError out of here and kill the turn mid-dispatch.
         """
-        self._console.print(f"\n[bold]{request.prompt}[/]")
+        self._console.print(f"\n[bold]{escape(request.prompt)}[/]")
         for index, option in enumerate(request.options, start=1):
             icon = "📁" if option.kind == "folder" else "📄" if option.kind == "file" else ""
             prefix = f"{icon} " if icon else ""
-            detail = f"  [dim]{option.detail}[/]" if option.detail else ""
-            self._console.print(f"  [bold]{index}[/]. {prefix}{option.label}{detail}")
+            detail = f"  [dim]{escape(option.detail)}[/]" if option.detail else ""
+            self._console.print(
+                f"  [bold]{index}[/]. {prefix}{escape(option.label)}{detail}"
+            )
         if request.select == "many":
             self._console.print("  [dim]Pick one or more.[/]")
 

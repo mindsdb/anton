@@ -12,6 +12,8 @@ Rendering is split by question kind, on purpose:
 
 from __future__ import annotations
 
+from rich.markup import escape
+
 from anton.core.interaction.elicit import AskAnswer, AskRequest
 
 __all__ = ["CLIElicitor"]
@@ -83,9 +85,9 @@ class CLIElicitor:
         # Browse mode has no visual file tree on a terminal — fall back to a
         # typed path (the GUI host gets a real navigable browser instead).
         if request.path_mode == "browse":
-            self._console.print(f"\n[bold]{request.prompt}[/]")
+            self._console.print(f"\n[bold]{escape(request.prompt)}[/]")
             if request.root:
-                self._console.print(f"  [dim]starting at {request.root}[/]")
+                self._console.print(f"  [dim]starting at {escape(request.root)}[/]")
             chosen = await prompt_or_cancel("Enter a path (Esc to cancel)")
             chosen = (chosen or "").strip()
             return (
@@ -98,11 +100,17 @@ class CLIElicitor:
         if not options:
             return AskAnswer(status="cancelled")
 
-        self._console.print(f"\n[bold]{request.prompt}[/]")
+        # Escaped: these come from the filesystem, so a directory named
+        # "[dim]" would otherwise be swallowed as a Rich tag, and one
+        # containing "[/]" would raise MarkupError out of ask() while the tool
+        # is mid-dispatch.
+        self._console.print(f"\n[bold]{escape(request.prompt)}[/]")
         for index, option in enumerate(options, start=1):
             icon = "📁" if option.kind == "folder" else "📄"
-            detail = f"  [dim]{option.detail}[/]" if option.detail else ""
-            self._console.print(f"  [bold]{index}[/]. {icon} {option.label}{detail}")
+            detail = f"  [dim]{escape(option.detail)}[/]" if option.detail else ""
+            self._console.print(
+                f"  [bold]{index}[/]. {icon} {escape(option.label)}{detail}"
+            )
 
         choice = await prompt_or_cancel(
             "Select a number (Esc to cancel)",

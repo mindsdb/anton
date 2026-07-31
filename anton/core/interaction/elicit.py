@@ -14,6 +14,12 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
+from anton.core.llm.provider import (
+    StreamAskUser,
+    StreamAskUserAnswered,
+    StreamTaskProgress,
+)
+
 __all__ = [
     "MAX_QUESTIONS_PER_TURN",
     "AskAnswer",
@@ -25,7 +31,9 @@ __all__ = [
 ]
 
 # Shared across the outer agent and any sub-agent: the user does not care
-# which layer is interrupting them.
+# which layer is interrupting them. Every question kind draws on this same
+# budget — a `select_path` picker spends it too — so "3 questions per turn"
+# is not "3 `ask_user` calls per turn".
 MAX_QUESTIONS_PER_TURN = 3
 
 # One option is nothing to choose; thirty buttons is a UI failure and the
@@ -81,7 +89,9 @@ class AskAnswer:
     legitimate answer to a multi-select question.
     """
 
-    status: str  # answered | cancelled | timeout | unavailable | limit
+    # `error` appears only on the retirement event emitted when the elicitor's
+    # ask() raises; elicit() re-raises rather than returning it.
+    status: str  # answered | cancelled | timeout | unavailable | limit | error
     values: tuple[str, ...] = ()
     text: str = ""
 
@@ -134,15 +144,6 @@ async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
     "there will be no question" happens before ``begin()``, so a card is
     never published for a question that cannot be answered.
     """
-    # Deferred: breaks an import cycle (provider.py imports from this module
-    # under TYPE_CHECKING; a top-level import here would be circular at
-    # runtime).
-    from anton.core.llm.provider import (
-        StreamAskUser,
-        StreamAskUserAnswered,
-        StreamTaskProgress,
-    )
-
     elicitor = getattr(session, "elicitor", None)
     if elicitor is None or request.kind not in elicitor.supported_kinds:
         return AskAnswer(status="unavailable")
@@ -188,7 +189,28 @@ async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
         published = request.kind == "choice"
         if published:
             await session.emit(StreamAskUser(id=question_id, request=request))
-        answer = await elicitor.ask(question_id, request)
+        try:
+            answer = await elicitor.ask(question_id, request)
+        except Exception:
+            # A raising ask() still leaves a published card with live buttons,
+            # and the turn continues (handle_ask_user does not catch, so this
+            # only becomes a tool failure). The frontend retires a card on
+            # StreamAskUserAnswered alone — its "expired" fallback keys on
+            # there being no in-flight run, which is false here — so without
+            # this the user clicks and gets a 404 for a question the agent has
+            # already moved past. "error" is a pinned tool-result status, so
+            # this needs no contract change.
+            #
+            # `Exception`, not `BaseException`: a cancellation unwinds the whole
+            # run, and the frontend's no-in-flight-run fallback already retires
+            # the card in that case.
+            if published:
+                await session.emit(
+                    StreamAskUserAnswered(
+                        id=question_id, answer=AskAnswer(status="error")
+                    )
+                )
+            raise
         if published:
             await session.emit(StreamAskUserAnswered(id=question_id, answer=answer))
         return answer
