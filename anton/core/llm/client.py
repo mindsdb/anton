@@ -100,6 +100,17 @@ class LLMClient:
         return self._planning_provider
 
     @property
+    def max_tokens(self) -> int:
+        """Default output-token budget for calls that don't pass their own.
+
+        Exposed so the session's truncation recovery can compare a
+        response's ``output_tokens`` against the budget the call actually
+        ran with (ENG-1042) — the gateway's ``finish_reason`` can't be
+        trusted at the cap (ENG-1082).
+        """
+        return self._max_tokens
+
+    @property
     def coding_provider(self) -> LLMProvider:
         """The LLM provider used for coding/skill execution."""
         return self._coding_provider

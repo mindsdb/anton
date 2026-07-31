@@ -135,6 +135,21 @@ class StreamAskUserAnswered:
     answer: AskAnswer
 
 
+@dataclass
+class StreamReasoningDelta:
+    """A chunk of the model's own extended-thinking/reasoning text.
+
+    NOT part of the final answer — Anthropic's `thinking_delta` content
+    blocks (surfaced via `output_config.effort`'s adaptive thinking) and
+    OpenAI's `response.reasoning_summary_text.delta` Responses-API events
+    both map to this. Kept distinct from `StreamTextDelta` so the harness
+    layer can route it to a separate "current thought" channel instead of
+    the persisted answer body.
+    """
+
+    text: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -146,6 +161,7 @@ StreamEvent = (
     | StreamContextCompacted
     | StreamAskUser
     | StreamAskUserAnswered
+    | StreamReasoningDelta
 )
 
 
@@ -474,8 +490,12 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
         )
     if status_code == 429 and not b.get("detail"):
-        # Plain rate-limit ("slow down"), NOT an out-of-quota 429 (that carries a
-        # `detail` and is mapped to TokenLimitExceeded upstream of this call).
+        # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
+        # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
+        # ``insufficient_quota``); the guard here is defense for direct callers —
+        # a billing failure is permanent and must never enter the retry loop.
+        if etype == "insufficient_quota":
+            return None
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
             provider=provider, code="rate_limited", session_backoff=False, model=model,
@@ -502,6 +522,20 @@ class ModelUnavailableError(ConnectionError):
         super().__init__(message)
         self.code = code
         self.model = model
+
+
+class EndpointConfigurationError(ConnectionError):
+    """Raised when a request fails in a way that points at the endpoint
+    configuration — a wrong base URL, a missing ``/v1``, a reverse-proxy route,
+    or an unsupported API path — rather than at the model or a transient outage.
+
+    Permanent for the identical request (a retry re-sends it to the same broken
+    route), and the remedy is the provider *setup* flow (fix the base URL /
+    route), NOT switching models and NOT waiting. Subclasses ConnectionError so
+    legacy call sites that only know the ConnectionError mapping keep working;
+    the interactive CLI reads the type to default such a failure to ``setup``
+    rather than ``retry`` (ENG-1145 review).
+    """
 
 
 @dataclass
