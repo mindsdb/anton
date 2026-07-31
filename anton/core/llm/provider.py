@@ -471,6 +471,32 @@ def classify_transient(
     return None
 
 
+def raise_on_empty_response(
+    *, content: str, tool_calls: list, stop_reason: str | None,
+    provider: str = "", model: str = "",
+) -> None:
+    """Fail loud on an empty 200: no content, no tool calls, no stop reason.
+
+    The non-streaming mirror of the streaming truncated-response guard (ENG-673).
+    An empty-from-start 200 is:
+
+    - a weak incident signal (real mid-incident silence surfaces as a dropped
+      connection / read timeout, which back off above), and
+    - a strong broken/misconfigured-endpoint signal.
+
+    So it fails fast (``session_backoff=False``) rather than looping the retry
+    budget — and, critically, raises instead of handing back an empty
+    ``LLMResponse`` the agent would misdiagnose as a backend outage.
+    """
+    if content or tool_calls or stop_reason is not None:
+        return
+    raise TransientProviderError(
+        f"{provider or 'The model provider'} returned an empty response — try again in a moment.",
+        provider=provider or "The model provider", code="empty_response",
+        session_backoff=False, model=model,
+    )
+
+
 class ModelUnavailableError(ConnectionError):
     """Raised when the gateway rejects the requested model with a structured 403.
 

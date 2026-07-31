@@ -3,9 +3,55 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import _parse_response_object
-from anton.core.llm.provider import LLMResponse, ToolCall, compute_context_pressure
+from anton.core.llm.provider import (
+    LLMResponse,
+    ToolCall,
+    TransientProviderError,
+    compute_context_pressure,
+    raise_on_empty_response,
+)
+
+
+def _output_text_item(text: str) -> SimpleNamespace:
+    """A minimal Responses API ``message`` item carrying one output_text block."""
+    return SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text=text)],
+    )
+
+
+class TestRaiseOnEmptyResponse:
+    def test_raises_on_empty_200(self):
+        # No content, no tool calls, no stop reason → the empty-200 failure mode.
+        with pytest.raises(TransientProviderError) as exc:
+            raise_on_empty_response(content="", tool_calls=[], stop_reason=None)
+        assert exc.value.code == "empty_response"
+        # Fail fast, don't loop the retry budget on a broken endpoint.
+        assert exc.value.session_backoff is False
+
+    def test_passthrough_with_content(self):
+        raise_on_empty_response(content="hi", tool_calls=[], stop_reason=None)
+
+    def test_passthrough_with_tool_calls(self):
+        raise_on_empty_response(
+            content="", tool_calls=[ToolCall(id="1", name="t", input={})], stop_reason=None
+        )
+
+    def test_passthrough_with_stop_reason(self):
+        # A real stop_reason means the provider terminated deliberately (e.g. a
+        # legitimately empty turn) — not a truncated/empty 200.
+        raise_on_empty_response(content="", tool_calls=[], stop_reason="stop")
+
+    def test_parse_response_object_raises_on_empty_200(self):
+        # End-to-end: an empty output with no status is the silent-empty 200 the
+        # guard exists to catch — it must raise, not return an empty LLMResponse.
+        response = SimpleNamespace(output=[], usage=None)
+        with pytest.raises(TransientProviderError):
+            _parse_response_object(response, "claude-sonnet-4-6")
 
 
 class TestComputeContextPressure:
@@ -31,7 +77,8 @@ class TestComputeContextPressure:
         # must coerce them to 0 (not pass None into compute_context_pressure)
         # and must not raise.
         response = SimpleNamespace(
-            output=[],
+            output=[_output_text_item("ok")],
+            status="completed",
             usage=SimpleNamespace(input_tokens=None, output_tokens=None),
         )
         result = _parse_response_object(response, "claude-sonnet-4-6")
@@ -42,7 +89,8 @@ class TestComputeContextPressure:
     def test_parse_response_object_keeps_real_usage_tokens(self):
         # Sanity: valid counts are preserved unchanged.
         response = SimpleNamespace(
-            output=[],
+            output=[_output_text_item("ok")],
+            status="completed",
             usage=SimpleNamespace(input_tokens=100_000, output_tokens=250),
         )
         result = _parse_response_object(response, "claude-sonnet-4-6")
