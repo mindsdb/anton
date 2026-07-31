@@ -1,14 +1,21 @@
-name: Auto-release and publish to PyPI
+name: Staging pre-release and publish to PyPI
 
-# Stable release stream: on every push to main, validate, cut a CalVer release,
-# publish it to PyPI, and run live release e2e. Staging pre-releases (rc) live in
-# publish-staging.yml so each stream keeps its own run tree, permissions,
-# notifications, and publishing identity.
+# rc pre-release stream: on every push to staging, validate, cut a PEP 440
+# pre-release (2.YY.M.DD.SEQrcN), and publish it to PyPI so cowork-server staging
+# consumes an immutable, versioned Anton artifact instead of a mutable git branch
+# or a hand-pinned commit (ENG-1159). Resolvers ignore pre-releases unless a
+# specifier names one, and PyPI's `info.version` (which the prod desktop updater
+# reads) excludes them, so prod installs can never pick these up.
 #
 # The publish job MUST live in this top-level workflow — PyPI Trusted Publishing
 # does not support reusable workflows and matches the OIDC claim on THIS
-# filename. Register release.yml as a trusted publisher (environment `pypi`) at
-# https://pypi.org/manage/project/anton-agent/settings/publishing/
+# filename. Register publish-staging.yml as a trusted publisher (environment
+# `pypi`) at the anton-agent PyPI project's publishing settings.
+#
+# Anton has nothing to self-pin (it does not depend on itself), so — unlike
+# cowork-server's staging publisher — this builds from a clean checkout of the
+# tag and needs no version-pretend override: hatch-vcs derives the exact rc
+# version straight from the tag, identical to the stable path in release.yml.
 #
 # No workflow-level `permissions:` block: only the release job needs
 # `contents: write`; every other job declares its own, so the repo default
@@ -18,11 +25,11 @@ name: Auto-release and publish to PyPI
 
 on:
   push:
-    branches: [main]
+    branches: [staging]
   workflow_dispatch:
 
 concurrency:
-  group: auto-release-${{ github.ref }}
+  group: staging-prerelease-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -31,20 +38,21 @@ jobs:
       contents: read
     uses: ./.github/workflows/tests.yml
 
-  auto-release:
+  release:
     needs: unit-tests
-    # workflow_dispatch can be pointed at any ref; only main cuts a stable release.
-    if: github.ref == 'refs/heads/main'
+    # workflow_dispatch can be pointed at any ref; only staging mints rc tags.
+    if: github.ref == 'refs/heads/staging'
     permissions:
       contents: write  # tag push + release creation
     uses: mindsdb/github-actions/.github/workflows/calver-release.yml@main
     with:
       calver-major: "2"
+      prerelease: true
       runs-on: ubuntu-latest
 
   publish:
-    name: Publish to PyPI
-    needs: auto-release
+    name: Build and publish pre-release to PyPI
+    needs: release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -53,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.auto-release.outputs.tag }}
+          ref: ${{ needs.release.outputs.tag }}
           fetch-depth: 0  # hatch-vcs needs tags to derive version
 
       - name: Setup uv
@@ -66,32 +74,23 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # Trusted publisher (OIDC) — release.yml must be registered at the
-        # anton-agent PyPI project's publishing settings (environment: pypi).
-
-  e2e:
-    needs: auto-release
-    permissions:
-      contents: read
-    uses: ./.github/workflows/tests_e2e_release.yml
-    with:
-      tag: ${{ needs.auto-release.outputs.tag }}
-    secrets: inherit
+        # Trusted publisher (OIDC) — publish-staging.yml must be registered at
+        # the anton-agent PyPI project's publishing settings (environment: pypi).
 
   notify:
-    # Alert the eng channel if ANY job in the release pipeline fails (tests, tag,
-    # PyPI publish, or release e2e).
+    # Alert the eng channel if ANY job in the staging release/publish pipeline
+    # fails.
     # One job covers both outcomes: a `uses:` job cannot branch on status, so
     # the aggregate result picks the failed or recovered message, and a
     # cancelled run stays silent.
-    needs: [unit-tests, auto-release, publish, e2e]
-    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
+    needs: [unit-tests, release, publish]
+    if: ${{ github.ref == 'refs/heads/staging' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
     permissions:
       contents: read
       actions: read  # the prior-run lookup behind the recovery message
     uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
     with:
-      env-name: "release"
+      env-name: "staging prerelease"
       status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
       runs-on: ubuntu-latest
     secrets: inherit
