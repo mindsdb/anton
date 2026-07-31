@@ -1407,12 +1407,28 @@ async def _chat_loop(
     _query_count = 0
     _total_questions = 0  # tracks first 10 questions for time estimates
 
-    from anton.chat_ui import StreamDisplay, EscapeWatcher, ClosingSpinner
+    from anton.chat_ui import StreamDisplay, EscapeWatcher, ClosingSpinner, QuestionRenderTracker
 
     toolbar = {"stats": "", "status": ""}
     display = StreamDisplay(console, toolbar=toolbar)
     last_token_status: TokenLimitInfo | None = None
     last_token_status_checked_at: float | None = None
+
+    # Give the CLI elicitor a way to stop the spinner, and — for a published
+    # ("choice") question — wait for confirmation that the question was
+    # actually printed, before it starts a prompt_toolkit prompt. See
+    # CLIElicitor.before_prompt and QuestionRenderTracker.
+    from anton.core.interaction.cli import CLIElicitor
+
+    question_render_tracker = QuestionRenderTracker()
+
+    if isinstance(session.elicitor, CLIElicitor):
+        async def _before_prompt(question_id, request) -> None:
+            display.stop_spinner_for_input()
+            if request.kind == "choice":
+                await question_render_tracker.wait_for_render(question_id)
+
+        session.elicitor.before_prompt = _before_prompt
 
     def _bottom_toolbar():
         stats = toolbar["stats"]
@@ -1880,6 +1896,7 @@ async def _chat_loop(
                             display.on_tool_use_end(event.id)
                         elif isinstance(event, StreamAskUser):
                             display.show_question(event.request)
+                            question_render_tracker.mark_rendered(event.id)
                         elif isinstance(event, StreamTaskProgress):
                             display.update_progress(
                                 event.phase, event.message, event.eta_seconds

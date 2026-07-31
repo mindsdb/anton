@@ -12,6 +12,8 @@ Rendering is split by question kind, on purpose:
 
 from __future__ import annotations
 
+from typing import Awaitable, Callable
+
 from rich.markup import escape
 
 from anton.core.interaction.elicit import AskAnswer, AskRequest
@@ -31,9 +33,27 @@ class CLIElicitor:
     # behaved. Autonomous runs withhold ask_user rather than time out.
     timeout_s = None
 
-    def __init__(self, console, supported_kinds: tuple[str, ...] = ("choice", "path")) -> None:
+    def __init__(
+        self,
+        console,
+        supported_kinds: tuple[str, ...] = ("choice", "path"),
+        before_prompt: Callable[[str, AskRequest], Awaitable[None]] | None = None,
+    ) -> None:
         self._console = console
         self.supported_kinds = tuple(supported_kinds)
+        # Awaited right before prompt_toolkit takes the terminal, with the
+        # question's id and request. `elicit()` only enqueues events onto an
+        # out-of-band queue (StreamTaskProgress(phase="interactive") to stop
+        # chat_ui's spinner, then StreamAskUser to print the question) —
+        # draining that queue is a separate task and can still be running
+        # when this method is called. prompt_toolkit's own first render is
+        # synchronous (application.py: _redraw() before the first real
+        # await), so without waiting here it can land before the spinner has
+        # stopped or before the question has printed, corrupting or
+        # reordering the terminal output. The wired callback (see chat.py)
+        # stops the spinner directly and, for a published ("choice") request,
+        # waits for confirmation that StreamAskUser was actually rendered.
+        self.before_prompt = before_prompt
 
     async def begin(self, question_id: str, request: AskRequest) -> None:
         return None
@@ -42,6 +62,8 @@ class CLIElicitor:
         return None
 
     async def ask(self, question_id: str, request: AskRequest) -> AskAnswer:
+        if self.before_prompt is not None:
+            await self.before_prompt(question_id, request)
         if request.kind == "path":
             return await self._ask_path(request)
         return await self._ask_choice(request)

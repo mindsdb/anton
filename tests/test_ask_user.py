@@ -603,6 +603,80 @@ async def test_cli_elicitor_satisfies_the_protocol(cli_elicitor):
     assert await cli_elicitor.end("q1") is None
 
 
+async def test_ask_without_before_prompt_set_does_not_crash(cli_elicitor, monkeypatch):
+    # Default from the fixture: before_prompt is None. A host that never
+    # wires one (or a test double) must not blow up on ask().
+    assert cli_elicitor.before_prompt is None
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="1")
+    )
+    answer = await cli_elicitor.ask("q1", _choice())
+    assert answer.status == "answered"
+
+
+async def test_ask_calls_before_prompt_before_reading_choice_input(
+    cli_elicitor, monkeypatch
+):
+    # before_prompt exists to stop chat_ui's spinner (and, for a published
+    # question, wait for it to be printed) before prompt_toolkit renders its
+    # own line — it must run BEFORE the input read, not after, or the race
+    # it exists to prevent is still there.
+    order: list[str] = []
+
+    async def _before_prompt(question_id, request):
+        order.append("before_prompt")
+
+    cli_elicitor.before_prompt = _before_prompt
+
+    async def _fake_prompt(*args, **kwargs):
+        order.append("prompt")
+        return "1"
+
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", _fake_prompt)
+    await cli_elicitor.ask("q1", _choice())
+    assert order == ["before_prompt", "prompt"]
+
+
+async def test_ask_calls_before_prompt_before_reading_path_input(
+    cli_elicitor, monkeypatch
+):
+    order: list[str] = []
+
+    async def _before_prompt(question_id, request):
+        order.append("before_prompt")
+
+    cli_elicitor.before_prompt = _before_prompt
+
+    async def _fake_prompt(*args, **kwargs):
+        order.append("prompt")
+        return "/tmp/x"
+
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", _fake_prompt)
+    await cli_elicitor.ask(
+        "q1",
+        AskRequest(prompt="Pick a folder", kind="path", path_mode="browse"),
+    )
+    assert order == ["before_prompt", "prompt"]
+
+
+async def test_ask_passes_question_id_and_request_to_before_prompt(
+    cli_elicitor, monkeypatch
+):
+    seen = {}
+
+    async def _before_prompt(question_id, request):
+        seen["question_id"] = question_id
+        seen["request"] = request
+
+    cli_elicitor.before_prompt = _before_prompt
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="1")
+    )
+    request = _choice()
+    await cli_elicitor.ask("q-42", request)
+    assert seen == {"question_id": "q-42", "request": request}
+
+
 async def test_cli_choice_maps_a_number_to_the_option_value(cli_elicitor, monkeypatch):
     monkeypatch.setattr(
         "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="2")
