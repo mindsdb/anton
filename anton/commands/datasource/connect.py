@@ -107,6 +107,7 @@ async def handle_connect_datasource(
     known_variables: dict[str, str] | None = None,
     from_tool_call: bool = False,
     vault: "DataVault | None" = None,
+    prefill_label: str | None = None,
 ) -> "ChatSession":
     """
     Connect a data source by entering credentials, either for a new name or re-entering for an existing one.
@@ -551,7 +552,7 @@ async def handle_connect_datasource(
             conn_name = uuid.uuid4().hex[:8]
         is_update = False
 
-        default_label = default_user_label(vault, engine_def.engine)
+        default_label = prefill_label or default_user_label(vault, engine_def.engine)
         user_label = await prompt_or_cancel("(anton) Label", default=default_label)
         if user_label is None:
             console.print("[anton.muted]Cancelled.[/]")
