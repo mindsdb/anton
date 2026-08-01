@@ -1639,6 +1639,36 @@ class TestUserLabelOnNewConnection:
         assert vault.list_connections() == []
 
 
+class TestReconnectPreservesBookkeepingFields:
+    @pytest.mark.asyncio
+    async def test_user_label_survives_reconnect(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save(
+            "postgresql", "existing",
+            {"host": "db.example.com", "port": "5432", "database": "prod_db",
+             "user": "alice", "password": "old", "_user_label": "prod-db"},
+        )
+        # find_matching_connection recognizes this as the same connection via name_from=database
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "new-pass"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        fields = vault.load("postgresql", "existing")
+        assert fields["_user_label"] == "prod-db"
+        assert fields["password"] == "new-pass"
+
+
 class TestCredentialScrubbing:
     """_scrub_credentials and _register_secret_vars — flat and namespaced modes."""
 

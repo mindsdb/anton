@@ -545,6 +545,10 @@ async def handle_connect_datasource(
 
     slug = f"{engine_def.engine}-{conn_name}"
 
+    if is_update:
+        existing = vault.load(engine_def.engine, conn_name) or {}
+        credentials = {**existing, **credentials}
+
     save_connection(vault, engine_def, conn_name, credentials)
     _telemetry("ds_connect_success", engine=engine_def.engine)
     session._active_datasource = slug
