@@ -10,6 +10,8 @@ from anton.connect_collector import ConnectionCollector, extract_variables
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
 from anton.utils.datasources import (
+    default_user_label,
+    ensure_unique_user_label,
     find_matching_connection,
     parse_connection_slug,
     register_secret_vars,
@@ -525,6 +527,21 @@ async def handle_connect_datasource(
         while vault.load(engine_def.engine, conn_name) is not None:
             conn_name = uuid.uuid4().hex[:8]
         is_update = False
+
+        default_label = default_user_label(vault, engine_def.engine)
+        user_label = await prompt_or_cancel("(anton) Label", default=default_label)
+        if user_label is None:
+            console.print("[anton.muted]Cancelled.[/]")
+            console.print()
+            return session
+        # `prompt_or_cancel` already returns `default` when the user submits
+        # empty input in production — but this explicit fallback is kept
+        # anyway: it makes the "empty means accept the default" behavior a
+        # property of *this* code, not an assumption about prompt_or_cancel's
+        # internals that a test-time mock (which replaces the whole function)
+        # silently bypasses.
+        user_label = (user_label or "").strip() or default_label
+        credentials["_user_label"] = ensure_unique_user_label(vault, user_label)
 
     slug = f"{engine_def.engine}-{conn_name}"
 

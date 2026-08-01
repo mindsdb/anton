@@ -665,6 +665,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -686,6 +687,7 @@ class TestHandleConnectDatasource:
         assert saved is not None
         assert saved["host"] == "db.example.com"
         assert saved["password"] == "s3cr3t"
+        assert saved["_user_label"] == "postgresql"
         assert result._history
         last = result._history[-1]
         assert last["role"] == "assistant"
@@ -759,8 +761,8 @@ class TestHandleConnectDatasource:
 
         # Only the engine selection prompt should fire. After that, the
         # collector is already complete and the flow proceeds directly
-        # to the connection test.
-        responses = iter(["PostgreSQL"])
+        # to the connection test, then the Label prompt (trailing "" = accept default).
+        responses = iter(["PostgreSQL", ""])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -832,10 +834,9 @@ class TestHandleConnectDatasource:
             "user: alice\n"
             "password: s3cr3t"
         )
-        # Only two user inputs needed: the engine pick, then the paste
-        # at the first credential prompt. The collector becomes complete
-        # immediately after extraction, so no further prompts are issued.
-        responses = iter(["PostgreSQL", pasted])
+        # Engine pick, then the paste at the first credential prompt, then
+        # the Label prompt (trailing "" = accept default) after the test.
+        responses = iter(["PostgreSQL", pasted, ""])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -901,6 +902,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1044,6 +1046,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1074,7 +1077,7 @@ class TestHandleConnectDatasource:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["HubSpot", "1", "pat-na1-abc123"])
+        responses = iter(["HubSpot", "1", "pat-na1-abc123", ""])  # trailing "" = Label prompt
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -1128,6 +1131,7 @@ class TestHandleConnectDatasource:
                 "PostgreSQL",
                 "host=db.example.com port=5432 database=prod_db user=alice",
                 "s3cr3t",  # only password remains → single-field prompt
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1259,6 +1263,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1320,6 +1325,7 @@ class TestHandleConnectDatasource:
                 "PostgreSQL",
                 "help",
                 "host=db.example.com port=5432 database=prod_db user=alice password=s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1365,8 +1371,8 @@ class TestHandleConnectDatasource:
 
         # Pre-fill everything except password → the while-loop hits the
         # single-field branch for 'password'. First response is 'help',
-        # second is the actual password.
-        responses = iter(["PostgreSQL", "help", "s3cr3t"])
+        # second is the actual password, then the Label prompt.
+        responses = iter(["PostgreSQL", "help", "s3cr3t", ""])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -1428,6 +1434,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1487,6 +1494,7 @@ class TestHandleConnectDatasource:
                 "PostgreSQL",
                 "host=db.example.com port=5432 database=prod_db user=alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1553,6 +1561,82 @@ class TestHandleConnectDatasource:
         assert saved.get("port") == "5432"
         assert "database" not in saved
         session._scratchpads.get_or_create.assert_not_called()
+
+
+class TestUserLabelOnNewConnection:
+    @pytest.mark.asyncio
+    async def test_default_label_accepted_on_enter(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter([
+            "PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", "",
+        ])  # trailing "" = Enter on the Label prompt, accepts the default
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "postgresql"
+
+    @pytest.mark.asyncio
+    async def test_custom_label_deduplicated(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save("postgresql", "existing", {"host": "x", "_user_label": "prod-db"})
+        responses = iter([
+            "PostgreSQL", "db.example.com", "5432", "other_db", "alice", "s3cr3t", "prod-db",
+        ])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = [c for c in vault.list_connections() if c["name"] != "existing"]
+        assert len(conns) == 1
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "prod-db 2"
+
+    @pytest.mark.asyncio
+    async def test_esc_on_label_prompt_cancels_whole_flow(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t"])
+
+        async def _side_effect(*a, **kw):
+            try:
+                return next(responses)
+            except StopIteration:
+                return None  # simulates Esc on the Label prompt
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=AsyncMock(side_effect=_side_effect)),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        assert vault.list_connections() == []
 
 
 class TestCredentialScrubbing:
@@ -1624,6 +1708,7 @@ class TestCredentialScrubbing:
                 "mydb",
                 "alice",
                 secret_pw,
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -2155,6 +2240,7 @@ class TestEnvActivationCollisionFree:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
