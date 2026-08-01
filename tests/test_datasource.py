@@ -1694,6 +1694,36 @@ class TestReconnectPreservesBookkeepingFields:
         assert fields["password"] == "new-pass"
 
 
+class TestConnectionMessagesIncludeLabel:
+    @pytest.mark.asyncio
+    async def test_save_message_includes_label(self, registry, vault_dir, make_session):
+        session = make_session()
+        # A real Console rendering to an in-memory buffer, not a MagicMock —
+        # so the assertion checks what a user actually sees (rich markup like
+        # `[bold]` stripped/rendered), not the raw f-string containing literal
+        # `[bold]...[/bold]` tags, which would never match a plain substring
+        # check.
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=120)
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", "prod-db"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        printed = buffer.getvalue()
+        assert 'Saved as "prod-db"' in printed
+        assert "postgresql-" in printed
+
+
 class TestCredentialScrubbing:
     """_scrub_credentials and _register_secret_vars — flat and namespaced modes."""
 
@@ -3474,7 +3504,10 @@ class TestCustomDatasourceRequiredFieldsPolicy:
         conns = vault.list_connections()
         assert len(conns) == 1, "Custom datasource must be saved even with empty credentials"
         saved = vault.load(conns[0]["engine"], conns[0]["name"])
-        assert saved == {}, "Empty credentials dict should be saved"
+        # No credential fields were saved — only the bookkeeping `_user_label`,
+        # silently defaulted to the engine id (every connection gets one now,
+        # including this custom/ad-hoc path — no special-casing).
+        assert saved == {"_user_label": "weirdapi"}, "Only the default label should be saved"
         assert result is session
 
 

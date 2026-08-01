@@ -77,9 +77,12 @@ async def _reconnect_to_saved(
         engine_label = recon_engine_def.display_name
     else:
         engine_label = conn["engine"]
+    fields = vault.load(conn["engine"], conn["name"]) or {}
+    user_label = str(fields.get("_user_label", "")).strip()
+    label_suffix = f' (label "{user_label}")' if user_label else ""
     console.print()
     console.print(
-        f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
+        f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold]{label_suffix}.[/]'
     )
     console.print()
     if not from_tool_call:
@@ -87,7 +90,7 @@ async def _reconnect_to_saved(
             {
                 "role": "assistant",
                 "content": (
-                    f'I\'ve reconnected to the {engine_label} connection "{slug}" '
+                    f'I\'ve reconnected to the {engine_label} connection "{slug}"{label_suffix} '
                     f"in the Local Vault. I can now query this data source when needed."
                 ),
             }
@@ -291,11 +294,13 @@ async def handle_connect_datasource(
                 _telemetry("ds_connect_failed", engine=engine_def.engine)
                 return session
         conn_name = uuid.uuid4().hex[:8]
+        credentials["_user_label"] = default_user_label(vault, engine_def.engine)
         slug = save_connection(vault, engine_def, conn_name, credentials)
         _telemetry("ds_connect_success", engine=engine_def.engine)
         session._active_datasource = slug
+        label = credentials.get("_user_label", "")
         console.print(
-            f'        Saved to Local Vault as [bold]"{slug}"[/bold].'
+            f'        Saved as [bold]"{label}"[/bold] (slug [bold]"{slug}"[/bold]).'
         )
         console.print()
         console.print("[anton.muted]        Ready to query your data.[/]")
@@ -560,7 +565,10 @@ async def handle_connect_datasource(
             f'        Updated existing connection [bold]"{slug}"[/bold].'
         )
     else:
-        console.print(f'        Saved to Local Vault as [bold]"{slug}"[/bold].')
+        label = credentials.get("_user_label", "")
+        console.print(
+            f'        Saved as [bold]"{label}"[/bold] (slug [bold]"{slug}"[/bold]).'
+        )
 
     console.print()
     console.print("[anton.muted]        Ready to query your data.[/]")
