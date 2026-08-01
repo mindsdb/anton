@@ -118,13 +118,17 @@ def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: 
     conservative unknown-DS_* scrub — so harmless values like base_url
     surfaced as `[DS_..._BASE_URL]` markers in user-facing output (ENG-688).
     Classification: the record's stored ``secure_keys`` when present, else
-    the vault's canonical legacy secret-name heuristic.
+    the vault's canonical legacy secret-name heuristic. `_`-prefixed
+    bookkeeping fields are skipped entirely — they're never injected as env
+    vars (see `env_for()`), so registering them here would be dead weight.
     """
     record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
     fields = (record or {}).get("fields") or vault.load(engine, name) or {}
     secure_keys = (record or {}).get("secure_keys")
     prefix = _slug_env_prefix(engine, name)
     for field_name in fields:
+        if field_name.startswith("_"):
+            continue
         key = f"{prefix}__{field_name.upper()}"
         _DS_KNOWN_VARS.add(key)
         if is_secret_key(field_name, secure_keys):
