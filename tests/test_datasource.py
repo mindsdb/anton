@@ -2099,7 +2099,10 @@ class TestHandleListDataSources:
         )
 
         buf = io.StringIO()
-        rich_console = Console(file=buf, highlight=False, markup=False)
+        # Widened: the table now has 5 columns (Label, Slug, Source,
+        # Identity, Status), not 3 — the default width truncates Slug/Status
+        # with an ellipsis otherwise.
+        rich_console = Console(file=buf, highlight=False, markup=False, width=120)
 
         with patch("anton.commands.datasource.manage.DatasourceRegistry", return_value=registry):
             handle_list_data_sources(rich_console, vault=vault)
@@ -2115,13 +2118,31 @@ class TestHandleListDataSources:
         vault.save("postgresql", "partial", {"host": "db.example.com"})
 
         buf = io.StringIO()
-        rich_console = Console(file=buf, highlight=False, markup=False)
+        rich_console = Console(file=buf, highlight=False, markup=False, width=120)
 
         with patch("anton.commands.datasource.manage.DatasourceRegistry", return_value=registry):
             handle_list_data_sources(rich_console, vault=vault)
 
         output = buf.getvalue()
         assert "incomplete" in output.lower()
+
+
+class TestListShowsLabelAndIdentity:
+    def test_list_table_has_label_slug_identity_columns(self, vault_dir):
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save(
+            "postgresql", "a1b2c3",
+            {"host": "db.example.com", "database": "prod_db", "_user_label": "prod-db"},
+        )
+        console = Console(file=io.StringIO(), width=120)
+        handle_list_data_sources(console, vault)
+        output = console.file.getvalue()
+        assert "Label" in output
+        assert "Slug" in output
+        assert "Identity" in output
+        assert "prod-db" in output
+        assert "postgresql-a1b2c3" in output
+        assert "db.example.com/prod_db" in output
 
 
 class TestHandleTestDatasource:
