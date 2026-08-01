@@ -80,8 +80,11 @@ async def handle_remove_data_source(console: "Console", slug: str, vault: DataVa
         for i, c in enumerate(connections, 1):
             conn_slug = f"{c['engine']}-{c['name']}"
             engine_def = registry.get(c["engine"])
-            label = engine_def.display_name if engine_def else c["engine"]
-            console.print(f"          [bold]{i:>2}.[/bold] {conn_slug} [dim]({label})[/]")
+            source_label = engine_def.display_name if engine_def else c["engine"]
+            fields = vault.load(c["engine"], c["name"]) or {}
+            user_label = str(fields.get("_user_label", "")).strip() or str(fields.get("_label", "")).strip()
+            prefix = f"{user_label} — " if user_label else ""
+            console.print(f"          [bold]{i:>2}.[/bold] {prefix}{conn_slug} [dim]({source_label})[/]")
         console.print()
         choices = [str(i) for i in range(1, len(connections) + 1)]
         pick = await prompt_or_cancel("(anton) Enter a number", choices=choices)

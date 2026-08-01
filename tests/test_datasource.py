@@ -2145,6 +2145,33 @@ class TestListShowsLabelAndIdentity:
         assert "db.example.com/prod_db" in output
 
 
+class TestRemovePickerShowsLabel:
+    @pytest.mark.asyncio
+    async def test_picker_shows_label_when_present(self, registry, vault_dir):
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save("postgresql", "a1b2c3", {"host": "x", "_user_label": "prod-db"})
+        # Real Console over an in-memory buffer, not MagicMock — robust
+        # against markup ever being added between the label and the slug.
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=120)
+        # Two prompts fire in sequence: "Enter a number" (pick connection #1),
+        # then the "Remove '...'?" confirm ("n" = decline, so nothing is
+        # deleted — only the picker's rendered list matters for this test).
+        responses = iter(["1", "n"])
+
+        with (
+            patch("anton.commands.datasource.manage.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.manage.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_remove_data_source(console, "", vault)
+
+        printed = buffer.getvalue()
+        assert "prod-db — postgresql-a1b2c3" in printed
+
+
 class TestHandleTestDatasource:
     @pytest.mark.asyncio
     async def test_success_path(self, vault_dir, registry, make_cell, make_pad):
