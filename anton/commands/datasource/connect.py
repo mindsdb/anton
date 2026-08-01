@@ -197,6 +197,21 @@ async def handle_connect_datasource(
                 _telemetry("ds_connect_failed", engine=edit_engine)
                 return session
 
+        current_label = credentials.get("_user_label") or credentials.get("_label") or ""
+        new_label = await prompt_or_cancel("(anton) Label", default=current_label)
+        if new_label is None:
+            return session
+        # Explicit fallback for the same reason as the /connect prompt in
+        # Task 5 — don't rely on prompt_or_cancel's own empty-input-returns-
+        # default behavior, since a test mock replacing the whole function
+        # bypasses it. Without this, an empty response here would overwrite
+        # an existing label with "".
+        new_label = (new_label or "").strip() or current_label
+        if new_label != current_label:
+            credentials["_user_label"] = ensure_unique_user_label(
+                vault, new_label, exclude=(edit_engine, edit_name)
+            )
+
         vault.save(edit_engine, edit_name, credentials)
         _telemetry("ds_connect_success", engine=edit_engine)
         restore_namespaced_env(vault)
