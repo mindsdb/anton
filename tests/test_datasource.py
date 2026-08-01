@@ -1787,8 +1787,12 @@ class TestActiveDatasourceScoping:
 
         ctx = build_datasource_context(vault)
 
-        assert "postgres-prod_db" in ctx
-        assert "(postgres)" in ctx
+        # New per-connection block format: slug leads (backticked), engine
+        # display name is its own line rather than a parenthetical next to
+        # the slug. "postgres" is a registered engine (display_name
+        # "PostgreSQL" in the real registry this test doesn't mock).
+        assert "`postgres-prod_db`" in ctx
+        assert "Engine: PostgreSQL" in ctx
 
     def test_multi_source_context_shows_both_connections(self, vault_dir):
         """Both connections are visible in the context with their namespaced vars."""

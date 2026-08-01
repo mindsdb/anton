@@ -49,7 +49,8 @@ class TestBuildContext:
 
         # Identity is shown so the agent can pick the right account.
         assert "support@acme.com" in ctx
-        assert "db.acme.com/sales" in ctx
+        assert "Host: db.acme.com" in ctx
+        assert "Database: sales" in ctx
         # Secrets are never in the prompt (only their DS_* var name).
         assert "SECRETVAL123" not in ctx
         assert "PGSECRET" not in ctx
@@ -75,15 +76,69 @@ class TestBuildContext:
         assert "__LABEL" not in ctx
         assert "DS_GMAIL_SUPPORT__EMAIL" in ctx  # real fields still listed
 
-    def test_label_preferred_over_email(self, tmp_path):
+    def test_label_and_email_both_shown(self, tmp_path):
         v = LocalDataVault(tmp_path)
         v.save(
             "gmail", "support",
             {"email": "regtr@mail.com", "app_password": "x", "_label": "Support"},
         )
         ctx = build_datasource_context(v)
-        assert "Support" in ctx       # the human label is shown
-        assert "regtr@mail.com" not in ctx  # label preferred over the opaque email
+        assert "Label: Support" in ctx
+        assert "Account: regtr@mail.com" in ctx
+
+
+class TestUserLabelInPrompt:
+    def test_user_label_preferred_over_legacy_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save(
+            "gmail", "support",
+            {"email": "reg@mail.com", "app_password": "x", "_label": "Old", "_user_label": "Support"},
+        )
+        ctx = build_datasource_context(v)
+        assert "Label: Support" in ctx
+        assert "Old" not in ctx
+
+    def test_legacy_label_still_shown_when_no_user_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save(
+            "gmail", "support",
+            {"email": "reg@mail.com", "app_password": "x", "_label": "Support"},
+        )
+        ctx = build_datasource_context(v)
+        assert "Label: Support" in ctx
+
+    def test_no_label_shows_none(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo"})
+        ctx = build_datasource_context(v)
+        assert "Label: (none)" in ctx
+
+    def test_slug_leads_the_block_in_backticks(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo", "_user_label": "prod-db"})
+        ctx = build_datasource_context(v)
+        assert "### `postgres-a1b2c3` — Label: prod-db" in ctx
+
+    def test_per_field_lines_present(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo", "_user_label": "prod-db"})
+        ctx = build_datasource_context(v)
+        assert "Host: db.example.com" in ctx
+        assert "Database: demo" in ctx
+        assert "DS_POSTGRES_A1B2C3__HOST" in ctx
+
+    def test_user_label_not_listed_as_env_var(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "x", "_user_label": "prod-db"})
+        ctx = build_datasource_context(v)
+        assert "__USER_LABEL" not in ctx
+
+    def test_reference_by_slug_wording(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "x"})
+        ctx = build_datasource_context(v)
+        assert "Reference it by slug;" in ctx
+        assert "Reference it by name;" not in ctx
 
 
 class TestParsePickedFiles:

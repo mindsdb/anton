@@ -259,7 +259,7 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         "If you see `[DS_<NAME>]` patterns in scratchpad output, those are "
         "scrub-markers where a secret value was redacted before returning "
         "text to you — the actual value IS injected in the env var. Reference "
-        "it by name; never treat the bracket form as a literal credential "
+        "it by slug; never treat the bracket form as a literal credential "
         "or pass it back as a value to any tool.\n"
     )
     # Google Drive's drive.file OAuth scope only covers files the app created
@@ -268,6 +268,11 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
     # since a plain files.list()/files.search() call won't return them.
     google_drive_oauth_connected = False
     google_drive_picked_files: dict[str, list[dict]] = {}
+    # Hoisted out of the loop below: this function is rebuilt on every chat
+    # turn, and DatasourceRegistry() parses the full built-in + user
+    # datasources.md on every construction (no caching) — with N
+    # connections that was N full re-parses per turn before this change.
+    registry = DatasourceRegistry()
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"
         if active_only and slug != active_only:
@@ -282,20 +287,35 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
             fields = vault.load(c["engine"], c["name"]) or {}
             secure_keys = None
         prefix = _slug_env_prefix(c["engine"], c["name"])
-        # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`) —
-        # they're not credential env vars the agent should reference.
-        var_names = ", ".join(
+        # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`,
+        # `_user_label`) — they're not credential env vars the agent should
+        # reference.
+        var_names = [
             f"{prefix}__{k.upper()}" for k in fields if not k.startswith("_")
-        )
-        # Prefer a user/agent-assigned label ("Support"); otherwise the derived
-        # non-secret identity (email / host).
-        identity = str(fields.get("_label", "")).strip() or _connection_identity(
-            fields, secure_keys
-        )
-        head = f"`{slug}` ({c['engine']})"
-        if identity:
-            head += f" — {identity}"
-        lines.append(f"- {head} → {var_names}")
+        ]
+        user_label = str(fields.get("_user_label", "")).strip() or str(
+            fields.get("_label", "")
+        ).strip()
+
+        lines.append(f"\n### `{slug}` — Label: {user_label or '(none)'}")
+        engine_def = registry.get(c["engine"])
+        lines.append(f"Engine: {engine_def.display_name if engine_def else c['engine']}")
+        # Same non-secret allowlist `_connection_identity()` encodes
+        # (host/database/email, secure_keys-gated) — inlined here as
+        # independent lines instead of one collapsed string.
+        host = str(fields.get("host", "")).strip()
+        database = str(fields.get("database", "")).strip()
+        email = str(fields.get("email", "")).strip() or str(fields.get("account_email", "")).strip()
+        if host and "host" not in (secure_keys or []):
+            lines.append(f"Host: {host}")
+        if database and "database" not in (secure_keys or []):
+            lines.append(f"Database: {database}")
+        if email and "email" not in (secure_keys or []) and "account_email" not in (secure_keys or []):
+            lines.append(f"Account: {email}")
+        lines.append("Credential env vars:")
+        for var in var_names:
+            lines.append(f" - {var}")
+
         if c["engine"] == "google_drive":
             if fields.get("auth_type") == "oauth":
                 google_drive_oauth_connected = True
