@@ -646,6 +646,31 @@ class TestHandleConnectDatasource:
         session._scratchpads.get_or_create.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_partial_save_sets_default_label_without_prompting(
+        self, registry, vault_dir, make_session
+    ):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "skip"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "postgresql"
+        # exactly 2 responses were consumed — proves no Label prompt fired
+
+    @pytest.mark.asyncio
     async def test_successful_connection_saves_and_injects_history(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):

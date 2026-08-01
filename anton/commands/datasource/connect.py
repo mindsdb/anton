@@ -500,6 +500,9 @@ async def handle_connect_datasource(
 
     if partial:
         auto_name = uuid.uuid4().hex[:8]
+        while vault.load(engine_def.engine, auto_name) is not None:
+            auto_name = uuid.uuid4().hex[:8]
+        credentials["_user_label"] = default_user_label(vault, engine_def.engine)
         vault.save(engine_def.engine, auto_name, credentials)
         slug = f"{engine_def.engine}-{auto_name}"
         console.print()
