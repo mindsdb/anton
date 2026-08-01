@@ -186,6 +186,51 @@ def _parse_picked_files(raw: str | None) -> list[dict]:
     return [f for f in parsed if isinstance(f, dict) and f.get("id")]
 
 
+def _labels_by_connection(vault: "DataVault") -> dict[tuple[str, str], str]:
+    """Every connection's non-empty label, keyed by (engine, name).
+
+    Prefers `_user_label`; falls back to the legacy `_label` field so an
+    old connection's already-visible label still counts as "taken" when
+    computing a new one.
+    """
+    out: dict[tuple[str, str], str] = {}
+    for c in vault.list_connections():
+        fields = vault.load(c["engine"], c["name"]) or {}
+        label = (fields.get("_user_label") or fields.get("_label") or "").strip()
+        if label:
+            out[(c["engine"], c["name"])] = label
+    return out
+
+
+def ensure_unique_user_label(
+    vault: "DataVault", candidate: str, *, exclude: tuple[str, str] | None = None
+) -> str:
+    """Return `candidate`, or `candidate` with a numeric suffix if it's already
+    used by another connection anywhere in the vault (global uniqueness, not
+    scoped per engine).
+
+    `exclude=(engine, name)` removes that one connection's own label from the
+    collision set first — pass the connection being edited/re-saved so keeping
+    its label unchanged doesn't bump it to "label 2".
+    """
+    by_conn = _labels_by_connection(vault)
+    if exclude:
+        by_conn.pop(exclude, None)
+    existing = set(by_conn.values())
+    if candidate not in existing:
+        return candidate
+    n = 2
+    while f"{candidate} {n}" in existing:
+        n += 1
+    return f"{candidate} {n}"
+
+
+def default_user_label(vault: "DataVault", engine: str) -> str:
+    """Default label for a brand-new connection to `engine` — the engine id,
+    de-duplicated against every existing connection's label (any engine)."""
+    return ensure_unique_user_label(vault, engine)
+
+
 def build_datasource_context(vault: DataVault, active_only: str | None = None) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
 
