@@ -264,6 +264,7 @@ def remote_scratchpad_runtime_factory(
     coding_base_url: str,
     cells: list[Cell] | None,
     workspace_path: Path | None,
+    session_id: str | None = None,
     endpoint_url: str = "",
     api_key: str = "",
 ) -> ScratchpadRuntime:

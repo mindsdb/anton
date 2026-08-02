@@ -16,6 +16,7 @@ from .provider import (
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolUseDelta,
     StreamToolUseEnd,
@@ -26,6 +27,7 @@ from .provider import (
     Usage,
     classify_transient,
     compute_context_pressure,
+    wallet_denial_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,9 @@ def _raise_for_status_error(
 
     - 401 → ConnectionError (invalid-key copy; cowork-server keys on this phrase).
     - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
+    - 402/429 with an M3 gate wallet code (``wallet_empty`` /
+      ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
+      → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
     - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, plain 429
       → TransientProviderError (retryable — see ENG-673).
     - anything else → the generic "temporarily unavailable" ConnectionError.
@@ -57,6 +62,30 @@ def _raise_for_status_error(
         msg = f"Server returned 429 — {body['detail']}"
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
         raise TokenLimitExceeded(msg) from exc
+
+    # MindsHub M3 wallet taxonomy (ENG-1169) — same branch as the openai twin
+    # so the mapping can't drift. Today the gateway's anthropic-dialect lane
+    # strips both the code and the X-MindsHub-* headers (tracked separately),
+    # so this fires only against a fixed gateway or a proxy that preserves
+    # them — but a wallet denial that DOES arrive here must hit the credits
+    # card, not the generic copy. Code/reason-exact: a BYOK Anthropic billing
+    # error carries neither and stays generic.
+    gate_reason = ""
+    if getattr(exc, "response", None) is not None:
+        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    wallet_code = wallet_denial_code(body) or (
+        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+    )
+    if exc.status_code in (402, 429) and wallet_code:
+        what = (
+            "your MindsHub credits are used up."
+            if wallet_code == "wallet_empty"
+            else "your included token allowance is exhausted."
+        )
+        raise TokenLimitExceeded(
+            f"Server returned {exc.status_code} — {what} Add credits at "
+            "https://console.mindshub.ai/settings/organization/billing to continue."
+        ) from exc
 
     transient = classify_transient(exc.status_code, body, provider=provider, model=model)
     if transient is not None:
@@ -262,6 +291,11 @@ class AnthropicProvider(LLMProvider):
                                 "json_parts": [],
                             }
                             yield StreamToolUseStart(id=block.id, name=block.name)
+                        elif block.type in ("thinking", "redacted_thinking"):
+                            # Adaptive thinking (triggered by output_config.effort,
+                            # set above when self._reasoning_effort is configured)
+                            # — the model's own reasoning, not the final answer.
+                            blocks[idx] = {"type": "thinking"}
                         else:
                             blocks[idx] = {"type": "text"}
 
@@ -278,6 +312,10 @@ class AnthropicProvider(LLMProvider):
                                 yield StreamToolUseDelta(
                                     id=info["id"], json_delta=delta.partial_json
                                 )
+                        elif delta.type == "thinking_delta":
+                            yield StreamReasoningDelta(text=delta.thinking)
+                        # signature_delta carries only a verification signature
+                        # for the thinking block, no user-facing text — ignored.
 
                     elif event.type == "content_block_stop":
                         idx = event.index

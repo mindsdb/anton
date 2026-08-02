@@ -105,6 +105,21 @@ class StreamContextCompacted:
     message: str
 
 
+@dataclass
+class StreamReasoningDelta:
+    """A chunk of the model's own extended-thinking/reasoning text.
+
+    NOT part of the final answer — Anthropic's `thinking_delta` content
+    blocks (surfaced via `output_config.effort`'s adaptive thinking) and
+    OpenAI's `response.reasoning_summary_text.delta` Responses-API events
+    both map to this. Kept distinct from `StreamTextDelta` so the harness
+    layer can route it to a separate "current thought" channel instead of
+    the persisted answer body.
+    """
+
+    text: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -114,6 +129,7 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamReasoningDelta
 )
 
 
@@ -404,6 +420,33 @@ _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
 )
 
+# The MindsHub M3 authorization gate's out-of-credits deny codes (ENG-1169):
+# ``wallet_empty`` rides a 402, ``included_allowance_exhausted`` a 429 (with NO
+# FastAPI ``detail``, so the legacy 429-quota branch never sees it). Both are
+# permanent for the identical request — they belong on the out-of-credits card,
+# never in the retry loop. The gate's velocity 429 (``rate_limited``) is NOT
+# here on purpose: that one means "slow down", and stays transient.
+_WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
+
+
+def wallet_denial_code(body: Any) -> str | None:
+    """The M3 gate's out-of-credits code carried in an error body, if any.
+
+    Reads ``code`` from both dialects — the SDK-unwrapped top level (OpenAI
+    SDK peels the ``error`` envelope, ENG-747) and the wire envelope
+    (Anthropic SDK / proxies that deliver it unmodified). Detection is
+    code-exact on purpose: BYOK 402s (e.g. OpenRouter's insufficient-credits
+    402) carry no such code and must stay generic — the remedy there is the
+    user's own provider billing, not MindsHub credits.
+    """
+    b = body if isinstance(body, dict) else {}
+    err = b.get("error") if isinstance(b.get("error"), dict) else {}
+    code = b.get("code") or err.get("code")
+    # isinstance first: `in` on a frozenset HASHES the value, so a hostile/buggy
+    # endpoint sending a list `code` would otherwise TypeError the classifier
+    # (every other wire-value membership check in these mappers uses tuples).
+    return code if isinstance(code, str) and code in _WALLET_DENIAL_CODES else None
+
 
 def classify_transient(
     status_code: int | None, body: Any, *, provider: str = "", model: str = ""
@@ -442,8 +485,15 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
         )
     if status_code == 429 and not b.get("detail"):
-        # Plain rate-limit ("slow down"), NOT an out-of-quota 429 (that carries a
-        # `detail` and is mapped to TokenLimitExceeded upstream of this call).
+        # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
+        # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
+        # ``insufficient_quota``, the M3 gate's allowance 429 carries a wallet
+        # code); the guards here are defense for direct callers — a billing
+        # failure is permanent and must never enter the retry loop (ENG-1169).
+        if etype == "insufficient_quota":
+            return None
+        if wallet_denial_code(b):
+            return None
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
             provider=provider, code="rate_limited", session_backoff=False, model=model,
@@ -470,6 +520,20 @@ class ModelUnavailableError(ConnectionError):
         super().__init__(message)
         self.code = code
         self.model = model
+
+
+class EndpointConfigurationError(ConnectionError):
+    """Raised when a request fails in a way that points at the endpoint
+    configuration — a wrong base URL, a missing ``/v1``, a reverse-proxy route,
+    or an unsupported API path — rather than at the model or a transient outage.
+
+    Permanent for the identical request (a retry re-sends it to the same broken
+    route), and the remedy is the provider *setup* flow (fix the base URL /
+    route), NOT switching models and NOT waiting. Subclasses ConnectionError so
+    legacy call sites that only know the ConnectionError mapping keep working;
+    the interactive CLI reads the type to default such a failure to ``setup``
+    rather than ``retry`` (ENG-1145 review).
+    """
 
 
 @dataclass
