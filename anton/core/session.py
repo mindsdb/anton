@@ -246,7 +246,6 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "not COMPLETE."
 )
 
-
 def _safe_error_detail(exc: BaseException) -> str:
     """Describe an exception for logs without copying model or user content.
 
