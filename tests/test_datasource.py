@@ -1723,6 +1723,29 @@ class TestConnectionMessagesIncludeLabel:
         assert 'Saved as "prod-db"' in printed
         assert "postgresql-" in printed
 
+    @pytest.mark.asyncio
+    async def test_needs_list_explains_label_field(self, registry, vault_dir, make_session):
+        session = make_session()
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=120)
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        printed = buffer.getvalue()
+        assert "needs:" in printed
+        assert 'label — a name to identify this connection later, e.g. "prod-db" (optional, defaults to the engine name)' in printed
+
 
 class TestEditPromptsForLabelAfterTest:
     @pytest.mark.asyncio

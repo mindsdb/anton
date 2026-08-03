@@ -397,6 +397,15 @@ async def handle_connect_datasource(
                 f"        {marker}[bold]{f.name}[/] "
                 f"[anton.muted]— {f.description} (optional)[/]"
             )
+        # `label` isn't one of `engine_def.fields` — it's prompted for
+        # separately after the per-engine fields are collected (see the
+        # `prompt_or_cancel("(anton) Label", ...)` call below) — but it's
+        # listed here too so the user knows it's coming and what it's for.
+        console.print(
+            "        • [bold]label[/] "
+            "[anton.muted]— a name to identify this connection later, "
+            "e.g. \"prod-db\" (optional, defaults to the engine name)[/]"
+        )
         console.print()
 
     while not collector.is_complete:
