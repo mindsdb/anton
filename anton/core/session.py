@@ -2930,6 +2930,9 @@ class ChatSession:
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
+                # Verifier failed — fail safe by treating the turn as done rather
+                # than forcing a continuation the user never asked for.
+                status, reason = "COMPLETE", "verifier unavailable"
                 # The verifier call failed on every budget it was given —
                 # truncated past the last retry, an unusable tool call, or a
                 # provider error (the per-attempt logs above carry the detail).

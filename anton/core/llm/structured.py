@@ -29,6 +29,7 @@ the subprocess already imports from `anton.core.*` at boot.
 
 from __future__ import annotations
 
+from typing import Any, NoReturn
 import logging
 from typing import Any, Awaitable, Callable, NoReturn
 
