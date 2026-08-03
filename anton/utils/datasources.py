@@ -252,6 +252,9 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         return ""
     lines = ["\n\n## Connected Data Sources"]
     lines.append(
+        "Each connection has a Slug (a stable machine identifier, e.g. "
+        "`postgres-7e8971c3`) and a Label (a human-readable name the user "
+        "gave it, e.g. \"prod-db\"; may be unset). "
         "Credentials are pre-injected as namespaced DS_<ENGINE_NAME>__<FIELD> "
         "environment variables. Use them directly in scratchpad code "
         "(e.g. DS_POSTGRES_PROD_DB__HOST). "
@@ -297,7 +300,7 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
             fields.get("_label", "")
         ).strip()
 
-        lines.append(f"\n### `{slug}` — Label: {user_label or '(none)'}")
+        lines.append(f"\n### Slug: `{slug}` — Label: {user_label or '(none)'}")
         engine_def = registry.get(c["engine"])
         lines.append(f"Engine: {engine_def.display_name if engine_def else c['engine']}")
         # Same non-secret allowlist `_connection_identity()` encodes

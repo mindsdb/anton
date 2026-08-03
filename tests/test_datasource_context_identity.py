@@ -117,7 +117,7 @@ class TestUserLabelInPrompt:
         v = LocalDataVault(tmp_path)
         v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo", "_user_label": "prod-db"})
         ctx = build_datasource_context(v)
-        assert "### `postgres-a1b2c3` — Label: prod-db" in ctx
+        assert "### Slug: `postgres-a1b2c3` — Label: prod-db" in ctx
 
     def test_per_field_lines_present(self, tmp_path):
         v = LocalDataVault(tmp_path)
