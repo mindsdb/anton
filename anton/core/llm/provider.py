@@ -420,6 +420,33 @@ _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
 )
 
+# The MindsHub M3 authorization gate's out-of-credits deny codes (ENG-1169):
+# ``wallet_empty`` rides a 402, ``included_allowance_exhausted`` a 429 (with NO
+# FastAPI ``detail``, so the legacy 429-quota branch never sees it). Both are
+# permanent for the identical request — they belong on the out-of-credits card,
+# never in the retry loop. The gate's velocity 429 (``rate_limited``) is NOT
+# here on purpose: that one means "slow down", and stays transient.
+_WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
+
+
+def wallet_denial_code(body: Any) -> str | None:
+    """The M3 gate's out-of-credits code carried in an error body, if any.
+
+    Reads ``code`` from both dialects — the SDK-unwrapped top level (OpenAI
+    SDK peels the ``error`` envelope, ENG-747) and the wire envelope
+    (Anthropic SDK / proxies that deliver it unmodified). Detection is
+    code-exact on purpose: BYOK 402s (e.g. OpenRouter's insufficient-credits
+    402) carry no such code and must stay generic — the remedy there is the
+    user's own provider billing, not MindsHub credits.
+    """
+    b = body if isinstance(body, dict) else {}
+    err = b.get("error") if isinstance(b.get("error"), dict) else {}
+    code = b.get("code") or err.get("code")
+    # isinstance first: `in` on a frozenset HASHES the value, so a hostile/buggy
+    # endpoint sending a list `code` would otherwise TypeError the classifier
+    # (every other wire-value membership check in these mappers uses tuples).
+    return code if isinstance(code, str) and code in _WALLET_DENIAL_CODES else None
+
 
 def classify_transient(
     status_code: int | None, body: Any, *, provider: str = "", model: str = ""
@@ -460,9 +487,12 @@ def classify_transient(
     if status_code == 429 and not b.get("detail"):
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
         # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
-        # ``insufficient_quota``); the guard here is defense for direct callers —
-        # a billing failure is permanent and must never enter the retry loop.
+        # ``insufficient_quota``, the M3 gate's allowance 429 carries a wallet
+        # code); the guards here are defense for direct callers — a billing
+        # failure is permanent and must never enter the retry loop (ENG-1169).
         if etype == "insufficient_quota":
+            return None
+        if wallet_denial_code(b):
             return None
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",

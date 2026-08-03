@@ -32,6 +32,7 @@ from .provider import (
     Usage,
     classify_transient,
     compute_context_pressure,
+    wallet_denial_code,
     raise_on_empty_response,
 )
 
@@ -57,6 +58,9 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
       - 429 with a quota detail → TokenLimitExceeded, checked first so a body
         carrying both ``detail`` and a structured code stays token_limit
         (quota keeps its own card downstream).
+      - 402/429 with an M3 gate wallet code (``wallet_empty`` /
+        ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
+        → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
       - anything else → the generic "temporarily unavailable" ConnectionError.
 
     Body-shape tolerance (ENG-747): the OpenAI SDK UNWRAPS the error
@@ -114,6 +118,36 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         raise TokenLimitExceeded(
             "Server returned 429 — your OpenAI quota is exhausted. Check your plan "
             "and billing at https://platform.openai.com."
+        ) from exc
+
+    # MindsHub M3 wallet taxonomy (ENG-1169): the authorization gate denies
+    # out-of-credits as 402 ``wallet_empty`` and a spent free allowance as 429
+    # ``included_allowance_exhausted`` — the latter carries NO FastAPI
+    # ``detail``, so the legacy 429 branch above never sees it. Both are
+    # permanent for the identical request: without this branch the 402 fell
+    # to the generic "temporarily unavailable" ConnectionError, got auto-
+    # retried, and was finally rendered as assistant prose — the out-of-
+    # credits card never showed and the user had no path to refill.
+    # TokenLimitExceeded fails fast (the session re-raises it unretried) and
+    # cowork-server maps it to the ``token_limit`` card. The X-MindsHub-Reason
+    # header is the fallback discriminator for a body that lost its code
+    # (e.g. an anthropic-dialect proxy); detection stays code/reason-exact so
+    # BYOK 402s fall through to the generic copy, never the credits card.
+    gate_reason = ""
+    if getattr(exc, "response", None) is not None:
+        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    wallet_code = wallet_denial_code(raw_body) or (
+        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+    )
+    if exc.status_code in (402, 429) and wallet_code:
+        what = (
+            "your MindsHub credits are used up."
+            if wallet_code == "wallet_empty"
+            else "your included token allowance is exhausted."
+        )
+        raise TokenLimitExceeded(
+            f"Server returned {exc.status_code} — {what} Add credits at "
+            "https://console.mindshub.ai/settings/organization/billing to continue."
         ) from exc
 
     if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
@@ -1103,6 +1137,24 @@ class OpenAIProvider(LLMProvider):
             # must classify it here or it surfaces as an opaque generic error on
             # the OpenAI/MindsHub path (ENG-673, Sam's review). Body type sits at
             # the top level (SDK-unwrapped); classify_transient handles that shape.
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1397,6 +1449,24 @@ class OpenAIProvider(LLMProvider):
             # Bare mid-stream SSE error (no status_code) — not an APIStatusError,
             # so it slips past the handlers above; the SDK already consumed the
             # 200 and never retried it → the session must back off (ENG-673).
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
