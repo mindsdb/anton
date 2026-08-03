@@ -1848,7 +1848,8 @@ class ChatSession:
 
     async def turn(self, user_input: str | list[dict]) -> str:
         user_input = _scrub_user_input(user_input)
-        self._append_history({"role": "user", "content": user_input})
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
+        self._append_history({"role": "user", "content": stamped_input})
 
         user_msg_str = (
             user_input
