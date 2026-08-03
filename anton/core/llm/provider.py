@@ -518,7 +518,9 @@ def raise_on_empty_response(
     budget — and, critically, raises instead of handing back an empty
     ``LLMResponse`` the agent would misdiagnose as a backend outage.
     """
-    if content or tool_calls or stop_reason is not None:
+    # Empty-string stop_reason ("" — no real provider sends it) is treated as
+    # absent, same as None: a truthiness check keeps the guard from being fooled.
+    if content or tool_calls or stop_reason:
         return
     raise TransientProviderError(
         f"{provider or 'The model provider'} returned an empty response — try again in a moment.",
