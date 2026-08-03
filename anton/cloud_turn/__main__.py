@@ -100,7 +100,14 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     ends. ``emit`` is a synchronous ``os.write`` with no ``await`` inside, so
     the ticker and the delta loop cannot interleave mid-line - no lock needed.
     """
-    from anton.core.llm.provider import StreamTextDelta
+    from anton.core.llm.provider import (
+        StreamComplete,
+        StreamContextCompacted,
+        StreamTaskProgress,
+        StreamTextDelta,
+        StreamToolResult,
+        StreamToolUseStart,
+    )
 
     builder = session_builder or build_cloud_chat_session
     session = None
@@ -121,6 +128,22 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         async for event in session.turn_stream(req.input):
             if isinstance(event, StreamTextDelta):
                 emit({"kind": "delta", "text": event.text or ""})
+            # Narrate the discrete actions to stderr so the turn is observable
+            # in the controller logs (per-token deltas/reasoning are skipped to
+            # keep it readable). The turn loop itself logs nothing.
+            elif isinstance(event, StreamToolUseStart):
+                logger.info("tool call: %s", event.name)
+            elif isinstance(event, StreamTaskProgress):
+                logger.info("progress [%s]: %s", event.phase, event.message)
+            elif isinstance(event, StreamToolResult):
+                action = f" action={event.action}" if event.action else ""
+                logger.info("tool result: %s%s (%d chars)",
+                            event.name, action, len(event.content or ""))
+            elif isinstance(event, StreamContextCompacted):
+                logger.info("context compacted: %s", event.message)
+            elif isinstance(event, StreamComplete):
+                logger.info("model response complete")
+        logger.info("cloud turn completed")
         emit({"kind": "turn_completed"})
     except Exception as exc:
         # Full traceback -> stderr only; wire carries a short scrubbed string.

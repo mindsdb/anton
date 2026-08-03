@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.__main__ import stream_turn
-from anton.core.llm.provider import StreamTextDelta
+from anton.core.llm.provider import (
+    StreamTaskProgress,
+    StreamTextDelta,
+    StreamToolResult,
+    StreamToolUseStart,
+)
 
 
 # ── contract parsing ─────────────────────────────────────────────────────────
@@ -90,6 +96,35 @@ def test_emits_deltas_then_completed():
 def test_text_only_no_deltas_still_completes():
     events = _drive(_FakeSession(deltas=[]))
     assert events == [{"kind": "turn_completed"}]
+
+
+def test_action_events_are_logged(caplog):
+    """Discrete turn actions (tool calls, progress, results) are narrated to the
+    logs so the pod's activity is observable in the controller; text deltas are
+    NOT logged (they are emitted, not narrated)."""
+    class _S:
+        closed = False
+
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamToolUseStart(id="t1", name="scratchpad")
+            yield StreamTaskProgress(phase="scratchpad_start", message="running cell")
+            yield StreamToolResult(name="scratchpad", content="x" * 20, action="exec", id="t1")
+            yield StreamTextDelta(text="hi")
+
+        def close(self):
+            self.closed = True
+
+    with caplog.at_level(logging.INFO):
+        events = _drive(_S())
+
+    assert {"kind": "delta", "text": "hi"} in events
+    assert {"kind": "turn_completed"} in events
+    assert "tool call: scratchpad" in caplog.text
+    assert "progress [scratchpad_start]: running cell" in caplog.text
+    assert "tool result: scratchpad action=exec (20 chars)" in caplog.text
+    assert "cloud turn completed" in caplog.text
+    # the answer text is emitted, never narrated into the logs
+    assert "hi" not in caplog.text
 
 
 def test_turn_failure_is_terminal_and_scrubbed():
