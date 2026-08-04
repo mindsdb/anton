@@ -33,6 +33,7 @@ from .provider import (
     classify_transient,
     compute_context_pressure,
     wallet_denial_code,
+    raise_on_empty_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -967,6 +968,11 @@ class OpenAIProvider(LLMProvider):
                     )
                 )
 
+        raise_on_empty_response(
+            content=content_text, tool_calls=tool_calls,
+            stop_reason=choice.finish_reason, model=model,
+        )
+
         usage_obj = response.usage
         input_tokens = usage_obj.prompt_tokens if usage_obj else 0
         return LLMResponse(
@@ -1528,6 +1534,11 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
+    status = getattr(response, "status", None)
+    raise_on_empty_response(
+        content=content_text, tool_calls=tool_calls, stop_reason=status, model=model,
+    )
+
     return LLMResponse(
         content=content_text,
         tool_calls=tool_calls,
@@ -1536,5 +1547,5 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             output_tokens=output_tokens,
             context_pressure=compute_context_pressure(model, input_tokens),
         ),
-        stop_reason=getattr(response, "status", None),
+        stop_reason=status,
     )

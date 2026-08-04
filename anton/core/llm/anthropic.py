@@ -28,6 +28,7 @@ from .provider import (
     classify_transient,
     compute_context_pressure,
     wallet_denial_code,
+    raise_on_empty_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,6 +218,11 @@ class AnthropicProvider(LLMProvider):
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, input=block.input)
                 )
+
+        raise_on_empty_response(
+            content=content_text, tool_calls=tool_calls,
+            stop_reason=response.stop_reason, provider="Anthropic", model=model,
+        )
 
         input_tokens = response.usage.input_tokens
         return LLMResponse(
