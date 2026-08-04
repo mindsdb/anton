@@ -674,3 +674,12 @@ PUBLISH_TOOL = ToolDef(
         "(no need to ask again)."
     ),
 )
+
+
+# Extra (non-core) tools every interactive anton session registers. Kept as a
+# single source so the fresh-session builder (chat.py) and the resume/settings
+# rebuild builder (chat_session.py::rebuild_session) can't drift — ENG-1166,
+# where rebuild_session omitted these and every resumed session silently lost
+# publish_or_preview + connect_new_datasource. Callers pass list(...) so each
+# session gets its own copy rather than sharing this module-level list.
+DEFAULT_SESSION_TOOLS = [CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL]

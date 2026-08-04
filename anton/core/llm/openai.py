@@ -14,6 +14,7 @@ from anton.utils.datasources import scrub_credentials
 from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
@@ -31,6 +32,8 @@ from .provider import (
     Usage,
     classify_transient,
     compute_context_pressure,
+    wallet_denial_code,
+    raise_on_empty_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +58,9 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
       - 429 with a quota detail → TokenLimitExceeded, checked first so a body
         carrying both ``detail`` and a structured code stays token_limit
         (quota keeps its own card downstream).
+      - 402/429 with an M3 gate wallet code (``wallet_empty`` /
+        ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
+        → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
       - anything else → the generic "temporarily unavailable" ConnectionError.
 
     Body-shape tolerance (ENG-747): the OpenAI SDK UNWRAPS the error
@@ -83,7 +89,16 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
-    body = exc.body if isinstance(exc.body, dict) else {}
+    # Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-
+    # element ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare
+    # object; the SDK stores whatever it parsed. Unwrap the list here or every
+    # structured check below (auth / quota / model) silently misses on Gemini
+    # and the error falls through to the generic "temporarily unavailable"
+    # message — the exact reason ENG-1145 surfaced as an opaque 404.
+    raw_body = exc.body
+    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
+        raw_body = raw_body[0]
+    body = raw_body if isinstance(raw_body, dict) else {}
     envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
@@ -105,6 +120,36 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             "and billing at https://platform.openai.com."
         ) from exc
 
+    # MindsHub M3 wallet taxonomy (ENG-1169): the authorization gate denies
+    # out-of-credits as 402 ``wallet_empty`` and a spent free allowance as 429
+    # ``included_allowance_exhausted`` — the latter carries NO FastAPI
+    # ``detail``, so the legacy 429 branch above never sees it. Both are
+    # permanent for the identical request: without this branch the 402 fell
+    # to the generic "temporarily unavailable" ConnectionError, got auto-
+    # retried, and was finally rendered as assistant prose — the out-of-
+    # credits card never showed and the user had no path to refill.
+    # TokenLimitExceeded fails fast (the session re-raises it unretried) and
+    # cowork-server maps it to the ``token_limit`` card. The X-MindsHub-Reason
+    # header is the fallback discriminator for a body that lost its code
+    # (e.g. an anthropic-dialect proxy); detection stays code/reason-exact so
+    # BYOK 402s fall through to the generic copy, never the credits card.
+    gate_reason = ""
+    if getattr(exc, "response", None) is not None:
+        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    wallet_code = wallet_denial_code(raw_body) or (
+        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+    )
+    if exc.status_code in (402, 429) and wallet_code:
+        what = (
+            "your MindsHub credits are used up."
+            if wallet_code == "wallet_empty"
+            else "your included token allowance is exhausted."
+        )
+        raise TokenLimitExceeded(
+            f"Server returned {exc.status_code} — {what} Add credits at "
+            "https://console.mindshub.ai/settings/organization/billing to continue."
+        ) from exc
+
     if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
         if code == "model_access_denied":
             msg = (
@@ -121,6 +166,56 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
                 "upgrading your plan may enable it."
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
+
+    # A 404 needs care: this mapper is shared by direct OpenAI, Gemini, MindsHub,
+    # Azure, and arbitrary OpenAI-compatible endpoints, so a bare 404 does NOT by
+    # itself mean the model is missing — a wrong base URL, a missing ``/v1``, a
+    # reverse-proxy route, or an unsupported API path all 404 too, and there
+    # "switch models" is the wrong remedy. Only treat it as model-not-found when
+    # the structured body actually points at the model: OpenAI's
+    # ``code="model_not_found"``, or a model-oriented message (Gemini's
+    # ``status="NOT_FOUND"`` with "models/<id> is not found / no longer
+    # available"). Everything else is surfaced as an endpoint/configuration
+    # failure carrying the provider's own words. (ENG-1145 review)
+    if exc.status_code == 404:
+        provider_msg = envelope.get("message") or body.get("message")
+        msg_l = provider_msg.lower() if isinstance(provider_msg, str) else ""
+        status_str = str(body.get("status") or envelope.get("status") or "").upper()
+        model_specific = code == "model_not_found" or (
+            "model" in msg_l
+            and (
+                status_str == "NOT_FOUND"
+                or "not found" in msg_l
+                or "not available" in msg_l
+                or "no longer available" in msg_l
+                or "does not exist" in msg_l
+            )
+        )
+        # Provider message as a leading-space fragment with a normalized
+        # terminator, so the appended copy reads cleanly whether or not the
+        # provider punctuated its own message (Gemini's ends in a period; a raw
+        # proxy/FastAPI detail may not). Named `suffix`, not `detail`: the `detail`
+        # bound above is the FastAPI 429 detail, and reusing the name would leak
+        # this 404-local value into any branch added after this block.
+        clean = provider_msg.strip() if isinstance(provider_msg, str) else ""
+        if clean and clean[-1] not in ".!?":
+            clean += "."
+        suffix = f" {clean}" if clean else ""
+        if model_specific:
+            reason = f":{suffix}" if suffix else "."
+            raise ModelUnavailableError(
+                f"The model '{model}' isn't available{reason} Switch models in Settings.",
+                code="model_not_found", model=model,
+            ) from exc
+        # Not model-specific → almost always a misrouted/misconfigured endpoint
+        # (bad base URL, missing /v1, proxy route). Permanent for this request,
+        # but the remedy is the endpoint config, not the model — a distinct type
+        # so the CLI defaults it to `setup` (fix provider/endpoint), not `retry`,
+        # and never to "switch models" (ENG-1145 review).
+        raise EndpointConfigurationError(
+            f"The model endpoint returned 404 — check the endpoint URL and model "
+            f"configuration.{suffix}"
+        ) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
@@ -873,6 +968,11 @@ class OpenAIProvider(LLMProvider):
                     )
                 )
 
+        raise_on_empty_response(
+            content=content_text, tool_calls=tool_calls,
+            stop_reason=choice.finish_reason, model=model,
+        )
+
         usage_obj = response.usage
         input_tokens = usage_obj.prompt_tokens if usage_obj else 0
         return LLMResponse(
@@ -1037,6 +1137,24 @@ class OpenAIProvider(LLMProvider):
             # must classify it here or it surfaces as an opaque generic error on
             # the OpenAI/MindsHub path (ENG-673, Sam's review). Body type sits at
             # the top level (SDK-unwrapped); classify_transient handles that shape.
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1331,6 +1449,24 @@ class OpenAIProvider(LLMProvider):
             # Bare mid-stream SSE error (no status_code) — not an APIStatusError,
             # so it slips past the handlers above; the SDK already consumed the
             # 200 and never retried it → the session must back off (ENG-673).
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1398,6 +1534,11 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
+    status = getattr(response, "status", None)
+    raise_on_empty_response(
+        content=content_text, tool_calls=tool_calls, stop_reason=status, model=model,
+    )
+
     return LLMResponse(
         content=content_text,
         tool_calls=tool_calls,
@@ -1406,5 +1547,5 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             output_tokens=output_tokens,
             context_pressure=compute_context_pressure(model, input_tokens),
         ),
-        stop_reason=getattr(response, "status", None),
+        stop_reason=status,
     )

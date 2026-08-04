@@ -45,6 +45,7 @@ from anton.core.llm.provider import (
     ToolCall,
     TransientProviderError,
 )
+from anton.core.llm.structured import looks_truncated
 from anton.core.llm.thalamus import (
     ACTION_RESPOND,
     ThalamicDecision,
@@ -89,6 +90,36 @@ from anton.core.settings import CoreSettings
 # Sentinel prefixing a compacted-history summary so later compactions can
 # recognize and update it in place rather than summarize a summary.
 _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
+
+# Truncation-recovery nudges (ENG-1042). Two variants of the same failure —
+# the response burned its whole output budget without producing a tool call:
+#
+# - Partial text arrived → the answer was cut mid-flight; ask the model to
+#   pick up where it stopped (the pre-existing recovery message).
+# - Nothing visible arrived → the whole budget went to internal reasoning
+#   (reasoning models share one max_tokens between thinking and answer);
+#   "continue where you left off" is meaningless when nothing was emitted,
+#   so ask for the answer up front instead.
+_TRUNCATED_CONTINUE_NUDGE = (
+    "SYSTEM: Your response was truncated because it exceeded the output token limit. "
+    "Continue exactly where you left off. If you were about to call a tool, "
+    "call it now. If the code you were writing was too long, split it into smaller parts."
+)
+_TRUNCATED_SILENT_NUDGE = (
+    "SYSTEM: Your previous response spent its entire output-token budget before "
+    "producing any visible text or tool call — the user saw nothing. Respond again, "
+    "and lead with the answer or the tool call immediately; keep deliberation brief. "
+    "If the output you are building is large, produce it in smaller parts."
+)
+# Shown to the user when the retry ALSO burns its (doubled) budget with
+# nothing visible. The one outcome this ticket forbids is the turn ending
+# silently.
+_TRUNCATION_FAILURE_NOTICE = (
+    "I ran out of output-token budget twice in a row before completing a "
+    "response, so I could not finish this step. Try splitting the request "
+    "into smaller steps; if this keeps happening, lowering the reasoning "
+    "effort in Settings also helps."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +245,6 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "while the data its answer relies on errored or came back empty is INCOMPLETE, "
     "not COMPLETE."
 )
-
 
 def _safe_error_detail(exc: BaseException) -> str:
     """Describe an exception for logs without copying model or user content.
@@ -2300,6 +2330,105 @@ class ChatSession:
         self._schedule_cerebellum_flush()
         self._schedule_acc_flush()
 
+    def _turn_max_tokens(self) -> int:
+        """Output-token budget the turn's planning calls actually run with.
+
+        `looks_truncated` compares output tokens against the budget the
+        call was given; the main loop never overrides ``max_tokens``, so
+        that is the client default. Falls back to LLMClient's own default
+        when the client doesn't expose one (mocks, exotic hosts).
+        """
+        budget = getattr(self._llm, "max_tokens", None)
+        return budget if isinstance(budget, int) and budget > 0 else 8192
+
+    async def _recover_truncated_stream(
+        self,
+        llm_response: LLMResponse,
+        *,
+        system: str,
+        tools: list[dict] | None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Retry a response that burned its output budget without finishing.
+
+        ``llm_response`` hit ``max_tokens`` before producing a tool call —
+        detected by token count (`looks_truncated`), NOT ``stop_reason``:
+        the MindsHub gateway reports a normal stop at the cap (ENG-1082),
+        which is what kept this recovery dead for every hosted user
+        (ENG-1042).
+
+        The retry always CHANGES the call — an identical re-issue dies
+        identically (measured: three unchanged retries 14 minutes apart,
+        all silent):
+
+        - the output budget is doubled for this one call, and
+        - a corrective nudge is injected into history — "continue where
+          you left off" when partial text arrived, "answer now, deliberate
+          less" when the whole budget went to internal reasoning.
+
+        If the retry also comes back truncated with nothing visible, a
+        failure notice is shown to the user (and recorded in history) —
+        the turn must never end silently. The retry's ``StreamComplete``
+        is withheld until after that decision so the notice text lands
+        inside the message, then re-yielded for the caller to capture.
+        """
+        budget = self._turn_max_tokens()
+        silent = not (llm_response.content or "").strip()
+        # Empty-content appends are no-ops inside _append_history, so the
+        # silent variant only records the nudge.
+        self._append_history(
+            {"role": "assistant", "content": llm_response.content or ""}
+        )
+        self._append_history(
+            {
+                "role": "user",
+                "content": (
+                    _TRUNCATED_SILENT_NUDGE if silent else _TRUNCATED_CONTINUE_NUDGE
+                ),
+            }
+        )
+        retry_budget = budget * 2
+        logger.warning(
+            "Response truncated at the output budget with no tool call "
+            "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s) — "
+            "retrying once with max_tokens=%s",
+            llm_response.usage.output_tokens,
+            budget,
+            llm_response.stop_reason,
+            silent,
+            retry_budget,
+        )
+
+        retry: StreamComplete | None = None
+        async for event in self.plan_stream_with_recovery(
+            system=system, tools=tools, max_tokens=retry_budget
+        ):
+            if isinstance(event, StreamComplete):
+                retry = event
+                continue  # withheld — re-yielded below, after the failure check
+            yield event
+
+        if retry is None:
+            return
+
+        retried = retry.response
+        if (
+            not retried.tool_calls
+            and not (retried.content or "").strip()
+            and looks_truncated(retried, retry_budget)
+        ):
+            logger.error(
+                "Truncation retry also burned its whole budget with no "
+                "visible output (output_tokens=%s, retry_budget=%s) — "
+                "surfacing failure to the user",
+                retried.usage.output_tokens,
+                retry_budget,
+            )
+            self._append_history(
+                {"role": "assistant", "content": _TRUNCATION_FAILURE_NOTICE}
+            )
+            yield StreamTextDelta(text=_TRUNCATION_FAILURE_NOTICE)
+        yield retry
+
     async def _stream_and_handle_tools(
         self, user_message: str = ""
     ) -> AsyncIterator[StreamEvent]:
@@ -2321,26 +2450,16 @@ class ChatSession:
         llm_response = response.response
 
         # Detect max_tokens truncation — the LLM was cut off mid-response.
-        # Inject a continuation prompt so it can finish what it was doing.
-        if (
-            llm_response.stop_reason in ("max_tokens", "length")
-            and not llm_response.tool_calls
+        # By token count, not stop_reason: the gateway reports a normal stop
+        # at the cap (ENG-1082), which made a stop_reason gate dead code for
+        # every MindsHub-routed user (ENG-1042).
+        if not llm_response.tool_calls and looks_truncated(
+            llm_response, self._turn_max_tokens()
         ):
-            self._append_history(
-                {"role": "assistant", "content": llm_response.content or ""}
-            )
-            self._append_history(
-                {
-                    "role": "user",
-                    "content": (
-                        "SYSTEM: Your response was truncated because it exceeded the output token limit. "
-                        "Continue exactly where you left off. If you were about to call a tool, "
-                        "call it now. If the code you were writing was too long, split it into smaller parts."
-                    ),
-                }
-            )
             response = None
-            async for event in self.plan_stream_with_recovery(system=system, tools=tools):
+            async for event in self._recover_truncated_stream(
+                llm_response, system=system, tools=tools
+            ):
                 yield event
                 if isinstance(event, StreamComplete):
                     response = event
@@ -2727,27 +2846,14 @@ class ChatSession:
                     return
                 llm_response = response.response
 
-                # Detect max_tokens truncation inside tool loop
-                if (
-                    llm_response.stop_reason in ("max_tokens", "length")
-                    and not llm_response.tool_calls
+                # Detect max_tokens truncation inside tool loop — same
+                # token-count evidence as the pre-loop gate (ENG-1042).
+                if not llm_response.tool_calls and looks_truncated(
+                    llm_response, self._turn_max_tokens()
                 ):
-                    self._append_history(
-                        {"role": "assistant", "content": llm_response.content or ""}
-                    )
-                    self._append_history(
-                        {
-                            "role": "user",
-                            "content": (
-                                "SYSTEM: Your response was truncated because it exceeded the output token limit. "
-                                "Continue exactly where you left off. If you were about to call a tool, "
-                                "call it now. If the code you were writing was too long, split it into smaller parts."
-                            ),
-                        }
-                    )
                     response = None
-                    async for event in self.plan_stream_with_recovery(
-                        system=system, tools=tools
+                    async for event in self._recover_truncated_stream(
+                        llm_response, system=system, tools=tools
                     ):
                         yield event
                         if isinstance(event, StreamComplete):
@@ -2882,6 +2988,9 @@ class ChatSession:
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
+                # Verifier failed — fail safe by treating the turn as done rather
+                # than forcing a continuation the user never asked for.
+                status, reason = "COMPLETE", "verifier unavailable"
                 # The verifier call failed on every budget it was given —
                 # truncated past the last retry, an unusable tool call, or a
                 # provider error (the per-attempt logs above carry the detail).
