@@ -368,16 +368,20 @@ async def _fetch_once(url: str, max_chars: int) -> _FetchResult:
 
 
 def _redact_url(url: str) -> str:
-    """Strip the query string and fragment before logging.
+    """Reduce a URL to scheme://host[:port]/path for logging.
 
-    A model-supplied URL can carry credentials in the query (``?api_key=…``);
-    logging scheme+host+path keeps the audit line useful without leaking them.
+    A model-supplied URL can carry credentials in the query (``?api_key=…``) or
+    in userinfo (``user:pass@host``); dropping both — plus the fragment — keeps
+    the audit line useful without leaking them.
     """
     try:
         parts = urlparse(url)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
     except ValueError:
         return "<unparseable-url>"
-    base = f"{parts.scheme}://{parts.netloc}{parts.path}"
+    base = f"{parts.scheme}://{host}{parts.path}"
     return f"{base}?<redacted>" if parts.query else base
 
 

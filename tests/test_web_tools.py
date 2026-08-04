@@ -459,7 +459,7 @@ class TestWebFetchLogging:
                 request=httpx.Request("GET", url),
             )
 
-        secret_url = "https://example.com/data?api_key=SECRET123&x=1"
+        secret_url = "https://user:pass@example.com/data?api_key=SECRET123&x=1"
         with patch.object(httpx.AsyncClient, "get", new=_get), caplog.at_level(
             logging.INFO, logger=self._LOGGER
         ):
@@ -468,6 +468,7 @@ class TestWebFetchLogging:
         msg = next(r for r in caplog.records if r.name == self._LOGGER).getMessage()
         assert "SECRET123" not in msg
         assert "api_key" not in msg
+        assert "pass" not in msg  # userinfo credentials stripped too
         assert "url=https://example.com/data?<redacted>" in msg
 
     async def test_giveup_logs_single_warning_line(self, caplog):
