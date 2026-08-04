@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
@@ -57,6 +58,7 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL,
@@ -2648,14 +2650,62 @@ class ChatSession:
                                 message="Analyzing results...",
                             )
                         else:
-                            # Non-scratchpad, non-interactive tool — track elapsed
+                            # Non-scratchpad, non-interactive tool — track elapsed.
+                            # dispatch_tool_stream() forwards ToolProgress markers
+                            # from a streaming handler as they arrive; a plain
+                            # (non-streaming) handler yields exactly one item (its
+                            # result), so this same loop works for both kinds.
                             yield StreamTaskProgress(
                                 phase="tool_start",
                                 message=tc.name,
                             )
-                            result_text = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
-                            )
+                            result_text = None
+                            cancelled = False
+                            async with aclosing(
+                                self.tool_registry.dispatch_tool_stream(
+                                    self, tc.name, tc.input
+                                )
+                            ) as stream:
+                                async for item in stream:
+                                    if isinstance(item, ToolProgress):
+                                        yield StreamTaskProgress(
+                                            phase="tool_progress",
+                                            message=item.text,
+                                            id=tc.id,
+                                        )
+                                    else:
+                                        result_text = item
+                                    # Checked AFTER handling item, not before —
+                                    # otherwise an already-arrived final result
+                                    # could be discarded on the same iteration
+                                    # the flag flips. NOTE: on today's one real
+                                    # consumer (CLI, anton/chat.py:1858-1866) this
+                                    # flag is set and a KeyboardInterrupt is
+                                    # raised in the SAME step, so this branch is
+                                    # rarely what actually stops execution — the
+                                    # aclosing() above is: it closes this
+                                    # generator (and the handler's own generator
+                                    # underneath it) via GeneratorExit as soon as
+                                    # the outer turn_stream() is torn down. This
+                                    # check stays for symmetry with the
+                                    # scratchpad branch above and as a safety net
+                                    # for any future consumer that sets the flag
+                                    # without immediately raising.
+                                    if self._cancel_event.is_set():
+                                        cancelled = True
+                                        break
+                            if cancelled and result_text is None:
+                                # Deliberately NOT prefixed "Error:"/"failed:" —
+                                # the _failed heuristic a few lines below this
+                                # branch would flag it as a tool failure, but a
+                                # user-initiated cancellation isn't one. Same
+                                # precedent as the scratchpad branch's own
+                                # "No result produced." (also not flagged as an
+                                # error) a few dozen lines above.
+                                result_text = (
+                                    f"Tool '{tc.name}' was cancelled by the user "
+                                    "before producing a result."
+                                )
                             _tool_elapsed = _time.monotonic() - _tool_t0
                             yield StreamTaskProgress(
                                 phase="tool_done",

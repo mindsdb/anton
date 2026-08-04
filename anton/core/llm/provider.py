@@ -67,12 +67,13 @@ class StreamComplete:
 class StreamTaskProgress:
     """Progress event from agent task execution (planning, building, executing).
 
-    `id` carries the originating tool_use id when this progress event
-    is a scratchpad phase marker (e.g. `scratchpad_start` /
-    `scratchpad_done`). The frontend correlates the event to the
-    specific step it advances; without it, multi-cell turns where the
-    LLM queued several tool calls before execution would patch the
-    wrong step (always the last one in the array).
+    `id` carries the originating tool_use id when this progress event is a
+    scratchpad phase marker (e.g. `scratchpad_start` / `scratchpad_done`) or a
+    generic streaming tool's `tool_progress` marker (see
+    `ToolRegistry.dispatch_tool_stream`, `anton/core/tools/registry.py`). The
+    frontend correlates the event to the specific step it advances; without
+    it, multi-cell turns where the LLM queued several tool calls before
+    execution would patch the wrong step (always the last one in the array).
     """
 
     phase: str
