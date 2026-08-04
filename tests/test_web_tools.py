@@ -4,6 +4,8 @@ session-side routing decision (native vs handler-dispatched).
 
 from __future__ import annotations
 
+import socket
+import ssl
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -269,14 +271,154 @@ class TestWebFetchFallback:
         assert "404" in out
 
     async def test_handles_timeout(self):
+        calls = {"n": 0}
+
         async def _get(self, url, headers=None):
+            calls["n"] += 1
             raise httpx.TimeoutException("slow")
 
-        with patch.object(httpx.AsyncClient, "get", new=_get):
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
             out = await handle_web_fetch_fallback(
                 None, {"url": "https://example.com"}
             )
+        # Timeout is transient → retried up to the attempt cap before giving up.
+        assert calls["n"] == 2
         assert "timed out" in out.lower()
+
+
+class TestWebFetchRetry:
+    """Narrow retry: transient failures are retried with backoff; permanent ones
+    (4xx, NXDOMAIN, SSL) fail fast on the first attempt."""
+
+    async def test_retries_5xx_then_succeeds(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return httpx.Response(
+                    503, text="busy", request=httpx.Request("GET", url)
+                )
+            return httpx.Response(
+                200,
+                text="<p>ok</p>",
+                headers={"content-type": "text/html"},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "ok" in out
+
+    async def test_5xx_exhausts_retries(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            return httpx.Response(500, text="boom", request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "500" in out and "gave up" in out
+
+    async def test_does_not_retry_non_retryable_5xx(self):
+        # 511 Network Authentication Required is a permanent 5xx → no retry.
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            return httpx.Response(511, text="portal", request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "511" in out
+
+    async def test_does_not_retry_4xx(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            return httpx.Response(404, text="nope", request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "404" in out
+
+    async def test_retries_connect_error(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            raise httpx.ConnectError("all connection attempts failed")
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "gave up" in out
+
+    async def test_does_not_retry_ssl_error(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            raise httpx.ConnectError("cert fail") from ssl.SSLCertVerificationError(
+                "bad cert"
+            )
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "cert fail" in out
+
+    async def test_retries_transient_dns(self):
+        # EAI_AGAIN from the SSRF preflight's getaddrinfo → transient → retried.
+        calls = {"n": 0}
+
+        def _gai(host, *args, **kwargs):
+            calls["n"] += 1
+            raise socket.gaierror(
+                socket.EAI_AGAIN, "Temporary failure in name resolution"
+            )
+
+        with patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo", new=_gai
+        ), patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "gave up" in out
+
+    async def test_does_not_retry_nxdomain(self):
+        # EAI_NONAME → permanent NXDOMAIN → single attempt, no retry.
+        calls = {"n": 0}
+
+        def _gai(host, *args, **kwargs):
+            calls["n"] += 1
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        with patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo", new=_gai
+        ), patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "Could not resolve" in out
 
 
 class TestStripHtml:

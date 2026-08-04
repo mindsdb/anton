@@ -25,10 +25,13 @@ unconfigured users — the swap is local to ``handle_web_fetch_fallback``.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import ipaddress
+import logging
 import os
 import socket
+import ssl
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -40,6 +43,8 @@ from anton.core.tools.tool_defs import ToolDef
 if TYPE_CHECKING:
     from anton.core.session import ChatSession
 
+logger = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # External search provider adapters
@@ -49,6 +54,39 @@ EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search"
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 _HTTP_TIMEOUT = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retry policy (transient failures only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# web_fetch is GET-only, so retries are always idempotent. We retry ONLY
+# transient failures and fail fast on permanent ones:
+# - retry:    transient DNS (EAI_AGAIN), connect/read errors, timeouts, HTTP 5xx
+# - no retry: NXDOMAIN, SSL/certificate errors, HTTP 4xx
+# 2 attempts (1 retry): a transient blip almost always clears on the first
+# retry, and a second retry mostly adds latency — up to _HTTP_TIMEOUT per extra
+# attempt on a hang. Only ~6/42 observed failures were transient at all.
+_MAX_FETCH_ATTEMPTS = 2
+_FETCH_BACKOFF_BASE_S = 0.5  # single 0.5s pause before the retry
+
+# Only these 5xx codes are transient. Others (501 Not Implemented, 505 HTTP
+# Version Not Supported, 511 Network Authentication Required, ...) are permanent
+# and must fail fast — retrying them just adds latency.
+_RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+
+# glibc EAI_AGAIN ("Temporary failure in name resolution") is a transient DNS
+# error worth retrying; EAI_NONAME ("Name or service not known") is a permanent
+# NXDOMAIN and must fail fast. getattr keeps import safe on platforms lacking it.
+_TRANSIENT_GAI_ERRNOS = {getattr(socket, "EAI_AGAIN", -3)}
+
+
+class _TransientFetchError(Exception):
+    """Retryable fetch failure: transient DNS, connect/read error, timeout, or 5xx.
+
+    The message is caller-facing — it is surfaced verbatim once retries are
+    exhausted, so it must read as a normal ``web_fetch`` error string.
+    """
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SSRF guard
@@ -103,6 +141,10 @@ def _check_url_ssrf(url: str) -> str | None:
         try:
             infos = socket.getaddrinfo(host, None)
         except socket.gaierror as exc:
+            if exc.errno in _TRANSIENT_GAI_ERRNOS:
+                raise _TransientFetchError(
+                    f"DNS temporarily failed for {host!r}: {exc}"
+                ) from exc
             return f"Could not resolve host {host!r}: {exc}"
 
         addrs = {info[4][0] for info in infos}
@@ -114,6 +156,8 @@ def _check_url_ssrf(url: str) -> str | None:
                     "Set ANTON_ALLOW_PRIVATE_FETCH=1 to allow fetching from "
                     "private/LAN addresses (self-hosted deployments only)."
                 )
+    except _TransientFetchError:
+        raise  # let the retry loop handle transient DNS failures
     except Exception as exc:
         return f"SSRF pre-flight check failed for {url!r}: {exc}"
 
@@ -232,8 +276,13 @@ def _strip_html(body: str) -> str:
     return parser.text()
 
 
-async def _fetch_url(url: str, max_chars: int) -> str:
-    """GET a URL and return its text content, truncated to ``max_chars``."""
+async def _fetch_once(url: str, max_chars: int) -> str:
+    """One fetch attempt.
+
+    Raises ``_TransientFetchError`` on retryable failures (transient DNS,
+    connect/read errors, timeouts, HTTP 5xx); returns a caller-facing string on
+    success or on any permanent failure (SSRF block, NXDOMAIN, SSL, HTTP 4xx).
+    """
     # SSRF guard: resolve the initial URL before opening any connection.
     if err := _check_url_ssrf(url):
         return err
@@ -258,11 +307,23 @@ async def _fetch_url(url: str, max_chars: int) -> str:
                     return err
                 resp = await client.send(resp.next_request)
                 hops += 1
-    except httpx.TimeoutException:
-        return f"Fetch timed out after {_HTTP_TIMEOUT}s for {url}"
+    except httpx.TimeoutException as exc:
+        raise _TransientFetchError(
+            f"Fetch timed out after {_HTTP_TIMEOUT}s for {url}"
+        ) from exc
     except httpx.HTTPError as exc:
+        # A ConnectError wrapping an SSL/certificate failure is a permanent
+        # config problem; every other transport error is a transient network
+        # blip worth retrying.
+        is_ssl = isinstance(exc, httpx.ConnectError) and isinstance(
+            exc.__cause__, ssl.SSLError
+        )
+        if isinstance(exc, httpx.TransportError) and not is_ssl:
+            raise _TransientFetchError(f"Fetch failed for {url}: {exc}") from exc
         return f"Fetch failed for {url}: {exc}"
 
+    if resp.status_code in _RETRYABLE_STATUS:
+        raise _TransientFetchError(f"Fetch returned HTTP {resp.status_code} for {url}")
     if resp.status_code >= 400:
         return f"Fetch returned HTTP {resp.status_code} for {url}"
 
@@ -282,6 +343,31 @@ async def _fetch_url(url: str, max_chars: int) -> str:
     header = f"Fetched {url} (HTTP {resp.status_code}, {len(resp.content)} bytes)"
     suffix = "\n... [truncated]" if truncated else ""
     return f"{header}\n\n{text}{suffix}"
+
+
+async def _fetch_url(url: str, max_chars: int) -> str:
+    """GET a URL with bounded retry on transient failures; return text content.
+
+    GET is idempotent, so retrying is safe. Permanent failures (4xx, NXDOMAIN,
+    SSL) short-circuit inside ``_fetch_once`` and never reach a second attempt.
+    """
+    last_error = ""
+    for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
+        try:
+            return await _fetch_once(url, max_chars)
+        except _TransientFetchError as exc:
+            last_error = str(exc)
+            logger.warning(
+                "web_fetch transient failure url=%s method=GET attempt=%d/%d: %s",
+                url,
+                attempt,
+                _MAX_FETCH_ATTEMPTS,
+                last_error,
+            )
+            if attempt < _MAX_FETCH_ATTEMPTS:
+                await asyncio.sleep(_FETCH_BACKOFF_BASE_S * 2 ** (attempt - 1))
+
+    return f"{last_error} (gave up after {_MAX_FETCH_ATTEMPTS} attempts)"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
