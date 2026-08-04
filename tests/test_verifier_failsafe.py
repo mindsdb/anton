@@ -11,9 +11,11 @@ to proceed.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from tests.conftest import make_mock_llm
@@ -620,24 +622,33 @@ async def test_latched_verifier_reprobes_and_can_recover(workspace):
         await session.close()
 
 
-async def test_transient_provider_errors_never_latch(workspace):
-    """A typed transient error must not latch. The latch is for a model that
-    *cannot* produce a verdict (kimi-K3's forced-tool_choice 400, ENG-1095) — a
-    capability claim. `TransientProviderError` asserts the opposite: retryable,
-    already retried upstream (ENG-673). Counting it would let two provider blips
-    disable verification for the rest of the session.
+@pytest.mark.parametrize("exc_factory, label", [
+    (lambda: __import__("anton.core.llm.provider", fromlist=["x"]).TransientProviderError(
+        "provider returned an empty 200"), "typed"),
+    # Review finding (pnewsam on #299): an UNTYPED transient reaching the generic
+    # handler used to count as "hard". A timeout is not a statement about whether
+    # the model can produce a verdict.
+    (lambda: asyncio.TimeoutError("read timed out"), "asyncio-timeout"),
+    (lambda: ConnectionResetError("peer reset the connection"), "connection-reset"),
+    (lambda: httpx.ConnectError("failed to establish a connection"), "httpx-connect"),
+])
+async def test_transient_provider_errors_never_latch(workspace, exc_factory, label):
+    """No transient failure may latch — typed or untyped. The latch is for a model
+    that *cannot* produce a verdict (kimi-K3's forced-tool_choice 400, ENG-1095) —
+    a capability claim. A dropped connection or a timeout asserts the opposite:
+    retryable, and typed ones are already retried upstream (ENG-673). Counting
+    them would let two provider blips disable verification for a whole re-probe
+    window.
 
     Matters more once #297 (ENG-847) lands, which converts empty 200s into
     `TransientProviderError` on the same providers the verdict call uses.
     """
-    from anton.core.llm.provider import TransientProviderError
-
     mock_llm = make_mock_llm()
     calls = {"n": 0}
 
     async def always_transient(_schema, *, system, messages, max_tokens):
         calls["n"] += 1
-        raise TransientProviderError("provider returned an empty 200")
+        raise exc_factory()
 
     mock_llm.generate_object_code = AsyncMock(side_effect=always_transient)
     session = _make_session(workspace, mock_llm)

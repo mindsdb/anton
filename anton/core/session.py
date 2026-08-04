@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 import random
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -220,6 +221,25 @@ class _VerifierVerdict(BaseModel):
 # forced `tool_choice` is a statement about the model, not about this transcript
 # (ENG-1095/ENG-1155). See `_verifier_latched`.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
+
+# Verdict-call failures that are transient by nature rather than statements about
+# the model's capability. The latch exists for a model that *cannot* produce a
+# verdict (kimi-K3 rejecting the forced `tool_choice` with a 400, ENG-1095); a
+# dropped connection or a read timeout says nothing about that, and counting it
+# would let two blips switch verification off for a whole re-probe window
+# (review: pnewsam on #299).
+#
+# `TransientProviderError` is ENG-673's typed mapping and is listed first for
+# intent, though `OSError` already covers it (it subclasses `ConnectionError`).
+# `OSError` also covers `asyncio.TimeoutError`, which is `TimeoutError` — an
+# `OSError` subclass — on 3.11+. `httpx.TransportError` covers the transport the
+# OpenAI SDK uses, which is reachable when an error escapes the SDK's own
+# wrapping. Anything outside this set still latches, bounded by the re-probe.
+_TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
+    TransientProviderError,
+    OSError,
+    httpx.TransportError,
+)
 
 # Turns a latched session skips before spending one verdict call to see whether
 # the cause has gone away (user switched model, gateway fix shipped). Without a
@@ -1562,8 +1582,8 @@ class ChatSession:
             log.warning(
                 "%s diagnosis returned no content — nothing appended; history "
                 "keeps its existing tail (the pre-verification reply on the "
-                "verifier paths, the final tool-call message on the "
-                "max-tool-rounds path)",
+                "verifier paths, the injected SYSTEM pause message on the "
+                "max-tool-rounds path, since the cap block appends that last)",
                 label,
             )
 
@@ -3044,15 +3064,16 @@ class ChatSession:
                     )
                     if not retrying:
                         break
-                except TransientProviderError as exc:
+                except _TRANSIENT_VERDICT_ERRORS as exc:
                     # Explicitly NOT a latch candidate. The latch is for a model
                     # that cannot produce a verdict at all (kimi-K3 rejecting the
                     # forced tool_choice with a 400, ENG-1095) — a statement about
-                    # capability. A typed transient error is the opposite claim:
-                    # retryable, and already retried upstream (ENG-673). Counting
-                    # it would let two provider blips disable verification for the
-                    # rest of the session. The turn still gets its honest
-                    # diagnosis (ENG-1079); it just doesn't latch.
+                    # capability. A transient failure is the opposite claim:
+                    # retryable, and typed ones are already retried upstream
+                    # (ENG-673). Counting them would let two provider blips
+                    # disable verification for a whole re-probe window. The turn
+                    # still gets its honest diagnosis (ENG-1079); it just doesn't
+                    # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
                     _verifier_log.info(
                         "completion-verifier verdict=TRANSIENT budget=%d error=%s",
@@ -3100,17 +3121,23 @@ class ChatSession:
                         # buys nothing once the cause is known to recur. One
                         # diagnosis per session (ENG-1155).
                         #
-                        # "Hard" = neither truncation nor a typed
-                        # TransientProviderError (see that except-clause above —
-                        # typed transients never latch). Untyped provider blips
-                        # (a generic ConnectionError, say) still count: two of
-                        # those in a row do latch, bounded by the re-probe
-                        # un-latching within _VERIFIER_LATCH_REPROBE_TURNS once
-                        # the provider recovers.
+                        # "Hard" = neither truncation nor anything in
+                        # `_TRANSIENT_VERDICT_ERRORS` (see that except-clause
+                        # above). Connection drops and timeouts are transient and
+                        # never latch; what remains is the shape ENG-1095 has —
+                        # a provider that rejects the call itself.
+                        #
+                        # Not strictly "consecutive" either: the counter is reset
+                        # only by a *successful* verdict, so hard → truncated →
+                        # hard still latches on the second hard failure. That is
+                        # deliberate — only a real verdict proves the model can
+                        # produce one, and a truncation in between is no evidence
+                        # that it can (review: pnewsam on #299).
                         self._verifier_latched = True
                         _verifier_log.info(
-                            "completion-verifier latched after %d consecutive hard "
-                            "failures — skipping further verification this session",
+                            "completion-verifier latched after %d hard failures with "
+                            "no successful verdict between them — skipping further "
+                            "verification this session",
                             self._verifier_hard_failures,
                         )
                         break
