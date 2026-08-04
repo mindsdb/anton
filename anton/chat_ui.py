@@ -412,6 +412,17 @@ class StreamDisplay:
             self._update_spinner()
             return
 
+        if phase == "tool_progress":
+            # A streaming tool handler (ToolRegistry.dispatch_tool_stream)
+            # yielded a ToolProgress marker. Print it as a permanent line —
+            # falling through to the generic phase handler below would only
+            # update the transient spinner footer (Live(transient=True)),
+            # which disappears the moment the spinner stops.
+            self._stop_spinner()
+            self._console.print(Text(f"  {message}", style="anton.muted"))
+            self._start_spinner()
+            return
+
         if phase == "tool_done":
             # Stash work elapsed — combined line printed on reasoning_done.
             elapsed = eta if eta else 0

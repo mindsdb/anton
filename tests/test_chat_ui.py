@@ -79,8 +79,26 @@ class TestStreamDisplay:
         assert live.update.call_count >= 1
 
     def test_phase_labels_cover_all_phases(self):
+        # Also guards the tool_progress design decision: that phase returns
+        # from update_progress() before reaching the PHASE_LABELS fallback
+        # (see chat_ui.py's tool_progress branch), so it must NOT appear here.
         expected = {"memory_recall", "planning", "executing", "complete", "failed", "scratchpad"}
         assert expected == set(PHASE_LABELS.keys())
+
+    @patch("anton.chat_ui.Live")
+    def test_tool_progress_prints_permanent_line_and_restarts_spinner(self, MockLive):
+        display, console = self._make_display()
+        display.start()  # 1st Live() — the running spinner
+
+        display.update_progress("tool_progress", "step_1 done")
+
+        printed = [str(call.args[0]) for call in console.print.call_args_list]
+        assert any("step_1 done" in text for text in printed)
+        # start() (1) + the tool_progress branch's own restart (1) after
+        # printing — a missing _start_spinner() there would leave the
+        # footer spinner gone for the rest of the turn without this check
+        # catching it (the printed-line assertion alone wouldn't notice).
+        assert MockLive.call_count == 2
 
 
 class TestActivityTracking:
