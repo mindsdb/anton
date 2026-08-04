@@ -500,6 +500,11 @@ class ChatSession:
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
         )
+        # Seed length + how many leading history messages the last compaction
+        # folded into its summary — lets a host map the compaction back onto
+        # its own message list (see `last_compaction`).
+        self._seed_len = len(self._history)
+        self._last_compacted_count: int | None = None
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
@@ -631,6 +636,23 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    @property
+    def last_compaction(self) -> dict | None:
+        """Result of the last history compaction this session ran, or None.
+
+        `summary`: the compacted message content, verbatim (re-seed it as
+        history[0] next turn so it gets recognized and extended, not
+        resummarized). `covered_through`: how many of `initial_history`'s
+        messages are now folded into it — map this count onto your own
+        message list to find the cutoff.
+        """
+        if self._last_compacted_count is None:
+            return None
+        return {
+            "summary": self._history[0]["content"],
+            "covered_through": min(self._last_compacted_count, self._seed_len),
+        }
 
     def _apply_error_tracking(
         self,
@@ -1131,17 +1153,19 @@ class ChatSession:
             return  # Too short to summarize
 
         min_recent = 4
-        split = max(int(len(self._history) * 0.6), 1)
+        # Number of leading messages to fold into the summary; doubles as the
+        # cut index (old = history[:compacted_count], recent = the rest).
+        compacted_count = max(int(len(self._history) * 0.6), 1)
         # Ensure we keep at least min_recent turns
-        split = min(split, len(self._history) - min_recent)
-        if split < 2:
+        compacted_count = min(compacted_count, len(self._history) - min_recent)
+        if compacted_count < 2:
             return
 
-        # Walk split backward to avoid breaking tool_use / tool_result pairs.
-        # A user message containing tool_result blocks must stay with the
-        # preceding assistant message that contains the matching tool_use.
-        while split > 1:
-            msg = self._history[split]
+        # Walk the cut backward to avoid breaking tool_use / tool_result
+        # pairs. A user message containing tool_result blocks must stay with
+        # the preceding assistant message that contains the matching tool_use.
+        while compacted_count > 1:
+            msg = self._history[compacted_count]
             if msg.get("role") != "user":
                 break
             content = msg.get("content")
@@ -1154,17 +1178,43 @@ class ChatSession:
                 break
             # This user message has tool_results — keep it (and its paired
             # assistant message) in the recent portion.
-            split -= 1
+            compacted_count -= 1
             # Also pull back over the preceding assistant message so the
             # pair stays together.
-            if split > 1 and self._history[split].get("role") == "assistant":
-                split -= 1
+            if compacted_count > 1 and self._history[compacted_count].get("role") == "assistant":
+                compacted_count -= 1
 
-        if split < 2:
+        if compacted_count < 2:
             return
 
-        old_turns = self._history[:split]
-        recent_turns = self._history[split:]
+        old_turns = self._history[:compacted_count]
+        recent_turns = self._history[compacted_count:]
+
+        # A prior summary carried forward from an earlier compaction isn't
+        # new material — exclude it so re-summarizing a barely-grown summary
+        # doesn't look worthwhile.
+        new_old_turns = old_turns
+        if (
+            old_turns
+            and isinstance(old_turns[0].get("content"), str)
+            and old_turns[0]["content"].lstrip().startswith(_COMPACTED_MARKER)
+        ):
+            new_old_turns = old_turns[1:]
+
+        def _approx_len(msgs: list[dict]) -> int:
+            total = 0
+            for m in msgs:
+                content = m.get("content", "")
+                total += len(content) if isinstance(content, str) else len(str(content))
+            return total
+
+        # Skip the LLM round-trip when the genuinely-new old turns are under
+        # ~10% of what we'd re-send — folding them in wouldn't shrink history
+        # enough to be worth the summarization call.
+        new_old_len = _approx_len(new_old_turns)
+        recent_len = _approx_len(recent_turns)
+        if new_old_len < 0.10 * (new_old_len + recent_len):
+            return
 
         # Serialize old turns. Pull out any prior compacted summary so we
         # UPDATE it in place rather than summarize a summary (which compounds
@@ -1238,6 +1288,8 @@ class ChatSession:
                 max_tokens=2048,
             )
             summary = summary_response.content or "(summary unavailable)"
+            # Record the compaction ONLY on success.
+            self._last_compacted_count = compacted_count
         except Exception:
             # If summarization fails, just do a simple truncation
             summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
@@ -1455,6 +1507,12 @@ class ChatSession:
             self._history = [placeholder, *tail]
         else:
             self._history = [placeholder, separator, *tail]
+
+        # A hard truncate discards the compacted summary — history[0] is now
+        # the truncation placeholder, not the summary. Clear the compaction
+        # record so `last_compaction` reports None (keep-full-history) rather
+        # than letting a host persist the placeholder as the durable summary.
+        self._last_compacted_count = None
 
     async def plan_with_recovery(
         self,
