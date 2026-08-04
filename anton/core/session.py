@@ -2131,18 +2131,21 @@ class ChatSession:
                 if isinstance(result, list):
                     # Multimodal tool result — scrub credentials from text
                     # blocks; image-block payloads are raw bytes and have
-                    # nothing to scrub. A list result signals success, so
-                    # mirror the success branch of `_apply_error_tracking`
-                    # and reset the streak instead of running the full
-                    # string-only nudge logic.
+                    # nothing to scrub. A list result signals success unless
+                    # the handler explicitly said otherwise (ENG-1276), so
+                    # mirror the matching branch of `_apply_error_tracking`
+                    # instead of running the full string-only nudge logic.
                     content: "str | list[dict]" = [
                         {**b, "text": scrub_credentials(b.get("text", ""))}
                         if b.get("type") == "text"
                         else b
                         for b in result
                     ]
-                    error_streak[tc.name] = 0
-                    resilience_nudged.discard(tc.name)
+                    if outcome.ok is False:
+                        error_streak[tc.name] = error_streak.get(tc.name, 0) + 1
+                    else:
+                        error_streak[tc.name] = 0
+                        resilience_nudged.discard(tc.name)
                 else:
                     result = scrub_credentials(result)
                     result = self._apply_error_tracking(
@@ -2917,18 +2920,21 @@ class ChatSession:
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
                         # blocks (image payloads carry no secrets). A list
-                        # result signals success, so mirror the success
-                        # branch of `_apply_error_tracking` and reset the
-                        # streak instead of running the full string-only
-                        # nudge logic.
+                        # result signals success unless the handler explicitly
+                        # said otherwise (ENG-1276), so mirror the matching
+                        # branch of `_apply_error_tracking` instead of running
+                        # the full string-only nudge logic.
                         scrubbed_blocks = [
                             {**b, "text": scrub_credentials(b.get("text", ""))}
                             if b.get("type") == "text"
                             else b
                             for b in result_text
                         ]
-                        error_streak[tc.name] = 0
-                        resilience_nudged.discard(tc.name)
+                        if tool_ok is False:
+                            error_streak[tc.name] = error_streak.get(tc.name, 0) + 1
+                        else:
+                            error_streak[tc.name] = 0
+                            resilience_nudged.discard(tc.name)
                         if self._episodic is not None:
                             self._episodic.log_turn(
                                 self._turn_count + 1,
@@ -2938,8 +2944,8 @@ class ChatSession:
                             )
                         self._acc_observe(
                             "tool_result",
-                            {"name": tc.name, "success": True, "error": ""},
-                            severity=1,
+                            {"name": tc.name, "success": tool_ok is not False, "error": ""},
+                            severity=5 if tool_ok is False else 1,
                             round_idx=tool_round,
                         )
                         tool_results.append(
