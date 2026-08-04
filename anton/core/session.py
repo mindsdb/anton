@@ -466,6 +466,14 @@ class ChatSession:
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
+        # Latch for a verifier that fails the same hard way every turn — e.g.
+        # kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), which
+        # fails on every verdict call until the gateway fix lands. Without the
+        # latch, each multi-step turn pays a full-history diagnosis call and
+        # shows the "checking in" message (ENG-1155). Session-scoped: a hard
+        # failure twice in a row latches, a successful verdict clears it.
+        self._verifier_hard_failures = 0
+        self._verifier_latched = False
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -1512,6 +1520,40 @@ class ChatSession:
         self.hard_truncate_history()
         return await self._llm.plan(messages=factory_validated(), **kwargs)
 
+    async def _stream_handback_diagnosis(self, *, system: str, label: str):
+        """Stream a hand-back diagnosis and persist exactly what the user read.
+
+        All three hand-back paths (STUCK, budget-exhausted, verifier-call
+        failure) stream a model-generated message and then stop the turn. The
+        message must be captured into history, because it — not the reply the
+        verifier rejected — is what the user actually saw. Persisting it also
+        keeps `history[-1]` an assistant message, which is what stops the
+        post-loop fallback from re-appending the stale reply (ENG-1155).
+
+        An empty diagnosis is logged rather than appended: an empty assistant
+        turn would recreate the same out-of-sync history this exists to fix,
+        and stale-but-real beats blank.
+        """
+        log = logging.getLogger(__name__)
+        diagnosis_response = None
+        async for event in self.plan_stream_with_recovery(system=system):
+            yield event
+            if isinstance(event, StreamComplete):
+                diagnosis_response = event
+        text = (
+            (diagnosis_response.response.content or "").strip()
+            if diagnosis_response is not None
+            else ""
+        )
+        if text:
+            self._append_history({"role": "assistant", "content": text})
+        else:
+            log.warning(
+                "%s diagnosis returned no content — history falls back to the "
+                "pre-verification reply",
+                label,
+            )
+
     async def plan_stream_with_recovery(
         self,
         *,
@@ -2428,6 +2470,10 @@ class ChatSession:
         # task isn't actually done yet.
         continuation = 0
         _max_rounds_hit = False
+        # True once the verification block has put the assistant reply in
+        # history, so the post-loop fallback knows not to append it a second
+        # time (ENG-1155 double-append).
+        _reply_persisted = False
         import logging as _logging
         _verifier_log = _logging.getLogger(__name__)
 
@@ -2461,7 +2507,16 @@ class ChatSession:
                             ),
                         }
                     )
-                    async for event in self.plan_stream_with_recovery(system=system):
+                    # Fourth hand-back path, same defect as the other three: the
+                    # reply above is already in history, so without capturing the
+                    # diagnosis the post-loop fallback appends that reply a second
+                    # time and the message the user actually read is lost
+                    # (ENG-1155 — this site is not named in the ticket, and it is
+                    # the highest-traffic one of the four).
+                    _reply_persisted = True
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="max-tool-rounds"
+                    ):
                         yield event
                     break
 
@@ -2826,9 +2881,13 @@ class ChatSession:
             if tool_round < self._verify_min_tool_rounds or _max_rounds_hit:
                 break
 
-            # Append the assistant's final text so the verifier can see it
+            # Append the assistant's final text so the verifier can see it.
+            # Once this has run, the post-loop fallback must NOT append `reply`
+            # again — doing so is what put the rejected reply in history twice
+            # on every hand-back turn (ENG-1155).
             reply = llm_response.content or ""
             self._append_history({"role": "assistant", "content": reply})
+            _reply_persisted = True
 
             if continuation >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
@@ -2850,9 +2909,27 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing incomplete task..."
                 )
-                async for event in self.plan_stream_with_recovery(system=system):
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="budget-exhausted"
+                ):
                     yield event
                 # Consolidation still runs after diagnosis
+                break
+
+            # A verifier that already failed hard twice in a row will keep
+            # failing for the rest of the session (ENG-1095's forced-tool_choice
+            # 400 is per-model, not per-call). Skip the verdict rather than pay a
+            # full-history diagnosis every turn and show "checking in" each time
+            # (ENG-1155). The turn ends on the model's own answer, which is
+            # already in history — unverified, but that beats a per-turn
+            # interruption we know the cause of.
+            if self._verifier_latched:
+                _verifier_log.info(
+                    "completion-verifier skipped — latched after %d consecutive "
+                    "hard failures; continuation=%d/%d tool_rounds=%d",
+                    self._verifier_hard_failures, continuation,
+                    self._max_continuations, tool_round,
+                )
                 break
 
             # Ask the cheap coding model to self-assess completion over a compact,
@@ -2890,6 +2967,10 @@ class ChatSession:
                 + _VERIFIER_NO_PREAMBLE
             )
             verdict = None
+            # Truncation vs hard failure decides whether this counts toward the
+            # latch: a blown budget is a tail sample of one model's verbosity,
+            # an identical hard error twice is a capability problem (ENG-1155).
+            verdict_failure: str | None = None
             for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
                 try:
                     verdict = await self._llm.generate_object_code(
@@ -2907,6 +2988,7 @@ class ChatSession:
                     retrying = exc.truncated and attempt + 1 < len(
                         _VERIFIER_TOKEN_BUDGETS
                     )
+                    verdict_failure = "truncated" if exc.truncated else "hard"
                     _verifier_log.info(
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s retrying=%s",
@@ -2920,6 +3002,7 @@ class ChatSession:
                     # collapse into one "verifier unavailable" line — but never
                     # the exception message, which can carry conversation
                     # content (ENG-1081).
+                    verdict_failure = "hard"
                     _verifier_log.info(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -2927,12 +3010,30 @@ class ChatSession:
                     break
 
             if verdict is not None:
+                # A working verdict clears the latch: whatever was failing
+                # (transient provider error, a model the user has since changed)
+                # is no longer failing.
+                self._verifier_hard_failures = 0
+                self._verifier_latched = False
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
-                # Verifier failed — fail safe by treating the turn as done rather
-                # than forcing a continuation the user never asked for.
-                status, reason = "COMPLETE", "verifier unavailable"
+                if verdict_failure == "hard":
+                    self._verifier_hard_failures += 1
+                    if self._verifier_hard_failures >= 2:
+                        # Second hard failure in a row: the first could have been
+                        # transient, this one establishes the pattern. Latch and
+                        # skip the diagnosis on this turn too — a second
+                        # "checking in" message plus a second full-history call
+                        # buys nothing once the cause is known to recur. One
+                        # diagnosis per session (ENG-1155).
+                        self._verifier_latched = True
+                        _verifier_log.info(
+                            "completion-verifier latched after %d consecutive hard "
+                            "failures — skipping further verification this session",
+                            self._verifier_hard_failures,
+                        )
+                        break
                 # The verifier call failed on every budget it was given —
                 # truncated past the last retry, an unusable tool call, or a
                 # provider error (the per-attempt logs above carry the detail).
@@ -2964,34 +3065,10 @@ class ChatSession:
                     phase="analyzing",
                     message="Something went wrong — checking in with you...",
                 )
-                diagnosis_response = None
-                async for event in self.plan_stream_with_recovery(system=system):
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="verifier-failure"
+                ):
                     yield event
-                    if isinstance(event, StreamComplete):
-                        diagnosis_response = event
-                # Persist the actual message the user just saw — not the stale
-                # pre-verification `reply` the post-loop fallback below would
-                # otherwise re-append, which would leave history (and thus the
-                # model's own memory of what it just told the user) out of sync
-                # with what was streamed.
-                diagnosis_text = (
-                    (diagnosis_response.response.content or "").strip()
-                    if diagnosis_response is not None
-                    else ""
-                )
-                if diagnosis_text:
-                    self._append_history(
-                        {"role": "assistant", "content": diagnosis_text}
-                    )
-                else:
-                    # An empty diagnosis would silently recreate the exact
-                    # out-of-sync history this path exists to fix (the
-                    # post-loop fallback re-appends the stale reply). Make it
-                    # visible rather than circular.
-                    _verifier_log.warning(
-                        "verifier-failure diagnosis returned no content — "
-                        "history falls back to the pre-verification reply"
-                    )
                 break
 
             _verifier_log.info(
@@ -3026,7 +3103,9 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing blocked task..."
                 )
-                async for event in self.plan_stream_with_recovery(system=system):
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="stuck"
+                ):
                     yield event
                 break
 
@@ -3063,9 +3142,13 @@ class ChatSession:
             llm_response = response.response
             # Loop back to the top of the completion verification loop
 
-        # Text-only final response — append to history (if not already appended
-        # by the verification block above).
-        if not self._history or self._history[-1].get("role") != "assistant":
+        # Text-only final response — append to history, unless the verification
+        # block already did. The old role-based guard was not enough: on a
+        # hand-back turn the last entry is the SYSTEM injection, so this fired
+        # and appended the rejected reply a second time (ENG-1155).
+        if not _reply_persisted and (
+            not self._history or self._history[-1].get("role") != "assistant"
+        ):
             reply = llm_response.content or ""
             self._append_history({"role": "assistant", "content": reply})
 
