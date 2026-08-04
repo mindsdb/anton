@@ -335,15 +335,36 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
+def _clip_keep_cause(text: str, cap: int) -> str:
+    """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
+
+    A failing tool result names its cause at the END — a traceback's final
+    line is the one that says ``libodbc.so.2: cannot open shared object
+    file`` — while the head carries what ran and the ``[error]`` marker. A
+    plain ``text[:cap]`` therefore showed the verifier the shape of a failure
+    but discarded its cause, which is how an unrecoverable environment wall
+    kept getting judged INCOMPLETE instead of STUCK (ENG-836). Keep a small
+    head, elide the middle, and spend most of the budget on the tail.
+    """
+    if len(text) <= cap:
+        return text
+    head = cap // 3
+    tail = cap - head
+    elided = len(text) - head - tail
+    return f"{text[:head]}\n[... {elided} chars elided ...]\n{text[-tail:]}"
+
+
 def _render_tool_result_content(content, cap: int) -> str:
     """Render a tool_result's content as bounded plain text.
 
     Never serializes raw payloads: a multimodal result (e.g. read_image) can
     carry megabytes of base64, so we keep only text blocks and mark images with
     a placeholder rather than ``json.dumps``-ing the whole thing (ENG-716).
+    Oversize content is clipped tail-biased so a failure's cause survives
+    (ENG-836).
     """
     if isinstance(content, str):
-        return content[:cap] or "(empty result)"
+        return _clip_keep_cause(content, cap) or "(empty result)"
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
@@ -353,8 +374,9 @@ def _render_tool_result_content(content, cap: int) -> str:
                 parts.append((block.get("text") or "").strip())
             elif block.get("type") in ("image", "image_url"):
                 parts.append("[image]")
-        return (" ".join(p for p in parts if p)[:cap]) or "[non-text result]"
-    return str(content)[:cap]
+        joined = " ".join(p for p in parts if p)
+        return _clip_keep_cause(joined, cap) or "[non-text result]"
+    return _clip_keep_cause(str(content), cap)
 
 
 def _render_verify_transcript(

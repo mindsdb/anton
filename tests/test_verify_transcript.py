@@ -52,15 +52,49 @@ def test_omits_internal_system_injections():
     assert "build the dashboard" in out
 
 
-def test_truncates_large_tool_output():
-    big = "x" * 5000
+def test_truncates_large_tool_output_keeping_both_ends():
+    # Direction matters, not just the cap: a homogeneous fixture ("x" * 5000)
+    # cannot tell head-truncation from tail-truncation, and head-truncation is
+    # exactly the ENG-836 bug. Mark both ends and assert both survive.
+    big = "HEAD_MARKER " + "x" * 5000 + " CAUSE_MARKER"
     history = [
         {"role": "user", "content": "run it"},
         {"role": "user", "content": [{"type": "tool_result", "content": big}]},
     ]
     out = _render_verify_transcript(history, tool_cap=400)
-    # Tool output is capped so the verify call stays cheap.
+    # Tool output is capped so the verify call stays cheap...
     assert out.count("x") <= 400
+    # ...but the clip keeps the head (what ran / the [error] marker) AND the
+    # tail (the cause), eliding the middle.
+    assert "HEAD_MARKER" in out
+    assert "CAUSE_MARKER" in out
+    assert "chars elided" in out
+
+
+def test_traceback_cause_survives_truncation():
+    # Regression for ENG-836: the verifier judged an unrecoverable environment
+    # wall INCOMPLETE because head-truncation kept the traceback preamble and
+    # discarded the final line naming the missing system library. The fixture
+    # must exceed tool_cap with the cause at the END, shaped like the real
+    # pyodbc failure — a short tidy error string would pass either way.
+    frames = "".join(
+        f'  File "/app/step_{i}.py", line {i * 7}, in run\n    connect()\n'
+        for i in range(12)
+    )
+    traceback = (
+        "Traceback (most recent call last):\n"
+        + frames
+        + "ImportError: libodbc.so.2: cannot open shared object file: "
+        "No such file or directory"
+    )
+    assert len(traceback) > 400
+    history = [
+        {"role": "user", "content": "build the KPI dashboard against Azure SQL"},
+        {"role": "user", "content": [{"type": "tool_result", "content": traceback}]},
+    ]
+    out = _render_verify_transcript(history, tool_cap=400)
+    assert "libodbc.so.2: cannot open shared object file" in out
+    assert "Traceback (most recent call last):" in out
 
 
 def test_empty_history_is_safe():
