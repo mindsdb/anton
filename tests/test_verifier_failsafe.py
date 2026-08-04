@@ -517,6 +517,109 @@ async def test_max_tool_rounds_diagnosis_is_persisted_as_streamed(workspace):
         await session.close()
 
 
+async def test_text_only_continuation_answer_is_not_dropped(workspace):
+    """Self-review catch. `_reply_persisted` must be per-iteration, not per-turn.
+
+    INCOMPLETE → the continuation finishes the answer with no tool calls →
+    `tool_round` stays 0 → the loop breaks at the verify_min_tool_rounds gate
+    BEFORE appending the new reply. A turn-scoped flag would still be True from
+    the first iteration, so the post-loop fallback would skip, and the answer the
+    user just read would vanish from history. That is the same defect ENG-1155
+    fixes, introduced on the continuation path.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [_VerifierVerdict(status="INCOMPLETE", reason="not done yet")]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("FIRST_DRAFT"))])
+        # Continuation needs no tools — it just finishes writing.
+        return _FakeAsyncIter([
+            StreamComplete(response=_text_response("FINAL_ANSWER_USER_READ"))
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        async for _ in session.turn_stream("write me a summary"):
+            pass
+
+        texts = _assistant_texts(session)
+        assert any("FINAL_ANSWER_USER_READ" in t for t in texts), (
+            "the continuation's answer — what the user actually read — is missing "
+            f"from history; assistant turns held: {texts}"
+        )
+        assert "FINAL_ANSWER_USER_READ" in texts[-1]
+    finally:
+        await session.close()
+
+
+async def test_latched_verifier_reprobes_and_can_recover(workspace):
+    """Self-review catch. A latched session makes no verdict calls, so "reset on a
+    successful verdict" is unreachable and the latch outlives its cause — the user
+    switches off the broken model and verification stays dead for the session.
+
+    After `_VERIFIER_LATCH_REPROBE_TURNS` skips it must spend one call; if that
+    succeeds, the latch clears.
+    """
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+    # Two hard failures to latch, then every later call succeeds (the user has
+    # switched to a model whose forced tool_choice works).
+    async def scripted(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("400 tool_choice not supported")
+        return _VerifierVerdict(status="COMPLETE", reason="done")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=scripted)
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"step {turn}"):
+                pass
+        assert session._verifier_latched is True, "two hard failures must latch"
+        assert calls["n"] == 2
+
+        # Run exactly enough turns to consume the skip budget and re-probe.
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"more {turn}"):
+                pass
+
+        assert calls["n"] == 3, (
+            f"expected exactly one re-probe call after {_VERIFIER_LATCH_REPROBE_TURNS} "
+            f"skips, verifier was called {calls['n']}x total"
+        )
+        assert session._verifier_latched is False, (
+            "a successful re-probe must clear the latch"
+        )
+        assert session._verifier_hard_failures == 0
+    finally:
+        await session.close()
+
+
 async def test_empty_diagnosis_is_logged_not_circular(workspace, caplog):
     """Review follow-up: an empty diagnosis must not silently recreate the
     out-of-sync history this path fixes — it logs, and the post-loop fallback

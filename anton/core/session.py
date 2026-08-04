@@ -211,11 +211,21 @@ class _VerifierVerdict(BaseModel):
 #
 # 2048 is sized from a measured distribution, not one sample: 16 identical calls
 # spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is also
-# why there is no "this model can't do it" latch — one truncation is a tail
-# sample, not proof about the next turn — and why the 4096 retry exists rather
-# than a single bigger budget. 1024 was measurably too small. Nothing pays for
-# headroom it doesn't use; first-party models answer in 43–115 tokens either way.
+# why *truncation* never latches — one truncation is a tail sample, not proof
+# about the next turn — and why the 4096 retry exists rather than a single bigger
+# budget. 1024 was measurably too small. Nothing pays for headroom it doesn't
+# use; first-party models answer in 43–115 tokens either way.
+#
+# A *hard* failure does latch, which is a different claim: a 400 rejecting the
+# forced `tool_choice` is a statement about the model, not about this transcript
+# (ENG-1095/ENG-1155). See `_verifier_latched`.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
+
+# Turns a latched session skips before spending one verdict call to see whether
+# the cause has gone away (user switched model, gateway fix shipped). Without a
+# re-probe the latch is permanent for the session and "reset on a successful
+# verdict" can never fire, since a latched session makes no verdict calls.
+_VERIFIER_LATCH_REPROBE_TURNS = 10
 
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
@@ -474,6 +484,7 @@ class ChatSession:
         # failure twice in a row latches, a successful verdict clears it.
         self._verifier_hard_failures = 0
         self._verifier_latched = False
+        self._verifier_latch_skips = 0
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -2470,14 +2481,22 @@ class ChatSession:
         # task isn't actually done yet.
         continuation = 0
         _max_rounds_hit = False
-        # True once the verification block has put the assistant reply in
-        # history, so the post-loop fallback knows not to append it a second
-        # time (ENG-1155 double-append).
+        # Set per verification-loop iteration (see below): tells the post-loop
+        # fallback the current reply is already in history, so it must not append
+        # it a second time (ENG-1155 double-append).
         _reply_persisted = False
         import logging as _logging
         _verifier_log = _logging.getLogger(__name__)
 
         while True:  # Completion verification loop
+            # Per-iteration, NOT per-turn: the flag means "the reply currently in
+            # `llm_response` is already in history". A continuation replaces
+            # `llm_response`, so a stale True would make the post-loop fallback
+            # skip a reply that was never persisted — dropping the answer the
+            # user just read on any INCOMPLETE turn whose continuation needs no
+            # tools (tool_round stays 0, so the loop breaks at the gate below
+            # before the append).
+            _reply_persisted = False
             tool_round = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
@@ -2923,14 +2942,31 @@ class ChatSession:
             # (ENG-1155). The turn ends on the model's own answer, which is
             # already in history — unverified, but that beats a per-turn
             # interruption we know the cause of.
+            # Re-probe occasionally so the latch can't outlive its cause: the
+            # user may switch off the broken model mid-session, or the gateway
+            # fix may land. Without this, "reset on a successful verdict" is
+            # unreachable — a latched session skips every verdict call, so there
+            # is never another success to reset on. A failed re-probe stays
+            # latched and does NOT re-diagnose (the >=2 branch below breaks
+            # before the diagnosis), so the cost is one verdict call per
+            # _VERIFIER_LATCH_REPROBE_TURNS turns.
             if self._verifier_latched:
+                self._verifier_latch_skips += 1
+                if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
+                    _verifier_log.info(
+                        "completion-verifier skipped — latched after %d consecutive "
+                        "hard failures (skip %d/%d before re-probe); "
+                        "continuation=%d/%d tool_rounds=%d",
+                        self._verifier_hard_failures, self._verifier_latch_skips,
+                        _VERIFIER_LATCH_REPROBE_TURNS, continuation,
+                        self._max_continuations, tool_round,
+                    )
+                    break
                 _verifier_log.info(
-                    "completion-verifier skipped — latched after %d consecutive "
-                    "hard failures; continuation=%d/%d tool_rounds=%d",
-                    self._verifier_hard_failures, continuation,
-                    self._max_continuations, tool_round,
+                    "completion-verifier re-probing after %d skipped verifications",
+                    self._verifier_latch_skips,
                 )
-                break
+                self._verifier_latch_skips = 0
 
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation: enough context for
