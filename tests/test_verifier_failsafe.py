@@ -386,8 +386,21 @@ async def test_deterministic_hard_failure_latches_after_one_diagnosis(workspace,
             f"latched session kept calling the verifier ({verdict_calls} calls)"
         )
         assert session._verifier_latched is True
-        assert any("latched after 2 consecutive hard failures" in r.message
-                   for r in caplog.records), "the latch must announce itself once"
+        # Anchor on a substring unique to the ANNOUNCEMENT line. The previous
+        # assertion matched "latched after N consecutive hard failures", which
+        # the per-turn *skip* log also contained — so it passed on turns 3-4
+        # without ever guarding the announcement it was written for
+        # (review: pnewsam on #299).
+        announcements = [
+            r for r in caplog.records
+            if "skipping further verification this session" in r.message
+        ]
+        assert len(announcements) == 1, (
+            f"the latch must announce itself exactly once, got {len(announcements)}"
+        )
+        assert "no successful verdict between them" in announcements[0].message, (
+            f"announcement must state the real reset semantics: {announcements[0].message!r}"
+        )
         skips = [r for r in caplog.records
                  if "completion-verifier skipped — latched" in r.message]
         assert len(skips) == 2, (

@@ -2985,8 +2985,9 @@ class ChatSession:
                 self._verifier_latch_skips += 1
                 if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
                     _verifier_log.info(
-                        "completion-verifier skipped — latched after %d consecutive "
-                        "hard failures (skip %d/%d before re-probe); "
+                        "completion-verifier skipped — latched after %d hard "
+                        "failures with no successful verdict between them "
+                        "(skip %d/%d before re-probe); "
                         "continuation=%d/%d tool_rounds=%d",
                         self._verifier_hard_failures, self._verifier_latch_skips,
                         _VERIFIER_LATCH_REPROBE_TURNS, continuation,
