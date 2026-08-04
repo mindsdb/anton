@@ -1,0 +1,37 @@
+name: Verifier verdict eval
+
+# Behavioural eval for the completion verifier's verdict quality (ENG-1211):
+# real verdict calls over committed transcript fixtures, asserting the
+# returned status. Runs only on PRs that touch the verifier's home file (or
+# the eval itself) — a rubric edit that regresses a case should be caught by
+# the PR, not by a customer.
+#
+# Requires the MINDSHUB_API_KEY repo secret. When it is absent (forks, or
+# before an admin adds it), pytest skips every case and the job stays green —
+# the gate is the key's presence, not workflow logic.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - "anton/core/session.py"
+      - "tests/test_verifier_verdict_live.py"
+
+jobs:
+  verdict-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Run verdict-quality eval (auto-skips without key)
+        env:
+          MINDSHUB_API_KEY: ${{ secrets.MINDSHUB_API_KEY }}
+        run: uv run --extra dev pytest tests/test_verifier_verdict_live.py -v
