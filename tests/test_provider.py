@@ -46,6 +46,13 @@ class TestRaiseOnEmptyResponse:
         # legitimately empty turn) — not a truncated/empty 200.
         raise_on_empty_response(content="", tool_calls=[], stop_reason="stop")
 
+    def test_empty_string_stop_reason_counts_as_absent(self):
+        # An empty-string stop_reason is treated as absent (no real provider
+        # sends ""), so an otherwise-empty response still raises. Pins the
+        # truthiness predicate against a revert to `stop_reason is not None`.
+        with pytest.raises(TransientProviderError):
+            raise_on_empty_response(content="", tool_calls=[], stop_reason="")
+
     def test_parse_response_object_raises_on_empty_200(self):
         # End-to-end: an empty output with no status is the silent-empty 200 the
         # guard exists to catch — it must raise, not return an empty LLMResponse.
