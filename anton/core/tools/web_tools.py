@@ -367,6 +367,20 @@ async def _fetch_once(url: str, max_chars: int) -> _FetchResult:
     )
 
 
+def _redact_url(url: str) -> str:
+    """Strip the query string and fragment before logging.
+
+    A model-supplied URL can carry credentials in the query (``?api_key=…``);
+    logging scheme+host+path keeps the audit line useful without leaking them.
+    """
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return "<unparseable-url>"
+    base = f"{parts.scheme}://{parts.netloc}{parts.path}"
+    return f"{base}?<redacted>" if parts.query else base
+
+
 def _log_fetch(
     url: str,
     status: object,
@@ -380,7 +394,7 @@ def _log_fetch(
     logger.log(
         level,
         "web_fetch url=%s method=GET status=%s bytes=%d attempts=%d elapsed_ms=%d",
-        url,
+        _redact_url(url),
         status,
         num_bytes,
         attempts,
