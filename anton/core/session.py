@@ -1080,6 +1080,12 @@ class ChatSession:
             from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL
             self.tool_registry.register_tool(WEB_FETCH_FALLBACK_TOOL)
 
+        # Minimal stub tool exercising a multi-step, own-context structure
+        # (see anton/core/tools/test_tool.py). Delete that file plus this
+        # block to remove it.
+        from anton.core.tools.test_tool import TEST_TOOL
+        self.tool_registry.register_tool(TEST_TOOL)
+
         # Artifacts — only register when a workspace is bound to the
         # session. Bare-cwd CLI sessions without `resolve_workspace`
         # have nowhere to write artifacts to, and the tool handlers
