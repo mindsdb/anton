@@ -54,6 +54,36 @@ class TestLastCompaction:
         # The last 4 (uncompacted) turns survive verbatim, in order.
         assert session.history[-4:] == original[6:]
 
+    async def test_failed_summarize_reports_no_compaction(self):
+        """A transient summarize error must NOT be reported as a compaction —
+        the host would otherwise persist the fact-free placeholder as the
+        durable summary, and it can never self-heal (it carries the marker)."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(side_effect=RuntimeError("blip"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+        await session._summarize_history()
+
+        assert session.last_compaction is None
+
+    async def test_hard_truncate_clears_compaction_record(self):
+        """compact then hard_truncate in one turn (the recovery ladder's
+        double-overflow path): history[0] is now the truncation placeholder,
+        so last_compaction must report None, not the placeholder."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nx"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+        await session._summarize_history()
+        assert session.last_compaction is not None  # precondition
+        session.hard_truncate_history()
+
+        assert session.last_compaction is None
+
 
 class TestSkipWhenLittleNewMaterial:
     async def test_skips_llm_call_when_old_turns_are_negligible(self):

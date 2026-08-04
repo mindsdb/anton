@@ -1258,6 +1258,8 @@ class ChatSession:
                 max_tokens=2048,
             )
             summary = summary_response.content or "(summary unavailable)"
+            # Record the compaction ONLY on success.
+            self._last_compacted_count = compacted_count
         except Exception:
             # If summarization fails, just do a simple truncation
             summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
@@ -1275,7 +1277,6 @@ class ChatSession:
             f"{summary}"
         )
         summary_msg = {"role": "user", "content": summary_body}
-        self._last_compacted_count = compacted_count
 
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
@@ -1476,6 +1477,12 @@ class ChatSession:
             self._history = [placeholder, *tail]
         else:
             self._history = [placeholder, separator, *tail]
+
+        # A hard truncate discards the compacted summary — history[0] is now
+        # the truncation placeholder, not the summary. Clear the compaction
+        # record so `last_compaction` reports None (keep-full-history) rather
+        # than letting a host persist the placeholder as the durable summary.
+        self._last_compacted_count = None
 
     async def plan_with_recovery(
         self,
