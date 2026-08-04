@@ -25,7 +25,11 @@ def test_keeps_prior_turn_context_for_referential_followups():
     assert "now do the same for the other file" in out
 
 
-def test_includes_truncated_tool_result_evidence():
+def test_includes_tool_result_evidence_verbatim_when_short():
+    # Short results (under tool_cap) reach the verifier untouched — this pins
+    # the ENG-716 "content, not just ok/error" property. It does NOT exercise
+    # truncation; direction-of-truncation coverage lives in
+    # test_truncates_large_tool_output_keeping_both_ends.
     history = [
         {"role": "user", "content": "how many open PRs?"},
         {"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad"}]},
