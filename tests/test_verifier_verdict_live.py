@@ -33,7 +33,10 @@ one blocker), so a single run passes ~20% of the time by luck. The STUCK case
 therefore also doubles as ENG-836's before/after measurement.
 
 Cost note: a full run is ~50 verdict calls over ~2-4k-token transcripts on
-cheap aliases.
+cheap aliases, ~4 minutes wall. Because the key is also picked up from the
+repo-root ``.env``, a plain ``pytest tests/`` on a machine with a keyed
+``.env`` runs this live — same behaviour as ``test_web_tools_live.py``.
+Deselect with ``-k "not verdict_live"`` or unset the key to skip.
 """
 
 from __future__ import annotations
@@ -168,7 +171,6 @@ class Case:
     history: list[dict]
     expected: str
     source: str
-    runs: int = 0  # 0 → module default (_RUNS, or _STUCK_RUNS for STUCK)
 
 
 # --- 1. Tool errored early, model recovered another way → COMPLETE ----------
@@ -414,7 +416,6 @@ _STUCK = Case(
     ],
     expected="STUCK",
     source="ENG-836 (Kiranam environment wall, base rate 1-in-5)",
-    runs=0,  # resolved to _STUCK_RUNS below
 )
 
 # --- 5. Stopped partway through a multi-part request → INCOMPLETE -----------
@@ -453,8 +454,6 @@ _CASES = [_RECOVERED, _IMPLIED_SUCCESS, _WAITING, _STUCK, _PARTIAL]
 
 
 def _runs_for(case: Case) -> int:
-    if case.runs:
-        return case.runs
     return _STUCK_RUNS if case.expected == "STUCK" else _RUNS
 
 
