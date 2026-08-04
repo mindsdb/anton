@@ -195,7 +195,19 @@ class _VerifierVerdict(BaseModel):
             "including when it implied success but the data its answer actually "
             "depends on errored or came back empty and was never recovered.\n"
             "- STUCK: a hard blocker prevents completion (missing credentials, an "
-            "unavailable service, or a permission the assistant does not have)."
+            "unavailable service, or a permission the assistant does not have). "
+            # Environment walls must be named explicitly or the verifier files
+            # them under INCOMPLETE and force-continues into the wall: measured
+            # 0-1/12 STUCK without the sentences below vs 12/12 with them, on
+            # the same blocked-task transcript, with unblocked-unfinished and
+            # errored-but-recovered controls unmoved (ENG-836 live A/B,
+            # 2026-08-04).
+            "This includes environment walls: an OS-level package, driver, or "
+            "system library the task requires but that cannot be installed in "
+            "this environment (no root/sudo, package manager blocked). Repeated "
+            "failed workarounds for the same underlying blocker mean STUCK, not "
+            "INCOMPLETE — even if the assistant says it will try another "
+            "approach."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
