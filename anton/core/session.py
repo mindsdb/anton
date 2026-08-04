@@ -363,7 +363,15 @@ def _clip_keep_cause(text: str, cap: int) -> str:
     head = cap // 3
     tail = cap - head
     elided = len(text) - head - tail
-    return f"{text[:head]}\n[... {elided} chars elided ...]\n{text[-tail:]}"
+    marker = f"\n[... {elided} chars elided ...]\n"
+    # Near-threshold inputs: when the marker costs at least what it removes,
+    # clipping would EXPAND the text (a 401-char input at cap=400 came back
+    # ~428 chars with a "[... 1 chars elided ...]" in the middle). Pass those
+    # through whole — same worst-case output bound, and the invariant becomes
+    # "clipping never returns more characters than it was given" (#305 review).
+    if len(text) <= cap + len(marker):
+        return text
+    return f"{text[:head]}{marker}{text[-tail:]}"
 
 
 def _render_tool_result_content(content, cap: int) -> str:

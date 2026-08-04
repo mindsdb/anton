@@ -75,6 +75,22 @@ def test_truncates_large_tool_output_keeping_both_ends():
     assert "chars elided" in out
 
 
+def test_near_threshold_output_passes_through_whole():
+    # A 401-char result at cap=400 must come back verbatim, not "clipped" into
+    # ~428 chars with a "[... 1 chars elided ...]" in the middle — the marker
+    # may never cost more than it removes (#305 review nit). The invariant:
+    # clipping never returns more characters than it was given.
+    near = "BEGIN " + "y" * 395 + " END"  # just over the 400 cap
+    assert 400 < len(near) < 430
+    history = [
+        {"role": "user", "content": "run it"},
+        {"role": "user", "content": [{"type": "tool_result", "content": near}]},
+    ]
+    out = _render_verify_transcript(history, tool_cap=400)
+    assert near in out
+    assert "chars elided" not in out
+
+
 def test_traceback_cause_survives_truncation():
     # Regression for ENG-836: the verifier judged an unrecoverable environment
     # wall INCOMPLETE because head-truncation kept the traceback preamble and
