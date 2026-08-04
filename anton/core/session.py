@@ -195,7 +195,19 @@ class _VerifierVerdict(BaseModel):
             "including when it implied success but the data its answer actually "
             "depends on errored or came back empty and was never recovered.\n"
             "- STUCK: a hard blocker prevents completion (missing credentials, an "
-            "unavailable service, or a permission the assistant does not have)."
+            "unavailable service, or a permission the assistant does not have). "
+            # Environment walls must be named explicitly or the verifier files
+            # them under INCOMPLETE and force-continues into the wall: measured
+            # 0-1/12 STUCK without the sentences below vs 12/12 with them, on
+            # the same blocked-task transcript, with unblocked-unfinished and
+            # errored-but-recovered controls unmoved (ENG-836 live A/B,
+            # 2026-08-04).
+            "This includes environment walls: an OS-level package, driver, or "
+            "system library the task requires but that cannot be installed in "
+            "this environment (no root/sudo, package manager blocked). Repeated "
+            "failed workarounds for the same underlying blocker mean STUCK, not "
+            "INCOMPLETE — even if the assistant says it will try another "
+            "approach."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
@@ -335,15 +347,44 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
+def _clip_keep_cause(text: str, cap: int) -> str:
+    """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
+
+    A failing tool result names its cause at the END — a traceback's final
+    line is the one that says ``libodbc.so.2: cannot open shared object
+    file`` — while the head carries what ran and the ``[error]`` marker. A
+    plain ``text[:cap]`` therefore showed the verifier the shape of a failure
+    but discarded its cause, which is how an unrecoverable environment wall
+    kept getting judged INCOMPLETE instead of STUCK (ENG-836). Keep a small
+    head, elide the middle, and spend most of the budget on the tail.
+    """
+    if len(text) <= cap:
+        return text
+    head = cap // 3
+    tail = cap - head
+    elided = len(text) - head - tail
+    marker = f"\n[... {elided} chars elided ...]\n"
+    # Near-threshold inputs: when the marker costs at least what it removes,
+    # clipping would EXPAND the text (a 401-char input at cap=400 came back
+    # ~428 chars with a "[... 1 chars elided ...]" in the middle). Pass those
+    # through whole — same worst-case output bound, and the invariant becomes
+    # "clipping never returns more characters than it was given" (#305 review).
+    if len(text) <= cap + len(marker):
+        return text
+    return f"{text[:head]}{marker}{text[-tail:]}"
+
+
 def _render_tool_result_content(content, cap: int) -> str:
     """Render a tool_result's content as bounded plain text.
 
     Never serializes raw payloads: a multimodal result (e.g. read_image) can
     carry megabytes of base64, so we keep only text blocks and mark images with
     a placeholder rather than ``json.dumps``-ing the whole thing (ENG-716).
+    Oversize content is clipped tail-biased so a failure's cause survives
+    (ENG-836).
     """
     if isinstance(content, str):
-        return content[:cap] or "(empty result)"
+        return _clip_keep_cause(content, cap) or "(empty result)"
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
@@ -353,8 +394,9 @@ def _render_tool_result_content(content, cap: int) -> str:
                 parts.append((block.get("text") or "").strip())
             elif block.get("type") in ("image", "image_url"):
                 parts.append("[image]")
-        return (" ".join(p for p in parts if p)[:cap]) or "[non-text result]"
-    return str(content)[:cap]
+        joined = " ".join(p for p in parts if p)
+        return _clip_keep_cause(joined, cap) or "[non-text result]"
+    return _clip_keep_cause(str(content), cap)
 
 
 def _render_verify_transcript(
