@@ -5,9 +5,9 @@ tests/test_chat_scratchpad.py::TestScratchpadStreaming::test_scratchpad_in_strea
 (a real ChatSession driven by a scripted plan_stream, draining
 session.turn_stream(...)) — adapted for a generic, non-scratchpad streaming
 tool. The tool is registered directly via
-session.tool_registry.register_tool(...) rather than depending on
-anton/core/tools/test_tool.py, so this test survives that file's eventual
-deletion.
+session.tool_registry.register_tool(...) rather than depending on a
+core-registered tool, so this test doesn't need any particular tool to exist
+in `_build_core_tools()`.
 """
 
 from __future__ import annotations

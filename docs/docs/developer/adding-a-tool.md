@@ -44,8 +44,8 @@ machinery):
    to the console while it runs, the handler can instead be an **async
    generator** yielding `ToolProgress` markers (`anton/core/tools/progress.py`)
    followed by one final result — see [Tool system](/developer/tool-system)
-   and `anton/core/tools/test_tool.py` for the reference example. Most tools
-   don't need this; it's for genuinely multi-step work.
+   for the protocol details. Most tools don't need this; it's for genuinely
+   multi-step work.
 3. **Registration** in `ChatSession._build_core_tools()`
    (`anton/core/session.py`), optionally guarded by a condition (workspace
    bound, episodic enabled, ...). Embedding hosts can instead pass extra

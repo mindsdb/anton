@@ -36,11 +36,11 @@ A handler may instead be an **async generator** that yields zero or more
 `ToolProgress` markers (`anton/core/tools/progress.py`) followed by exactly
 one final `str`/`list[dict]` — the same thing a plain handler would return.
 Progress markers never reach the LLM; they exist only to print incremental
-lines to the console while the tool runs (see `anton/core/tools/test_tool.py`
-for the reference example). A generator handler that never yields a
-non-`ToolProgress` item is a bug, not a valid "no result" — `dispatch_tool`/
-`dispatch_tool_stream` raise `RuntimeError` rather than silently returning
-`None`.
+lines to the console while the tool runs (see
+`tests/test_turn_stream_tool_progress.py` for a worked example of the
+protocol). A generator handler that never yields a non-`ToolProgress` item is
+a bug, not a valid "no result" — `dispatch_tool`/`dispatch_tool_stream` raise
+`RuntimeError` rather than silently returning `None`.
 
 ## `ToolRegistry`
 
