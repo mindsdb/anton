@@ -58,7 +58,7 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
-from anton.core.tools.registry import ToolRegistry
+from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
@@ -741,18 +741,40 @@ class ChatSession:
         tool_name: str,
         error_streak: dict[str, int],
         resilience_nudged: set[str],
+        ok: bool | None = None,
     ) -> str:
-        """Track consecutive errors per tool and append nudge/circuit-breaker messages."""
-        is_error = any(
-            marker in result_text
-            for marker in (
-                "[error]",
-                "Task failed:",
-                "failed",
-                "timed out",
-                "Rejected:",
+        """Track consecutive errors per tool and append nudge/circuit-breaker messages.
+
+        ``ok`` is the handler's own verdict (see ``ToolOutcome``, ENG-1276).
+        When present it decides outright — the tool knew whether it failed and
+        the result never needed to be re-classified by reading it. ``None``
+        means an unmigrated handler: fall back to the legacy substring match,
+        and log when that fallback classifies an error so the remaining call
+        sites are discoverable. The substring match misclassifies in both
+        directions — a success printing "0 records failed" increments the
+        streak, and a genuine failure using none of the five phrases RESETS
+        it, which is how the ENG-836 driver ping-pong (interleaved false
+        "successes") kept the breaker asleep at ~4.95M tokens.
+        """
+        if ok is not None:
+            is_error = not ok
+        else:
+            is_error = any(
+                marker in result_text
+                for marker in (
+                    "[error]",
+                    "Task failed:",
+                    "failed",
+                    "timed out",
+                    "Rejected:",
+                )
             )
-        )
+            if is_error:
+                logger.info(
+                    "tool-failure classified by text fallback for '%s' — "
+                    "handler not yet migrated to ToolOutcome (ENG-1276)",
+                    tool_name,
+                )
         if is_error:
             error_streak[tool_name] = error_streak.get(tool_name, 0) + 1
         else:
@@ -2093,11 +2115,18 @@ class ChatSession:
             tool_results: list[dict] = []
             for tc in response.tool_calls:
                 try:
-                    result = await self.tool_registry.dispatch_tool(
+                    outcome = await self.tool_registry.dispatch_tool(
                         self, tc.name, tc.input
                     )
                 except Exception as exc:
-                    result = f"Tool '{tc.name}' failed: {exc}"
+                    # A raise is a definitive failure verdict — no text
+                    # classification needed (ENG-1276).
+                    outcome = ToolOutcome(
+                        content=f"Tool '{tc.name}' failed: {exc}",
+                        ok=False,
+                        reason=type(exc).__name__,
+                    )
+                result = outcome.content
 
                 if isinstance(result, list):
                     # Multimodal tool result — scrub credentials from text
@@ -2121,6 +2150,7 @@ class ChatSession:
                         tc.name,
                         error_streak,
                         resilience_nudged,
+                        ok=outcome.ok,
                     )
                     content = result
 
@@ -2731,12 +2761,17 @@ class ChatSession:
 
                     _tool_t0 = _time.monotonic()
 
+                    # The handler's own failure verdict, when it gave one —
+                    # drives the error streak instead of text matching
+                    # (ENG-1276). None = unmigrated handler → legacy fallback.
+                    tool_ok: bool | None = None
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
                             prep = await prepare_scratchpad_exec(self, tc.input)
-                            if isinstance(prep, str):
-                                result_text = prep
+                            if isinstance(prep, ToolOutcome):
+                                result_text = prep.content
+                                tool_ok = prep.ok
                             else:
                                 (
                                     pad,
@@ -2783,6 +2818,14 @@ class ChatSession:
                                     if cell
                                     else "No result produced."
                                 )
+                                # The runtime's verdict, not a text guess: a
+                                # cell with a raised error/timeout/kill failed;
+                                # stderr-only output (warnings) is not a
+                                # failure for streak purposes. A cancelled
+                                # exec (cell is None) stays None — neither
+                                # success nor failure (ENG-1276).
+                                if cell is not None:
+                                    tool_ok = not (cell.error or "").strip()
                                 if cell is not None:
                                     self._record_cell_explainability(
                                         pad_name=tc.input.get("name", ""),
@@ -2827,9 +2870,11 @@ class ChatSession:
                             if self._escape_watcher:
                                 self._escape_watcher.pause()
                             try:
-                                result_text = await self.tool_registry.dispatch_tool(
+                                _outcome = await self.tool_registry.dispatch_tool(
                                     self, tc.name, tc.input
                                 )
+                                result_text = _outcome.content
+                                tool_ok = _outcome.ok
                             finally:
                                 if self._escape_watcher:
                                     self._escape_watcher.resume()
@@ -2843,9 +2888,11 @@ class ChatSession:
                                 phase="tool_start",
                                 message=tc.name,
                             )
-                            result_text = await self.tool_registry.dispatch_tool(
+                            _outcome = await self.tool_registry.dispatch_tool(
                                 self, tc.name, tc.input
                             )
+                            result_text = _outcome.content
+                            tool_ok = _outcome.ok
                             _tool_elapsed = _time.monotonic() - _tool_t0
                             yield StreamTaskProgress(
                                 phase="tool_done",
@@ -2863,7 +2910,9 @@ class ChatSession:
                                     + result_text
                                 )
                     except Exception as exc:
+                        # A raise is a definitive failure verdict (ENG-1276).
                         result_text = f"Tool '{tc.name}' failed: {exc}"
+                        tool_ok = False
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
@@ -2911,20 +2960,21 @@ class ChatSession:
                         )
                     result_text = scrub_credentials(result_text)
                     result_text = self._apply_error_tracking(
-                        result_text, tc.name, error_streak, resilience_nudged
+                        result_text, tc.name, error_streak, resilience_nudged,
+                        ok=tool_ok,
                     )
-                    # ACC: tool_result emit. Heuristic success-detection
-                    # from the result text — anton-core does not have a
-                    # structured success/error envelope at this layer,
-                    # so we look for the conventional "Tool 'X' failed"
-                    # prefix that the exception branch above sets, plus
-                    # any handler that prefixed its return with "Error:"
-                    # or the dispatcher's own error-tracking markers.
-                    _failed = (
-                        f"Tool '{tc.name}' failed:" in result_text
-                        or result_text.startswith("Error:")
-                        or "ERROR:" in result_text[:200].upper()
-                    )
+                    # ACC: tool_result emit. Prefer the handler's own verdict
+                    # (ENG-1276); heuristic text-detection only for handlers
+                    # that haven't declared one — the conventional
+                    # "Tool 'X' failed" prefix plus "Error:"-prefixed returns.
+                    if tool_ok is not None:
+                        _failed = not tool_ok
+                    else:
+                        _failed = (
+                            f"Tool '{tc.name}' failed:" in result_text
+                            or result_text.startswith("Error:")
+                            or "ERROR:" in result_text[:200].upper()
+                        )
                     self._acc_observe(
                         "tool_result",
                         {
