@@ -108,7 +108,7 @@ def _client(model: str) -> LLMClient:
     return LLMClient.from_settings(settings)
 
 
-async def _verdict(llm: LLMClient, case: Case) -> str:
+async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:
     """One verdict call, replicating session.py's budget-escalation loop:
     first budget, retry once on truncation with the bigger one (ENG-1081).
     Anything else propagates — a hard failure here is a test failure, which is
@@ -117,10 +117,9 @@ async def _verdict(llm: LLMClient, case: Case) -> str:
     system, messages = _build_verify_request(case.history, case.user_message)
     for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
         try:
-            verdict = await llm.generate_object_code(
+            return await llm.generate_object_code(
                 _VerifierVerdict, system=system, messages=messages, max_tokens=budget
             )
-            return verdict.status
         except StructuredOutputError as exc:
             if exc.truncated and attempt + 1 < len(_VERIFIER_TOKEN_BUDGETS):
                 continue
@@ -128,7 +127,7 @@ async def _verdict(llm: LLMClient, case: Case) -> str:
     raise AssertionError("unreachable: budget loop exhausted without raising")
 
 
-async def _verdicts(llm: LLMClient, case: Case, n: int) -> list[str]:
+async def _verdicts(llm: LLMClient, case: Case, n: int) -> list[_VerifierVerdict]:
     # Sequential, not gathered: the gateway rate-limits per key (ENG-878
     # counts full context per request), and a burst of parallel verdict calls
     # 429ing would fail the eval for reasons that say nothing about the rubric.
@@ -467,10 +466,15 @@ def _runs_for(case: Case) -> int:
 async def test_verdict(model: str, case: Case):
     llm = _client(model)
     n = _runs_for(case)
-    statuses = await _verdicts(llm, case, n)
+    verdicts = await _verdicts(llm, case, n)
+    statuses = [v.status for v in verdicts]
+    # The verifier's own `reason` strings are the diagnostic for a red run —
+    # "why did the rubric flip" — so surface them in the failure message
+    # instead of just the statuses.
+    detail = "; ".join(f"{v.status}: {v.reason}" for v in verdicts)
     assert statuses == [case.expected] * n, (
-        f"{case.name} on {model}: expected {case.expected} x{n}, got {statuses} "
-        f"(source: {case.source})"
+        f"{case.name} on {model}: expected {case.expected} x{n} "
+        f"(source: {case.source}), got [{detail}]"
     )
 
 
@@ -481,7 +485,12 @@ async def test_narrating_model_reaches_a_verdict_at_shipped_budgets():
     which the fail-safe upstream turned into silent task death. Verdict
     *quality* on this alias is covered by the matrix above; this asserts only
     that the call survives the model's narration.
+
+    Behaviourally this overlaps the matrix (a truncation escape on the
+    recovered fixture would fail `test_verdict` too) — kept as one cheap,
+    named call so the ENG-1081 regression class stays traceable in the test
+    report even if the matrix's cases or models are later reshaped.
     """
     llm = _client(_NARRATING_MODEL)
-    status = await _verdict(llm, _RECOVERED)
-    assert status in ("COMPLETE", "WAITING", "INCOMPLETE", "STUCK")
+    verdict = await _verdict(llm, _RECOVERED)
+    assert verdict.status in ("COMPLETE", "WAITING", "INCOMPLETE", "STUCK")

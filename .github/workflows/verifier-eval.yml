@@ -16,8 +16,20 @@ permissions:
 on:
   pull_request:
     paths:
+      # The rubric, status definitions, budgets, and prompt construction.
       - "anton/core/session.py"
+      # The verdict call path: forced-tool-call plumbing and truncation
+      # classification. A looks_truncated regression re-creates ENG-1081
+      # without ever touching session.py.
+      - "anton/core/llm/structured.py"
+      - "anton/core/llm/client.py"
       - "tests/test_verifier_verdict_live.py"
+
+# One live run per PR at a time — a force-push cancels the superseded run
+# instead of stacking ~50 prod gateway calls per push.
+concurrency:
+  group: verifier-eval-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verdict-eval:
