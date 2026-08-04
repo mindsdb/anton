@@ -21,6 +21,14 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Check requirements.txt matches uv.lock
+        # Snyk's repo scan reads requirements.txt, not uv.lock, so the committed
+        # export has to stay in step with the lockfile.
+        run: |
+          uv export --frozen --no-dev --no-emit-project --no-hashes --no-annotate \
+            --format requirements-txt > "$RUNNER_TEMP/requirements.txt"
+          diff -u requirements.txt "$RUNNER_TEMP/requirements.txt"
+
       - name: Run unit tests
         run: uv run --extra dev pytest tests/ -v --ignore=tests/e2e
 
