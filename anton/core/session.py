@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 import random
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -211,11 +212,40 @@ class _VerifierVerdict(BaseModel):
 #
 # 2048 is sized from a measured distribution, not one sample: 16 identical calls
 # spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is also
-# why there is no "this model can't do it" latch — one truncation is a tail
-# sample, not proof about the next turn — and why the 4096 retry exists rather
-# than a single bigger budget. 1024 was measurably too small. Nothing pays for
-# headroom it doesn't use; first-party models answer in 43–115 tokens either way.
+# why *truncation* never latches — one truncation is a tail sample, not proof
+# about the next turn — and why the 4096 retry exists rather than a single bigger
+# budget. 1024 was measurably too small. Nothing pays for headroom it doesn't
+# use; first-party models answer in 43–115 tokens either way.
+#
+# A *hard* failure does latch, which is a different claim: a 400 rejecting the
+# forced `tool_choice` is a statement about the model, not about this transcript
+# (ENG-1095/ENG-1155). See `_verifier_latched`.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
+
+# Verdict-call failures that are transient by nature rather than statements about
+# the model's capability. The latch exists for a model that *cannot* produce a
+# verdict (kimi-K3 rejecting the forced `tool_choice` with a 400, ENG-1095); a
+# dropped connection or a read timeout says nothing about that, and counting it
+# would let two blips switch verification off for a whole re-probe window
+# (review: pnewsam on #299).
+#
+# `TransientProviderError` is ENG-673's typed mapping and is listed first for
+# intent, though `OSError` already covers it (it subclasses `ConnectionError`).
+# `OSError` also covers `asyncio.TimeoutError`, which is `TimeoutError` — an
+# `OSError` subclass — on 3.11+. `httpx.TransportError` covers the transport the
+# OpenAI SDK uses, which is reachable when an error escapes the SDK's own
+# wrapping. Anything outside this set still latches, bounded by the re-probe.
+_TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
+    TransientProviderError,
+    OSError,
+    httpx.TransportError,
+)
+
+# Turns a latched session skips before spending one verdict call to see whether
+# the cause has gone away (user switched model, gateway fix shipped). Without a
+# re-probe the latch is permanent for the session and "reset on a successful
+# verdict" can never fire, since a latched session makes no verdict calls.
+_VERIFIER_LATCH_REPROBE_TURNS = 10
 
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
@@ -466,6 +496,15 @@ class ChatSession:
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
+        # Latch for a verifier that fails the same hard way every turn — e.g.
+        # kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), which
+        # fails on every verdict call until the gateway fix lands. Without the
+        # latch, each multi-step turn pays a full-history diagnosis call and
+        # shows the "checking in" message (ENG-1155). Session-scoped: a hard
+        # failure twice in a row latches, a successful verdict clears it.
+        self._verifier_hard_failures = 0
+        self._verifier_latched = False
+        self._verifier_latch_skips = 0
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -1570,6 +1609,42 @@ class ChatSession:
         self.hard_truncate_history()
         return await self._llm.plan(messages=factory_validated(), **kwargs)
 
+    async def _stream_handback_diagnosis(self, *, system: str, label: str):
+        """Stream a hand-back diagnosis and persist exactly what the user read.
+
+        All three hand-back paths (STUCK, budget-exhausted, verifier-call
+        failure) stream a model-generated message and then stop the turn. The
+        message must be captured into history, because it — not the reply the
+        verifier rejected — is what the user actually saw. Persisting it also
+        keeps `history[-1]` an assistant message, which is what stops the
+        post-loop fallback from re-appending the stale reply (ENG-1155).
+
+        An empty diagnosis is logged rather than appended: an empty assistant
+        turn would recreate the same out-of-sync history this exists to fix,
+        and stale-but-real beats blank.
+        """
+        log = logging.getLogger(__name__)
+        diagnosis_response = None
+        async for event in self.plan_stream_with_recovery(system=system):
+            yield event
+            if isinstance(event, StreamComplete):
+                diagnosis_response = event
+        text = (
+            (diagnosis_response.response.content or "").strip()
+            if diagnosis_response is not None
+            else ""
+        )
+        if text:
+            self._append_history({"role": "assistant", "content": text})
+        else:
+            log.warning(
+                "%s diagnosis returned no content — nothing appended; history "
+                "keeps its existing tail (the pre-verification reply on the "
+                "verifier paths, the injected SYSTEM pause message on the "
+                "max-tool-rounds path, since the cap block appends that last)",
+                label,
+            )
+
     async def plan_stream_with_recovery(
         self,
         *,
@@ -2486,10 +2561,22 @@ class ChatSession:
         # task isn't actually done yet.
         continuation = 0
         _max_rounds_hit = False
+        # Set per verification-loop iteration (see below): tells the post-loop
+        # fallback the current reply is already in history, so it must not append
+        # it a second time (ENG-1155 double-append).
+        _reply_persisted = False
         import logging as _logging
         _verifier_log = _logging.getLogger(__name__)
 
         while True:  # Completion verification loop
+            # Per-iteration, NOT per-turn: the flag means "the reply currently in
+            # `llm_response` is already in history". A continuation replaces
+            # `llm_response`, so a stale True would make the post-loop fallback
+            # skip a reply that was never persisted — dropping the answer the
+            # user just read on any INCOMPLETE turn whose continuation needs no
+            # tools (tool_round stays 0, so the loop breaks at the gate below
+            # before the append).
+            _reply_persisted = False
             tool_round = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
@@ -2519,7 +2606,16 @@ class ChatSession:
                             ),
                         }
                     )
-                    async for event in self.plan_stream_with_recovery(system=system):
+                    # Fourth hand-back path, same defect as the other three: the
+                    # reply above is already in history, so without capturing the
+                    # diagnosis the post-loop fallback appends that reply a second
+                    # time and the message the user actually read is lost
+                    # (ENG-1155 — this site is not named in the ticket, and it is
+                    # the highest-traffic one of the four).
+                    _reply_persisted = True
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="max-tool-rounds"
+                    ):
                         yield event
                     break
 
@@ -2884,9 +2980,13 @@ class ChatSession:
             if tool_round < self._verify_min_tool_rounds or _max_rounds_hit:
                 break
 
-            # Append the assistant's final text so the verifier can see it
+            # Append the assistant's final text so the verifier can see it.
+            # Once this has run, the post-loop fallback must NOT append `reply`
+            # again — doing so is what put the rejected reply in history twice
+            # on every hand-back turn (ENG-1155).
             reply = llm_response.content or ""
             self._append_history({"role": "assistant", "content": reply})
+            _reply_persisted = True
 
             if continuation >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
@@ -2908,10 +3008,55 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing incomplete task..."
                 )
-                async for event in self.plan_stream_with_recovery(system=system):
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="budget-exhausted"
+                ):
                     yield event
                 # Consolidation still runs after diagnosis
                 break
+
+            # A verifier that already failed hard twice in a row will keep
+            # failing for the rest of the session (ENG-1095's forced-tool_choice
+            # 400 is per-model, not per-call). Skip the verdict rather than pay a
+            # full-history diagnosis every turn and show "checking in" each time
+            # (ENG-1155). The turn ends on the model's own answer, which is
+            # already in history — unverified, but that beats a per-turn
+            # interruption we know the cause of.
+            # Re-probe occasionally so the latch can't outlive its cause: the
+            # user may switch off the broken model mid-session, or the gateway
+            # fix may land. Without this, "reset on a successful verdict" is
+            # unreachable — a latched session skips every verdict call, so there
+            # is never another success to reset on. A hard-failing re-probe stays
+            # latched and does NOT re-diagnose (the latched branch below breaks
+            # before the diagnosis), so the cost is one verdict call per
+            # _VERIFIER_LATCH_REPROBE_TURNS turns.
+            # A re-probe that TRUNCATES (or hits a typed TransientProviderError)
+            # instead is intended to fall through to the honest diagnosis below,
+            # and it leaves the latch set: neither counts toward or against the
+            # latch (truncation is a tail sample, see _VERIFIER_TOKEN_BUDGETS;
+            # typed transients never latch by definition), so only a successful
+            # verdict clears it. A latched session re-probing into a
+            # persistently-verbose model therefore diagnoses once per re-probe
+            # cycle rather than never — matching "every truncated turn keeps its
+            # honest diagnosis".
+            if self._verifier_latched:
+                self._verifier_latch_skips += 1
+                if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
+                    _verifier_log.info(
+                        "completion-verifier skipped — latched after %d hard "
+                        "failures with no successful verdict between them "
+                        "(skip %d/%d before re-probe); "
+                        "continuation=%d/%d tool_rounds=%d",
+                        self._verifier_hard_failures, self._verifier_latch_skips,
+                        _VERIFIER_LATCH_REPROBE_TURNS, continuation,
+                        self._max_continuations, tool_round,
+                    )
+                    break
+                _verifier_log.info(
+                    "completion-verifier re-probing after %d skipped verifications",
+                    self._verifier_latch_skips,
+                )
+                self._verifier_latch_skips = 0
 
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation: enough context for
@@ -2948,6 +3093,10 @@ class ChatSession:
                 + _VERIFIER_NO_PREAMBLE
             )
             verdict = None
+            # Truncation vs hard failure decides whether this counts toward the
+            # latch: a blown budget is a tail sample of one model's verbosity,
+            # an identical hard error twice is a capability problem (ENG-1155).
+            verdict_failure: str | None = None
             for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
                 try:
                     verdict = await self._llm.generate_object_code(
@@ -2965,6 +3114,7 @@ class ChatSession:
                     retrying = exc.truncated and attempt + 1 < len(
                         _VERIFIER_TOKEN_BUDGETS
                     )
+                    verdict_failure = "truncated" if exc.truncated else "hard"
                     _verifier_log.info(
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s retrying=%s",
@@ -2973,11 +3123,28 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except _TRANSIENT_VERDICT_ERRORS as exc:
+                    # Explicitly NOT a latch candidate. The latch is for a model
+                    # that cannot produce a verdict at all (kimi-K3 rejecting the
+                    # forced tool_choice with a 400, ENG-1095) — a statement about
+                    # capability. A transient failure is the opposite claim:
+                    # retryable, and typed ones are already retried upstream
+                    # (ENG-673). Counting them would let two provider blips
+                    # disable verification for a whole re-probe window. The turn
+                    # still gets its honest diagnosis (ENG-1079); it just doesn't
+                    # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
+                    verdict_failure = "transient"
+                    _verifier_log.info(
+                        "completion-verifier verdict=TRANSIENT budget=%d error=%s",
+                        budget, _safe_error_detail(exc),
+                    )
+                    break
                 except Exception as exc:
                     # Enough to tell the failure modes apart — four used to
                     # collapse into one "verifier unavailable" line — but never
                     # the exception message, which can carry conversation
                     # content (ENG-1081).
+                    verdict_failure = "hard"
                     _verifier_log.info(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -2985,12 +3152,54 @@ class ChatSession:
                     break
 
             if verdict is not None:
+                # A working verdict clears the latch: whatever was failing
+                # (transient provider error, a model the user has since changed)
+                # is no longer failing.
+                self._verifier_hard_failures = 0
+                self._verifier_latched = False
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
-                # Verifier failed — fail safe by treating the turn as done rather
-                # than forcing a continuation the user never asked for.
-                status, reason = "COMPLETE", "verifier unavailable"
+                if verdict_failure == "hard":
+                    self._verifier_hard_failures += 1
+                    if self._verifier_latched:
+                        # A failed re-probe: the cause is still there. Stay
+                        # latched with its own log line — re-announcing "latched
+                        # after N failures" with an ever-growing N would read as
+                        # a new event each cycle. No re-diagnosis (one per
+                        # session, ENG-1155).
+                        _verifier_log.info(
+                            "completion-verifier re-probe failed — staying latched"
+                        )
+                        break
+                    if self._verifier_hard_failures >= 2:
+                        # Second hard failure in a row: the first could have been
+                        # transient, this one establishes the pattern. Latch and
+                        # skip the diagnosis on this turn too — a second
+                        # "checking in" message plus a second full-history call
+                        # buys nothing once the cause is known to recur. One
+                        # diagnosis per session (ENG-1155).
+                        #
+                        # "Hard" = neither truncation nor anything in
+                        # `_TRANSIENT_VERDICT_ERRORS` (see that except-clause
+                        # above). Connection drops and timeouts are transient and
+                        # never latch; what remains is the shape ENG-1095 has —
+                        # a provider that rejects the call itself.
+                        #
+                        # Not strictly "consecutive" either: the counter is reset
+                        # only by a *successful* verdict, so hard → truncated →
+                        # hard still latches on the second hard failure. That is
+                        # deliberate — only a real verdict proves the model can
+                        # produce one, and a truncation in between is no evidence
+                        # that it can (review: pnewsam on #299).
+                        self._verifier_latched = True
+                        _verifier_log.info(
+                            "completion-verifier latched after %d hard failures with "
+                            "no successful verdict between them — skipping further "
+                            "verification this session",
+                            self._verifier_hard_failures,
+                        )
+                        break
                 # The verifier call failed on every budget it was given —
                 # truncated past the last retry, an unusable tool call, or a
                 # provider error (the per-attempt logs above carry the detail).
@@ -3022,34 +3231,10 @@ class ChatSession:
                     phase="analyzing",
                     message="Something went wrong — checking in with you...",
                 )
-                diagnosis_response = None
-                async for event in self.plan_stream_with_recovery(system=system):
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="verifier-failure"
+                ):
                     yield event
-                    if isinstance(event, StreamComplete):
-                        diagnosis_response = event
-                # Persist the actual message the user just saw — not the stale
-                # pre-verification `reply` the post-loop fallback below would
-                # otherwise re-append, which would leave history (and thus the
-                # model's own memory of what it just told the user) out of sync
-                # with what was streamed.
-                diagnosis_text = (
-                    (diagnosis_response.response.content or "").strip()
-                    if diagnosis_response is not None
-                    else ""
-                )
-                if diagnosis_text:
-                    self._append_history(
-                        {"role": "assistant", "content": diagnosis_text}
-                    )
-                else:
-                    # An empty diagnosis would silently recreate the exact
-                    # out-of-sync history this path exists to fix (the
-                    # post-loop fallback re-appends the stale reply). Make it
-                    # visible rather than circular.
-                    _verifier_log.warning(
-                        "verifier-failure diagnosis returned no content — "
-                        "history falls back to the pre-verification reply"
-                    )
                 break
 
             _verifier_log.info(
@@ -3084,7 +3269,9 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing blocked task..."
                 )
-                async for event in self.plan_stream_with_recovery(system=system):
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="stuck"
+                ):
                     yield event
                 break
 
@@ -3121,9 +3308,13 @@ class ChatSession:
             llm_response = response.response
             # Loop back to the top of the completion verification loop
 
-        # Text-only final response — append to history (if not already appended
-        # by the verification block above).
-        if not self._history or self._history[-1].get("role") != "assistant":
+        # Text-only final response — append to history, unless the verification
+        # block already did. The old role-based guard was not enough: on a
+        # hand-back turn the last entry is the SYSTEM injection, so this fired
+        # and appended the rejected reply a second time (ENG-1155).
+        if not _reply_persisted and (
+            not self._history or self._history[-1].get("role") != "assistant"
+        ):
             reply = llm_response.content or ""
             self._append_history({"role": "assistant", "content": reply})
 
