@@ -661,6 +661,105 @@ async def test_transient_provider_errors_never_latch(workspace):
         await session.close()
 
 
+async def test_failed_reprobe_stays_latched_without_rediagnosis(workspace, caplog):
+    """The other half of the re-probe contract: when the cause is still there,
+    the re-probe fails, the session stays latched, and — critically — no second
+    diagnosis fires (one per session, ENG-1155). The next skip cycle then starts
+    over, so the steady-state cost of a permanently broken verifier is one
+    verdict call per `_VERIFIER_LATCH_REPROBE_TURNS` turns.
+    """
+    import logging
+
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def always_hard(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_hard)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        with caplog.at_level(logging.INFO):
+            # 2 latching turns, then two full skip-and-reprobe cycles.
+            for turn in range(2 + 2 * _VERIFIER_LATCH_REPROBE_TURNS):
+                plan, state = _tool_then_text_plan()
+                mock_llm.plan_stream = plan
+                async for _ in session.turn_stream(f"step {turn}"):
+                    pass
+                if state["n"] >= 3:
+                    diagnoses += 1
+
+        assert session._verifier_latched is True, "failed re-probe must stay latched"
+        assert diagnoses == 1, (
+            f"failed re-probes must not re-diagnose, got {diagnoses}"
+        )
+        # 2 latching calls + 1 failed re-probe per cycle.
+        assert calls["n"] == 4, (
+            f"expected 2 latching + 2 re-probe calls, got {calls['n']}"
+        )
+        reprobe_failures = [
+            r for r in caplog.records
+            if "re-probe failed — staying latched" in r.message
+        ]
+        assert len(reprobe_failures) == 2, (
+            "a failed re-probe must log its own line, not re-announce the latch"
+        )
+    finally:
+        await session.close()
+
+
+async def test_latched_truncating_reprobe_diagnoses_and_stays_latched(workspace):
+    """A latched session whose re-probe TRUNCATES (the user switched from a
+    hard-failing model to a persistently-verbose one) falls through to the
+    honest diagnosis and leaves the latch set — truncation never counts toward
+    or against the latch, so only a successful verdict clears it. Pins the
+    deliberate interaction between the latch and "every truncated turn keeps
+    its honest diagnosis" (see the re-probe comment in session.py).
+    """
+    from anton.core.llm.provider import StructuredOutputError
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def hard_then_truncated(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("400 tool_choice not supported")
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=hard_then_truncated)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        for turn in range(2 + _VERIFIER_LATCH_REPROBE_TURNS):
+            plan, state = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"step {turn}"):
+                pass
+            if state["n"] >= 3:
+                diagnoses += 1
+
+        assert session._verifier_latched is True, (
+            "a truncating re-probe must not clear the latch"
+        )
+        assert diagnoses == 2, (
+            f"expected the latch-time diagnosis plus one on the truncating "
+            f"re-probe, got {diagnoses}"
+        )
+    finally:
+        await session.close()
+
+
 async def test_empty_diagnosis_is_logged_not_circular(workspace, caplog):
     """Review follow-up: an empty diagnosis must not silently recreate the
     out-of-sync history this path fixes — it logs, and the post-loop fallback

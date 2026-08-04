@@ -1560,8 +1560,10 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": text})
         else:
             log.warning(
-                "%s diagnosis returned no content — history falls back to the "
-                "pre-verification reply",
+                "%s diagnosis returned no content — nothing appended; history "
+                "keeps its existing tail (the pre-verification reply on the "
+                "verifier paths, the final tool-call message on the "
+                "max-tool-rounds path)",
                 label,
             )
 
@@ -2946,10 +2948,19 @@ class ChatSession:
             # user may switch off the broken model mid-session, or the gateway
             # fix may land. Without this, "reset on a successful verdict" is
             # unreachable — a latched session skips every verdict call, so there
-            # is never another success to reset on. A failed re-probe stays
-            # latched and does NOT re-diagnose (the >=2 branch below breaks
+            # is never another success to reset on. A hard-failing re-probe stays
+            # latched and does NOT re-diagnose (the latched branch below breaks
             # before the diagnosis), so the cost is one verdict call per
             # _VERIFIER_LATCH_REPROBE_TURNS turns.
+            # A re-probe that TRUNCATES (or hits a typed TransientProviderError)
+            # instead is intended to fall through to the honest diagnosis below,
+            # and it leaves the latch set: neither counts toward or against the
+            # latch (truncation is a tail sample, see _VERIFIER_TOKEN_BUDGETS;
+            # typed transients never latch by definition), so only a successful
+            # verdict clears it. A latched session re-probing into a
+            # persistently-verbose model therefore diagnoses once per re-probe
+            # cycle rather than never — matching "every truncated turn keeps its
+            # honest diagnosis".
             if self._verifier_latched:
                 self._verifier_latch_skips += 1
                 if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
@@ -3071,6 +3082,16 @@ class ChatSession:
             else:
                 if verdict_failure == "hard":
                     self._verifier_hard_failures += 1
+                    if self._verifier_latched:
+                        # A failed re-probe: the cause is still there. Stay
+                        # latched with its own log line — re-announcing "latched
+                        # after N failures" with an ever-growing N would read as
+                        # a new event each cycle. No re-diagnosis (one per
+                        # session, ENG-1155).
+                        _verifier_log.info(
+                            "completion-verifier re-probe failed — staying latched"
+                        )
+                        break
                     if self._verifier_hard_failures >= 2:
                         # Second hard failure in a row: the first could have been
                         # transient, this one establishes the pattern. Latch and
@@ -3078,6 +3099,14 @@ class ChatSession:
                         # "checking in" message plus a second full-history call
                         # buys nothing once the cause is known to recur. One
                         # diagnosis per session (ENG-1155).
+                        #
+                        # "Hard" = neither truncation nor a typed
+                        # TransientProviderError (see that except-clause above —
+                        # typed transients never latch). Untyped provider blips
+                        # (a generic ConnectionError, say) still count: two of
+                        # those in a row do latch, bounded by the re-probe
+                        # un-latching within _VERIFIER_LATCH_REPROBE_TURNS once
+                        # the provider recovers.
                         self._verifier_latched = True
                         _verifier_log.info(
                             "completion-verifier latched after %d consecutive hard "
