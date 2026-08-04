@@ -32,6 +32,8 @@ import logging
 import os
 import socket
 import ssl
+import time
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -86,6 +88,19 @@ class _TransientFetchError(Exception):
     The message is caller-facing — it is surfaced verbatim once retries are
     exhausted, so it must read as a normal ``web_fetch`` error string.
     """
+
+
+@dataclass(frozen=True)
+class _FetchResult:
+    """Result of a single ``_fetch_once`` attempt, carrying audit metadata.
+
+    ``status`` is the HTTP status code for any received response, or a short
+    label ("blocked", "transport_error") for failures that never got one.
+    """
+
+    text: str  # caller-facing content or error message
+    status: int | str
+    num_bytes: int = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,16 +291,16 @@ def _strip_html(body: str) -> str:
     return parser.text()
 
 
-async def _fetch_once(url: str, max_chars: int) -> str:
+async def _fetch_once(url: str, max_chars: int) -> _FetchResult:
     """One fetch attempt.
 
     Raises ``_TransientFetchError`` on retryable failures (transient DNS,
-    connect/read errors, timeouts, HTTP 5xx); returns a caller-facing string on
+    connect/read errors, timeouts, HTTP 5xx); returns a ``_FetchResult`` on
     success or on any permanent failure (SSRF block, NXDOMAIN, SSL, HTTP 4xx).
     """
     # SSRF guard: resolve the initial URL before opening any connection.
     if err := _check_url_ssrf(url):
-        return err
+        return _FetchResult(err, status="blocked")
 
     try:
         # follow_redirects=False so we can inspect each redirect target before
@@ -304,7 +319,7 @@ async def _fetch_once(url: str, max_chars: int) -> str:
                 # Resolve relative redirects against the current URL.
                 next_url = str(resp.next_request.url) if resp.next_request else location
                 if err := _check_url_ssrf(next_url):
-                    return err
+                    return _FetchResult(err, status="blocked")
                 resp = await client.send(resp.next_request)
                 hops += 1
     except httpx.TimeoutException as exc:
@@ -320,12 +335,14 @@ async def _fetch_once(url: str, max_chars: int) -> str:
         )
         if isinstance(exc, httpx.TransportError) and not is_ssl:
             raise _TransientFetchError(f"Fetch failed for {url}: {exc}") from exc
-        return f"Fetch failed for {url}: {exc}"
+        return _FetchResult(f"Fetch failed for {url}: {exc}", status="transport_error")
 
     if resp.status_code in _RETRYABLE_STATUS:
         raise _TransientFetchError(f"Fetch returned HTTP {resp.status_code} for {url}")
     if resp.status_code >= 400:
-        return f"Fetch returned HTTP {resp.status_code} for {url}"
+        return _FetchResult(
+            f"Fetch returned HTTP {resp.status_code} for {url}", status=resp.status_code
+        )
 
     content_type = (resp.headers.get("content-type") or "").lower()
     body = resp.text
@@ -340,9 +357,35 @@ async def _fetch_once(url: str, max_chars: int) -> str:
         text = text[:max_chars]
         truncated = True
 
-    header = f"Fetched {url} (HTTP {resp.status_code}, {len(resp.content)} bytes)"
+    num_bytes = len(resp.content)
+    header = f"Fetched {url} (HTTP {resp.status_code}, {num_bytes} bytes)"
     suffix = "\n... [truncated]" if truncated else ""
-    return f"{header}\n\n{text}{suffix}"
+    return _FetchResult(
+        f"{header}\n\n{text}{suffix}",
+        status=resp.status_code,
+        num_bytes=num_bytes,
+    )
+
+
+def _log_fetch(
+    url: str,
+    status: object,
+    num_bytes: int,
+    attempts: int,
+    started: float,
+    *,
+    level: int,
+) -> None:
+    """Emit one structured audit line per web_fetch call."""
+    logger.log(
+        level,
+        "web_fetch url=%s method=GET status=%s bytes=%d attempts=%d elapsed_ms=%d",
+        url,
+        status,
+        num_bytes,
+        attempts,
+        int((time.monotonic() - started) * 1000),
+    )
 
 
 async def _fetch_url(url: str, max_chars: int) -> str:
@@ -350,23 +393,26 @@ async def _fetch_url(url: str, max_chars: int) -> str:
 
     GET is idempotent, so retrying is safe. Permanent failures (4xx, NXDOMAIN,
     SSL) short-circuit inside ``_fetch_once`` and never reach a second attempt.
+    Emits exactly one structured log line per call, whatever the outcome.
     """
+    started = time.monotonic()
     last_error = ""
     for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
         try:
-            return await _fetch_once(url, max_chars)
+            outcome = await _fetch_once(url, max_chars)
         except _TransientFetchError as exc:
             last_error = str(exc)
-            logger.warning(
-                "web_fetch transient failure url=%s method=GET attempt=%d/%d: %s",
-                url,
-                attempt,
-                _MAX_FETCH_ATTEMPTS,
-                last_error,
-            )
             if attempt < _MAX_FETCH_ATTEMPTS:
                 await asyncio.sleep(_FETCH_BACKOFF_BASE_S * 2 ** (attempt - 1))
+            continue
+        _log_fetch(
+            url, outcome.status, outcome.num_bytes, attempt, started, level=logging.INFO
+        )
+        return outcome.text
 
+    _log_fetch(
+        url, "transient_giveup", 0, _MAX_FETCH_ATTEMPTS, started, level=logging.WARNING
+    )
     return f"{last_error} (gave up after {_MAX_FETCH_ATTEMPTS} attempts)"
 
 

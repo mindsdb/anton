@@ -4,6 +4,7 @@ session-side routing decision (native vs handler-dispatched).
 
 from __future__ import annotations
 
+import logging
 import socket
 import ssl
 from types import SimpleNamespace
@@ -419,6 +420,51 @@ class TestWebFetchRetry:
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 1
         assert "Could not resolve" in out
+
+
+class TestWebFetchLogging:
+    """Exactly one structured audit line per web_fetch call."""
+
+    _LOGGER = "anton.core.tools.web_tools"
+
+    async def test_success_logs_single_info_line(self, caplog):
+        async def _get(self, url, headers=None):
+            return httpx.Response(
+                200,
+                text="<p>hi</p>",
+                headers={"content-type": "text/html"},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), caplog.at_level(
+            logging.INFO, logger=self._LOGGER
+        ):
+            await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+
+        recs = [r for r in caplog.records if r.name == self._LOGGER]
+        assert len(recs) == 1
+        assert recs[0].levelno == logging.INFO
+        msg = recs[0].getMessage()
+        assert "method=GET" in msg
+        assert "status=200" in msg
+        assert "attempts=1" in msg
+        assert "bytes=" in msg and "elapsed_ms=" in msg
+
+    async def test_giveup_logs_single_warning_line(self, caplog):
+        async def _get(self, url, headers=None):
+            raise httpx.ConnectError("all connection attempts failed")
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ), caplog.at_level(logging.INFO, logger=self._LOGGER):
+            await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+
+        recs = [r for r in caplog.records if r.name == self._LOGGER]
+        assert len(recs) == 1
+        assert recs[0].levelno == logging.WARNING
+        msg = recs[0].getMessage()
+        assert "status=transient_giveup" in msg
+        assert "attempts=2" in msg
 
 
 class TestStripHtml:
