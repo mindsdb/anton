@@ -3033,6 +3033,21 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except TransientProviderError as exc:
+                    # Explicitly NOT a latch candidate. The latch is for a model
+                    # that cannot produce a verdict at all (kimi-K3 rejecting the
+                    # forced tool_choice with a 400, ENG-1095) — a statement about
+                    # capability. A typed transient error is the opposite claim:
+                    # retryable, and already retried upstream (ENG-673). Counting
+                    # it would let two provider blips disable verification for the
+                    # rest of the session. The turn still gets its honest
+                    # diagnosis (ENG-1079); it just doesn't latch.
+                    verdict_failure = "transient"
+                    _verifier_log.info(
+                        "completion-verifier verdict=TRANSIENT budget=%d error=%s",
+                        budget, _safe_error_detail(exc),
+                    )
+                    break
                 except Exception as exc:
                     # Enough to tell the failure modes apart — four used to
                     # collapse into one "verifier unavailable" line — but never

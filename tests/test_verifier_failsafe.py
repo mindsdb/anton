@@ -620,6 +620,47 @@ async def test_latched_verifier_reprobes_and_can_recover(workspace):
         await session.close()
 
 
+async def test_transient_provider_errors_never_latch(workspace):
+    """A typed transient error must not latch. The latch is for a model that
+    *cannot* produce a verdict (kimi-K3's forced-tool_choice 400, ENG-1095) — a
+    capability claim. `TransientProviderError` asserts the opposite: retryable,
+    already retried upstream (ENG-673). Counting it would let two provider blips
+    disable verification for the rest of the session.
+
+    Matters more once #297 (ENG-847) lands, which converts empty 200s into
+    `TransientProviderError` on the same providers the verdict call uses.
+    """
+    from anton.core.llm.provider import TransientProviderError
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def always_transient(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        raise TransientProviderError("provider returned an empty 200")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_transient)
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(4):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"step {turn}"):
+                pass
+
+        assert session._verifier_latched is False, (
+            "transient provider errors must never latch the session"
+        )
+        assert session._verifier_hard_failures == 0
+        # Verification keeps being attempted every turn, rather than being
+        # switched off after two blips.
+        assert calls["n"] == 4, (
+            f"verifier should still be called every turn, got {calls['n']}"
+        )
+    finally:
+        await session.close()
+
+
 async def test_empty_diagnosis_is_logged_not_circular(workspace, caplog):
     """Review follow-up: an empty diagnosis must not silently recreate the
     out-of-sync history this path fixes — it logs, and the post-loop fallback
