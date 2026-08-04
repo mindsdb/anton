@@ -2661,39 +2661,67 @@ class ChatSession:
                             )
                             result_text = None
                             cancelled = False
-                            async with aclosing(
-                                self.tool_registry.dispatch_tool_stream(
-                                    self, tc.name, tc.input
-                                )
-                            ) as stream:
-                                async for item in stream:
-                                    if isinstance(item, ToolProgress):
-                                        yield StreamTaskProgress(
-                                            phase="tool_progress",
-                                            message=item.text,
-                                            id=tc.id,
-                                        )
-                                    else:
-                                        result_text = item
-                                    # Checked AFTER handling item, not before —
-                                    # otherwise an already-arrived final result
-                                    # could be discarded on the same iteration
-                                    # the flag flips. NOTE: on today's one real
-                                    # consumer (CLI, anton/chat.py:1858-1866) this
-                                    # flag is set and a KeyboardInterrupt is
-                                    # raised in the SAME step, so this branch is
-                                    # rarely what actually stops execution — the
-                                    # aclosing() above is: it closes this
-                                    # generator (and the handler's own generator
-                                    # underneath it) via GeneratorExit as soon as
-                                    # the outer turn_stream() is torn down. This
-                                    # check stays for symmetry with the
-                                    # scratchpad branch above and as a safety net
-                                    # for any future consumer that sets the flag
-                                    # without immediately raising.
-                                    if self._cancel_event.is_set():
-                                        cancelled = True
-                                        break
+                            _tool_error: Exception | None = None
+                            try:
+                                async with aclosing(
+                                    self.tool_registry.dispatch_tool_stream(
+                                        self, tc.name, tc.input
+                                    )
+                                ) as stream:
+                                    async for item in stream:
+                                        if isinstance(item, ToolProgress):
+                                            yield StreamTaskProgress(
+                                                phase="tool_progress",
+                                                message=item.text,
+                                                id=tc.id,
+                                            )
+                                        else:
+                                            result_text = item
+                                        # Checked AFTER handling item, not before —
+                                        # otherwise an already-arrived final result
+                                        # could be discarded on the same iteration
+                                        # the flag flips. NOTE: on today's one real
+                                        # consumer (CLI, anton/chat.py:1858-1866) this
+                                        # flag is set and a KeyboardInterrupt is
+                                        # raised in the SAME step, so this branch is
+                                        # rarely what actually stops execution — the
+                                        # aclosing() above is: it closes this
+                                        # generator (and the handler's own generator
+                                        # underneath it) via GeneratorExit as soon as
+                                        # the outer turn_stream() is torn down. This
+                                        # check stays for symmetry with the
+                                        # scratchpad branch above and as a safety net
+                                        # for any future consumer that sets the flag
+                                        # without immediately raising.
+                                        if self._cancel_event.is_set():
+                                            cancelled = True
+                                            break
+                            except Exception as exc:
+                                # Caught locally ONLY so the tool_done marker
+                                # below can still be yielded from ordinary
+                                # (non-unwinding) execution; re-raised right
+                                # after, so the outer handler a few lines below
+                                # still builds "Tool 'x' failed: ...".
+                                # GeneratorExit is a BaseException, not an
+                                # Exception, so cancellation via the consumer
+                                # closing this generator is NOT caught here —
+                                # it propagates straight through and the
+                                # generator closes without a tool_done, same as
+                                # any other stream abort. NOT a try/finally
+                                # with a yield inside: yielding while the
+                                # generator is being closed raises "async
+                                # generator ignored GeneratorExit".
+                                _tool_error = exc
+
+                            _tool_elapsed = _time.monotonic() - _tool_t0
+                            yield StreamTaskProgress(
+                                phase="tool_done",
+                                message=tc.name,
+                                eta_seconds=_tool_elapsed,
+                                id=tc.id,
+                            )
+                            if _tool_error is not None:
+                                raise _tool_error
                             if cancelled and result_text is None:
                                 # Deliberately NOT prefixed "Error:"/"failed:" —
                                 # the _failed heuristic a few lines below this
@@ -2706,12 +2734,6 @@ class ChatSession:
                                     f"Tool '{tc.name}' was cancelled by the user "
                                     "before producing a result."
                                 )
-                            _tool_elapsed = _time.monotonic() - _tool_t0
-                            yield StreamTaskProgress(
-                                phase="tool_done",
-                                message=tc.name,
-                                eta_seconds=_tool_elapsed,
-                            )
                             if (
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"

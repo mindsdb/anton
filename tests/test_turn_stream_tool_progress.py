@@ -173,3 +173,67 @@ class TestTurnStreamToolProgress:
             assert any("failed" in t and "produced no result" in t for t in texts)
         finally:
             await session.close()
+
+    async def test_tool_done_carries_the_tool_call_id(self):
+        session, mock_llm = _make_session_with_tool(_two_step_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            done = [
+                e for e in events
+                if isinstance(e, StreamTaskProgress) and e.phase == "tool_done"
+            ]
+            assert len(done) == 1
+            assert done[0].id == "tc_1"
+        finally:
+            await session.close()
+
+    async def test_tool_done_is_emitted_even_when_the_handler_raises_after_progress(self):
+        session, mock_llm = _make_session_with_tool(_raising_after_progress_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            done = [
+                e for e in events
+                if isinstance(e, StreamTaskProgress) and e.phase == "tool_done"
+            ]
+            assert len(done) == 1
+            assert done[0].id == "tc_1"
+            # The failure itself must still reach conversation history — the
+            # done-marker must not swallow or replace the exception.
+            texts = _tool_result_texts(session)
+            assert any("failed" in t and "boom" in t for t in texts)
+        finally:
+            await session.close()
+
+    async def test_closing_the_generator_mid_progress_does_not_raise(self):
+        # Regression guard: a `finally: yield ...` around the progress loop
+        # looks like a natural way to guarantee tool_done fires on every
+        # path, but `yield` while an async generator is unwinding a
+        # GeneratorExit raises "async generator ignored GeneratorExit".
+        # This is the exact path Esc-cancellation takes in the CLI
+        # (anton/chat.py stops reading turn_stream() while it's suspended
+        # on a tool_progress yield).
+        #
+        # Deliberately closes _stream_and_handle_tools() directly, NOT
+        # turn_stream(): turn_stream() drives it with a plain `async for`
+        # (no aclosing()), so closing turn_stream() only throws
+        # GeneratorExit into turn_stream()'s own yield — the inner
+        # generator (which owns the code under test) is merely abandoned,
+        # not closed, and a RuntimeError from a broken fix would surface
+        # later as an unhandled exception during event-loop shutdown,
+        # never inside this test. Closing the inner generator is the only
+        # way this guard can actually fail on a broken implementation.
+        session, mock_llm = _make_session_with_tool(_two_step_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        gen = session._stream_and_handle_tools("run the probe")
+        try:
+            saw_progress = False
+            async for event in gen:
+                if isinstance(event, StreamTaskProgress) and event.phase == "tool_progress":
+                    saw_progress = True
+                    break
+            assert saw_progress
+            await gen.aclose()  # must not raise RuntimeError
+        finally:
+            await session.close()
