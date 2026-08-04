@@ -40,7 +40,12 @@ machinery):
    `async def handle_mytool(session: "ChatSession", tc_input: dict) -> str` —
    it receives the live session and the tool-call input dict, and returns the
    result string sent back to the LLM (vision tools may return a list of
-   content blocks instead).
+   content blocks instead). If your tool needs to print incremental progress
+   to the console while it runs, the handler can instead be an **async
+   generator** yielding `ToolProgress` markers (`anton/core/tools/progress.py`)
+   followed by one final result — see [Tool system](/developer/tool-system)
+   and `anton/core/tools/test_tool.py` for the reference example. Most tools
+   don't need this; it's for genuinely multi-step work.
 3. **Registration** in `ChatSession._build_core_tools()`
    (`anton/core/session.py`), optionally guarded by a condition (workspace
    bound, episodic enabled, ...). Embedding hosts can instead pass extra
@@ -136,7 +141,12 @@ hiding a tool entirely beats registering one that returns errors.
 1. Define `_DESCRIPTION`, `_INPUT_SCHEMA`, the handler, and the `ToolDef` —
    ideally in one new file under `anton/core/tools/`.
 2. Register it in `_build_core_tools()` with the right guard.
-3. Make the handler total: every input shape returns a string; no path raises.
+3. Make the handler total: every input shape returns a string (or, for a
+   streaming handler, every path eventually yields a final
+   non-`ToolProgress` result); no path raises except a genuine bug — a
+   generator that yields only `ToolProgress` and no final result IS treated
+   as a bug and raises `RuntimeError` from `dispatch_tool`/
+   `dispatch_tool_stream`.
 4. Keep results within reason — large outputs bloat history (episodic logging
    truncates tool results at 2000 chars; your tool result itself goes into the
    LLM history uncut, so truncate big payloads yourself).
