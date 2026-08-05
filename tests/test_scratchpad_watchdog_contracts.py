@@ -268,3 +268,44 @@ class TestNudgeRouting:
             ChatSession._select_resilience_nudge("web_search", "timed out")
             == RESILIENCE_NUDGE
         )
+
+
+from anton.core.memory.acc import Event, detect_kill_loop
+
+
+def _kill_event(reason: str, name: str = "pad", round_idx: int = 0) -> Event:
+    return Event("scratchpad_killed", 6, {"name": name, "reason": reason}, round_idx)
+
+
+class TestKillLoopLesson:
+    """The durable ACC rule must be cause-aware: liveness kills teach
+    reset-and-retry, never 'smaller batches' (ENG-578)."""
+
+    def test_liveness_kills_do_not_teach_smaller_batches(self):
+        events = [
+            _kill_event(
+                "Cell killed after 30s without a liveness signal from the scratchpad worker",
+                round_idx=1,
+            ),
+            _kill_event(
+                "Cell killed after 30s without a liveness signal from the scratchpad worker",
+                round_idx=2,
+            ),
+        ]
+        lesson = detect_kill_loop(events)
+        assert lesson is not None
+        low = lesson.rule.lower()
+        assert "smaller" not in low
+        assert "reset" in low
+
+    def test_budget_kills_still_teach_smaller(self):
+        events = [
+            _kill_event("Cell timed out after 120s total", round_idx=1),
+            _kill_event("Cell timed out after 120s total", round_idx=2),
+        ]
+        lesson = detect_kill_loop(events)
+        assert lesson is not None
+        assert "smaller" in lesson.rule.lower()
+
+    def test_single_kill_still_below_threshold(self):
+        assert detect_kill_loop([_kill_event("Cell timed out after 120s total")]) is None
