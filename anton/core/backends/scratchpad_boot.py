@@ -675,8 +675,14 @@ from anton.core.backends.wire import (
 _wire_lock = threading.Lock()
 
 # Env override exists for tests only; <= 0 disables the heartbeat entirely
-# (restoring pre-heartbeat watchdog behavior).
-_HEARTBEAT_INTERVAL = float(os.environ.get("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "10"))
+# (restoring pre-heartbeat watchdog behavior). Same guard as SESSION_MAX_BYTES:
+# a malformed override must never stop the scratchpad from booting.
+try:
+    _HEARTBEAT_INTERVAL = float(
+        os.environ.get("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "10")
+    )
+except ValueError:
+    _HEARTBEAT_INTERVAL = 10.0
 
 # Per-tick cap on salvage chunk size: bounds a single wire line even when a
 # cell floods stdout between ticks; the remainder ships on later ticks.

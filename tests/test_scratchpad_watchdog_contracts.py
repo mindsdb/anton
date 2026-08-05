@@ -113,16 +113,23 @@ class TestLivenessHeartbeat:
             await pad.close()
 
     async def test_no_stray_beats_corrupt_next_cell(self, monkeypatch):
-        """Beats stop with the cell; a following cell parses cleanly."""
+        """Beats stop with the cell: the next cell parses cleanly AND sees no
+        leaked heartbeat thread from its predecessor (its own is the only
+        daemon thread alive in the worker)."""
         shrink_timers(monkeypatch)
         pad = make_pad()
         await pad.start()
         try:
             await pad.execute("import time; time.sleep(2); print('one')")
             await asyncio.sleep(1)  # idle gap where a leaked thread would tick
-            cell = await pad.execute("print('two')")
+            cell = await pad.execute(
+                "import threading\n"
+                "alive = [t for t in threading.enumerate()\n"
+                "         if t is not threading.main_thread() and t.daemon]\n"
+                "print(f'daemon-threads={len(alive)}')\n"
+            )
             assert cell.error is None
-            assert cell.stdout.strip() == "two"
+            assert "daemon-threads=1" in cell.stdout
         finally:
             await pad.close()
 
