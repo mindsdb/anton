@@ -461,6 +461,15 @@ def _runs_for(case: Case) -> int:
 # ---------------------------------------------------------------------------
 
 
+# If this reds on a PR whose diff can't plausibly change a verdict: re-run the
+# failing case against origin/staging with the same key. Still failing -> this
+# is live gateway/model drift, i.e. the PRODUCTION verifier now judges this
+# fixture differently — a real regression that deserves its own ticket, not an
+# eval flake to be quieted (the per-run `status: reason` strings in the failure
+# message say what the model now thinks). Passing on staging -> suspect the PR
+# after all, or a transient (#307 review: the accepted lever for transients is
+# a one-retry wrapper on non-StructuredOutputError failures in `_verdict`,
+# never looser assertions).
 @pytest.mark.parametrize("model", _MODELS)
 @pytest.mark.parametrize("case", _CASES, ids=lambda c: c.name)
 async def test_verdict(model: str, case: Case):
