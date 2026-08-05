@@ -718,6 +718,38 @@ def build_chat_completion_kwargs(
     return kwargs
 
 
+def _split_cached_input(usage) -> tuple[int, int]:
+    """Return (fresh_input_tokens, cache_read_tokens) from an OpenAI-shaped usage.
+
+    OpenAI's prompt/input token count INCLUDES cached tokens, unlike
+    Anthropic's which excludes them — subtract the cached share out so
+    ``Usage`` components mean the same thing on every provider (ENG-1288).
+    Handles both naming schemes: chat.completions (``prompt_tokens`` +
+    ``prompt_tokens_details.cached_tokens``) and the Responses API
+    (``input_tokens`` + ``input_tokens_details.cached_tokens``). Cache
+    WRITES are not exposed on OpenAI-compatible surfaces at all — creation
+    stays 0 there, a stated ENG-1288 gap.
+    """
+    if usage is None:
+        return 0, 0
+
+    def _as_int(value) -> int:
+        # Gateways and test doubles put non-numeric junk in usage fields;
+        # anything that isn't a real number counts as 0, never a crash.
+        return value if isinstance(value, int) else 0
+
+    total = _as_int(getattr(usage, "prompt_tokens", None)) or _as_int(
+        getattr(usage, "input_tokens", None)
+    )
+    details = (
+        getattr(usage, "prompt_tokens_details", None)
+        or getattr(usage, "input_tokens_details", None)
+    )
+    cached = _as_int(getattr(details, "cached_tokens", None)) if details is not None else 0
+    cached = min(cached, total)  # defensive: never negative fresh input
+    return total - cached, cached
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -974,14 +1006,17 @@ class OpenAIProvider(LLMProvider):
         )
 
         usage_obj = response.usage
-        input_tokens = usage_obj.prompt_tokens if usage_obj else 0
+        input_tokens, cache_read_tokens = _split_cached_input(usage_obj)
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
             usage=Usage(
                 input_tokens=input_tokens,
                 output_tokens=usage_obj.completion_tokens if usage_obj else 0,
-                context_pressure=compute_context_pressure(model, input_tokens),
+                context_pressure=compute_context_pressure(
+                    model, input_tokens + cache_read_tokens
+                ),
+                cache_read_tokens=cache_read_tokens,
             ),
             stop_reason=choice.finish_reason,
         )
@@ -1032,6 +1067,7 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
         stop_reason: str | None = None
 
         # Track tool call deltas by index
@@ -1048,7 +1084,7 @@ class OpenAIProvider(LLMProvider):
             stream_started = True
             async for chunk in stream:
                 if chunk.usage:
-                    input_tokens = chunk.usage.prompt_tokens
+                    input_tokens, cache_read_tokens = _split_cached_input(chunk.usage)
                     output_tokens = chunk.usage.completion_tokens
 
                 if not chunk.choices:
@@ -1220,7 +1256,10 @@ class OpenAIProvider(LLMProvider):
                 usage=Usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
+                    context_pressure=compute_context_pressure(
+                        model, input_tokens + cache_read_tokens
+                    ),
+                    cache_read_tokens=cache_read_tokens,
                 ),
                 stop_reason=stop_reason,
             )
@@ -1339,6 +1378,7 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
         stop_reason: str | None = None
 
         # Map output_index → in-flight function-call state. Responses API uses
@@ -1424,7 +1464,7 @@ class OpenAIProvider(LLMProvider):
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
                         if usage is not None:
-                            input_tokens = getattr(usage, "input_tokens", 0) or 0
+                            input_tokens, cache_read_tokens = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
                         stop_reason = getattr(final_response, "status", None)
         except openai.BadRequestError as exc:
@@ -1490,7 +1530,10 @@ class OpenAIProvider(LLMProvider):
                 usage=Usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
+                    context_pressure=compute_context_pressure(
+                        model, input_tokens + cache_read_tokens
+                    ),
+                    cache_read_tokens=cache_read_tokens,
                 ),
                 stop_reason=stop_reason,
             )
@@ -1531,7 +1574,7 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     # `or 0` guards an explicit None (the attr is present but null) — the
     # Responses API returns usage.input_tokens=None on web-search responses,
     # which a bare getattr default does NOT catch. Mirrors the streaming path.
-    input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    input_tokens, cache_read_tokens = _split_cached_input(usage)
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
     status = getattr(response, "status", None)
@@ -1545,7 +1588,10 @@ def _parse_response_object(response, model: str) -> LLMResponse:
         usage=Usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            context_pressure=compute_context_pressure(model, input_tokens),
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
         ),
         stop_reason=status,
     )

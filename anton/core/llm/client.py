@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from .provider import LLMProvider, LLMResponse, StreamEvent
+from .provider import LLMProvider, LLMResponse, StreamComplete, StreamEvent
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -56,6 +57,26 @@ class LLMClient:
         self._router_provider = router_provider or coding_provider
         self._router_model = router_model or coding_model
         self._max_tokens = max_tokens
+        # ENG-1288: optional per-call usage observer. Every LLM call this
+        # client makes — plan/plan_stream (planning), code + structured
+        # coding calls like the completion verifier (coding), summarize/gate
+        # (router) — reports (role, model, usage) here. The session installs
+        # its per-turn cost accumulator; None means nobody is counting.
+        # Accounting must never break a call: notification is wrapped and
+        # swallowed (see _notify_usage).
+        self.usage_listener = None  # Callable[[str, str, Usage], None] | None
+
+    def _notify_usage(self, role: str, model: str, usage) -> None:
+        listener = self.usage_listener
+        if listener is None:
+            return
+        try:
+            listener(role, model, usage)
+        except Exception:
+            # A broken accumulator must never kill the turn it's counting.
+            logging.getLogger(__name__).warning(
+                "usage_listener raised — turn cost undercounted", exc_info=True
+            )
 
     async def plan(
         self,
@@ -66,7 +87,7 @@ class LLMClient:
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
-        return await self._planning_provider.complete(
+        response = await self._planning_provider.complete(
             model=self._planning_model,
             system=system,
             messages=messages,
@@ -74,6 +95,8 @@ class LLMClient:
             max_tokens=max_tokens or self._max_tokens,
             native_web_tools=native_web_tools,
         )
+        self._notify_usage("planning", self._planning_model, response.usage)
+        return response
 
     async def plan_stream(
         self,
@@ -92,6 +115,10 @@ class LLMClient:
             max_tokens=max_tokens or self._max_tokens,
             native_web_tools=native_web_tools,
         ):
+            if isinstance(event, StreamComplete):
+                self._notify_usage(
+                    "planning", self._planning_model, event.response.usage
+                )
             yield event
 
     @property
@@ -109,6 +136,11 @@ class LLMClient:
         trusted at the cap (ENG-1082).
         """
         return self._max_tokens
+
+    @property
+    def planning_model(self) -> str:
+        """The model name used for planning / the user-facing turn loop."""
+        return self._planning_model
 
     @property
     def coding_provider(self) -> LLMProvider:
@@ -139,7 +171,7 @@ class LLMClient:
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
-        return await self._coding_provider.complete(
+        response = await self._coding_provider.complete(
             model=self._coding_model,
             system=system,
             messages=messages,
@@ -147,6 +179,8 @@ class LLMClient:
             max_tokens=max_tokens or self._max_tokens,
             native_web_tools=native_web_tools,
         )
+        self._notify_usage("coding", self._coding_model, response.usage)
+        return response
 
     async def summarize(
         self,
@@ -161,12 +195,14 @@ class LLMClient:
         (the router_* kwargs default to the coding role in __init__), so
         this is behavior-preserving unless a distinct model is selected.
         """
-        return await self._router_provider.complete(
+        response = await self._router_provider.complete(
             model=self._router_model,
             system=system,
             messages=messages,
             max_tokens=max_tokens or self._max_tokens,
         )
+        self._notify_usage("router", self._router_model, response.usage)
+        return response
 
     async def gate(
         self,
@@ -182,7 +218,7 @@ class LLMClient:
         No ``native_web_tools``: the thalamus must never do work itself,
         only answer from context or delegate.
         """
-        return await self._router_provider.complete(
+        response = await self._router_provider.complete(
             model=self._router_model,
             system=system,
             messages=messages,
@@ -190,6 +226,8 @@ class LLMClient:
             tool_choice=tool_choice,
             max_tokens=max_tokens or self._max_tokens,
         )
+        self._notify_usage("router", self._router_model, response.usage)
+        return response
 
     async def _generate_object_with(
         self,
@@ -226,6 +264,15 @@ class LLMClient:
             tools=[tool],
             tool_choice={"type": "tool", "name": tool["name"]},
             max_tokens=budget,
+        )
+        # Count BEFORE the no-tool-call raise below: a structured call that
+        # failed (and its bigger-budget retry) still spent real tokens
+        # (ENG-1288). Role is coding for both generate_object variants today;
+        # derive it from the provider/model actually used.
+        self._notify_usage(
+            "planning" if model == self._planning_model else "coding",
+            model,
+            response.usage,
         )
 
         if not response.tool_calls:
