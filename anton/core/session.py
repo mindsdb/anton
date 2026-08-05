@@ -1290,7 +1290,7 @@ class ChatSession:
                 pass
         self._tracked_backends.clear()
 
-    async def _summarize_history(self) -> None:
+    async def _summarize_history(self) -> bool:
         """Compress old conversation turns into a summary.
 
         Splits history into old (first 60%) and recent (last 40%), keeping at
@@ -1298,9 +1298,14 @@ class ChatSession:
         summarization model (the router role, which falls back to the coding
         model when no distinct one is configured) and replaced with a single
         user message.
+
+        Returns True only if history was actually replaced. Every no-op path
+        (too short, negligible new material, summarization failure) returns
+        False so callers don't set `_compacted_this_turn` or emit a
+        StreamContextCompacted event for a compaction that didn't happen.
         """
         if len(self._history) < 6:
-            return  # Too short to summarize
+            return False  # Too short to summarize
 
         min_recent = 4
         # Number of leading messages to fold into the summary; doubles as the
@@ -1309,7 +1314,7 @@ class ChatSession:
         # Ensure we keep at least min_recent turns
         compacted_count = min(compacted_count, len(self._history) - min_recent)
         if compacted_count < 2:
-            return
+            return False
 
         # Walk the cut backward to avoid breaking tool_use / tool_result
         # pairs. A user message containing tool_result blocks must stay with
@@ -1335,7 +1340,7 @@ class ChatSession:
                 compacted_count -= 1
 
         if compacted_count < 2:
-            return
+            return False
 
         old_turns = self._history[:compacted_count]
         recent_turns = self._history[compacted_count:]
@@ -1364,7 +1369,7 @@ class ChatSession:
         new_old_len = _approx_len(new_old_turns)
         recent_len = _approx_len(recent_turns)
         if new_old_len < 0.10 * (new_old_len + recent_len):
-            return
+            return False
 
         # Serialize old turns. Pull out any prior compacted summary so we
         # UPDATE it in place rather than summarize a summary (which compounds
@@ -1440,9 +1445,20 @@ class ChatSession:
             summary = summary_response.content or "(summary unavailable)"
             # Record the compaction ONLY on success.
             self._last_compacted_count = compacted_count
-        except Exception:
-            # If summarization fails, just do a simple truncation
-            summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
+        except Exception as exc:
+            # Don't discard history on failure — losing the earlier turns is
+            # worse than carrying them. Leave `self._history` untouched and let
+            # the reactive overflow path handle it if the provider actually
+            # rejects the request. Never silently: an unlogged swallow made a
+            # dropped conversation indistinguishable from a successful
+            # compaction (ENG-1274). Type name only; the message can quote
+            # conversation-derived content.
+            logger.warning(
+                "history summarization failed (%s) — keeping %d turns intact",
+                type(exc).__name__,
+                len(old_turns),
+            )
+            return False
 
         # 3b-light: reference-only framing so the model treats this as compacted
         # history, not a fresh instruction, and never resumes superseded/cancelled
@@ -1468,6 +1484,7 @@ class ChatSession:
             ]
         else:
             self._history = [summary_msg] + recent_turns
+        return True
 
     def _compact_scratchpads(self) -> bool:
         """Compact all active scratchpads. Returns True if any were compacted."""
@@ -1709,9 +1726,10 @@ class ChatSession:
         except ContextOverflowError:
             pass
 
-        await self._summarize_history()
+        compacted = await self._summarize_history()
         self._compact_scratchpads()
-        self._compacted_this_turn = True
+        if compacted:
+            self._compacted_this_turn = True
         try:
             return await self._llm.plan(messages=factory_validated(), **kwargs)
         except ContextOverflowError:
@@ -1794,12 +1812,13 @@ class ChatSession:
         except ContextOverflowError:
             pass
 
-        await self._summarize_history()
+        compacted = await self._summarize_history()
         self._compact_scratchpads()
-        self._compacted_this_turn = True
-        yield StreamContextCompacted(
-            message="Context was getting long — older history has been summarized."
-        )
+        if compacted:
+            self._compacted_this_turn = True
+            yield StreamContextCompacted(
+                message="Context was getting long — older history has been summarized."
+            )
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 yield event
@@ -2113,9 +2132,10 @@ class ChatSession:
             not self._compacted_this_turn
             and response.usage.context_pressure > self._context_pressure_threshold
         ):
-            await self._summarize_history()
+            compacted = await self._summarize_history()
             self._compact_scratchpads()
-            self._compacted_this_turn = True
+            if compacted:
+                self._compacted_this_turn = True
 
         # Handle tool calls
         tool_round = 0
@@ -2229,9 +2249,10 @@ class ChatSession:
                 not self._compacted_this_turn
                 and response.usage.context_pressure > self._context_pressure_threshold
             ):
-                await self._summarize_history()
+                compacted = await self._summarize_history()
                 self._compact_scratchpads()
-                self._compacted_this_turn = True
+                if compacted:
+                    self._compacted_this_turn = True
 
         # Text-only response
         reply = response.content or ""
@@ -2677,12 +2698,13 @@ class ChatSession:
             not self._compacted_this_turn
             and llm_response.usage.context_pressure > self._context_pressure_threshold
         ):
-            await self._summarize_history()
+            compacted = await self._summarize_history()
             self._compact_scratchpads()
-            self._compacted_this_turn = True
-            yield StreamContextCompacted(
-                message="Context was getting long — older history has been summarized."
-            )
+            if compacted:
+                self._compacted_this_turn = True
+                yield StreamContextCompacted(
+                    message="Context was getting long — older history has been summarized."
+                )
 
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
@@ -3123,12 +3145,13 @@ class ChatSession:
                     and llm_response.usage.context_pressure
                     > self._context_pressure_threshold
                 ):
-                    await self._summarize_history()
+                    compacted = await self._summarize_history()
                     self._compact_scratchpads()
-                    self._compacted_this_turn = True
-                    yield StreamContextCompacted(
-                        message="Context was getting long — older history has been summarized."
-                    )
+                    if compacted:
+                        self._compacted_this_turn = True
+                        yield StreamContextCompacted(
+                            message="Context was getting long — older history has been summarized."
+                        )
 
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A always skips at
