@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
+from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -397,13 +398,27 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
     return "Memory updated: " + "; ".join(descriptions)
 
 
-async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
-    """Dispatch a scratchpad tool call by action."""
+async def handle_scratchpad(
+    session: ChatSession, tc_input: dict
+) -> str | ToolOutcome:
+    """Dispatch a scratchpad tool call by action.
+
+    The exec path returns a ``ToolOutcome`` carrying the runtime's own
+    failure verdict, so the error streak doesn't re-classify the result by
+    reading it (ENG-1276). The other actions still return plain strings
+    (legacy substring classification).
+    """
     action = tc_input.get("action", "")
     name = tc_input.get("name", "")
 
     if not name:
-        return "Scratchpad name is required."
+        # Explicit failure: this text has no legacy marker phrase, so the
+        # substring fallback used to RESET the streak on it (ENG-1276).
+        return ToolOutcome(
+            content="Scratchpad name is required.",
+            ok=False,
+            reason="scratchpad_missing_name",
+        )
 
     # ACC emit helper: use the session's safe wrapper if it exists,
     # otherwise no-op. Defined as a local closure so each emit site
@@ -421,7 +436,7 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         # paths. A str return is a message the call should not run past
         # (empty code, single-scratchpad challenge, or install failure).
         result = await prepare_scratchpad_exec(session, tc_input)
-        if isinstance(result, str):
+        if isinstance(result, ToolOutcome):
             return result
         pad, code, description, estimated_time, estimated_seconds = result
 
@@ -453,13 +468,27 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
-        return format_cell_result(cell)
+        # The runtime's verdict: a raised error/timeout/kill is a failure;
+        # stderr-only output (warnings) is not, and stdout containing words
+        # like "failed" is not either — the streak reads this flag, never the
+        # text (ENG-1276). The reason is the traceback's LAST line (the cause),
+        # the machine-comparable key ENG-1286's thrash breaker will consume.
+        error = (cell.error or "").strip() if cell is not None else ""
+        return ToolOutcome(
+            content=format_cell_result(cell),
+            ok=not error,
+            reason=error.splitlines()[-1][:160] if error else "",
+        )
 
     elif action == "view":
         # get_or_create: new ChatSession has empty _pads but replayed cells on the
         # manager — same hydration path as exec so view works on the first tool call.
         pad = await session._scratchpads.get_or_create(name)
-        return pad.view()
+        # ok=True: viewing succeeded even when the notebook being viewed
+        # contains old "[error]" cells — the substring fallback used to count
+        # a successful view of a failed cell as a fresh tool failure
+        # (ENG-1276 false positive).
+        return ToolOutcome(content=pad.view(), ok=True)
 
     elif action == "reset":
         pad = session._scratchpads.pads.get(name)
@@ -480,7 +509,9 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         # get_or_create: dump must materialize the runtime from replayed cells when this
         # is the first scratchpad call in a new session (pads.get would miss every time).
         pad = await session._scratchpads.get_or_create(name)
-        return pad.render_notebook()
+        # ok=True for the same reason as view: rendering a notebook whose
+        # cells include past "[error]" output is a success, not a failure.
+        return ToolOutcome(content=pad.render_notebook(), ok=True)
 
     elif action == "install":
         packages = tc_input.get("packages", [])
