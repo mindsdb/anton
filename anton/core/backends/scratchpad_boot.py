@@ -306,9 +306,9 @@ if _scratchpad_model:
         async def _run_with_heartbeat(coro):
             """Run an async coroutine while emitting progress heartbeats.
 
-            LLM API calls can block for 30s+.  Without heartbeats, the
-            scratchpad inactivity timeout (30s) kills the process.  This
-            wrapper runs a heartbeat task alongside the real work.
+            Survival is covered by the cell-level liveness heartbeat thread;
+            these progress lines exist for the user — "Waiting for LLM… (Ns)"
+            is visible status during an in-cell LLM call that can block 30s+.
             """
 
             async def _heartbeat():
@@ -349,8 +349,9 @@ if _scratchpad_model:
             ):
                 """Call the LLM synchronously. Returns an LLMResponse.
 
-                Automatically emits progress heartbeats every 10s so that
-                long API calls don't trip the scratchpad inactivity timeout.
+                Emits "Waiting for LLM…" progress every 10s so the user sees
+                status during long API calls (liveness is handled by the
+                cell-level heartbeat thread).
                 """
                 return _llm_asyncio.run(
                     _run_with_heartbeat(

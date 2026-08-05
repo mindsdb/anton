@@ -309,3 +309,16 @@ class TestKillLoopLesson:
 
     def test_single_kill_still_below_threshold(self):
         assert detect_kill_loop([_kill_event("Cell timed out after 120s total")]) is None
+
+
+class TestToolContractText:
+    def test_description_does_not_claim_progress_is_survival_critical(self):
+        from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+
+        desc = SCRATCHPAD_TOOL.description.lower()
+        # The new contract: the runtime keeps working cells alive; progress()
+        # is status, not survival; only the total budget (or a dead worker)
+        # kills a cell.
+        assert "kept alive automatically" in desc
+        assert "inactivity timeout" not in desc
+        assert "reset the timer" not in desc
