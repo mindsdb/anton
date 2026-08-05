@@ -27,6 +27,7 @@ from anton.memory.history_store import is_user_turn
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
+    SCRATCHPAD_STUCK_NUDGE,
     SCRATCHPAD_TIMEOUT_NUDGE,
 )
 from anton.core.llm.provider import (
@@ -864,7 +865,16 @@ class ChatSession:
         if tool_name != "scratchpad":
             return RESILIENCE_NUDGE
         low = result_text.lower()
-        if "timed out" in low or "inactivity" in low:
+        # A silence/liveness kill means the worker looked dead — "make the
+        # cell smaller" is exactly the wrong advice there (ENG-578: it taught
+        # per-item LLM round-trips). Only the total-budget kill genuinely
+        # means the work was too heavy. "inactivity" keeps matching kills
+        # reported by remote/old-version workers. Checked before "timed out"
+        # so the liveness message can never fall through to the too-heavy
+        # branch.
+        if "liveness" in low or "inactivity" in low:
+            return SCRATCHPAD_STUCK_NUDGE
+        if "timed out" in low:
             return SCRATCHPAD_TIMEOUT_NUDGE
         # Match the empty-code dispatcher message specifically — generic
         # phrases like "too large"/"truncated" appear in unrelated errors

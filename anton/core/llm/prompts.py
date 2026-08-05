@@ -429,3 +429,17 @@ SCRATCHPAD_TIMEOUT_NUDGE = (
     "progress() inside long loops so active work isn't mistaken for a hang. Reuse the "
     "SAME scratchpad; do not rename it."
 )
+# A liveness kill is the opposite diagnosis to the timeout nudge above: the
+# worker looked dead/wedged, and "make it smaller" teaches the per-item
+# round-trip pattern that made ENG-578 expensive. Selection is routed on the
+# kill-message wording in _select_resilience_nudge.
+SCRATCHPAD_STUCK_NUDGE = (
+    "\n\nSYSTEM: This scratchpad cell was killed because the worker stopped "
+    "signalling liveness — the process looked dead or wedged. This is NOT a "
+    "size problem: do not shrink the batch or split the loop; deliberate "
+    "sleeps and blocking calls are kept alive automatically. Reset the "
+    "scratchpad and retry the same cell. Pass estimated_execution_time_seconds "
+    "so the total budget fits, and call progress() to narrate long phases. If "
+    "the same code wedges again, a native call may be hanging — give that call "
+    "its own timeout. Reuse the SAME scratchpad; do not rename it."
+)

@@ -12,6 +12,12 @@ import asyncio
 import pytest
 
 from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.llm.prompts import (
+    RESILIENCE_NUDGE,
+    SCRATCHPAD_STUCK_NUDGE,
+    SCRATCHPAD_TIMEOUT_NUDGE,
+)
+from anton.core.session import ChatSession
 
 _DEFAULTS = dict(
     coding_provider="anthropic",
@@ -227,3 +233,38 @@ class TestKillMessages:
             assert "liveness" not in cell.error.lower()
         finally:
             await pad.close()
+
+
+class TestNudgeRouting:
+    """Pure string routing, no LLM: the post-kill nudge must name the right
+    cause for the timer that fired (ENG-578 — 'too heavy' taught per-item
+    round-trips to a cell that was deliberately waiting)."""
+
+    def test_liveness_kill_does_not_claim_too_heavy(self):
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "Cell killed after 30s without a liveness signal from the scratchpad worker",
+        )
+        assert nudge == SCRATCHPAD_STUCK_NUDGE
+        assert "too heavy" not in nudge
+
+    def test_legacy_inactivity_text_routes_to_stuck(self):
+        """Remote/old workers still emit the old wording; it must not get
+        'too heavy' advice either."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad", "Cell killed after 30s of inactivity (no output or progress() calls)"
+        )
+        assert nudge == SCRATCHPAD_STUCK_NUDGE
+
+    def test_total_budget_kill_keeps_too_heavy(self):
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad", "Cell timed out after 120s total"
+        )
+        assert nudge == SCRATCHPAD_TIMEOUT_NUDGE
+        assert "too heavy" in nudge
+
+    def test_non_scratchpad_unchanged(self):
+        assert (
+            ChatSession._select_resilience_nudge("web_search", "timed out")
+            == RESILIENCE_NUDGE
+        )
