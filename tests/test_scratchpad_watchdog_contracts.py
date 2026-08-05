@@ -340,3 +340,65 @@ class TestToolContractText:
         assert "must break the work into smaller cells" not in low
         assert "hard timeout of 120 seconds" not in low
         assert "kept alive automatically" in low
+
+
+class TestCwdNote:
+    """ENG-578 fix #5, warn-only: a cell that changes the CWD says so — the
+    change silently persists into later cells and used to cost debug rounds."""
+
+    async def test_chdir_cell_gets_note_with_both_paths(self, monkeypatch, tmp_path):
+        shrink_timers(monkeypatch)
+        target = (tmp_path / "subdir").resolve()
+        target.mkdir()
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                f"import os\nos.chdir({str(target)!r})\nprint('moved')\n"
+            )
+            assert cell.error is None
+            assert "changed the working directory" in cell.stdout
+            assert str(target) in cell.stdout
+            assert "persists for subsequent cells" in cell.stdout
+        finally:
+            await pad.close()
+
+    async def test_next_cell_without_chdir_has_no_note(self, monkeypatch, tmp_path):
+        shrink_timers(monkeypatch)
+        target = (tmp_path / "subdir").resolve()
+        target.mkdir()
+        pad = make_pad()
+        await pad.start()
+        try:
+            await pad.execute(f"import os; os.chdir({str(target)!r})")
+            cell = await pad.execute("print('still-here')")
+            assert cell.error is None
+            assert "changed the working directory" not in cell.stdout
+        finally:
+            await pad.close()
+
+    async def test_chdir_to_same_directory_no_note(self, monkeypatch):
+        shrink_timers(monkeypatch)
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute("import os; os.chdir(os.getcwd()); print('noop')")
+            assert cell.error is None
+            assert "changed the working directory" not in cell.stdout
+        finally:
+            await pad.close()
+
+    async def test_error_after_chdir_still_notes(self, monkeypatch, tmp_path):
+        shrink_timers(monkeypatch)
+        target = (tmp_path / "subdir").resolve()
+        target.mkdir()
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                f"import os\nos.chdir({str(target)!r})\nraise RuntimeError('boom')\n"
+            )
+            assert cell.error is not None and "boom" in cell.error
+            assert "changed the working directory" in cell.stdout
+        finally:
+            await pad.close()

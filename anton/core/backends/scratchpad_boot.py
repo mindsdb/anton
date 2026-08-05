@@ -1008,6 +1008,7 @@ while True:
         )
         _hb_thread.start()
     try:
+        _cwd_before = os.getcwd()
         out_buf = io.StringIO()
         err_buf = io.StringIO()
         log_buf = io.StringIO()
@@ -1089,6 +1090,21 @@ while True:
             stdout_val = (
                 stdout_val[:_MAX_OUTPUT]
                 + f"\n\n... (truncated, {len(stdout_val)} chars total)"
+            )
+
+        # Warn-only chdir visibility (ENG-578 fix #5): a cell's os.chdir
+        # silently persists into every later cell of this pad — tell the
+        # model instead of resetting, so deliberate chdir workflows keep
+        # working. Appended AFTER the truncation clamp so the note can never
+        # be truncated away, and regardless of `error` so a cell that raised
+        # after the chdir still reports it.
+        _cwd_after = os.getcwd()
+        if _cwd_after != _cwd_before:
+            stdout_val = (
+                stdout_val
+                + ("\n" if stdout_val and not stdout_val.endswith("\n") else "")
+                + f"Note: this cell changed the working directory from {_cwd_before} "
+                f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
             )
 
         # Persist session after each cell. Keep the return value: a swallowed failure here
