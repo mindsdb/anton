@@ -1848,6 +1848,9 @@ class ChatSession:
 
     async def turn(self, user_input: str | list[dict]) -> str:
         user_input = _scrub_user_input(user_input)
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
         stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
         self._append_history({"role": "user", "content": stamped_input})
 
@@ -2032,6 +2035,9 @@ class ChatSession:
         """
         self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
         stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
         self._append_history({"role": "user", "content": stamped_input})
 
