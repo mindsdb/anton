@@ -465,6 +465,53 @@ def _render_verify_transcript(
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
 
+def _build_verify_request(
+    history: list[dict], user_message: str | None
+) -> tuple[str, list[dict]]:
+    """Build the exact (system, messages) pair the completion verifier is called
+    with.
+
+    Module-level rather than inline in the verify loop so the verdict-quality
+    eval (``tests/test_verifier_verdict_live.py``, ENG-1211) exercises the
+    production prompt by construction — a rubric or wording edit here is picked
+    up by the eval automatically instead of drifting in a copy.
+
+    A compact, text-rendered view of the recent conversation: enough context
+    for referential follow-ups plus truncated tool-result evidence to
+    cross-check success claims, but far smaller than the raw transcript and
+    free of tool_use/tool_result pairing constraints (ENG-716).
+    """
+    transcript = _render_verify_transcript(history)
+    # Always state the current request explicitly: a long tool-heavy turn
+    # can push the turn's opening user message out of the transcript window,
+    # and the request is the anchor for the whole judgment (ENG-716).
+    request = (user_message or "").strip()
+    request_header = f"USER'S CURRENT REQUEST: {request}\n\n" if request else ""
+    verify_messages = [
+        {
+            "role": "user",
+            "content": (
+                "Assess the conversation below (tool results are truncated) and "
+                "decide the status of the USER's most recent request.\n\n"
+                f"{request_header}{transcript}\n\n"
+                + _VERIFIER_JUDGMENT_RUBRIC
+            ),
+        },
+    ]
+    verifier_system = (
+        "You are a task-completion verifier. Decide whether the user's "
+        "request is complete, the assistant is waiting on the user, the work "
+        "is unfinished, or the assistant is blocked. Follow the status "
+        "definitions exactly.\n\n"
+        # Models that narrate before acting spend the whole budget on
+        # prose and never reach the tool call (ENG-1081). Asking for the
+        # call first shortens the preamble; it does not eliminate it,
+        # which is why the verdict-call budgets are generous as well.
+        + _VERIFIER_NO_PREAMBLE
+    )
+    return verifier_system, verify_messages
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -3101,38 +3148,10 @@ class ChatSession:
                 self._verifier_latch_skips = 0
 
             # Ask the cheap coding model to self-assess completion over a compact,
-            # text-rendered view of the recent conversation: enough context for
-            # referential follow-ups plus truncated tool-result evidence to
-            # cross-check success claims, but far smaller than the raw transcript
-            # and free of tool_use/tool_result pairing constraints (ENG-716). The
+            # text-rendered view of the recent conversation (ENG-716). The
             # assistant's latest reply is already in history (appended above).
-            transcript = _render_verify_transcript(self._history)
-            # Always state the current request explicitly: a long tool-heavy turn
-            # can push the turn's opening user message out of the transcript window,
-            # and the request is the anchor for the whole judgment (ENG-716).
-            request = (user_message or "").strip()
-            request_header = f"USER'S CURRENT REQUEST: {request}\n\n" if request else ""
-            verify_messages = [
-                {
-                    "role": "user",
-                    "content": (
-                        "Assess the conversation below (tool results are truncated) and "
-                        "decide the status of the USER's most recent request.\n\n"
-                        f"{request_header}{transcript}\n\n"
-                        + _VERIFIER_JUDGMENT_RUBRIC
-                    ),
-                },
-            ]
-            verifier_system = (
-                "You are a task-completion verifier. Decide whether the user's "
-                "request is complete, the assistant is waiting on the user, the work "
-                "is unfinished, or the assistant is blocked. Follow the status "
-                "definitions exactly.\n\n"
-                # Models that narrate before acting spend the whole budget on
-                # prose and never reach the tool call (ENG-1081). Asking for the
-                # call first shortens the preamble; it does not eliminate it,
-                # which is why the budget below is generous as well.
-                + _VERIFIER_NO_PREAMBLE
+            verifier_system, verify_messages = _build_verify_request(
+                self._history, user_message
             )
             verdict = None
             # Truncation vs hard failure decides whether this counts toward the
