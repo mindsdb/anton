@@ -26,9 +26,17 @@ def make_pad(name: str = "eng578") -> LocalScratchpadRuntime:
 
 
 def shrink_timers(monkeypatch, *, heartbeat: str = "0.2") -> None:
-    """1s silence window, 15s total budget, sub-second beats."""
+    """1s silence window, 15s total budget, sub-second beats.
+
+    Also shrinks the post-progress() grace window to 1s: left at its 60s
+    default, a single "Installing {module}..." progress line would widen the
+    silence window enough to survive a several-second silent auto-install on
+    its own, making test_silent_auto_install_survives pass with or without
+    the heartbeat and pin nothing.
+    """
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "1")
     monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "15")
     monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", heartbeat)
 
@@ -116,12 +124,22 @@ class TestLivenessHeartbeat:
         """The ENG-1275 shape: in-cell auto-install silent past the window.
         ANTON_UV_PATH is pointed at a stub that sleeps then fails, so the cell
         must survive the silent install attempt and report the install error
-        (not an inactivity kill)."""
+        (not an inactivity kill).
+
+        _find_uv is patched to return None: LocalScratchpadRuntime.start()
+        otherwise always overwrites ANTON_UV_PATH with a real `uv` found on
+        PATH (near-universal on a dev/CI box that runs `uv run pytest`),
+        silently discarding this test's stub and making it install-fail in
+        well under a second instead of exercising the slow, silent path.
+        """
         shrink_timers(monkeypatch)
         stub = tmp_path / "slow_uv.sh"
         stub.write_text("#!/bin/sh\nsleep 3\nexit 1\n")
         stub.chmod(0o755)
         monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
         pad = make_pad()
         await pad.start()
         try:

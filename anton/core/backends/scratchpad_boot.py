@@ -316,10 +316,16 @@ if _scratchpad_model:
                 while True:
                     await _llm_asyncio.sleep(_LLM_HEARTBEAT_INTERVAL)
                     elapsed += _LLM_HEARTBEAT_INTERVAL
-                    _real_stdout.write(
-                        PROGRESS_MARKER + f" Waiting for LLM… ({elapsed}s)\n"
-                    )
-                    _real_stdout.flush()
+                    # Same lock as every other _real_stdout writer (see _wire_lock
+                    # below): the liveness heartbeat thread is a genuine OS thread
+                    # that writes for the whole cell span, including in-cell LLM
+                    # calls, so an unlocked write here could land inside another
+                    # writer's multi-line block and tear the parent's protocol.
+                    with _wire_lock:
+                        _real_stdout.write(
+                            PROGRESS_MARKER + f" Waiting for LLM… ({elapsed}s)\n"
+                        )
+                        _real_stdout.flush()
 
             beat = _llm_asyncio.create_task(_heartbeat())
             try:
