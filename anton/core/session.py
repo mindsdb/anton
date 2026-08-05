@@ -2141,6 +2141,12 @@ class ChatSession:
                         else b
                         for b in result
                     ]
+                    # NOTE for whoever migrates the first multimodal handler to declare
+                    # ok=False: the streak climbs here, but the resilience-nudge and
+                    # circuit-breaker TEXT are only appended by _apply_error_tracking
+                    # on the string path — this branch skips it, so the model is never
+                    # told to stop retrying. When that handler exists, append the nudge
+                    # as an extra {"type": "text"} block here (#308 review).
                     if outcome.ok is False:
                         error_streak[tc.name] = error_streak.get(tc.name, 0) + 1
                     else:
@@ -2930,6 +2936,12 @@ class ChatSession:
                             else b
                             for b in result_text
                         ]
+                        # NOTE for whoever migrates the first multimodal handler to declare
+                        # ok=False: the streak climbs here, but the resilience-nudge and
+                        # circuit-breaker TEXT are only appended by _apply_error_tracking
+                        # on the string path — this branch skips it, so the model is never
+                        # told to stop retrying. When that handler exists, append the nudge
+                        # as an extra {"type": "text"} block here (#308 review).
                         if tool_ok is False:
                             error_streak[tc.name] = error_streak.get(tc.name, 0) + 1
                         else:
