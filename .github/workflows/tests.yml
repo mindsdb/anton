@@ -3,11 +3,16 @@ name: CI
 permissions:
   contents: read
 
+# Unit + stub-e2e validation. Runs directly on pull requests, and is CALLED as a
+# reusable (workflow_call) by the release publishers — release.yml on main and
+# publish-staging.yml on staging — so a branch push validates exactly once,
+# inside the release run tree, instead of as a second disconnected push run.
+# Failure notification lives in the calling publisher, not here (mirrors the
+# cowork-server tests-unit.yml reusable pattern).
 on:
   pull_request:
-    branches: [main,staging]
-  push:
-    branches: [main,staging]
+    branches: [main, staging]
+  workflow_call:
 
 jobs:
   run-tests:
@@ -26,21 +31,3 @@ jobs:
 
       - name: Run E2E tests (stub)
         run: uv run --extra dev pytest tests/e2e/ -v
-
-  notify:
-    # Alert the eng channel if CI fails on a direct push to main/staging. PR runs
-    # are skipped — the author sees those directly.
-    # One job covers both outcomes: a `uses:` job cannot branch on status, so
-    # the aggregate result picks the failed or recovered message, and a
-    # cancelled run stays silent.
-    needs: [run-tests]
-    if: ${{ !cancelled() && !contains(needs.*.result, 'cancelled') && github.event_name == 'push' }}
-    permissions:
-      contents: read
-      actions: read  # the prior-run lookup behind the recovery message
-    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
-    with:
-      env-name: "CI"
-      status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
-      runs-on: ubuntu-latest
-    secrets: inherit
