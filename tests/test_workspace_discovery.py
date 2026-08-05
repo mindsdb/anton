@@ -110,3 +110,42 @@ class TestDiscoveryBlock:
         block = build_workspace_discovery_context(mgr)
         assert "catanah" in block
         assert "Project root" not in block
+
+
+class TestVolatileTailPlacement:
+    def test_workspace_context_lands_after_datetime_marker(self):
+        # Cache-stability contract (ENG-1122): the block is volatile and must
+        # sit after the volatile-tail marker so it never busts the cached
+        # prefix.
+        from anton.core.llm.prompt_builder import (
+            ChatSystemPromptBuilder,
+            SystemPromptContext,
+        )
+
+        builder = ChatSystemPromptBuilder()
+        prompt = builder.build(
+            conversation_started="Monday, January 05, 2026",
+            current_datetime="Monday, January 05, 2026 at 09:00 AM",
+            system_prompt_context=SystemPromptContext(),
+            proactive_dashboards=False,
+            output_dir="/tmp/out",
+            workspace_context="\n\nWorkspace state:\nScratchpads for this conversation: catanah",
+        )
+        assert "Workspace state:" in prompt
+        assert prompt.index("Workspace state:") > prompt.index("Current date and time")
+
+    def test_empty_workspace_context_adds_nothing(self):
+        from anton.core.llm.prompt_builder import (
+            ChatSystemPromptBuilder,
+            SystemPromptContext,
+        )
+
+        builder = ChatSystemPromptBuilder()
+        prompt = builder.build(
+            conversation_started="Monday, January 05, 2026",
+            current_datetime="Monday, January 05, 2026 at 09:00 AM",
+            system_prompt_context=SystemPromptContext(),
+            proactive_dashboards=False,
+            output_dir="/tmp/out",
+        )
+        assert "Workspace state:" not in prompt
