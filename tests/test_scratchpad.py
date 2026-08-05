@@ -784,16 +784,23 @@ class TestProgressAndTimeouts:
         finally:
             await pad.close()
 
-    async def test_inactivity_timeout_kills_without_progress(self, monkeypatch):
-        """Code that sleeps without progress() calls should be killed by inactivity timeout."""
+    async def test_silence_kill_names_liveness(self, monkeypatch):
+        """A worker that sends no liveness signal is killed on the silence window.
+
+        Since ENG-578 the runtime heartbeats on a working cell's behalf, so a
+        plain sleep survives; disabling the heartbeat simulates a dead/wedged
+        worker and must still be killed — with the liveness wording, not the
+        old "no output" story.
+        """
         monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "2")
         monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "60")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0")
         pad = make_scratchpad(name="no-progress")
         await pad.start()
         try:
             cell = await pad.execute("import time; time.sleep(30)")
             assert cell.error is not None
-            assert "inactivity" in cell.error.lower()
+            assert "liveness" in cell.error.lower()
         finally:
             await pad.close()
 
