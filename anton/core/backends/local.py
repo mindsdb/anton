@@ -841,9 +841,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     raise asyncio.TimeoutError(
                         f"Cell timed out after {total_timeout:.0f}s total"
                     ) from None
+                # Wording is load-bearing: _select_resilience_nudge and the
+                # ACC kill-loop detector route on "liveness" vs "timed out" —
+                # change them together (ENG-578 lockstep constraint).
                 raise asyncio.TimeoutError(
-                    f"Cell killed after {current_inactivity:.0f}s of inactivity "
-                    "(no output or progress() calls)"
+                    f"Cell killed after {current_inactivity:.0f}s without a "
+                    "liveness signal from the scratchpad worker — the process "
+                    "looks dead or wedged. Deliberate sleeps and blocking calls "
+                    "are kept alive automatically, so this is NOT caused by "
+                    "quiet-but-working code"
                 ) from None
 
             if not raw:

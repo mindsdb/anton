@@ -210,3 +210,20 @@ class TestPartialStdoutSalvage:
             assert cell.stdout.count("marker-once") == 1
         finally:
             await pad.close()
+
+
+class TestKillMessages:
+    async def test_total_budget_kill_says_timed_out(self, monkeypatch):
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute("import time; time.sleep(30)")
+            assert cell.error is not None
+            assert "timed out" in cell.error.lower()
+            assert "liveness" not in cell.error.lower()
+        finally:
+            await pad.close()
