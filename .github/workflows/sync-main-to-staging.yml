@@ -1,5 +1,12 @@
 name: Sync main to staging
 
+# run-tree-ok: a release-train hook, not a stage of this repo's push:main pipeline.
+# Folding it in as a `workflow_call` job would make the sync conditional on that
+# pipeline running AND succeeding, which is the exact failure it exists to prevent:
+# a hotfix whose deploy fails still has to reach staging, or the next release PR is
+# diffed against a main that staging does not contain. It also keeps the App-token
+# push out of the deploy pipeline's permission envelope.
+
 # Keeps `staging` from falling behind `main`.
 #
 # The release path is already covered: merging the weekly release PR fires
