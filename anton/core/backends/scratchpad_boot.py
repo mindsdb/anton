@@ -662,7 +662,11 @@ _real_stdin = sys.stdin
 
 import threading
 
-from anton.core.backends.wire import HEARTBEAT_MARKER, PROGRESS_MARKER
+from anton.core.backends.wire import (
+    HEARTBEAT_MARKER,
+    PROGRESS_MARKER,
+    STDOUT_CHUNK_MARKER,
+)
 
 # All _real_stdout writes go through this lock: the heartbeat thread writes
 # concurrently with the main thread's progress()/result emission, and a torn
@@ -673,6 +677,10 @@ _wire_lock = threading.Lock()
 # (restoring pre-heartbeat watchdog behavior).
 _HEARTBEAT_INTERVAL = float(os.environ.get("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "10"))
 
+# Per-tick cap on salvage chunk size: bounds a single wire line even when a
+# cell floods stdout between ticks; the remainder ships on later ticks.
+_CHUNK_MAX = 8_192
+
 # The heartbeat thread reads this; the main loop points "buf" at the current
 # cell's out_buf (it is swapped on auto-install retry). "shipped" is used by
 # the stdout-salvage chunking (see the main loop).
@@ -680,9 +688,24 @@ _cell_out: dict = {"buf": None, "shipped": 0}
 
 
 def _heartbeat_loop(stop: threading.Event) -> None:
+    # A tick with new cell output ships it as a salvage chunk instead of a
+    # bare beat — any line is liveness, and the parent keeps the chunks so a
+    # killed cell can still report what it printed before dying. json.dumps
+    # gives one-line framing (newlines/unicode escaped); a torn trailing
+    # line read off the StringIO mid-write is acceptable in a salvage path.
     while not stop.wait(_HEARTBEAT_INTERVAL):
+        buf = _cell_out["buf"]
+        text = buf.getvalue() if buf is not None else ""
+        new = text[_cell_out["shipped"] :]
         with _wire_lock:
-            _real_stdout.write(HEARTBEAT_MARKER + "\n")
+            if new:
+                chunk = new[:_CHUNK_MAX]
+                _cell_out["shipped"] += len(chunk)
+                _real_stdout.write(
+                    STDOUT_CHUNK_MARKER + " " + json.dumps(chunk) + "\n"
+                )
+            else:
+                _real_stdout.write(HEARTBEAT_MARKER + "\n")
             _real_stdout.flush()
 
 
@@ -981,6 +1004,11 @@ while True:
         out_buf = io.StringIO()
         err_buf = io.StringIO()
         log_buf = io.StringIO()
+        # Reset "shipped" BEFORE re-pointing "buf": the heartbeat thread may
+        # read between the two assignments, and the worst case must be a
+        # re-shipped duplicate chunk, never a skipped one.
+        _cell_out["shipped"] = 0
+        _cell_out["buf"] = out_buf
         error = None
         namespace["_anton_explainability_queries"] = []
         _cell_log_handler.buf = log_buf
@@ -1022,6 +1050,10 @@ while True:
                 out_buf = io.StringIO()
                 err_buf = io.StringIO()
                 log_buf = io.StringIO()
+                # Same ordering rule as the first cell setup: shipped first,
+                # so the swap can only duplicate a chunk, never skip one.
+                _cell_out["shipped"] = 0
+                _cell_out["buf"] = out_buf
                 _cell_log_handler.buf = log_buf
                 sys.stdout = out_buf
                 sys.stderr = err_buf
@@ -1072,6 +1104,7 @@ while True:
         _hb_stop.set()
         if _hb_thread is not None:
             _hb_thread.join(timeout=2)
+        _cell_out["buf"] = None
 
     result = {
         "stdout": stdout_val,

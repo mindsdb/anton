@@ -149,3 +149,64 @@ class TestLivenessHeartbeat:
             assert "liveness" not in cell.error.lower()
         finally:
             await pad.close()
+
+
+class TestPartialStdoutSalvage:
+    async def test_killed_cell_reports_partial_stdout(self, monkeypatch):
+        """Prints from completed iterations survive a kill. Uses a
+        total-budget kill (heartbeat ON, tiny total budget) because that is
+        the deterministic kill shape once liveness beats exist."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "3")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import time\n"
+                "print('sent 1/3')\n"
+                "print('sent 2/3')\n"
+                "time.sleep(30)\n"   # runs into the 3s total budget
+                "print('sent 3/3')\n"
+            )
+            assert cell.error is not None and "timed out" in cell.error.lower()
+            assert "sent 2/3" in cell.stdout
+            assert "sent 3/3" not in cell.stdout
+            assert "partial" in cell.error.lower()
+        finally:
+            await pad.close()
+
+    async def test_crash_reports_partial_stdout(self, monkeypatch):
+        """Process death (EOF path) also attaches salvage."""
+        shrink_timers(monkeypatch)
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os, time\n"
+                "print('before-crash')\n"
+                "time.sleep(0.5)\n"   # > one 0.2s tick so the chunk ships
+                "os._exit(1)\n"
+            )
+            assert cell.error is not None
+            assert "before-crash" in cell.stdout
+        finally:
+            await pad.close()
+
+    async def test_successful_cell_output_appears_exactly_once(self, monkeypatch):
+        """Salvage is discarded on success — no duplicated stdout."""
+        shrink_timers(monkeypatch)
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import time\n"
+                "print('marker-once')\n"
+                "time.sleep(0.5)\n"   # ensures the chunk shipped pre-result
+                "print('tail')\n"
+            )
+            assert cell.error is None
+            assert cell.stdout.count("marker-once") == 1
+        finally:
+            await pad.close()

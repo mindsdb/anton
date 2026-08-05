@@ -20,11 +20,17 @@ from anton.core.backends.wire import (
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
+    STDOUT_CHUNK_MARKER,
 )
 from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
+
+# Bound on accumulated salvage chunks per cell — mirrors the boot script's
+# _MAX_OUTPUT so a killed cell can never report more stdout than a successful
+# one would have.
+_SALVAGE_MAX = 10_000
 
 
 def _read_boot_script() -> str:
@@ -700,6 +706,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             )
             return
 
+        # Fresh salvage state per cell: _read_result accumulates the worker's
+        # stdout chunks here so a kill/crash can still report partial output.
+        self._salvage: list[str] = []
+        self._salvage_truncated = False
+
         payload = code + "\n" + CELL_DELIM + "\n"
         self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
@@ -731,9 +742,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "For Snowflake: use SHOW RUNNING QUERIES and "
                 "SELECT SYSTEM$CANCEL_ALL_QUERIES(<session_id>)."
             )
+            salvaged = "".join(self._salvage)
+            if salvaged:
+                if self._salvage_truncated:
+                    salvaged = "(truncated to most recent output)\n" + salvaged
+                error_msg += (
+                    "\n\nPartial output from before the kill was recovered "
+                    "and is shown in stdout (current to within one heartbeat "
+                    "interval) — use it to determine which side effects "
+                    "already happened."
+                )
             cell = Cell(
                 code=code,
-                stdout="",
+                stdout=salvaged,
                 stderr="",
                 error=error_msg,
                 description=description,
@@ -826,8 +847,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 ) from None
 
             if not raw:
+                # Crash/EOF: attach whatever stdout chunks were salvaged —
+                # the process died with side effects possibly already done.
                 yield {
-                    "stdout": "",
+                    "stdout": "".join(self._salvage),
                     "stderr": "",
                     "error": "Process exited unexpectedly.",
                 }
@@ -837,6 +860,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             if line.startswith(HEARTBEAT_MARKER):
                 # Liveness only: arrival already re-armed the readline timer.
+                continue
+
+            if line.startswith(STDOUT_CHUNK_MARKER):
+                # Salvage: accumulate silently (arrival is also liveness).
+                # Keep the TAIL when over budget — after a kill the newest
+                # output ("sent 47/50") is the valuable part, unlike normal
+                # stdout truncation which keeps the head.
+                try:
+                    chunk = json.loads(line[len(STDOUT_CHUNK_MARKER) :].strip())
+                except json.JSONDecodeError:
+                    chunk = ""
+                if isinstance(chunk, str) and chunk:
+                    self._salvage.append(chunk)
+                    total = sum(len(c) for c in self._salvage)
+                    while total > _SALVAGE_MAX and len(self._salvage) > 1:
+                        total -= len(self._salvage.pop(0))
+                        self._salvage_truncated = True
                 continue
 
             if line.startswith(PROGRESS_MARKER):
