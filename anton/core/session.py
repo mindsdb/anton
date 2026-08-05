@@ -622,6 +622,10 @@ class ChatSession:
         self._act_first = config.act_first
         self._started_at = config.started_at
         self._extra_tools = config.tools
+        # Deferred tool bundles: tools tagged with `unlock_skill`
+        # are held here, keyed by skill label, and registered only when that
+        # skill is recalled. Populated in `_build_tools`.
+        self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
         self._console = config.console
@@ -1198,8 +1202,48 @@ class ChatSession:
         if not self.tool_registry:
             self._build_core_tools()
             for tool in self._extra_tools:
-                self.tool_registry.register_tool(tool)
+                # Deferred tools wait in `_deferred_bundles` until
+                # their skill is recalled; the rest register up front.
+                if tool.unlock_skill:
+                    self._deferred_bundles.setdefault(
+                        tool.unlock_skill, []
+                    ).append(tool)
+                else:
+                    self.tool_registry.register_tool(tool)
+            # After extra tools: re-unlock bundles from a prior recall in the
+            # loaded history, at the same tail position the live path uses, so
+            # tool order stays cache-stable across turns.
+            self._replay_tool_bundles_from_history()
         return self.tool_registry.dump()
+
+    def _register_tool_bundle(self, label: str) -> None:
+        """Register the deferred tools a recalled skill unlocks.
+
+        Sticky for the session; `register_tool` dedups by name so repeated
+        recalls are safe. No-op if the label unlocks no bundle.
+        """
+        for tool in self._deferred_bundles.get(label, []):
+            self.tool_registry.register_tool(tool)
+
+    def _replay_tool_bundles_from_history(self) -> None:
+        """Re-unlock bundles from prior `recall_skill` calls in the history.
+
+        Lets sticky tools survive a session rebuild (e.g. server restart). If
+        compaction evicted the call, the model re-recalls when next needed.
+        """
+        for msg in self._history:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("name") == "recall_skill"
+                ):
+                    label = (block.get("input") or {}).get("label")
+                    if isinstance(label, str):
+                        self._register_tool_bundle(label.strip())
 
     def _build_core_tools(self) -> None:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
@@ -2042,6 +2086,9 @@ class ChatSession:
                 skill = None
             if skill is None:
                 continue
+            # Unlock gated tools before the skip below, so a preload
+            # registers the bundle even when it won't re-inject the body.
+            self._register_tool_bundle(skill.label)
             # Skip skills whose full body is already in context — mirrors
             # handle_recall_skill's stub path so a preload can't duplicate a
             # procedure the planning model already has (wasted tokens).
@@ -2219,6 +2266,10 @@ class ChatSession:
                 )
 
             self._append_history({"role": "user", "content": tool_results})
+
+            # Rebuild: a tool this round (e.g. recall_skill) may have
+            # registered new tools the follow-up must see.
+            tools = self._build_tools()
 
             # Get follow-up from LLM
             response = await self.plan_with_recovery(system=system, tools=tools)
@@ -3065,6 +3116,10 @@ class ChatSession:
                 self._acc_maybe_nudge(tool_results)
 
                 self._append_history({"role": "user", "content": tool_results})
+
+                # Rebuild: a tool this round (e.g. recall_skill) may have
+                # registered new tools the follow-up must see.
+                tools = self._build_tools()
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
