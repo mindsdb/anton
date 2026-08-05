@@ -51,3 +51,62 @@ class TestManagerAccessors:
         path.write_bytes(b"stub")
         got = mgr.pad_snapshot_mtime("campaign")
         assert got is not None and abs(got - time.time()) < 60
+
+
+from anton.core.utils.scratchpad import build_workspace_discovery_context
+
+
+def seed_agent_pads(mgr: ScratchpadManager, names: list[str]) -> None:
+    for n in names:
+        mgr.record_agent_pad(n)
+
+
+class TestDiscoveryBlock:
+    def test_empty_everything_renders_nothing(self, tmp_path):
+        empty_root = tmp_path / "root"
+        empty_root.mkdir()
+        mgr = make_manager(empty_root)
+        assert build_workspace_discovery_context(mgr) == ""
+
+    def test_pads_and_root_listing(self, tmp_path):
+        (tmp_path / "campaign_engine.py").write_text("x")
+        (tmp_path / "BRIEFING.md").write_text("x")
+        (tmp_path / "campaigns").mkdir()
+        (tmp_path / ".env").write_text("PLACEHOLDER=1")  # hidden: excluded
+        mgr = make_manager(tmp_path)
+        seed_agent_pads(mgr, ["catanah"])
+        block = build_workspace_discovery_context(mgr)
+        assert "Workspace state:" in block
+        assert "catanah" in block
+        assert "campaign_engine.py" in block
+        assert "campaigns/" in block
+        assert ".env" not in block
+
+    def test_live_pad_labeled_active_system_pads_hidden(self, tmp_path):
+        mgr = make_manager(tmp_path)
+        seed_agent_pads(mgr, ["catanah"])
+        # Simulate live pads: one agent-recorded, one system-created.
+        mgr._pads["catanah"] = object()
+        mgr._pads["artifact-slug-pad"] = object()
+        block = build_workspace_discovery_context(mgr)
+        assert "catanah (active)" in block
+        assert "artifact-slug-pad" not in block
+
+    def test_caps_and_remainders(self, tmp_path):
+        for i in range(35):
+            (tmp_path / f"file{i:02d}.txt").write_text("x")
+        mgr = make_manager(tmp_path)
+        seed_agent_pads(mgr, [f"pad{i:02d}" for i in range(12)])
+        block = build_workspace_discovery_context(mgr)
+        assert "… and 2 more" in block   # 12 pads, cap 10
+        assert "… and 5 more" in block   # 35 files, cap 30
+
+    def test_listing_failure_renders_without_root(self, tmp_path, monkeypatch):
+        mgr = make_manager(tmp_path)
+        seed_agent_pads(mgr, ["catanah"])
+        monkeypatch.setattr(
+            Path, "iterdir", lambda self: (_ for _ in ()).throw(PermissionError())
+        )
+        block = build_workspace_discovery_context(mgr)
+        assert "catanah" in block
+        assert "Project root" not in block
