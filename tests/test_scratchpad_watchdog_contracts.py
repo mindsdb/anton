@@ -329,3 +329,14 @@ class TestToolContractText:
         assert "kept alive automatically" in desc
         assert "inactivity timeout" not in desc
         assert "reset the timer" not in desc
+
+    def test_system_prompt_does_not_mandate_splitting_cells(self):
+        # The system prompt was a fourth author of the wrong lesson: "hard
+        # timeout of 120 seconds" + "you MUST break the work into smaller
+        # cells" taught the per-item pattern before the tool was even called.
+        from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+
+        low = CHAT_SYSTEM_PROMPT.lower()
+        assert "must break the work into smaller cells" not in low
+        assert "hard timeout of 120 seconds" not in low
+        assert "kept alive automatically" in low

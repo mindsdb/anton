@@ -113,11 +113,14 @@ dump action — it shows a clean notebook-style summary without wasting tokens o
 Always include all necessary imports at the top of each cell that uses them. \
 Re-importing is a no-op in Python so there is zero cost, and it guarantees the cell \
 works even if earlier cells failed or state was lost.
-- IMPORTANT: Each cell has a hard timeout of 120 seconds. If exceeded, the process is \
-killed and ALL state (variables, imports, data) is lost. For every exec call, provide \
-one_line_description and estimated_execution_time_seconds (integer). If your estimate \
-exceeds 90 seconds, you MUST break the work into smaller cells. Prefer vectorized \
-operations, batch I/O, and focused cells that do one thing well.
+- IMPORTANT: Cells are kept alive automatically while they are working — deliberate \
+sleeps and blocking calls (e.g. a throttled batch loop) are safe in ONE cell, and one \
+cell per batch is the preferred shape. For every exec call, provide \
+one_line_description and estimated_execution_time_seconds (integer): the estimate \
+sizes the total time budget (roughly 2x; without an estimate the default budget is \
+120 seconds), and a cell that outlives its total budget is killed with all state \
+lost. Prefer vectorized operations and batch I/O; do not split work into tiny cells \
+to dodge timeouts.
 - Host Python packages are available by default. Use the scratchpad install action to \
 add more — installed packages persist across resets.
 
