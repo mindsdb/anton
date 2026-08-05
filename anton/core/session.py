@@ -676,7 +676,10 @@ class ChatSession:
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
         # Lives at ~/.anton/skills/<label>/. The recall_skill tool retrieves
         # entries on demand and increments per-stage usage counters.
-        self._skill_store = SkillStore(root=getattr(s, "skills_root", None))
+        self._skill_store = SkillStore(
+            root=getattr(s, "skills_root", None),
+            extra_roots=getattr(s, "skills_extra_roots", None),
+        )
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
