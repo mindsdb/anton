@@ -654,15 +654,40 @@ if _minds_datasource and _minds_api_key and _minds_url:
 _real_stdout = sys.stdout
 _real_stdin = sys.stdin
 
-from anton.core.backends.wire import PROGRESS_MARKER
+import threading
+
+from anton.core.backends.wire import HEARTBEAT_MARKER, PROGRESS_MARKER
+
+# All _real_stdout writes go through this lock: the heartbeat thread writes
+# concurrently with the main thread's progress()/result emission, and a torn
+# line would corrupt the parent's line-oriented protocol.
+_wire_lock = threading.Lock()
+
+# Env override exists for tests only; <= 0 disables the heartbeat entirely
+# (restoring pre-heartbeat watchdog behavior).
+_HEARTBEAT_INTERVAL = float(os.environ.get("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "10"))
+
+# The heartbeat thread reads this; the main loop points "buf" at the current
+# cell's out_buf (it is swapped on auto-install retry). "shipped" is used by
+# the stdout-salvage chunking (see the main loop).
+_cell_out: dict = {"buf": None, "shipped": 0}
+
+
+def _heartbeat_loop(stop: threading.Event) -> None:
+    while not stop.wait(_HEARTBEAT_INTERVAL):
+        with _wire_lock:
+            _real_stdout.write(HEARTBEAT_MARKER + "\n")
+            _real_stdout.flush()
+
 
 _MAX_OUTPUT = 10_000
 
 
 def progress(message=""):
     """Signal that long-running work is still active. Resets the inactivity timer."""
-    _real_stdout.write(PROGRESS_MARKER + " " + str(message) + "\n")
-    _real_stdout.flush()
+    with _wire_lock:
+        _real_stdout.write(PROGRESS_MARKER + " " + str(message) + "\n")
+        _real_stdout.flush()
 
 
 _inject_helper("progress", progress)
@@ -927,98 +952,120 @@ while True:
     code = heal_surrogate_source(code)
     if not code.strip():
         result = {"stdout": "", "stderr": "", "logs": "", "error": None}
-        _real_stdout.write(RESULT_START + "\n")
-        _real_stdout.write(json.dumps(result) + "\n")
-        _real_stdout.write(RESULT_END + "\n")
-        _real_stdout.flush()
+        with _wire_lock:
+            _real_stdout.write(RESULT_START + "\n")
+            _real_stdout.write(json.dumps(result) + "\n")
+            _real_stdout.write(RESULT_END + "\n")
+            _real_stdout.flush()
         continue
 
-    out_buf = io.StringIO()
-    err_buf = io.StringIO()
-    log_buf = io.StringIO()
-    error = None
-    namespace["_anton_explainability_queries"] = []
-    _cell_log_handler.buf = log_buf
-
-    sys.stdout = out_buf
-    sys.stderr = err_buf
-    _auto_installed = []
+    # Liveness heartbeat: a daemon thread pings the real pipe while this cell
+    # runs, so the parent's inactivity watchdog sees activity through a
+    # deliberate sleep or a blocking call, not just through stdout/progress().
+    # Span covers the auto-install retry below too (ENG-1275: a silent
+    # in-cell install used to be indistinguishable from a wedged process).
+    _hb_stop = threading.Event()
+    _hb_thread = None
+    if _HEARTBEAT_INTERVAL > 0:
+        _hb_thread = threading.Thread(
+            target=_heartbeat_loop, args=(_hb_stop,), daemon=True
+        )
+        _hb_thread.start()
     try:
-        compiled = compile(code, "<scratchpad>", "exec")
-        exec(compiled, namespace)
-    except ModuleNotFoundError as _mnf:
-        # Auto-install the missing module and retry the cell once
-        _missing = _mnf.name
-        if _missing:
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        log_buf = io.StringIO()
+        error = None
+        namespace["_anton_explainability_queries"] = []
+        _cell_log_handler.buf = log_buf
+
+        sys.stdout = out_buf
+        sys.stderr = err_buf
+        _auto_installed = []
+        try:
+            compiled = compile(code, "<scratchpad>", "exec")
+            exec(compiled, namespace)
+        except ModuleNotFoundError as _mnf:
+            # Auto-install the missing module and retry the cell once
+            _missing = _mnf.name
+            if _missing:
+                sys.stdout = _real_stdout
+                sys.stderr = sys.__stderr__
+                _cell_log_handler.buf = None
+                with _wire_lock:
+                    _real_stdout.write(
+                        PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n"
+                    )
+                    _real_stdout.flush()
+                import subprocess as _sp
+
+                _uv_path = os.environ.get("ANTON_UV_PATH", "")
+                if _uv_path:
+                    _pip = _sp.run(
+                        [_uv_path, "pip", "install", "--python", sys.executable, _missing],
+                        capture_output=True,
+                        timeout=120,
+                    )
+                else:
+                    _pip = _sp.run(
+                        [sys.executable, "-m", "pip", "install", _missing],
+                        capture_output=True,
+                        timeout=120,
+                    )
+                # Reset buffers and retry
+                out_buf = io.StringIO()
+                err_buf = io.StringIO()
+                log_buf = io.StringIO()
+                _cell_log_handler.buf = log_buf
+                sys.stdout = out_buf
+                sys.stderr = err_buf
+                if _pip.returncode == 0:
+                    _auto_installed.append(_missing)
+                    try:
+                        exec(compiled, namespace)
+                    except Exception:
+                        error = traceback.format_exc()
+                else:
+                    error = (
+                        f"ModuleNotFoundError: No module named '{_missing}'\n"
+                        f"Auto-install failed:\n{_pip.stderr.decode()}"
+                    )
+            else:
+                error = traceback.format_exc()
+        except Exception:
+            error = traceback.format_exc()
+        finally:
             sys.stdout = _real_stdout
             sys.stderr = sys.__stderr__
             _cell_log_handler.buf = None
-            _real_stdout.write(
-                PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n"
+
+        stdout_val = out_buf.getvalue()
+        if len(stdout_val) > _MAX_OUTPUT:
+            stdout_val = (
+                stdout_val[:_MAX_OUTPUT]
+                + f"\n\n... (truncated, {len(stdout_val)} chars total)"
             )
-            _real_stdout.flush()
-            import subprocess as _sp
 
-            _uv_path = os.environ.get("ANTON_UV_PATH", "")
-            if _uv_path:
-                _pip = _sp.run(
-                    [_uv_path, "pip", "install", "--python", sys.executable, _missing],
-                    capture_output=True,
-                    timeout=120,
-                )
-            else:
-                _pip = _sp.run(
-                    [sys.executable, "-m", "pip", "install", _missing],
-                    capture_output=True,
-                    timeout=120,
-                )
-            # Reset buffers and retry
-            out_buf = io.StringIO()
-            err_buf = io.StringIO()
-            log_buf = io.StringIO()
-            _cell_log_handler.buf = log_buf
-            sys.stdout = out_buf
-            sys.stderr = err_buf
-            if _pip.returncode == 0:
-                _auto_installed.append(_missing)
-                try:
-                    exec(compiled, namespace)
-                except Exception:
-                    error = traceback.format_exc()
-            else:
-                error = (
-                    f"ModuleNotFoundError: No module named '{_missing}'\n"
-                    f"Auto-install failed:\n{_pip.stderr.decode()}"
-                )
-        else:
-            error = traceback.format_exc()
-    except Exception:
-        error = traceback.format_exc()
+        # Persist session after each cell. Keep the return value: a swallowed failure here
+        # is exactly how ENG-1124 stayed invisible for two months.
+        _session_dump_note = _dump_namespace(namespace)
+        if _session_dump_note:
+            _session_notes.append(_session_dump_note)
+
+        # Surface persistence problems on `logs`, never on `error` — see `_session_notes`.
+        logs_val = log_buf.getvalue()
+        if _session_notes:
+            logs_val = (logs_val.rstrip("\n") + "\n\n" if logs_val.strip() else "") + "\n".join(
+                _session_notes
+            )
+            _session_notes.clear()
     finally:
-        sys.stdout = _real_stdout
-        sys.stderr = sys.__stderr__
-        _cell_log_handler.buf = None
-
-    stdout_val = out_buf.getvalue()
-    if len(stdout_val) > _MAX_OUTPUT:
-        stdout_val = (
-            stdout_val[:_MAX_OUTPUT]
-            + f"\n\n... (truncated, {len(stdout_val)} chars total)"
-        )
-
-    # Persist session after each cell. Keep the return value: a swallowed failure here
-    # is exactly how ENG-1124 stayed invisible for two months.
-    _session_dump_note = _dump_namespace(namespace)
-    if _session_dump_note:
-        _session_notes.append(_session_dump_note)
-
-    # Surface persistence problems on `logs`, never on `error` — see `_session_notes`.
-    logs_val = log_buf.getvalue()
-    if _session_notes:
-        logs_val = (logs_val.rstrip("\n") + "\n\n" if logs_val.strip() else "") + "\n".join(
-            _session_notes
-        )
-        _session_notes.clear()
+        # Always stop the heartbeat, even if result assembly above raised —
+        # otherwise the thread leaks and keeps ticking into the next cell's
+        # read loop (see test_no_stray_beats_corrupt_next_cell).
+        _hb_stop.set()
+        if _hb_thread is not None:
+            _hb_thread.join(timeout=2)
 
     result = {
         "stdout": stdout_val,
@@ -1029,7 +1076,8 @@ while True:
     }
     if _auto_installed:
         result["auto_installed"] = _auto_installed
-    _real_stdout.write(RESULT_START + "\n")
-    _real_stdout.write(json.dumps(result) + "\n")
-    _real_stdout.write(RESULT_END + "\n")
-    _real_stdout.flush()
+    with _wire_lock:
+        _real_stdout.write(RESULT_START + "\n")
+        _real_stdout.write(json.dumps(result) + "\n")
+        _real_stdout.write(RESULT_END + "\n")
+        _real_stdout.flush()

@@ -8,6 +8,7 @@ CELL_DELIM = "__ANTON_CELL_END__"
 RESULT_START = "__ANTON_RESULT__"
 RESULT_END = "__ANTON_RESULT_END__"
 PROGRESS_MARKER = "__ANTON_PROGRESS__"
+HEARTBEAT_MARKER = "__ANTON_HEARTBEAT__"
 
 
 def heal_surrogate_source(code: str) -> str:

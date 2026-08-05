@@ -16,6 +16,7 @@ from pathlib import Path
 from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.wire import (
     CELL_DELIM,
+    HEARTBEAT_MARKER,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
@@ -833,6 +834,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 return
 
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+            if line.startswith(HEARTBEAT_MARKER):
+                # Liveness only: arrival already re-armed the readline timer.
+                continue
 
             if line.startswith(PROGRESS_MARKER):
                 current_inactivity = max(
