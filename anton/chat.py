@@ -1161,113 +1161,15 @@ def _persist_first_run_done(settings) -> None:
     settings.first_run_done = True
 
 
-_GREETING_EXAMPLES = [
-    (
-        "Go through my inbox, find every subscription I never read,\n"
-        "       and build me a dashboard with unsubscribe links right there."
-    ),
-    (
-        "Classify my last 200 emails \u2014 what actually needs my\n"
-        "       attention vs what\u2019s noise? Show me a breakdown."
-    ),
-    (
-        "Show me all my meetings next month \u2014 who\u2019s taking most\n"
-        "       of my time? Build me a dashboard."
-    ),
-    (
-        "Find all recurring meetings I haven\u2019t attended in 3+ months \u2014\n"
-        "       should I drop them? Give me a report."
-    ),
-    (
-        "Compare AAPL, NVDA, and TSLA over the last year \u2014\n"
-        "       full interactive investment dashboard."
-    ),
-    (
-        "What\u2019s the latest tech news today? Pull the headlines\n"
-        "       and summarize what actually matters."
-    ),
-    (
-        "I have a spreadsheet with sales data \u2014 analyze it and\n"
-        "       build me an interactive dashboard with the key insights."
-    ),
-    (
-        "Help me plan a trip to Tokyo \u2014 flights, hotels, budget,\n"
-        "       all in one dashboard."
-    ),
-]
-
-
-def _desktop_greeting(console: Console, settings) -> None:
-    """First-time greeting for desktop app users. Types out a welcome + example."""
-    import random
-    import time as _time
-
-    from anton.channel.theme import get_palette as _gp
-
-    _c = _gp().cyan
-    _r, _g, _b = int(_c[1:3], 16), int(_c[3:5], 16), int(_c[5:7], 16)
-    _ac = f"\033[1;38;2;{_r};{_g};{_b}m"
-    _ar = "\033[0m"
-
-    example = random.choice(_GREETING_EXAMPLES)  # noqa: S311
-
-    console.print()
-
-    # Line 1: "Hi Boss! I'm Anton — here to help with anything."
-    _line1 = "Hi Boss! I\u2019m Anton \u2014 here to help with anything."
-    console.file.write(f"{_ac}anton>{_ar} ")
-    for ch in _line1:
-        console.file.write(ch)
-        console.file.flush()
-        _time.sleep(0.02)
-    console.file.write("\n")
-    console.file.flush()
-
-    _time.sleep(0.3)
-
-    # Line 2: blank
-    console.file.write("\n")
-
-    # Line 3: "For example, try something like:"
-    _line2 = "For example, try something like:"
-    console.file.write("       ")
-    for ch in _line2:
-        console.file.write(ch)
-        console.file.flush()
-        _time.sleep(0.02)
-    console.file.write("\n")
-    console.file.flush()
-
-    _time.sleep(0.2)
-
-    # Line 4: blank
-    console.file.write("\n")
-
-    # Line 5+: the example (quoted, italic feel)
-    console.file.write("       \u201c")
-    for ch in example:
-        console.file.write(ch)
-        console.file.flush()
-        _time.sleep(0.015)
-    console.file.write("\u201d\n")
-    console.file.flush()
-
-    console.print()
-
-    _persist_first_run_done(settings)
-
-
-
-
 def run_chat(
-    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
+    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False
 ) -> None:
     """Launch the interactive chat REPL."""
-    asyncio.run(_chat_loop(console, settings, resume=resume, first_run=first_run, desktop_first_run=desktop_first_run))
+    asyncio.run(_chat_loop(console, settings, resume=resume, first_run=first_run))
 
 
 async def _chat_loop(
-    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
+    console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False
 ) -> None:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.core.llm.client import LLMClient
@@ -1379,12 +1281,6 @@ async def _chat_loop(
         if resumed_id:
             current_session_id = resumed_id
 
-    if desktop_first_run and not settings.first_run_done:
-        try:
-            _desktop_greeting(console, settings)
-        except Exception:
-            pass
-
     _agent_zero_query: str | None = None
     if first_run and not settings.first_run_done:
         try:
@@ -1397,7 +1293,7 @@ async def _chat_loop(
             pass
         _persist_first_run_done(settings)
 
-    if not first_run and not desktop_first_run:
+    if not first_run:
         console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
     console.print("[anton.muted] type '/help' for commands or 'exit' to quit.[/]")
     console.print()

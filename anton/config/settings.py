@@ -8,10 +8,15 @@ from anton.core.settings import CoreSettings
 
 
 def _build_env_files() -> list[str]:
-    """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env
-    -> ~/.cowork/.env. Later files win, so the consolidated ~/.cowork/.env
-    takes precedence; ~/.anton/.env stays as a fallback for installs that
-    haven't migrated yet."""
+    """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env.
+    Later files win, so the user-global ~/.anton/.env takes precedence over a
+    project-local .anton/.env.
+
+    The standalone CLI owns its own config here; it no longer reads the Cowork
+    desktop's ~/.cowork/.env mirror (ENG-1295). When Anton runs embedded in
+    cowork-server, the harness builds AntonSettings with the DB overlay and no
+    .env base (AntonSettings(_env_file=None)), so this chain applies only to
+    the standalone CLI."""
     files: list[str] = [".env"]
     local_env = Path.cwd() / ".anton" / ".env"
     if local_env.is_file():
@@ -19,9 +24,6 @@ def _build_env_files() -> list[str]:
     user_env = Path("~/.anton/.env").expanduser()
     if user_env.is_file():
         files.append(str(user_env))
-    cowork_env = Path("~/.cowork/.env").expanduser()
-    if cowork_env.is_file():
-        files.append(str(cowork_env))
     return files
 
 
