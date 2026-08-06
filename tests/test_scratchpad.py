@@ -784,16 +784,23 @@ class TestProgressAndTimeouts:
         finally:
             await pad.close()
 
-    async def test_inactivity_timeout_kills_without_progress(self, monkeypatch):
-        """Code that sleeps without progress() calls should be killed by inactivity timeout."""
+    async def test_silence_kill_names_liveness(self, monkeypatch):
+        """A worker that sends no liveness signal is killed on the silence window.
+
+        Since ENG-578 the runtime heartbeats on a working cell's behalf, so a
+        plain sleep survives; disabling the heartbeat simulates a dead/wedged
+        worker and must still be killed — with the liveness wording, not the
+        old "no output" story.
+        """
         monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "2")
         monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "60")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0")
         pad = make_scratchpad(name="no-progress")
         await pad.start()
         try:
             cell = await pad.execute("import time; time.sleep(30)")
             assert cell.error is not None
-            assert "inactivity" in cell.error.lower()
+            assert "liveness" in cell.error.lower()
         finally:
             await pad.close()
 
@@ -866,10 +873,14 @@ class TestProgressAndTimeouts:
         assert inactivity == float(CoreSettings().cell_inactivity_max)
         assert total == 600.0  # total is intentionally left uncapped
 
-    async def test_compute_timeouts_total_max_off_by_default(self):
-        """cell_total_max defaults to 0 — the total is uncapped out of the box."""
+    async def test_compute_timeouts_total_max_capped_by_default(self):
+        """cell_total_max defaults to 1h. Since the liveness heartbeat keeps
+        deliberately-quiet cells alive (ENG-578), a deadlock or infinite loop
+        beats like a working cell — this ceiling is the only bound that ends
+        it, so it must be on out of the box (and generous enough for a
+        throttled batch campaign)."""
         from anton.core.settings import CoreSettings
-        assert CoreSettings().cell_total_max == 0
+        assert CoreSettings().cell_total_max == 3600
 
     async def test_compute_timeouts_total_max_backstop(self, monkeypatch):
         """When set, cell_total_max bounds the total; inactivity stays capped."""
