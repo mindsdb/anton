@@ -66,8 +66,18 @@ class LLMClient:
         # swallowed (see _notify_usage).
         self.usage_listener = None  # Callable[[str, str, Usage], None] | None
 
-    def _notify_usage(self, role: str, model: str, usage) -> None:
-        listener = self.usage_listener
+    def _notify_usage(self, role: str, model: str, usage, listener=None) -> None:
+        """Report one call's usage to the turn-cost accumulator.
+
+        ``listener`` must be the reference captured when the call was ISSUED,
+        not read here at completion time. End-of-turn fire-and-forget work
+        (cerebellum flush, identity update, scratchpad consolidation) shares
+        this client, so on a long-lived-session host a fast follow-up message
+        arms turn N+1's listener while turn N's flush is still in flight —
+        resolving late booked that usage into the wrong turn (#309 review).
+        Captured-at-issue means background calls started while disarmed book
+        nowhere, which is what ``turn_cost``'s docstring already promises.
+        """
         if listener is None:
             return
         try:
@@ -87,6 +97,7 @@ class LLMClient:
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
+        listener = self.usage_listener
         response = await self._planning_provider.complete(
             model=self._planning_model,
             system=system,
@@ -95,7 +106,7 @@ class LLMClient:
             max_tokens=max_tokens or self._max_tokens,
             native_web_tools=native_web_tools,
         )
-        self._notify_usage("planning", self._planning_model, response.usage)
+        self._notify_usage("planning", self._planning_model, response.usage, listener)
         return response
 
     async def plan_stream(
@@ -107,6 +118,7 @@ class LLMClient:
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        listener = self.usage_listener
         async for event in self._planning_provider.stream(
             model=self._planning_model,
             system=system,
@@ -117,7 +129,7 @@ class LLMClient:
         ):
             if isinstance(event, StreamComplete):
                 self._notify_usage(
-                    "planning", self._planning_model, event.response.usage
+                    "planning", self._planning_model, event.response.usage, listener
                 )
             yield event
 
@@ -171,6 +183,7 @@ class LLMClient:
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
+        listener = self.usage_listener
         response = await self._coding_provider.complete(
             model=self._coding_model,
             system=system,
@@ -179,7 +192,7 @@ class LLMClient:
             max_tokens=max_tokens or self._max_tokens,
             native_web_tools=native_web_tools,
         )
-        self._notify_usage("coding", self._coding_model, response.usage)
+        self._notify_usage("coding", self._coding_model, response.usage, listener)
         return response
 
     async def summarize(
@@ -195,13 +208,14 @@ class LLMClient:
         (the router_* kwargs default to the coding role in __init__), so
         this is behavior-preserving unless a distinct model is selected.
         """
+        listener = self.usage_listener
         response = await self._router_provider.complete(
             model=self._router_model,
             system=system,
             messages=messages,
             max_tokens=max_tokens or self._max_tokens,
         )
-        self._notify_usage("router", self._router_model, response.usage)
+        self._notify_usage("router", self._router_model, response.usage, listener)
         return response
 
     async def gate(
@@ -218,6 +232,7 @@ class LLMClient:
         No ``native_web_tools``: the thalamus must never do work itself,
         only answer from context or delegate.
         """
+        listener = self.usage_listener
         response = await self._router_provider.complete(
             model=self._router_model,
             system=system,
@@ -226,7 +241,7 @@ class LLMClient:
             tool_choice=tool_choice,
             max_tokens=max_tokens or self._max_tokens,
         )
-        self._notify_usage("router", self._router_model, response.usage)
+        self._notify_usage("router", self._router_model, response.usage, listener)
         return response
 
     async def _generate_object_with(
@@ -257,6 +272,7 @@ class LLMClient:
 
         budget = max_tokens or self._max_tokens
 
+        listener = self.usage_listener
         response = await provider.complete(
             model=model,
             system=system,
@@ -273,6 +289,7 @@ class LLMClient:
             "planning" if model == self._planning_model else "coding",
             model,
             response.usage,
+            listener,
         )
 
         if not response.tool_calls:

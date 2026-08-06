@@ -32,9 +32,11 @@ class Usage:
       subtracts ``cached_tokens`` out — without that, the same call would
       report different components depending on the wire format.
     - ``cache_read_tokens`` / ``cache_creation_tokens``: prompt tokens served
-      from / written to the provider prompt cache. OpenAI-compatible
-      endpoints expose only the read side (``prompt_tokens_details.
-      cached_tokens``); creation stays 0 there — a stated gap, not a bug.
+      from / written to the provider prompt cache. Both are populated on the
+      OpenAI dialect too — our gateway publishes
+      ``prompt_tokens_details.{cached_tokens, cache_write_tokens}`` — and are
+      subtracted out of ``prompt_tokens`` by ``_split_cached_input``. A
+      third-party endpoint that omits either field reports 0 for it.
     - Total context for a call = input + cache_read + cache_creation
       (cache tokens ARE context; dropping them understates a warm-cache
       call by ~10x).

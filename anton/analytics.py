@@ -1,9 +1,28 @@
-"""Fire-and-forget anonymous analytics events.
+"""Fire-and-forget analytics events.
 
 Every call spawns a daemon thread that issues a single GET request to the
-configured analytics URL.  The request carries only the action name, a
-timestamp, and an anonymous machine fingerprint — no PII, no payload
-beyond what the query string contains.
+configured analytics URL.  The request carries the action name, a timestamp,
+an anonymous machine fingerprint, and whatever the caller passes as
+``extra`` query parameters.  No conversation content, ever.
+
+Identifier policy (updated for ENG-1288)
+========================================
+
+Events were originally fingerprint-only, i.e. anonymous in the strong sense:
+nothing on the wire could be tied back to a user.  ``turn_completed`` (the
+per-turn cost event) is the first caller to send an opaque **join key** —
+``conversation_id``, the same value emitted as ``Langfuse-Session-Id`` — so a
+turn's cost can be tied to its trace when investigating a runaway.
+
+That makes these events *pseudonymous*, not anonymous: the id itself carries
+no personal data, but anyone holding BOTH collector data and Langfuse access
+can resolve it to a user (Langfuse traces are tagged with user emails).  Both
+are internal systems with their own access controls, and the join is the
+point of the field — but the distinction is deliberate and documented here so
+the next caller doesn't assume this channel is unlinkable.
+
+Still never sent, by any caller: message text, prompts, tool output, file
+paths, credentials, hostnames, or email addresses.
 
 Guarantees:
   • Never blocks the caller.

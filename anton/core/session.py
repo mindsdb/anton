@@ -1726,7 +1726,7 @@ class ChatSession:
         self.hard_truncate_history()
         return await self._llm.plan(messages=factory_validated(), **kwargs)
 
-    def _emit_turn_cost(self) -> None:
+    def _emit_turn_cost(self, expected: TurnCost | None = None) -> None:
         """Close the turn's cost books: disarm the listener, resolve the
         terminal path, and emit the two reporting sinks (ENG-1288).
 
@@ -1745,6 +1745,13 @@ class ChatSession:
         tc = self._turn_cost
         if tc is None:
             return
+        if expected is not None and tc is not expected:
+            # A late async-generator finalizer for an ABANDONED turn: asyncio
+            # runs it in a fresh task long after the fact, by which point a
+            # newer turn may own the books. Closing those would emit the next
+            # turn's partial totals mid-turn and leave it uncounted. Only the
+            # turn that opened these books may close them (#309 review).
+            return
         self._turn_cost = None
         try:
             self._llm.usage_listener = None
@@ -1755,7 +1762,13 @@ class ChatSession:
         cancelled = bool(
             getattr(self, "_cancel_event", None) and self._cancel_event.is_set()
         )
-        if isinstance(exc, GeneratorExit) or cancelled:
+        # asyncio.CancelledError is the SHAPE USER STOP TAKES on the primary
+        # host: cowork-server's RunHandle.cancel() calls task.cancel(), which
+        # raises it inside the suspended generator frame — and nothing there
+        # sets `_cancel_event` (that's anton's CLI only). Without it every
+        # Stop filed as "error" (#309 review). GeneratorExit covers the
+        # narrower case where the cancel lands exactly at a yield boundary.
+        if isinstance(exc, (GeneratorExit, asyncio.CancelledError)) or cancelled:
             tc.ended_by = "cancelled"
         elif exc is not None:
             tc.ended_by = "error"
@@ -2232,9 +2245,14 @@ class ChatSession:
 
         while response.tool_calls:
             tool_round += 1
-            if self._turn_cost is not None:
-                self._turn_cost.rounds = tool_round
+            if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+                self._turn_cost.rounds += 1
             if tool_round > self._max_tool_rounds:
+                # Mirror turn_stream's cap mark (#309 review) — this path is
+                # public API even without in-repo callers, and the books are
+                # wired here too.
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "round_cap"
                 self._append_history(
                     {"role": "assistant", "content": response.content or ""}
                 )
@@ -2437,6 +2455,7 @@ class ChatSession:
         # waist — planning, coding (incl. verifier verdicts), and router
         # calls all report here (ENG-1288).
         self._turn_cost = TurnCost()
+        _turn_cost_books = self._turn_cost
         self._llm.usage_listener = self._turn_cost.add
 
         try:
@@ -2572,7 +2591,14 @@ class ChatSession:
                         # again with the error context now in history
                         continue
                     else:
-                        # Exhausted retries — stop and summarize for the user
+                        # Exhausted retries — stop and summarize for the user.
+                        # Mark the terminal: the apology below is yielded as
+                        # ordinary text and nothing is in flight when the
+                        # finally runs, so without this the turn reported
+                        # "completed" — undercounting the most common failure
+                        # mode in any error-rate query (#309 review).
+                        if self._turn_cost is not None:
+                            self._turn_cost.ended_by = "retry_exhausted"
                         self._append_history(
                             {
                                 "role": "user",
@@ -2615,8 +2641,19 @@ class ChatSession:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
                 )
-            reset_trace_context(_trace_token)
-            self._emit_turn_cost()
+            # Emit BEFORE reset_trace_context: on an abandoned generator the
+            # finalizer runs in a copied context, where resetting a token
+            # created elsewhere raises ValueError — which used to abort this
+            # finally and drop the turn's books entirely (#309 review). The
+            # guard passes the books this turn opened so a late finalizer
+            # can't close a newer turn's.
+            self._emit_turn_cost(expected=_turn_cost_books)
+            try:
+                reset_trace_context(_trace_token)
+            except ValueError:
+                # Cross-context finalizer — the ContextVar copy dies with the
+                # task anyway, so there is nothing to restore.
+                pass
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:
@@ -2829,8 +2866,14 @@ class ChatSession:
 
             while llm_response.tool_calls:
                 tool_round += 1
-                if self._turn_cost is not None:
-                    self._turn_cost.rounds = tool_round
+                # Accumulate, don't assign: `tool_round` is loop-local and
+                # resets to 0 on every verifier-forced continuation, so
+                # assigning reported only the last continuation's rounds —
+                # breaking the metric for exactly the expensive shape it
+                # exists to classify. Counted before the cap check so a
+                # capped turn reports the cap, not cap+1 (#309 review).
+                if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+                    self._turn_cost.rounds += 1
                 if tool_round > self._max_tool_rounds:
                     _max_rounds_hit = True
                     if self._turn_cost is not None:

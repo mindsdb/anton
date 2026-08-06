@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -268,3 +269,132 @@ class TestTurnResetsBooks:
         assert len(books) == 2
         assert books[0] is not books[1], "turn 2 must open fresh books"
         assert totals[0] == totals[1], "totals must not accumulate across turns"
+
+
+class TestCacheSplitAcrossProviders:
+    """The two headline invariants of the cache split (#309 review: the
+    no-subtract mutation survived all 1474 tests, so both were unpinned).
+
+    1. ``input_tokens`` means FRESH prompt tokens on every provider — the
+       OpenAI dialect's cache-inclusive ``prompt_tokens`` gets both cached
+       buckets subtracted out.
+    2. ``context_pressure`` keeps its exact pre-split value: all prompt-side
+       tokens, cached or not. Getting this wrong triggers premature
+       compaction on gateway traffic.
+    """
+
+    def _chat_usage(self, prompt=1000, cached=800, written=0, completion=50):
+        return SimpleNamespace(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            prompt_tokens_details=SimpleNamespace(
+                cached_tokens=cached, cache_write_tokens=written
+            ),
+        )
+
+    def test_chat_shape_subtracts_cached_share(self):
+        from anton.core.llm.openai import _split_cached_input
+
+        assert _split_cached_input(self._chat_usage()) == (200, 800, 0)
+
+    def test_gateway_shape_splits_reads_and_writes(self):
+        # mindshub_inference publishes both buckets and composes
+        # prompt_tokens = fresh + reads + writes.
+        from anton.core.llm.openai import _split_cached_input
+
+        usage = self._chat_usage(prompt=100, cached=30, written=10)
+        assert _split_cached_input(usage) == (60, 30, 10)
+
+    def test_responses_api_shape_uses_input_token_names(self):
+        from anton.core.llm.openai import _split_cached_input
+
+        usage = SimpleNamespace(
+            input_tokens=1000,
+            output_tokens=10,
+            input_tokens_details=SimpleNamespace(
+                cached_tokens=800, cache_write_tokens=50
+            ),
+        )
+        assert _split_cached_input(usage) == (150, 800, 50)
+
+    def test_no_details_means_all_fresh(self):
+        from anton.core.llm.openai import _split_cached_input
+
+        assert _split_cached_input(SimpleNamespace(prompt_tokens=500)) == (500, 0, 0)
+
+    def test_malformed_payload_never_yields_negative_fresh_input(self):
+        from anton.core.llm.openai import _split_cached_input
+
+        usage = self._chat_usage(prompt=100, cached=900, written=900)
+        fresh, read, write = _split_cached_input(usage)
+        assert fresh == 0 and read + write <= 100
+
+    @pytest.mark.asyncio
+    async def test_provider_reports_split_and_unchanged_context_pressure(self):
+        # End to end through the real provider: components split, and
+        # context_pressure computed on ALL prompt tokens (1000), which is
+        # exactly what it was before the split existed.
+        from anton.core.llm.openai import OpenAIProvider
+        from anton.core.llm.provider import compute_context_pressure
+
+        provider = OpenAIProvider(api_key="k")
+        completion = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="hi", tool_calls=None),
+                    finish_reason="stop",
+                )
+            ],
+            usage=self._chat_usage(prompt=1000, cached=750, written=50),
+        )
+        provider._client = MagicMock()
+        provider._client.chat = MagicMock()
+        provider._client.chat.completions = MagicMock()
+        provider._client.chat.completions.create = AsyncMock(return_value=completion)
+
+        response = await provider.complete(
+            model="sonnet", system="s", messages=[{"role": "user", "content": "hi"}]
+        )
+        assert response.usage.input_tokens == 200
+        assert response.usage.cache_read_tokens == 750
+        assert response.usage.cache_creation_tokens == 50
+        assert response.usage.context_tokens == 1000
+        assert response.usage.context_pressure == compute_context_pressure("sonnet", 1000)
+
+
+class TestListenerCapturedAtIssueTime:
+    @pytest.mark.asyncio
+    async def test_background_call_started_before_disarm_books_nowhere(self):
+        # End-of-turn background work (cerebellum flush, identity update)
+        # shares the client. A call issued during turn N that lands after
+        # turn N+1 armed its books must NOT land in turn N+1 (#309 review).
+        release = asyncio.Event()
+        provider = AsyncMock()
+
+        async def _slow_complete(**kwargs):
+            await release.wait()
+            return LLMResponse(content="late", usage=_usage(inp=999))
+
+        provider.complete = AsyncMock(side_effect=_slow_complete)
+        client = LLMClient(
+            planning_provider=provider,
+            planning_model="planner",
+            coding_provider=provider,
+            coding_model="coder",
+        )
+
+        turn_one = TurnCost()
+        client.usage_listener = turn_one.add
+        task = asyncio.create_task(client.code(system="s", messages=[]))
+        await asyncio.sleep(0)  # let the call reach the await
+
+        # Turn 1 ends: books close, listener disarms. Turn 2 opens its own.
+        client.usage_listener = None
+        turn_two = TurnCost()
+        client.usage_listener = turn_two.add
+
+        release.set()
+        await task
+
+        assert turn_two.llm_calls == 0, "late call must not book into the next turn"
+        assert turn_one.llm_calls == 1, "it belongs to the turn that issued it"
