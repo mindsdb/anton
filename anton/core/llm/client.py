@@ -10,15 +10,24 @@ if TYPE_CHECKING:
 
 
 def _resolve_openai_compatible_flavor(settings: AntonSettings) -> str:
-    """Distinguish mdb.ai passthrough from a generic openai-compatible endpoint.
+    """Distinguish MindsHub/mdb.ai passthrough from a generic openai-compatible
+    endpoint.
 
-    The "Minds-Enterprise-Cloud" setup path writes ``openai_base_url =
-    f"{minds_url.rstrip('/')}/api/v1"`` and ``openai_api_key = minds_api_key``
-    (see ``AntonSettings.model_post_init``). When that exact pairing matches
-    the user's current settings, the OpenAI provider is talking to mdb.ai and
-    can therefore use the chat.completions native web tool passthrough. Any
-    other base URL is a generic third-party endpoint that needs the
-    handler-dispatched fallback at the session layer.
+    ``AntonSettings.model_post_init`` derives ``openai_base_url`` from
+    ``minds_url`` host-awarely: ``api.mindshub.ai`` serves the
+    OpenAI-compatible API at ``/v1``, the legacy ``mdb.ai`` host at
+    ``/api/v1`` (ENG-436). Both derivations, plus a ``minds_url`` that already
+    carries its own suffix, mean the provider is talking to our gateway and
+    can use the chat.completions native web-tool passthrough — it accepts
+    ``{"type": "web_search"}`` / ``{"type": "fetch"}`` directly (matching the
+    gateway's own ``GenericToolType``). Any other base URL is a generic
+    third-party endpoint that needs the handler-dispatched fallback at the
+    session layer.
+
+    The ``/v1`` case was missing, so **every MindsHub install fell through to
+    generic** and silently lost native web search — the session's fallback
+    needs an Exa/Brave key that MindsHub users don't have (#317 review).
+    Pinned by ``tests/test_openai_setup.py``.
 
     No new env var is introduced — we infer flavor purely from the existing
     config the setup flow already produces.
@@ -27,7 +36,7 @@ def _resolve_openai_compatible_flavor(settings: AntonSettings) -> str:
 
     base = (getattr(settings, "openai_base_url", None) or "").rstrip("/").lower()
     minds = (getattr(settings, "minds_url", None) or "").rstrip("/").lower()
-    if minds and (base == minds or base == f"{minds}/api/v1"):
+    if minds and base in (minds, f"{minds}/v1", f"{minds}/api/v1"):
         return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
     return OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
 
