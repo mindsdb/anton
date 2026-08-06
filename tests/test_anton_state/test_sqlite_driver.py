@@ -1,7 +1,8 @@
+import sqlite3
 import time
 import pytest
 from anton_state.schema import Attr, StateSchema
-from anton_state.errors import ConditionalCheckFailed, StateValidationError
+from anton_state.errors import ConditionalCheckFailed, StateThrottled, StateValidationError
 from anton_state.sqlite_driver import SQLiteDriver
 
 M = StateSchema(
@@ -114,6 +115,75 @@ def test_update_set_and_add(drv):
 def test_put_validates(drv):
     with pytest.raises(StateValidationError):
         drv.put({"sk": "s"}, if_not_exists=False, if_version=None)  # no pk
+
+
+# --- update/increment validate their inputs, same as put (parity with the
+#     cloud broker, where DynamoDB itself rejects an oversized item or an ADD
+#     on a non-number) ---
+
+def test_increment_rejects_non_numeric_by(drv):
+    with pytest.raises(StateValidationError):
+        drv.increment("c", "g", field="n", by="1")
+
+
+def test_update_rejects_non_numeric_add_field(drv):
+    with pytest.raises(StateValidationError):
+        drv.update("c", "g", set_fields=None, add_fields={"n": "1"}, if_version=None)
+
+
+def test_update_rejects_unsupported_set_field_type(drv):
+    with pytest.raises(StateValidationError):
+        drv.update("c", "g", set_fields={"blob": object()}, add_fields=None, if_version=None)
+
+
+def test_update_rejects_oversized_item(drv):
+    with pytest.raises(StateValidationError):
+        drv.update("c", "g", set_fields={"big": "x" * 500_000}, add_fields=None, if_version=None)
+
+
+def test_rejected_mutation_does_not_apply(drv):
+    """A validation failure must not leave a partial write behind."""
+    with pytest.raises(StateValidationError):
+        drv.update("c", "g", set_fields={"blob": object()}, add_fields=None, if_version=None)
+    assert drv.get("c", "g", consistent=True) is None
+
+
+# --- sqlite lock contention maps to a typed STATE error, not a raw sqlite3
+#     exception (parity with the broker, which maps throttling to StateThrottled) ---
+
+class _FlakyConn:
+    """Wraps a real connection, failing BEGIN IMMEDIATE like a busy_timeout expiry."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def execute(self, sql, *a, **kw):
+        if sql == "BEGIN IMMEDIATE":
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *a, **kw)
+
+    def commit(self):
+        return self._real.commit()
+
+    def rollback(self):
+        return self._real.rollback()
+
+    def close(self):
+        return self._real.close()
+
+
+def test_put_wraps_locked_database_as_throttled(drv, monkeypatch):
+    real_connect = drv._connect
+    monkeypatch.setattr(drv, "_connect", lambda: _FlakyConn(real_connect()))
+    with pytest.raises(StateThrottled):
+        drv.put({"pk": "u1", "sk": "s"}, if_not_exists=False, if_version=None)
+
+
+def test_increment_wraps_locked_database_as_throttled(drv, monkeypatch):
+    real_connect = drv._connect
+    monkeypatch.setattr(drv, "_connect", lambda: _FlakyConn(real_connect()))
+    with pytest.raises(StateThrottled):
+        drv.increment("c", "g", field="n", by=1)
 
 
 # --- expired items must not be resurrected by a mutation (parity with the

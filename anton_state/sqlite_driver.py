@@ -13,9 +13,9 @@ import time
 from typing import Any
 
 from .base import DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT, _VERSION_ATTR
-from .errors import ConditionalCheckFailed
+from .errors import ConditionalCheckFailed, StateThrottled
 from .schema import StateSchema
-from .validation import validate_item, validate_key
+from .validation import check_number, check_size, check_value, validate_item, validate_key
 
 
 class SQLiteDriver:
@@ -106,6 +106,9 @@ class SQLiteDriver:
                 (pk, sk, body, expires),
             )
             con.commit()
+        except sqlite3.OperationalError as e:
+            con.rollback()
+            raise StateThrottled(str(e)) from e
         except Exception:
             con.rollback()
             raise
@@ -129,6 +132,9 @@ class SQLiteDriver:
                     )
             con.execute("DELETE FROM items WHERE pk=? AND sk=?", (pk, skv))
             con.commit()
+        except sqlite3.OperationalError as e:
+            con.rollback()
+            raise StateThrottled(str(e)) from e
         except Exception:
             con.rollback()
             raise
@@ -178,7 +184,9 @@ class SQLiteDriver:
         Partial mutation: unlike put, this does NOT run validate_item and does
         NOT synthesise the logical pk/sk attributes — mirroring the schema-agnostic
         broker (plan #2), where increment/update on an absent item create a minimal
-        item (mutated field + _v) without the logical key attributes.
+        item (mutated field + _v) without the logical key attributes. Callers
+        (increment/update) still type-check their inputs up front, and the
+        mutated item is size-capped here, same as put.
 
         An EXPIRED row reads as absent here, matching get/query (physical
         deletion is lazy, so the "zombie" is still on disk). Without that, an
@@ -197,6 +205,7 @@ class SQLiteDriver:
                        and row["expires_at"] < time.time())
             item = json.loads(row["body"]) if (row and not expired) else {}
             item = mutate(item)
+            check_size(item)
             item[_VERSION_ATTR] = item.get(_VERSION_ATTR, 0) + 1
             body = json.dumps(item, separators=(",", ":"), ensure_ascii=False)
             con.execute(
@@ -206,6 +215,9 @@ class SQLiteDriver:
             )
             con.commit()
             return item
+        except sqlite3.OperationalError as e:
+            con.rollback()
+            raise StateThrottled(str(e)) from e
         except Exception:
             con.rollback()
             raise
@@ -214,6 +226,7 @@ class SQLiteDriver:
 
     def increment(self, pk: str, sk: str | None, *, field: str, by: int | float) -> int | float:
         validate_key(pk, sk, self.schema)
+        check_number(by, "increment 'by'")
 
         def mut(item):
             item[field] = item.get(field, 0) + by
@@ -223,6 +236,10 @@ class SQLiteDriver:
 
     def update(self, pk, sk, *, set_fields, add_fields, if_version):
         validate_key(pk, sk, self.schema)
+        for v in (set_fields or {}).values():
+            check_value(v)
+        for k, v in (add_fields or {}).items():
+            check_number(v, f"add_fields[{k!r}]")
 
         def mut(item):
             if if_version is not None and item.get(_VERSION_ATTR, 0) != if_version:

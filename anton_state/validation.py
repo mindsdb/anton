@@ -17,20 +17,34 @@ MAX_ITEM_BYTES = 400 * 1024
 _RESERVED_UNDERSCORE = {"_v", "_key"}
 
 
-def _check_value(value) -> None:
+def check_value(value) -> None:
     if isinstance(value, bool) or isinstance(value, (int, float, str)) or value is None:
         return
     if isinstance(value, dict):
         for k, v in value.items():
             if not isinstance(k, str):
                 raise StateValidationError("map keys must be strings")
-            _check_value(v)
+            check_value(v)
         return
     if isinstance(value, list):
         for v in value:
-            _check_value(v)
+            check_value(v)
         return
     raise StateValidationError(f"unsupported value type: {type(value).__name__}")
+
+
+def check_number(value, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StateValidationError(f"{label} must be a number")
+
+
+def check_size(item: dict) -> None:
+    try:
+        size = len(json.dumps(item, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError) as e:
+        raise StateValidationError(f"item is not JSON-serializable: {e}")
+    if size > MAX_ITEM_BYTES:
+        raise StateValidationError(f"item too large: {size} > {MAX_ITEM_BYTES} bytes")
 
 
 def validate_key(pk: str, sk: str | None, schema: StateSchema) -> None:
@@ -64,7 +78,7 @@ def validate_item(item: dict, schema: StateSchema) -> None:
             raise StateValidationError(f"attribute '{name}' uses a reserved '_' prefix")
 
     for value in item.values():
-        _check_value(value)
+        check_value(value)
 
     if schema.ttl_attribute and schema.ttl_attribute in item:
         ttl = item[schema.ttl_attribute]
@@ -73,9 +87,4 @@ def validate_item(item: dict, schema: StateSchema) -> None:
                 f"TTL attribute '{schema.ttl_attribute}' must be a number (epoch seconds)"
             )
 
-    try:
-        size = len(json.dumps(item, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    except (TypeError, ValueError) as e:
-        raise StateValidationError(f"item is not JSON-serializable: {e}")
-    if size > MAX_ITEM_BYTES:
-        raise StateValidationError(f"item too large: {size} > {MAX_ITEM_BYTES} bytes")
+    check_size(item)
