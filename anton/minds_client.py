@@ -249,10 +249,26 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
     return ids
 
 
+@dataclass
+class MindsModels:
+    """Resolved (planning, coding) pair plus the model to probe with.
+
+    When the pair came from the live catalogue, probing the coding model
+    validates the actual configuration. With no catalogue to trust, the pair
+    is the tier defaults but the probe uses the free-bucket model — a paid
+    default would 403 for free-tier keys on exactly the hosts that don't
+    serve the listing route (the ENG-576 shape).
+    """
+
+    planning: str
+    coding: str
+    probe: str
+
+
 def resolve_minds_models(
     base_url: str, api_key: str, verify: bool = True
-) -> tuple[str, str]:
-    """Pick the (planning, coding) model pair from the live catalogue.
+) -> MindsModels:
+    """Pick the setup models from the live catalogue.
 
     Falls back to the tier defaults when /v1/models is unreachable — listing
     routes are not deployed on every MindsHub host and can 404 even for valid
@@ -263,7 +279,11 @@ def resolve_minds_models(
     except Exception:
         ids = []
     if not ids:
-        return (MINDS_DEFAULT_PLANNING_MODEL, MINDS_DEFAULT_CODING_MODEL)
+        return MindsModels(
+            planning=MINDS_DEFAULT_PLANNING_MODEL,
+            coding=MINDS_DEFAULT_CODING_MODEL,
+            probe=MINDS_FREE_TIER_MODEL,
+        )
 
     def pick(preferred: tuple[str, ...], fallback: str) -> str:
         for name in preferred:
@@ -279,7 +299,7 @@ def resolve_minds_models(
         ids[0],
     )
     coding = pick((MINDS_DEFAULT_CODING_MODEL, MINDS_FREE_TIER_MODEL), planning)
-    return (planning, coding)
+    return MindsModels(planning=planning, coding=coding, probe=coding)
 
 
 @dataclass

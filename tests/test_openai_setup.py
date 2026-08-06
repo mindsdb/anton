@@ -128,25 +128,25 @@ class TestResolveMindsModels:
                 ["mindshub_air", "haiku", "sonnet", "opus", "fable"]
             ),
         )
-        assert minds_client.resolve_minds_models("https://x", "k") == ("sonnet", "haiku")
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding) == ("sonnet", "haiku")
+        assert r.probe == r.coding  # catalogue-backed probe validates the config
 
     def test_falls_back_within_catalog_when_defaults_missing(self, monkeypatch):
         monkeypatch.setattr(
             "anton.minds_client.minds_request",
             lambda *a, **kw: self._catalog(["fable", "mindshub_air"]),
         )
-        planning, coding = minds_client.resolve_minds_models("https://x", "k")
-        assert planning == "fable"
-        assert coding == "mindshub_air"  # no haiku → the free-bucket model
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding) == ("fable", "mindshub_air")
 
     def test_coding_follows_planning_when_no_cheap_model_exists(self, monkeypatch):
         monkeypatch.setattr(
             "anton.minds_client.minds_request",
             lambda *a, **kw: self._catalog(["fable", "grok"]),
         )
-        planning, coding = minds_client.resolve_minds_models("https://x", "k")
-        assert planning == "fable"
-        assert coding == "fable"
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding) == ("fable", "fable")
 
     def test_falls_back_to_defaults_when_models_route_missing(self, monkeypatch):
         """/v1/models is not deployed on every MindsHub host — a 404 there
@@ -157,10 +157,14 @@ class TestResolveMindsModels:
 
         monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
 
-        assert minds_client.resolve_minds_models("https://x", "k") == (
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding) == (
             minds_client.MINDS_DEFAULT_PLANNING_MODEL,
             minds_client.MINDS_DEFAULT_CODING_MODEL,
         )
+        # No catalogue to trust → probe with the universal free-bucket model,
+        # not a paid default that 403s on free-tier keys (ENG-576).
+        assert r.probe == minds_client.MINDS_FREE_TIER_MODEL
 
     def test_never_returns_dead_smart_router_aliases(self, monkeypatch):
         """The legacy mdb.ai aliases must never be picked, whatever the server
@@ -169,7 +173,8 @@ class TestResolveMindsModels:
             "anton.minds_client.minds_request",
             lambda *a, **kw: self._catalog(["_reason_", "_code_"]),
         )
-        assert minds_client.resolve_minds_models("https://x", "k") == (
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding) == (
             minds_client.MINDS_DEFAULT_PLANNING_MODEL,
             minds_client.MINDS_DEFAULT_CODING_MODEL,
         )
@@ -187,9 +192,9 @@ class TestResolveMindsModels:
                 {"id": "mindshub_air", "enabled": True, "embedding": False},
             ]),
         )
-        assert minds_client.resolve_minds_models("https://x", "k") == (
-            "mindshub_air",
-            "mindshub_air",
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding, r.probe) == (
+            "mindshub_air", "mindshub_air", "mindshub_air",
         )
 
     def test_embedding_models_are_never_picked(self, monkeypatch):
@@ -202,7 +207,8 @@ class TestResolveMindsModels:
                 {"id": "grok", "enabled": True, "embedding": False},
             ]),
         )
-        assert minds_client.resolve_minds_models("https://x", "k") == ("grok", "grok")
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding) == ("grok", "grok")
 
 
 class TestMindsV1Base:
@@ -231,7 +237,8 @@ def test_setup_minds_skips_no_ssl_retry_on_http_error(monkeypatch):
     monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
     monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: False)  # no retry
     monkeypatch.setattr(
-        "anton.cli.resolve_minds_models", lambda *a, **kw: ("sonnet", "haiku")
+        "anton.cli.resolve_minds_models",
+        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
     )
 
     def fake_test_llm(*a, **kw):
@@ -261,7 +268,8 @@ def test_setup_minds_writes_catalog_resolved_models(monkeypatch):
     monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
     monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
     monkeypatch.setattr(
-        "anton.cli.resolve_minds_models", lambda *a, **kw: ("sonnet", "haiku")
+        "anton.cli.resolve_minds_models",
+        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
     )
     monkeypatch.setattr(
         "anton.cli.test_llm",
@@ -288,7 +296,8 @@ def test_setup_minds_honors_env_url_override(monkeypatch):
     monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
     monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
     monkeypatch.setattr(
-        "anton.cli.resolve_minds_models", lambda *a, **kw: ("sonnet", "haiku")
+        "anton.cli.resolve_minds_models",
+        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
     )
     monkeypatch.setattr(
         "anton.cli.test_llm", lambda *a, **kw: minds_client.LLMTestResult(ok=True)
@@ -300,6 +309,38 @@ def test_setup_minds_honors_env_url_override(monkeypatch):
     workspace.set_secret.assert_any_call(
         "ANTON_MINDS_URL", "https://api.staging.mindshub.ai"
     )
+
+
+def test_setup_minds_persists_the_base_url_the_probe_validated(monkeypatch):
+    """Invariant: the persisted ANTON_OPENAI_BASE_URL must be the base the
+    probe hit. With a /v1-suffixed ANTON_MINDS_URL the probe absorbs the
+    suffix (minds_v1_base) — persisting f"{url}/v1" would double it and save
+    a runtime config the probe never validated ('Connected', then 404s)."""
+    import anton.cli as cli
+
+    settings = AntonSettings(_env_file=None)
+    workspace = MagicMock()
+    probed: dict = {}
+
+    monkeypatch.setenv("ANTON_MINDS_URL", "https://api.staging.mindshub.ai/v1")
+    monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
+    monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        "anton.cli.resolve_minds_models",
+        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
+    )
+
+    def fake_test_llm(base_url, api_key, verify=True, model=None):
+        probed["base"] = minds_client.minds_v1_base(base_url)
+        return minds_client.LLMTestResult(ok=True)
+
+    monkeypatch.setattr("anton.cli.test_llm", fake_test_llm)
+
+    cli._setup_minds(settings, workspace)
+
+    assert probed["base"] == "https://api.staging.mindshub.ai/v1"
+    assert settings.openai_base_url == probed["base"]
+    workspace.set_secret.assert_any_call("ANTON_OPENAI_BASE_URL", probed["base"])
 
 
 def test_setup_openai_uses_modern_openai_token_parameter(monkeypatch):

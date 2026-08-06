@@ -274,10 +274,8 @@ async def _handle_connect(
 
     # --- Test if the Minds server also supports LLM endpoints ---
     # (silenced: was printing "Testing LLM endpoints..." and "not available" messages)
-    planning_model, coding_model = resolve_minds_models(
-        minds_url, api_key, verify=ssl_verify
-    )
-    llm_result = test_llm(minds_url, api_key, verify=ssl_verify, model=coding_model)
+    models = resolve_minds_models(minds_url, api_key, verify=ssl_verify)
+    llm_result = test_llm(minds_url, api_key, verify=ssl_verify, model=models.probe)
 
     if not llm_result.ok and llm_result.error:
         console.print(
@@ -291,15 +289,15 @@ async def _handle_connect(
         )
         settings.planning_provider = "openai-compatible"
         settings.coding_provider = "openai-compatible"
-        settings.planning_model = planning_model
-        settings.coding_model = coding_model
+        settings.planning_model = models.planning
+        settings.coding_model = models.coding
         # openai_api_key and openai_base_url are derived at runtime from
         # minds_api_key and minds_url via model_post_init — no need to persist them.
         settings.model_post_init(None)
         global_ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         global_ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
-        global_ws.set_secret("ANTON_PLANNING_MODEL", planning_model)
-        global_ws.set_secret("ANTON_CODING_MODEL", coding_model)
+        global_ws.set_secret("ANTON_PLANNING_MODEL", models.planning)
+        global_ws.set_secret("ANTON_CODING_MODEL", models.coding)
     else:
         # Check if Anthropic key is already configured
         has_anthropic = settings.anthropic_api_key or os.environ.get(

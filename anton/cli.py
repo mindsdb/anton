@@ -36,7 +36,7 @@ from anton.commands.datasource import (
     handle_list_data_sources,
     handle_test_datasource
 )
-from anton.minds_client import resolve_minds_models, test_llm
+from anton.minds_client import minds_v1_base, resolve_minds_models, test_llm
 
 
 def _build_scratchpad_manager(
@@ -735,16 +735,13 @@ def _setup_minds(settings, ws) -> None:
     llm_ok = False
     rate_limited = False
     error_detail: str | None = None
-    planning_model = coding_model = None
 
     with Live(Spinner("dots", text="  Connecting...", style="anton.cyan"), console=console, transient=True):
         # Resolve the models from the live catalogue first, then probe with
         # the model we're about to configure — a passing probe validates the
         # actual configuration, not a hardcoded alias (ENG-1140).
-        planning_model, coding_model = resolve_minds_models(
-            minds_url, api_key, verify=True
-        )
-        result = test_llm(minds_url, api_key, verify=True, model=coding_model)
+        models = resolve_minds_models(minds_url, api_key, verify=True)
+        result = test_llm(minds_url, api_key, verify=True, model=models.probe)
         if result.rate_limited:
             rate_limited = True
             error_detail = result.error
@@ -756,11 +753,9 @@ def _setup_minds(settings, ws) -> None:
             error_detail = result.error
         else:
             error_detail = result.error
-            planning_model, coding_model = resolve_minds_models(
-                minds_url, api_key, verify=False
-            )
+            models = resolve_minds_models(minds_url, api_key, verify=False)
             result_no_ssl = test_llm(
-                minds_url, api_key, verify=False, model=coding_model
+                minds_url, api_key, verify=False, model=models.probe
             )
             if result_no_ssl.rate_limited:
                 rate_limited = True
@@ -785,16 +780,19 @@ def _setup_minds(settings, ws) -> None:
         console.print("  [anton.success]Connected[/]")
         settings.planning_provider = "openai-compatible"
         settings.coding_provider = "openai-compatible"
-        settings.planning_model = planning_model
-        settings.coding_model = coding_model
+        settings.planning_model = models.planning
+        settings.coding_model = models.coding
         settings.minds_ssl_verify = ssl_verify
-        derived_base_url = f"{minds_url}/v1"
+        # Same host rule as the probe (test_llm) — the persisted base must be
+        # the URL the probe validated, or "Connected" lies about the config
+        # that gets saved (e.g. a /v1-suffixed ANTON_MINDS_URL would double).
+        derived_base_url = minds_v1_base(minds_url)
         settings.openai_api_key = api_key
         settings.openai_base_url = derived_base_url
         ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
-        ws.set_secret("ANTON_PLANNING_MODEL", planning_model)
-        ws.set_secret("ANTON_CODING_MODEL", coding_model)
+        ws.set_secret("ANTON_PLANNING_MODEL", models.planning)
+        ws.set_secret("ANTON_CODING_MODEL", models.coding)
         ws.set_secret("ANTON_MINDS_SSL_VERIFY", "true" if ssl_verify else "false")
         ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
         ws.set_secret("ANTON_OPENAI_BASE_URL", derived_base_url)
