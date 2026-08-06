@@ -102,10 +102,14 @@ class TestDiscoveryBlock:
         assert "… and 5 more" in block   # 35 files, cap 30
 
     def test_listing_failure_renders_without_root(self, tmp_path, monkeypatch):
+        import anton.core.utils.scratchpad as scratchpad_utils
+
         mgr = make_manager(tmp_path)
         seed_agent_pads(mgr, ["catanah"])
         monkeypatch.setattr(
-            Path, "iterdir", lambda self: (_ for _ in ()).throw(PermissionError())
+            scratchpad_utils.os,
+            "scandir",
+            lambda path: (_ for _ in ()).throw(PermissionError()),
         )
         block = build_workspace_discovery_context(mgr)
         assert "catanah" in block

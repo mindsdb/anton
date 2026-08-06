@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import os
 from typing import TYPE_CHECKING
 
 from anton.core.tools.registry import ToolOutcome
@@ -73,11 +75,18 @@ def build_workspace_discovery_context(manager) -> str:
     try:
         root = manager.workspace_path
         if root is not None:
-            entries = sorted(
-                p.name + ("/" if p.is_dir() else "")
-                for p in root.iterdir()
-                if not p.name.startswith(".")
-            )
+            # Hidden entries are excluded deliberately: this block ships to
+            # the model, and filenames hinting at secret locations (.env,
+            # .aws) don't belong in LLM-visible context — even names-only.
+            # scandir rather than iterdir+is_dir: dir-ness comes from the
+            # dirent for free instead of a stat per entry, and this runs
+            # every turn. Full iteration is inherent to a sorted first-30.
+            with os.scandir(root) as it:
+                entries = sorted(
+                    entry.name + ("/" if entry.is_dir() else "")
+                    for entry in it
+                    if not entry.name.startswith(".")
+                )
             if entries:
                 shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
                 more = (
