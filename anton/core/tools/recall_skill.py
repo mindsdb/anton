@@ -159,6 +159,13 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
             f"procedure below and proceed without a recalled skill."
         )
 
+    # Unlock any tools this skill gates (ENG-764), before the early-return
+    # paths below so the bundle is registered regardless of how we return.
+    # Duck-typed session: guard for minimal sessions lacking the hook.
+    register_bundle = getattr(session, "_register_tool_bundle", None)
+    if callable(register_bundle):
+        register_bundle(skill.label)
+
     if _already_in_history(session, skill.label):
         # NOTE: this stub must never contain _recall_marker() or the
         # procedure header — otherwise a stub surviving compaction would
