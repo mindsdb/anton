@@ -232,6 +232,11 @@ class AnthropicProvider(LLMProvider):
                 input_tokens=input_tokens,
                 output_tokens=response.usage.output_tokens,
                 context_pressure=compute_context_pressure(model, input_tokens),
+                # Anthropic reports cache activity as separate fields and its
+                # input_tokens already excludes them — pass through as-is
+                # (ENG-1288). getattr-guarded: absent on older SDK responses.
+                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
             ),
             stop_reason=response.stop_reason,
         )
@@ -266,6 +271,8 @@ class AnthropicProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         stop_reason: str | None = None
 
         # Track content blocks by index for tool correlation
@@ -285,6 +292,8 @@ class AnthropicProvider(LLMProvider):
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
                         output_tokens = getattr(usage, "output_tokens", 0)
+                        cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
+                        cache_creation_tokens = getattr(usage, "cache_creation_input_tokens", 0) or 0
 
                     elif event.type == "content_block_start":
                         idx = event.index
@@ -402,6 +411,8 @@ class AnthropicProvider(LLMProvider):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     context_pressure=compute_context_pressure(model, input_tokens),
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
             )

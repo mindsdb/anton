@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import os
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCall, Usage
+
+# Tests that drive full turns now reach the turn-cost analytics sink
+# (ENG-1288): _emit_turn_cost falls back to a fresh AntonSettings(), whose
+# default analytics_url is the real collector. Kill analytics for the whole
+# suite so no test run — local or CI — ever fires a real event. (CI is also
+# dropped by send_event's own CI detection; this covers local dev runs.)
+os.environ.setdefault("ANTON_ANALYTICS_ENABLED", "false")
 
 
 def make_mock_llm() -> AsyncMock:

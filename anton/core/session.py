@@ -9,6 +9,7 @@ from datetime import datetime
 import json
 import logging
 import re
+import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
 
@@ -61,6 +62,7 @@ from anton.core.llm.tracing import (
 )
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
+from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
@@ -468,6 +470,28 @@ def _render_verify_transcript(
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
 
+# Distinguishes "caller captured no exception" (a clean turn — authoritative)
+# from "caller didn't tell us" (fall back to sys.exc_info()). A plain None
+# default would conflate them and re-open the leak this closes.
+_EXC_UNSET = object()
+
+
+def _role_model(tc: TurnCost, role: str) -> str:
+    """Model that ran ``role`` this turn ("" if the role never ran)."""
+    slice_ = tc.by_role.get(role)
+    return slice_.model if slice_ else ""
+
+
+def _role_tokens(tc: TurnCost, role: str) -> str:
+    slice_ = tc.by_role.get(role)
+    return str(slice_.tokens if slice_ else 0)
+
+
+def _role_calls(tc: TurnCost, role: str) -> str:
+    slice_ = tc.by_role.get(role)
+    return str(slice_.calls if slice_ else 0)
+
+
 def _build_verify_request(
     history: list[dict], user_message: str | None
 ) -> tuple[str, list[dict]]:
@@ -650,6 +674,10 @@ class ChatSession:
         self._history_store = config.history_store
         self._session_id = config.session_id
         self._harness = config.harness
+        # Per-turn token cost books (ENG-1288). Created and armed at each
+        # turn's start; emitted and disarmed in the turn's finally. None
+        # outside a turn.
+        self._turn_cost: TurnCost | None = None
         # Set per-turn by `turn_stream` so any LLM call made during that
         # turn can read the current turn identifier (used by telemetry /
         # langfuse propagation in the provider layer).
@@ -1766,6 +1794,169 @@ class ChatSession:
         self.hard_truncate_history()
         return await self._llm.plan(messages=factory_validated(), **kwargs)
 
+    def _emit_turn_cost(
+        self,
+        expected: TurnCost | None = None,
+        exc: BaseException | None | object = _EXC_UNSET,
+    ) -> None:
+        """Close the turn's cost books: disarm the listener, resolve the
+        terminal path, and emit the two reporting sinks (ENG-1288).
+
+        Called from the turn's ``finally`` so it fires on every exit —
+        normal completion, hand-backs, generator close (client disconnect /
+        cancel), and errors. The in-flight exception, if any, wins the
+        ``ended_by`` resolution; explicit marks set at the terminal sites
+        (round_cap / handback_*) survive a clean exit; everything else is
+        "completed".
+
+        Post-turn background work (cerebellum flush, identity extraction)
+        runs after this and is deliberately NOT attributed to any turn —
+        the listener is disarmed here precisely so late usage can't leak
+        into the next turn's books (stated ENG-1288 gap).
+        """
+        # Report the books this call was handed. A late async-generator
+        # finalizer for an ABANDONED turn runs in a fresh task long after the
+        # fact, by which point a newer turn may own the shared slot — but the
+        # stale books still hold a complete, real turn, and dropping them lost
+        # exactly the runaway the user just cancelled (#309 review). So: emit
+        # whichever books came in, and let only the OWNING turn clear the slot.
+        tc = expected if expected is not None else self._turn_cost
+        if tc is None or tc.emitted:
+            return
+        tc.emitted = True  # the double-emit guard, now on the books themselves
+        is_owner = self._turn_cost is tc
+        if tc.ended_monotonic is None:
+            # The owning turn is ending right now; a late finalizer is not — so
+            # it reports up to the last LLM call rather than up to whenever
+            # asyncio ran it (#309 review follow-up).
+            import time as _t
+
+            tc.ended_monotonic = (
+                _t.monotonic()
+                if is_owner or tc.last_activity_monotonic is None
+                else tc.last_activity_monotonic
+            )
+        if is_owner:
+            self._turn_cost = None
+            try:
+                self._llm.usage_listener = None
+            except Exception:
+                pass
+
+        # A caller that captured its own exception is authoritative — including
+        # when it captured NOTHING (a clean turn), which is why this needs a
+        # sentinel rather than `if exc is None`. `sys.exc_info()` returns
+        # whatever the thread is CURRENTLY handling, including an exception the
+        # caller had already caught before invoking the turn, and reading it on
+        # a clean turn reported `error` for one that succeeded. The lookup
+        # remains only for the legacy non-streaming `turn()`, which has no
+        # wrapping handler to capture from (#309 review).
+        if exc is _EXC_UNSET:
+            exc = sys.exc_info()[1]
+        cancelled = bool(
+            getattr(self, "_cancel_event", None) and self._cancel_event.is_set()
+        )
+        # asyncio.CancelledError is the SHAPE USER STOP TAKES on the primary
+        # host: cowork-server's RunHandle.cancel() calls task.cancel(), which
+        # raises it inside the suspended generator frame — and nothing there
+        # sets `_cancel_event` (that's anton's CLI only). Without it every
+        # Stop filed as "error" (#309 review). GeneratorExit covers the
+        # narrower case where the cancel lands exactly at a yield boundary.
+        if isinstance(exc, (GeneratorExit, asyncio.CancelledError)) or cancelled:
+            tc.ended_by = "cancelled"
+        elif exc is not None:
+            tc.ended_by = "error"
+
+        # Stamped at books-open; the live lookup remains only for bare-session
+        # tests and the legacy non-streaming path.
+        turn_index = tc.turn_index or (self._turn_count + 1)
+        logger.info(
+            "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
+            "input=%d output=%d cache_read=%d cache_creation=%d "
+            "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
+            "by_role=%s",
+            self._session_id, turn_index, tc.ended_by, tc.total_tokens,
+            tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
+            tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
+            tc.continuations, tc.peak_context_tokens, tc.duration_ms,
+            ",".join(
+                f"{role}={s.model}:{s.tokens}/{s.calls}"
+                for role, s in sorted(tc.by_role.items())
+            ) or "-",
+        )
+
+        # Analytics sink — same settings-resolution pattern as the
+        # ds_connect_* events (anton/tools.py): the session's settings when
+        # the host provided AntonSettings, else a fresh resolve so
+        # analytics_enabled / the CI drop still apply. send_event is
+        # fire-and-forget and never raises. Numbers, names, and IDs only —
+        # never conversation content (ENG-1288).
+        try:
+            settings = getattr(self, "_settings", None)
+            if settings is None or not hasattr(settings, "analytics_enabled"):
+                from anton.config.settings import AntonSettings
+
+                settings = AntonSettings()
+            from anton import __version__ as _anton_version
+            from anton.analytics import send_event
+
+            send_event(
+                settings,
+                "turn_completed",
+                ended_by=tc.ended_by,
+                tokens_total=str(tc.total_tokens),
+                input_tokens=str(tc.input_tokens),
+                output_tokens=str(tc.output_tokens),
+                cache_read_tokens=str(tc.cache_read_tokens),
+                cache_creation_tokens=str(tc.cache_creation_tokens),
+                llm_calls=str(tc.llm_calls),
+                rounds=str(tc.rounds),
+                continuations=str(tc.continuations),
+                peak_context_tokens=str(tc.peak_context_tokens),
+                duration_ms=str(tc.duration_ms),
+                # Per-role attribution: which model actually ran each role and
+                # what it spent. `<role>_model` is the model the USER was on
+                # for the conversational loop (planning) — the configured names
+                # can drift from what ran, and dollars are only computable from
+                # (model, tokens) pairs since a turn mixes rates. Roles are a
+                # closed set, so these stay flat and queryable.
+                planning_model=_role_model(tc, "planning") or str(
+                    self._llm.planning_model or ""
+                ),
+                planning_tokens=_role_tokens(tc, "planning"),
+                planning_calls=_role_calls(tc, "planning"),
+                coding_model=_role_model(tc, "coding") or str(
+                    self._llm.coding_model or ""
+                ),
+                coding_tokens=_role_tokens(tc, "coding"),
+                coding_calls=_role_calls(tc, "coding"),
+                router_model=_role_model(tc, "router"),
+                router_tokens=_role_tokens(tc, "router"),
+                router_calls=_role_calls(tc, "router"),
+                # Should always be 0. Emitted so the per-role sum reconciles
+                # with tokens_total for ANY role a caller passes — `TurnCost.add`
+                # folds anything outside `EVENT_ROLES` into this bucket, so a
+                # novel role shows up here rather than vanishing. A non-zero
+                # value is the alarm that some caller invented a role.
+                unknown_tokens=_role_tokens(tc, UNKNOWN_ROLE),
+                unknown_calls=_role_calls(tc, UNKNOWN_ROLE),
+                # Configured provider name (anthropic / openai /
+                # openai-compatible): separates gateway traffic from BYOK in
+                # queries. The finer per-model provider split is a follow-up.
+                llm_provider=str(getattr(settings, "planning_provider", "") or ""),
+                harness=str(self._harness or ""),
+                anton_version=_anton_version,
+                # Join keys: the same session/turn identity the MindsHub
+                # trace headers carry, so an analytics row links back to
+                # its Langfuse trace (and through it, to the user) for
+                # forensics.
+                conversation_id=str(self._session_id or ""),
+                turn_index=str(turn_index),
+            )
+        except Exception:
+            # Reporting must never affect the turn that just ran.
+            pass
+
     async def _stream_handback_diagnosis(self, *, system: str, label: str):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -2122,6 +2313,14 @@ class ChatSession:
         user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
+        # Open the turn's cost books (ENG-1288) — same contract as
+        # turn_stream. This non-streaming path has no wrapping finally, so
+        # emission happens at both returns; an exception propagating out of
+        # this method skips emission (stated gap: the CLI path's error exits
+        # go unreported rather than restructuring the method around it).
+        self._turn_cost = TurnCost(turn_index=self._turn_count + 1)
+        self._llm.usage_listener = self._turn_cost.add
+
         user_msg_str = (
             user_input
             if isinstance(user_input, str)
@@ -2143,6 +2342,7 @@ class ChatSession:
                     self._cortex.maybe_vacuum()
                 self._schedule_cerebellum_flush()
                 self._schedule_acc_flush()
+                self._emit_turn_cost()
                 return decision.text
             if decision is not None and decision.skills:
                 self._inject_recalled_skills(decision.skills)
@@ -2170,7 +2370,14 @@ class ChatSession:
 
         while response.tool_calls:
             tool_round += 1
+            if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+                self._turn_cost.rounds += 1
             if tool_round > self._max_tool_rounds:
+                # Mirror turn_stream's cap mark (#309 review) — this path is
+                # public API even without in-repo callers, and the books are
+                # wired here too.
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "round_cap"
                 self._append_history(
                     {"role": "assistant", "content": response.content or ""}
                 )
@@ -2294,6 +2501,7 @@ class ChatSession:
         self._schedule_cerebellum_flush()
         self._schedule_acc_flush()
 
+        self._emit_turn_cost()
         return reply
 
     async def turn_stream(
@@ -2368,6 +2576,22 @@ class ChatSession:
             )
         )
 
+        # Open the turn's cost books and listen at the LLM-client narrow
+        # waist — planning, coding (incl. verifier verdicts), and router
+        # calls all report here (ENG-1288).
+        # Stamp the SAME expression the trace context uses above — including an
+        # explicit host-supplied `turn_id`. Deriving it independently from
+        # `_turn_count` was correct only by accident (no host passes `turn_id`
+        # today); the moment one does, the cost event and the Langfuse trace
+        # would name different turns, which is the defect this stamping exists
+        # to prevent. Consistent by construction, not by coincidence.
+        self._turn_cost = TurnCost(
+            turn_index=turn_id if turn_id is not None else self._turn_count + 1
+        )
+        _turn_cost_books = self._turn_cost
+        self._llm.usage_listener = self._turn_cost.add
+
+        _turn_exc: BaseException | None = None
         try:
             # Cheap front-model routing (ENG-648). Text-only turns first
             # hit the thalamus model, which either answers trivial/from-
@@ -2501,7 +2725,14 @@ class ChatSession:
                         # again with the error context now in history
                         continue
                     else:
-                        # Exhausted retries — stop and summarize for the user
+                        # Exhausted retries — stop and summarize for the user.
+                        # Mark the terminal: the apology below is yielded as
+                        # ordinary text and nothing is in flight when the
+                        # finally runs, so without this the turn reported
+                        # "completed" — undercounting the most common failure
+                        # mode in any error-rate query (#309 review).
+                        if self._turn_cost is not None:
+                            self._turn_cost.ended_by = "retry_exhausted"
                         self._append_history(
                             {
                                 "role": "user",
@@ -2539,12 +2770,31 @@ class ChatSession:
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break
+        except BaseException as _e:
+            # Capture, don't classify — the finally needs to know whether THIS
+            # turn failed, rather than asking the interpreter what the thread
+            # happens to be handling (#309 review). Covers GeneratorExit and
+            # CancelledError too, both BaseException, both real turn endings.
+            _turn_exc = _e
+            raise
         finally:
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
                 )
-            reset_trace_context(_trace_token)
+            # Emit BEFORE reset_trace_context: on an abandoned generator the
+            # finalizer runs in a copied context, where resetting a token
+            # created elsewhere raises ValueError — which used to abort this
+            # finally and drop the turn's books entirely (#309 review). The
+            # guard passes the books this turn opened so a late finalizer
+            # can't close a newer turn's.
+            self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            try:
+                reset_trace_context(_trace_token)
+            except ValueError:
+                # Cross-context finalizer — the ContextVar copy dies with the
+                # task anyway, so there is nothing to restore.
+                pass
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:
@@ -2757,8 +3007,18 @@ class ChatSession:
 
             while llm_response.tool_calls:
                 tool_round += 1
+                # Accumulate, don't assign: `tool_round` is loop-local and
+                # resets to 0 on every verifier-forced continuation, so
+                # assigning reported only the last continuation's rounds —
+                # breaking the metric for exactly the expensive shape it
+                # exists to classify. Counted before the cap check so a
+                # capped turn reports the cap, not cap+1 (#309 review).
+                if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+                    self._turn_cost.rounds += 1
                 if tool_round > self._max_tool_rounds:
                     _max_rounds_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "round_cap"
                     self._acc_observe(
                         "cap_exhausted",
                         {"cap": self._max_tool_rounds},
@@ -3211,6 +3471,8 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing incomplete task..."
                 )
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted"
                 ):
@@ -3406,6 +3668,8 @@ class ChatSession:
                     phase="analyzing",
                     message="Something went wrong — checking in with you...",
                 )
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure"
                 ):
@@ -3444,6 +3708,8 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing blocked task..."
                 )
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck"
                 ):
@@ -3452,6 +3718,8 @@ class ChatSession:
 
             # INCOMPLETE — continue working
             continuation += 1
+            if self._turn_cost is not None:
+                self._turn_cost.continuations = continuation
             self._append_history(
                 {
                     "role": "user",

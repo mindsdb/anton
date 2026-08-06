@@ -23,9 +23,35 @@ class ToolCall:
 
 @dataclass
 class Usage:
+    """Token usage for one LLM call, normalized across providers (ENG-1288).
+
+    Component semantics are UNIFORM regardless of provider:
+    - ``input_tokens``: fresh (non-cached) prompt tokens only. Anthropic's
+      ``input_tokens`` already excludes cache activity; OpenAI's
+      ``prompt_tokens`` INCLUDES cached tokens, so the OpenAI provider
+      subtracts ``cached_tokens`` out — without that, the same call would
+      report different components depending on the wire format.
+    - ``cache_read_tokens`` / ``cache_creation_tokens``: prompt tokens served
+      from / written to the provider prompt cache. Both are populated on the
+      OpenAI dialect too — our gateway publishes
+      ``prompt_tokens_details.{cached_tokens, cache_write_tokens}`` — and are
+      subtracted out of ``prompt_tokens`` by ``_split_cached_input``. A
+      third-party endpoint that omits either field reports 0 for it.
+    - Total context for a call = input + cache_read + cache_creation
+      (cache tokens ARE context; dropping them understates a warm-cache
+      call by ~10x).
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
     context_pressure: float = 0.0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+
+    @property
+    def context_tokens(self) -> int:
+        """Total prompt-side tokens the call carried (all three components)."""
+        return self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens
 
 
 @dataclass
