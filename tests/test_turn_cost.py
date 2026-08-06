@@ -559,6 +559,26 @@ class TestUnknownRoleReconciles:
         )
         assert per_role == int(kw["tokens_total"]), "per-role sum must reconcile"
 
+    def test_novel_role_folds_into_unknown_rather_than_vanishing(self):
+        # The nit Paul caught: `role or UNKNOWN_ROLE` only caught a FALSY role.
+        # A novel non-empty role ("verifier") keyed its own bucket, which the
+        # event never reads — so its tokens dropped from the breakdown AND left
+        # `unknown` at 0, breaking reconciliation with no alarm (#309 review).
+        s = _bare_session()
+        s._turn_cost.add("planning", "sonnet", _usage(100, 10))
+        s._turn_cost.add("verifier", "haiku", _usage(300, 20))   # invented role
+        assert "verifier" not in s._turn_cost.by_role
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        kw = send.call_args.kwargs
+        assert kw["unknown_tokens"] == "320", "novel role must surface in unknown"
+        assert kw["unknown_calls"] == "1"
+        per_role = sum(
+            int(kw[f"{r}_tokens"])
+            for r in ("planning", "coding", "router", "unknown")
+        )
+        assert per_role == int(kw["tokens_total"]) == 430
+
     def test_reconciliation_holds_with_every_role_populated(self):
         s = _bare_session()
         s._turn_cost.add("planning", "sonnet", _usage(1000, 100, 500))

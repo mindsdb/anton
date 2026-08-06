@@ -140,10 +140,15 @@ class TurnCost:
         self.cache_creation_tokens += usage.cache_creation_tokens
         self.peak_context_tokens = max(self.peak_context_tokens, usage.context_tokens)
         self.last_activity_monotonic = time.monotonic()
-        # An empty role lands in `unknown`, which the event emits alongside the
-        # three real roles — so the per-role sum always reconciles with
-        # `total_tokens` instead of silently losing a bucket (#309 review).
-        slice_ = self.by_role.setdefault(role or UNKNOWN_ROLE, RoleCost())
+        # Any role the event doesn't emit — empty OR novel (a future caller
+        # passing e.g. "verifier") — is folded into `unknown`. Keying on the
+        # raw role instead would put those tokens in a bucket nothing reads:
+        # they'd vanish from the per-role breakdown AND leave `unknown` at 0,
+        # so the reconciliation would break with no alarm (#309 review).
+        # The role's *name* is lost when folded; its tokens are not, and that
+        # is the invariant that has to hold.
+        key = role if role in EVENT_ROLES else UNKNOWN_ROLE
+        slice_ = self.by_role.setdefault(key, RoleCost())
         slice_.observe(
             model,
             usage.input_tokens

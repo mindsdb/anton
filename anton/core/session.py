@@ -1887,9 +1887,11 @@ class ChatSession:
                 router_model=_role_model(tc, "router"),
                 router_tokens=_role_tokens(tc, "router"),
                 router_calls=_role_calls(tc, "router"),
-                # Should always be 0. Emitted anyway so the per-role sum
-                # reconciles with tokens_total even if a future caller passes
-                # an unexpected role — a non-zero value here is the alarm.
+                # Should always be 0. Emitted so the per-role sum reconciles
+                # with tokens_total for ANY role a caller passes — `TurnCost.add`
+                # folds anything outside `EVENT_ROLES` into this bucket, so a
+                # novel role shows up here rather than vanishing. A non-zero
+                # value is the alarm that some caller invented a role.
                 unknown_tokens=_role_tokens(tc, UNKNOWN_ROLE),
                 unknown_calls=_role_calls(tc, UNKNOWN_ROLE),
                 # Configured provider name (anthropic / openai /
