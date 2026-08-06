@@ -517,13 +517,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         os.close(fd)
         self._boot_path = path
 
-        # Force UTF-8 mode in the child so its I/O never depends on the host
-        # code page (ENG-824).
+        # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
+        # Propagate provider credentials from the ANTON_* names into the SDK
+        # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
             env["ANTHROPIC_API_KEY"] = env["ANTON_ANTHROPIC_API_KEY"]
         if "OPENAI_API_KEY" not in env and "ANTON_OPENAI_API_KEY" in env:
