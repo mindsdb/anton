@@ -279,6 +279,12 @@ async def _handle_connect(
     )
     llm_result = test_llm(minds_url, api_key, verify=ssl_verify, model=coding_model)
 
+    if not llm_result.ok and llm_result.error:
+        console.print(
+            f"[anton.muted]Minds LLM endpoints unavailable ({llm_result.error}) — "
+            "keeping the current LLM provider.[/]"
+        )
+
     if llm_result.ok:
         console.print(
             "[anton.success]LLM endpoints available — using Minds server as LLM provider.[/]"

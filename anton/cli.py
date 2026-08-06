@@ -687,37 +687,34 @@ def _print_provider_choices() -> None:
     console.print()
 
 
-def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshub.ai") -> None:
-    """Set up MindsHub as the LLM provider."""
+def _setup_minds(settings, ws) -> None:
+    """Set up MindsHub as the LLM provider.
+
+    The host is not user-editable — same as the Electron onboarding, where
+    MINDS_API_BASE is baked per build. Operators/QA point anton at staging or
+    a self-hosted server via the ANTON_MINDS_URL env var (honored here so
+    setup doesn't clobber it back to prod); there is no prompt for it.
+    """
     console.print()
 
-    is_cloud = default_url and default_url.endswith(("mindshub.ai", "mdb.ai"))
+    minds_url = (
+        os.environ.get("ANTON_MINDS_URL", "").strip() or "https://api.mindshub.ai"
+    ).rstrip("/")
 
-    if is_cloud:
-        minds_url = default_url
-    else:
-        minds_url = _setup_prompt("Server URL", default=default_url).strip()
-        if not minds_url.startswith(("http://", "https://")):
-            minds_url = "https://" + minds_url
-
-    # Normalize: ensure no trailing slash
-    minds_url = minds_url.rstrip("/")
-
-    if is_cloud:
-        console.print(
-            "  [anton.muted]If you don't have an API key yet, we'll help you create one — it takes a few seconds.[/]"
+    console.print(
+        "  [anton.muted]If you don't have an API key yet, we'll help you create one — it takes a few seconds.[/]"
+    )
+    console.print()
+    has_key = Confirm.ask(
+        "  Do you have a MindsHub API key?",
+        default=True,
+        console=console,
+    )
+    if not has_key:
+        webbrowser.open(
+            "https://auth.mindshub.ai/auth/realms/mindsdb/protocol/openid-connect/registrations?client_id=public-client&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fconsole.mindshub.ai"
         )
         console.print()
-        has_key = Confirm.ask(
-            "  Do you have a MindsHub API key?",
-            default=True,
-            console=console,
-        )
-        if not has_key:
-            webbrowser.open(
-                "https://auth.mindshub.ai/auth/realms/mindsdb/protocol/openid-connect/registrations?client_id=public-client&response_type=code&scope=openid&redirect_uri=https%3A%2F%2Fconsole.mindshub.ai"
-            )
-            console.print()
 
     while True:
         api_key = _setup_prompt("API key", is_password=True)
@@ -750,6 +747,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
         result = test_llm(minds_url, api_key, verify=True, model=coding_model)
         if result.rate_limited:
             rate_limited = True
+            error_detail = result.error
         elif result.ok:
             llm_ok = True
         elif result.http_status is not None:
@@ -766,6 +764,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
             )
             if result_no_ssl.rate_limited:
                 rate_limited = True
+                error_detail = result_no_ssl.error
             elif result_no_ssl.ok:
                 ssl_verify = False
                 llm_ok = True
@@ -800,8 +799,15 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
         ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
         ws.set_secret("ANTON_OPENAI_BASE_URL", derived_base_url)
     elif rate_limited:
+        # A 429 here is usually the TPM/RPM limiter, not an exhausted
+        # allowance (wallet-empty is a 402) — so lead with the provider's own
+        # message and keep the top-up advice secondary.
         console.print(
-            "[anton.error]Token limit exceeded. Visit https://console.mindshub.ai to upgrade or to top up your tokens.[/]"
+            f"  [anton.error]{error_detail or 'Rate limit or token limit exceeded.'}[/]"
+        )
+        console.print(
+            "  [anton.muted]Rate limits clear on their own — try again in a moment. "
+            "If you're out of tokens, visit https://console.mindshub.ai to upgrade or top up.[/]"
         )
         raise _SetupRetry()
     else:
@@ -813,7 +819,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
             )
         retry = Confirm.ask("  Try again?", default=True, console=console)
         if retry:
-            _setup_minds(settings, ws, default_url=default_url)
+            _setup_minds(settings, ws)
         else:
             raise _SetupRetry()
 

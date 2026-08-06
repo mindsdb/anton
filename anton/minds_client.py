@@ -27,6 +27,32 @@ if TYPE_CHECKING:
 MINDS_DEFAULT_PLANNING_MODEL = "sonnet"
 MINDS_DEFAULT_CODING_MODEL = "haiku"
 
+# The free-bucket model present in every tier (auth's model_policy.json sets
+# free_bucket only for it) — the last resort when the catalogue says the key
+# cannot use the tier defaults, and cowork-server's probe model (ENG-576).
+MINDS_FREE_TIER_MODEL = "mindshub_air"
+
+# Dead mdb.ai smart-router aliases — never usable, whatever a server claims
+# to serve (ENG-1140).
+LEGACY_SMART_ROUTER_ALIASES = frozenset({"_reason_", "_code_"})
+
+
+def minds_v1_base(base_url: str) -> str:
+    """Host-aware OpenAI-compatible base URL.
+
+    api.mindshub.ai serves the OpenAI-compatible API at /v1, the legacy
+    mdb.ai host at /api/v1. Same rule as AntonSettings.model_post_init
+    (ENG-436) and cowork-server's minds_chat_base_url; a shell twin lives in
+    anton_services snapshots/cowork/setup.sh (mh_fetch_model_catalog) — keep
+    them aligned.
+    """
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        return base
+    if "mdb.ai" in base:
+        return f"{base}/api/v1"
+    return f"{base}/v1"
+
 
 def minds_request(
     url: str,
@@ -193,15 +219,33 @@ def list_datasources(
 
 
 def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
-    """List model ids from the server's OpenAI-compatible /v1/models catalogue."""
-    url = f"{base_url}/v1/models"
-    raw = minds_request(url, api_key, verify=verify)
+    """List the chat-model ids this key can actually use.
+
+    Filters the catalogue on the fields that say whether a model is usable,
+    not just listed: ``embedding`` models can't chat, and ``enabled`` is
+    auth's wallet/allowance-aware access decision — a free-tier or
+    wallet-empty key sees paid models with ``enabled: false`` (clients must
+    not recompute access themselves; ENG-576). Entries without the flag are
+    kept, so older hosts that don't send it still work. The dead smart-router
+    aliases are dropped defensively.
+
+    Short timeout: the catalogue is advisory (callers fall back to defaults),
+    so it must not double the worst-case spinner hang of the probe itself.
+    """
+    url = f"{minds_v1_base(base_url)}/models"
+    raw = minds_request(url, api_key, verify=verify, timeout=10)
     data = _json.loads(raw.decode())
     entries = data.get("data") if isinstance(data, dict) else data
     ids: list[str] = []
     for entry in entries or []:
-        if isinstance(entry, dict) and entry.get("id"):
-            ids.append(str(entry["id"]))
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        if entry.get("embedding") or entry.get("enabled") is False:
+            continue
+        model_id = str(entry["id"])
+        if model_id in LEGACY_SMART_ROUTER_ALIASES:
+            continue
+        ids.append(model_id)
     return ids
 
 
@@ -227,8 +271,14 @@ def resolve_minds_models(
                 return name
         return fallback
 
-    planning = pick((MINDS_DEFAULT_PLANNING_MODEL, "opus", "fable"), ids[0])
-    coding = pick((MINDS_DEFAULT_CODING_MODEL,), planning)
+    # The free-bucket model sits last in each chain: when the catalogue says
+    # the key can't use the paid defaults (free tier / empty wallet), land on
+    # the model it is entitled to instead of one that will 403 (ENG-576).
+    planning = pick(
+        (MINDS_DEFAULT_PLANNING_MODEL, "opus", "fable", MINDS_FREE_TIER_MODEL),
+        ids[0],
+    )
+    coding = pick((MINDS_DEFAULT_CODING_MODEL, MINDS_FREE_TIER_MODEL), planning)
     return (planning, coding)
 
 
@@ -275,25 +325,34 @@ def test_llm(
     verify: bool = True,
     model: str = MINDS_DEFAULT_CODING_MODEL,
 ) -> LLMTestResult:
-    """Probe the server's chat-completions endpoint with a 1-token request.
+    """Probe the server's chat-completions endpoint with a tiny request.
 
     Probes with the model setup is about to configure (resolved from the live
     catalogue by the caller), so a passing probe validates the actual config.
-    Uses the new /v1/ format (legacy /api/v1/ is still supported by the server).
+
+    max_tokens must be >= 16: the OpenAI-backed catalogue entries (gpt-*,
+    mindshub_air) reject smaller values with integer_below_min_value, so a
+    1-token probe was a deterministic false negative on those models. 20
+    matches cowork-server's validate_minds.
     """
     payload = _json.dumps(build_chat_completion_kwargs(
         model=model,
         messages=[{"role": "user", "content": "ping"}],
-        max_tokens=1,
+        max_tokens=20,
     )).encode()
 
-    url = f"{base_url}/v1/chat/completions"
+    url = f"{minds_v1_base(base_url)}/chat/completions"
     try:
         minds_request(url, api_key, method="POST", payload=payload, verify=verify)
         return LLMTestResult(ok=True)
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            return LLMTestResult(ok=False, rate_limited=True, http_status=429)
+            return LLMTestResult(
+                ok=False,
+                rate_limited=True,
+                error=_http_error_detail(e),
+                http_status=429,
+            )
         return LLMTestResult(ok=False, error=_http_error_detail(e), http_status=e.code)
     except Exception as e:
         headline, _advice = describe_minds_connection_error(e)

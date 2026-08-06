@@ -28,7 +28,10 @@ def test_minds_test_llm_uses_modern_openai_token_parameter(monkeypatch):
 
     payload = json.loads(captured["payload"].decode())
     assert payload["model"] == minds_client.MINDS_DEFAULT_CODING_MODEL
-    assert payload["max_completion_tokens"] == 1
+    # >= 16: the OpenAI-backed catalogue models (gpt-*, mindshub_air) reject
+    # smaller values with integer_below_min_value — a 1-token probe was a
+    # deterministic false negative on them.
+    assert payload["max_completion_tokens"] == 20
     assert "max_tokens" not in payload
 
 
@@ -75,15 +78,22 @@ def test_minds_test_llm_propagates_provider_error_message(monkeypatch):
     assert "_code_" in result.error
 
 
-def test_minds_test_llm_flags_rate_limit(monkeypatch):
+def test_minds_test_llm_flags_rate_limit_and_keeps_detail(monkeypatch):
+    """A 429 is usually the TPM/RPM limiter, not an empty wallet — the
+    provider's own message must survive so the caller doesn't hardcode
+    'buy tokens' advice at a user who has tokens."""
+
     def fake_minds_request(*args, **kwargs):
-        raise _http_error(429, {"error": {"message": "limit"}})
+        raise _http_error(
+            429, {"error": {"code": "rate_limit", "message": "Rate limit exceeded for model 'sonnet'"}}
+        )
 
     monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
 
     result = minds_client.test_llm("https://example.com", "test-key")
     assert result.ok is False
     assert result.rate_limited is True
+    assert "Rate limit exceeded" in result.error
 
 
 def test_minds_test_llm_falls_back_to_status_when_body_unparseable(monkeypatch):
@@ -104,7 +114,12 @@ def test_minds_test_llm_falls_back_to_status_when_body_unparseable(monkeypatch):
 
 class TestResolveMindsModels:
     def _catalog(self, ids):
+        """Entries deliberately omit enabled/embedding — older hosts don't
+        send the flags, and absent flags must mean 'usable'."""
         return json.dumps({"data": [{"id": i} for i in ids]}).encode()
+
+    def _rich_catalog(self, entries):
+        return json.dumps({"data": entries}).encode()
 
     def test_prefers_tier_defaults_from_catalog(self, monkeypatch):
         monkeypatch.setattr(
@@ -122,7 +137,16 @@ class TestResolveMindsModels:
         )
         planning, coding = minds_client.resolve_minds_models("https://x", "k")
         assert planning == "fable"
-        assert coding == "fable"  # no haiku → coding follows planning
+        assert coding == "mindshub_air"  # no haiku → the free-bucket model
+
+    def test_coding_follows_planning_when_no_cheap_model_exists(self, monkeypatch):
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._catalog(["fable", "grok"]),
+        )
+        planning, coding = minds_client.resolve_minds_models("https://x", "k")
+        assert planning == "fable"
+        assert coding == "fable"
 
     def test_falls_back_to_defaults_when_models_route_missing(self, monkeypatch):
         """/v1/models is not deployed on every MindsHub host — a 404 there
@@ -139,13 +163,60 @@ class TestResolveMindsModels:
         )
 
     def test_never_returns_dead_smart_router_aliases(self, monkeypatch):
-        """The legacy mdb.ai aliases must never be picked, whatever the server says."""
+        """The legacy mdb.ai aliases must never be picked, whatever the server
+        says — even a catalogue consisting only of them falls back to defaults."""
         monkeypatch.setattr(
             "anton.minds_client.minds_request",
-            lambda *a, **kw: self._catalog(["sonnet", "haiku"]),
+            lambda *a, **kw: self._catalog(["_reason_", "_code_"]),
         )
-        pair = minds_client.resolve_minds_models("https://x", "k")
-        assert "_reason_" not in pair and "_code_" not in pair
+        assert minds_client.resolve_minds_models("https://x", "k") == (
+            minds_client.MINDS_DEFAULT_PLANNING_MODEL,
+            minds_client.MINDS_DEFAULT_CODING_MODEL,
+        )
+
+    def test_free_tier_key_lands_on_the_free_bucket_model(self, monkeypatch):
+        """enabled=false is auth's wallet/allowance-aware access decision: a
+        free-tier key sees paid models disabled and must land on mindshub_air,
+        not on a model that will 403 (the ENG-576 shape)."""
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._rich_catalog([
+                {"id": "sonnet", "enabled": False, "embedding": False},
+                {"id": "haiku", "enabled": False, "embedding": False},
+                {"id": "opus", "enabled": False, "embedding": False},
+                {"id": "mindshub_air", "enabled": True, "embedding": False},
+            ]),
+        )
+        assert minds_client.resolve_minds_models("https://x", "k") == (
+            "mindshub_air",
+            "mindshub_air",
+        )
+
+    def test_embedding_models_are_never_picked(self, monkeypatch):
+        """The ids[0] fallback must not land on an embeddings model configured
+        as planning/coding."""
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._rich_catalog([
+                {"id": "embed-small", "enabled": True, "embedding": True},
+                {"id": "grok", "enabled": True, "embedding": False},
+            ]),
+        )
+        assert minds_client.resolve_minds_models("https://x", "k") == ("grok", "grok")
+
+
+class TestMindsV1Base:
+    """Host-aware base rule — same as AntonSettings.model_post_init (ENG-436)
+    and cowork-server's minds_chat_base_url."""
+
+    def test_mindshub_host_uses_v1(self):
+        assert minds_client.minds_v1_base("https://api.mindshub.ai") == "https://api.mindshub.ai/v1"
+
+    def test_legacy_mdb_host_uses_api_v1(self):
+        assert minds_client.minds_v1_base("https://mdb.ai") == "https://mdb.ai/api/v1"
+
+    def test_explicit_v1_suffix_kept_as_is(self):
+        assert minds_client.minds_v1_base("https://host.example/v1") == "https://host.example/v1"
 
 
 def test_setup_minds_skips_no_ssl_retry_on_http_error(monkeypatch):
@@ -203,6 +274,32 @@ def test_setup_minds_writes_catalog_resolved_models(monkeypatch):
     assert settings.coding_model == "haiku"
     workspace.set_secret.assert_any_call("ANTON_PLANNING_MODEL", "sonnet")
     workspace.set_secret.assert_any_call("ANTON_CODING_MODEL", "haiku")
+
+
+def test_setup_minds_honors_env_url_override(monkeypatch):
+    """ANTON_MINDS_URL is the only path to a non-default host (staging,
+    self-hosted) — setup must use it, not clobber it back to prod."""
+    import anton.cli as cli
+
+    settings = AntonSettings(_env_file=None)
+    workspace = MagicMock()
+
+    monkeypatch.setenv("ANTON_MINDS_URL", "https://api.staging.mindshub.ai/")
+    monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
+    monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        "anton.cli.resolve_minds_models", lambda *a, **kw: ("sonnet", "haiku")
+    )
+    monkeypatch.setattr(
+        "anton.cli.test_llm", lambda *a, **kw: minds_client.LLMTestResult(ok=True)
+    )
+
+    cli._setup_minds(settings, workspace)
+
+    assert settings.minds_url == "https://api.staging.mindshub.ai"
+    workspace.set_secret.assert_any_call(
+        "ANTON_MINDS_URL", "https://api.staging.mindshub.ai"
+    )
 
 
 def test_setup_openai_uses_modern_openai_token_parameter(monkeypatch):
