@@ -873,10 +873,14 @@ class TestProgressAndTimeouts:
         assert inactivity == float(CoreSettings().cell_inactivity_max)
         assert total == 600.0  # total is intentionally left uncapped
 
-    async def test_compute_timeouts_total_max_off_by_default(self):
-        """cell_total_max defaults to 0 — the total is uncapped out of the box."""
+    async def test_compute_timeouts_total_max_capped_by_default(self):
+        """cell_total_max defaults to 1h. Since the liveness heartbeat keeps
+        deliberately-quiet cells alive (ENG-578), a deadlock or infinite loop
+        beats like a working cell — this ceiling is the only bound that ends
+        it, so it must be on out of the box (and generous enough for a
+        throttled batch campaign)."""
         from anton.core.settings import CoreSettings
-        assert CoreSettings().cell_total_max == 0
+        assert CoreSettings().cell_total_max == 3600
 
     async def test_compute_timeouts_total_max_backstop(self, monkeypatch):
         """When set, cell_total_max bounds the total; inactivity stays capped."""

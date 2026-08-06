@@ -821,13 +821,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
 
+        # A budget kill with zero salvaged output is ambiguous: a stuck call
+        # and silent heavy work look identical from outside, so the message
+        # says so instead of implying "too heavy" (the confident wrong guess
+        # that taught the ENG-578 per-item pattern). The phrase routes to its
+        # own nudge — lockstep constraint, see the silence-kill raise below.
+        def _total_timeout_message() -> str:
+            base = f"Cell timed out after {total_timeout:.0f}s total"
+            if not self._salvage:
+                return base + (
+                    " without producing any output — either a call is stuck "
+                    "or the work is heavier than estimated"
+                )
+            return base
+
         while True:
             elapsed = _time.monotonic() - start
             remaining_total = total_timeout - elapsed
             if remaining_total <= 0:
-                raise asyncio.TimeoutError(
-                    f"Cell timed out after {total_timeout:.0f}s total"
-                )
+                raise asyncio.TimeoutError(_total_timeout_message())
 
             line_timeout = min(current_inactivity, remaining_total)
             try:
@@ -838,17 +850,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             except asyncio.TimeoutError:
                 elapsed_now = _time.monotonic() - start
                 if elapsed_now >= total_timeout - 0.5:
-                    raise asyncio.TimeoutError(
-                        f"Cell timed out after {total_timeout:.0f}s total"
-                    ) from None
-                # Wording is load-bearing: _select_resilience_nudge and the
-                # ACC kill-loop detector route on "liveness" vs "timed out" —
-                # change them together (ENG-578 lockstep constraint).
+                    raise asyncio.TimeoutError(_total_timeout_message()) from None
+                # Wording is load-bearing in THREE places (ENG-578 lockstep):
+                # _select_resilience_nudge routes on "liveness"/"timed out"/
+                # "without producing any output", the ACC kill-loop detector
+                # classifies on the same phrases, and observe_scratchpad_cell
+                # records only the FIRST 120 chars as the ACC reason — the
+                # routing keywords must stay inside that slice. Change all of
+                # them together.
+                #
+                # Only two things actually reach this timer now: a dead worker
+                # (EOF follows shortly) or one pinned below Python by a native
+                # call holding the GIL — a userland deadlock or spin keeps
+                # heartbeating and runs to the total budget instead.
                 raise asyncio.TimeoutError(
                     f"Cell killed after {current_inactivity:.0f}s without a "
-                    "liveness signal from the scratchpad worker — the process "
-                    "looks dead or wedged. Deliberate sleeps and blocking calls "
-                    "are kept alive automatically, so this is NOT caused by "
+                    "liveness signal from the scratchpad worker — the worker "
+                    "process died, or a native call is stuck holding it below "
+                    "Python. Deliberate sleeps and blocking calls are kept "
+                    "alive automatically, so this is NOT caused by "
                     "quiet-but-working code"
                 ) from None
 

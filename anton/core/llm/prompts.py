@@ -438,11 +438,24 @@ SCRATCHPAD_TIMEOUT_NUDGE = (
 # kill-message wording in _select_resilience_nudge.
 SCRATCHPAD_STUCK_NUDGE = (
     "\n\nSYSTEM: This scratchpad cell was killed because the worker stopped "
-    "signalling liveness — the process looked dead or wedged. This is NOT a "
-    "size problem: do not shrink the batch or split the loop; deliberate "
-    "sleeps and blocking calls are kept alive automatically. Reset the "
-    "scratchpad and retry the same cell. Pass estimated_execution_time_seconds "
-    "so the total budget fits, and call progress() to narrate long phases. If "
-    "the same code wedges again, a native call may be hanging — give that call "
-    "its own timeout. Reuse the SAME scratchpad; do not rename it."
+    "signalling liveness — the process died or a native call is stuck holding "
+    "it below Python. This is NOT a size problem: do not shrink the batch or "
+    "split the loop; deliberate sleeps and blocking calls are kept alive "
+    "automatically. Reset the scratchpad and retry the same cell. Pass "
+    "estimated_execution_time_seconds so the total budget fits, and call "
+    "progress() to narrate long phases. If the same code wedges again, a "
+    "native call may be hanging — give that call its own timeout. Reuse the "
+    "SAME scratchpad; do not rename it."
+)
+# A budget kill with zero output is ambiguous — a stuck call and silent heavy
+# work look identical from outside. Say so, rather than confidently claiming
+# "too heavy" (the guess that taught the ENG-578 per-item pattern).
+SCRATCHPAD_SILENT_TIMEOUT_NUDGE = (
+    "\n\nSYSTEM: This scratchpad cell ran out of its total time budget without "
+    "producing any output — either a call is stuck or the work is heavier than "
+    "estimated; the runtime cannot tell which. Retry once with a realistic "
+    "estimated_execution_time_seconds, print intermediate results, call "
+    "progress() to narrate phases, and give blocking calls their own timeouts. "
+    "If it dies silently again, treat the code as stuck (find the blocking "
+    "call) rather than too big. Reuse the SAME scratchpad; do not rename it."
 )

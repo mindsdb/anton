@@ -14,6 +14,7 @@ import pytest
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
+    SCRATCHPAD_SILENT_TIMEOUT_NUDGE,
     SCRATCHPAD_STUCK_NUDGE,
     SCRATCHPAD_TIMEOUT_NUDGE,
 )
@@ -70,7 +71,11 @@ class TestLivenessHeartbeat:
         try:
             cell = await pad.execute("import time; time.sleep(3); print('done')")
             assert cell.error is not None
-            assert "liveness" in cell.error.lower()
+            # Within the FIRST 120 chars: observe_scratchpad_cell records
+            # reason=err[:120] for ACC, so the routing keyword must survive
+            # that slice — a future prefix pushing it out would silently
+            # return every kill to the "too heavy" lesson with tests green.
+            assert "liveness" in cell.error[:120].lower()
         finally:
             await pad.close()
 
@@ -238,6 +243,28 @@ class TestKillMessages:
             assert cell.error is not None
             assert "timed out" in cell.error.lower()
             assert "liveness" not in cell.error.lower()
+            # Silent budget kill: the message must say the ambiguity out loud
+            # (stuck vs silently heavy), within the ACC's 120-char slice.
+            assert "without producing any output" in cell.error[:120].lower()
+        finally:
+            await pad.close()
+
+    async def test_producing_budget_kill_has_no_silent_marker(self, monkeypatch):
+        """A budget kill that WAS producing output keeps the plain message —
+        that is the one case where "too heavy" is genuinely right."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "3")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import time\nprint('working')\ntime.sleep(0.5)\ntime.sleep(30)\n"
+            )
+            assert cell.error is not None
+            assert "timed out" in cell.error.lower()
+            assert "without producing any output" not in cell.error.lower()
         finally:
             await pad.close()
 
@@ -269,6 +296,17 @@ class TestNudgeRouting:
         )
         assert nudge == SCRATCHPAD_TIMEOUT_NUDGE
         assert "too heavy" in nudge
+
+    def test_silent_budget_kill_gets_honest_nudge(self):
+        """A budget kill with zero output is ambiguous (stuck vs silently
+        heavy) — it must not claim "too heavy" and must not claim wedged."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "Cell timed out after 120s total without producing any output — "
+            "either a call is stuck or the work is heavier than estimated",
+        )
+        assert nudge == SCRATCHPAD_SILENT_TIMEOUT_NUDGE
+        assert "too heavy" not in nudge
 
     def test_non_scratchpad_unchanged(self):
         assert (
@@ -316,6 +354,49 @@ class TestKillLoopLesson:
 
     def test_single_kill_still_below_threshold(self):
         assert detect_kill_loop([_kill_event("Cell timed out after 120s total")]) is None
+
+    def test_mixed_turn_majority_liveness_wins(self):
+        """2 budget + 3 liveness must NOT write "too heavy" (majority wins)."""
+        events = [
+            _kill_event("Cell timed out after 120s total", round_idx=1),
+            _kill_event("Cell timed out after 120s total", round_idx=2),
+            _kill_event("Cell killed after 30s without a liveness signal", round_idx=3),
+            _kill_event("Cell killed after 30s without a liveness signal", round_idx=4),
+            _kill_event("Cell killed after 30s without a liveness signal", round_idx=5),
+        ]
+        lesson = detect_kill_loop(events)
+        assert lesson is not None
+        assert "smaller" not in lesson.rule.lower()
+
+    def test_heavy_majority_still_wins(self):
+        events = [
+            _kill_event("Cell timed out after 120s total", round_idx=1),
+            _kill_event("Cell timed out after 120s total", round_idx=2),
+            _kill_event("Cell killed after 30s without a liveness signal", round_idx=3),
+        ]
+        lesson = detect_kill_loop(events)
+        assert lesson is not None
+        assert "smaller" in lesson.rule.lower()
+
+    def test_unreasoned_kills_write_no_rule(self):
+        """A kill with no recorded reason is ambiguous — no durable rule
+        beats a wrong one."""
+        events = [_kill_event("", round_idx=1), _kill_event("", round_idx=2)]
+        assert detect_kill_loop(events) is None
+
+    def test_silent_budget_kills_write_no_rule(self):
+        """Silent budget kills are ambiguous (stuck vs silently heavy)."""
+        events = [
+            _kill_event(
+                "Cell timed out after 120s total without producing any output",
+                round_idx=1,
+            ),
+            _kill_event(
+                "Cell timed out after 120s total without producing any output",
+                round_idx=2,
+            ),
+        ]
+        assert detect_kill_loop(events) is None
 
 
 class TestToolContractText:
