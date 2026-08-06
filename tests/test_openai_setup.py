@@ -225,6 +225,131 @@ class TestMindsV1Base:
         assert minds_client.minds_v1_base("https://host.example/v1") == "https://host.example/v1"
 
 
+class TestMindsPassthroughFlavorDetection:
+    """The gateway must be detected as passthrough for every base URL
+    ``model_post_init`` can derive (#317 review).
+
+    Getting this wrong is silent: the provider falls back to
+    ``FLAVOR_OPENAI_COMPATIBLE_GENERIC``, whose ``native_web_tools()`` returns
+    an empty set, so the session routes web_search to a handler ToolDef needing
+    an Exa/Brave key that MindsHub users don't have. Web search just stops
+    working, with no error anywhere.
+    """
+
+    def _flavor(self, minds_url: str) -> str:
+        from anton.core.llm.client import _resolve_openai_compatible_flavor
+
+        settings = AntonSettings(
+            planning_provider="openai-compatible",
+            coding_provider="openai-compatible",
+            minds_api_key="k",
+            minds_url=minds_url,
+            openai_base_url=None,
+            openai_api_key=None,
+        )
+        return _resolve_openai_compatible_flavor(settings)
+
+    def _passthrough(self) -> str:
+        from anton.core.llm.openai import OpenAIProvider
+
+        return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+
+    def test_mindshub_host_is_passthrough(self):
+        # The canonical value setup writes. This is the case that was broken:
+        # minds_url has no suffix, model_post_init derives .../v1, and the
+        # detection only knew about the bare host and /api/v1.
+        assert self._flavor("https://api.mindshub.ai") == self._passthrough()
+
+    def test_legacy_mdb_host_is_passthrough(self):
+        assert self._flavor("https://mdb.ai") == self._passthrough()
+
+    def test_explicit_v1_suffix_is_passthrough(self):
+        assert self._flavor("https://api.mindshub.ai/v1") == self._passthrough()
+
+    def test_third_party_endpoint_stays_generic(self):
+        # The guard against over-matching: a generic endpoint must NOT get the
+        # passthrough, or anton sends web-tool types it can't understand.
+        from anton.core.llm.openai import OpenAIProvider
+
+        settings = AntonSettings(
+            planning_provider="openai-compatible",
+            coding_provider="openai-compatible",
+            minds_api_key="k",
+            minds_url="https://api.mindshub.ai",
+            openai_base_url="https://some-proxy.example/v1",
+            openai_api_key="k",
+        )
+        from anton.core.llm.client import _resolve_openai_compatible_flavor
+
+        assert (
+            _resolve_openai_compatible_flavor(settings)
+            == OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
+        )
+
+    def test_passthrough_actually_enables_native_web_tools(self):
+        # The property that matters downstream — the flavor is only a means.
+        from anton.core.llm.openai import OpenAIProvider
+
+        provider = OpenAIProvider(
+            api_key="k",
+            base_url="https://api.mindshub.ai/v1",
+            flavor=self._passthrough(),
+        )
+        assert provider.native_web_tools() == {"web_search", "web_fetch"}
+
+
+class TestSetupErrorTextIsMarkupSafe:
+    """Provider error text is interpolated into Rich markup; an unescaped
+    ``[...]`` that Rich reads as a style tag raises MarkupError and crashes
+    setup — the opposite of the error-surfacing this PR adds (#317 review).
+    """
+
+    def _run_setup_with_error(self, monkeypatch, detail: str):
+        import anton.cli as cli
+
+        monkeypatch.setattr(
+            cli, "resolve_minds_models",
+            lambda *a, **k: minds_client.MindsModels(
+                planning="sonnet", coding="haiku", probe="haiku"
+            ),
+        )
+        monkeypatch.setattr(
+            cli, "test_llm",
+            lambda *a, **k: minds_client.LLMTestResult(
+                ok=False, error=detail, http_status=404
+            ),
+        )
+        monkeypatch.setattr(cli, "_setup_prompt", lambda *a, **k: "key")
+        monkeypatch.setattr(cli.Confirm, "ask", staticmethod(lambda *a, **k: False))
+        settings = AntonSettings(minds_url="https://api.mindshub.ai")
+        ws = MagicMock()
+        # Declining the retry exits via _SetupRetry — that's the normal control
+        # flow and not what this test is about. The assertion is narrow on
+        # purpose: MarkupError must never escape, whatever the provider said.
+        from rich.errors import MarkupError
+
+        try:
+            cli._setup_minds(settings, ws)
+        except MarkupError:
+            raise
+        except Exception:
+            pass
+
+    # Fixture choice matters: Rich TOLERATES an unmatched OPENING tag
+    # ("[sonnet-4-6]" prints fine), so those strings prove nothing. Only a
+    # CLOSING tag ("[/...]") raises — verified against rich directly. A route
+    # or JSON-pointer echoed in a gateway error is exactly that shape.
+    def test_route_in_error_text_does_not_crash_setup(self, monkeypatch):
+        self._run_setup_with_error(
+            monkeypatch, "model_not_found: unknown route [/v1/chat/completions]"
+        )
+
+    def test_json_pointer_in_error_text_does_not_crash_setup(self, monkeypatch):
+        self._run_setup_with_error(
+            monkeypatch, "validation error at [/model] — field required"
+        )
+
+
 def test_setup_minds_skips_no_ssl_retry_on_http_error(monkeypatch):
     """An HTTP-level failure (server answered → TLS worked) must not trigger
     the verify=False retry — it can only repeat the same error."""

@@ -95,6 +95,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style as PTStyle
+from rich.markup import escape
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
 from anton.commands.goal import parse_goal_args, run_goal_loop
@@ -277,13 +278,24 @@ async def _handle_connect(
     models = resolve_minds_models(minds_url, api_key, verify=ssl_verify)
     llm_result = test_llm(minds_url, api_key, verify=ssl_verify, model=models.probe)
 
-    if not llm_result.ok and llm_result.error:
+    # A 429 proves the endpoint is THERE — it answered, it just throttled this
+    # probe. Treating it as unavailable dropped a throttled-but-valid MindsHub
+    # endpoint and fell through to the BYOK prompt (#317 review); the previous
+    # truthy "rate_limited" string had adopted it.
+    llm_available = llm_result.ok or llm_result.rate_limited
+
+    if not llm_available and llm_result.error:
         console.print(
-            f"[anton.muted]Minds LLM endpoints unavailable ({llm_result.error}) — "
-            "keeping the current LLM provider.[/]"
+            f"[anton.muted]Minds LLM endpoints unavailable "
+            f"({escape(llm_result.error)}) — keeping the current LLM provider.[/]"
+        )
+    elif llm_result.rate_limited:
+        console.print(
+            "[anton.muted]Minds LLM endpoints are rate-limited right now — "
+            "using them anyway; limits clear on their own.[/]"
         )
 
-    if llm_result.ok:
+    if llm_available:
         console.print(
             "[anton.success]LLM endpoints available — using Minds server as LLM provider.[/]"
         )

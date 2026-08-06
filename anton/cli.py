@@ -13,6 +13,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.spinner import Spinner
@@ -800,8 +801,13 @@ def _setup_minds(settings, ws) -> None:
         # A 429 here is usually the TPM/RPM limiter, not an exhausted
         # allowance (wallet-empty is a 402) — so lead with the provider's own
         # message and keep the top-up advice secondary.
+        # escape(): the provider's text is interpolated into Rich markup, and
+        # a message containing [...] that Rich reads as a bad style tag raises
+        # MarkupError — crashing setup instead of reporting the error it was
+        # added to surface (#317 review).
         console.print(
-            f"  [anton.error]{error_detail or 'Rate limit or token limit exceeded.'}[/]"
+            f"  [anton.error]"
+            f"{escape(error_detail) if error_detail else 'Rate limit or token limit exceeded.'}[/]"
         )
         console.print(
             "  [anton.muted]Rate limits clear on their own — try again in a moment. "
@@ -810,7 +816,9 @@ def _setup_minds(settings, ws) -> None:
         raise _SetupRetry()
     else:
         if error_detail:
-            console.print(f"  [anton.error]Could not connect: {error_detail}[/]")
+            console.print(
+                f"  [anton.error]Could not connect: {escape(error_detail)}[/]"
+            )
         else:
             console.print(
                 "  [anton.error]Could not connect. Check your API key and URL.[/]"
