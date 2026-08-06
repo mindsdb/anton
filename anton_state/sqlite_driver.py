@@ -12,7 +12,7 @@ import sqlite3
 import time
 from typing import Any
 
-from .base import _VERSION_ATTR
+from .base import DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT, _VERSION_ATTR
 from .errors import ConditionalCheckFailed
 from .schema import StateSchema
 from .validation import validate_item, validate_key
@@ -160,10 +160,13 @@ class SQLiteDriver:
                 where.append("json_extract(body, '$.' || ?) = ?")
                 params += [k, v]
 
+        # Bounded exactly like the cloud broker: an absent limit means "the
+        # default cap", never "every row". Diverging here is the local-vs-
+        # published mismatch ENG-704 exists to avoid — a collection over the cap
+        # would otherwise return everything locally and silently truncate in prod.
         sql = "SELECT body FROM items WHERE " + " AND ".join(where) + " ORDER BY pk, sk"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(limit)
+        sql += " LIMIT ?"
+        params.append(DEFAULT_QUERY_LIMIT if limit is None else min(limit, MAX_QUERY_LIMIT))
 
         with self._connect() as con:
             rows = con.execute(sql, params).fetchall()
@@ -176,13 +179,23 @@ class SQLiteDriver:
         NOT synthesise the logical pk/sk attributes — mirroring the schema-agnostic
         broker (plan #2), where increment/update on an absent item create a minimal
         item (mutated field + _v) without the logical key attributes.
+
+        An EXPIRED row reads as absent here, matching get/query (physical
+        deletion is lazy, so the "zombie" is still on disk). Without that, an
+        expired counter would resume from a value the reads pretend is gone —
+        jumping from "missing" straight to old_value + 1. The cloud broker
+        enforces the same rule with a TTL condition on update_item.
         """
         skv = self._sk_value(sk)
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT body FROM items WHERE pk=? AND sk=?", (pk, skv)).fetchone()
-            item = json.loads(row["body"]) if row else {}
+            row = con.execute(
+                "SELECT body, expires_at FROM items WHERE pk=? AND sk=?", (pk, skv)
+            ).fetchone()
+            expired = (row is not None and row["expires_at"] is not None
+                       and row["expires_at"] < time.time())
+            item = json.loads(row["body"]) if (row and not expired) else {}
             item = mutate(item)
             item[_VERSION_ATTR] = item.get(_VERSION_ATTR, 0) + 1
             body = json.dumps(item, separators=(",", ":"), ensure_ascii=False)

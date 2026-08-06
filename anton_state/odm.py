@@ -47,6 +47,7 @@ class Collection:
         await self._store.delete(pk, self._sk_val(key), if_version=if_version)
 
     async def list(self, *, pk: str = _DEFAULT_PK, limit: int | None = None) -> list[Item]:
+        """Bounded — see Store.query: `limit=None` is a default cap, not "all"."""
         return await self._store.query(pk, sk_prefix=f"{self._name}#", limit=limit)
 
     async def increment(

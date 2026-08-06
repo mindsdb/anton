@@ -114,3 +114,46 @@ def test_update_set_and_add(drv):
 def test_put_validates(drv):
     with pytest.raises(StateValidationError):
         drv.put({"sk": "s"}, if_not_exists=False, if_version=None)  # no pk
+
+
+# --- expired items must not be resurrected by a mutation (parity with the
+#     cloud broker's TTL condition on update_item) ---
+
+def test_increment_ignores_expired_item(drv):
+    """get() already hides the row, so increment must restart the counter rather
+    than resume from a value the reads pretend is gone."""
+    drv.put({"pk": "c", "sk": "g", "n": 5, "expires_at": time.time() - 10},
+            if_not_exists=False, if_version=None)
+    assert drv.get("c", "g", consistent=True) is None
+    assert drv.increment("c", "g", field="n", by=1) == 1
+
+
+def test_increment_on_live_ttl_item_still_works(drv):
+    drv.put({"pk": "c", "sk": "g", "n": 5, "expires_at": time.time() + 3600},
+            if_not_exists=False, if_version=None)
+    assert drv.increment("c", "g", field="n", by=1) == 6
+
+
+def test_update_ignores_expired_item(drv):
+    drv.put({"pk": "c", "sk": "g", "n": 5, "name": "old", "expires_at": time.time() - 10},
+            if_not_exists=False, if_version=None)
+    item = drv.update("c", "g", set_fields=None, add_fields={"n": 1}, if_version=None)
+    assert item["n"] == 1 and "name" not in item
+
+
+# --- query is bounded, exactly like the broker ---
+
+def test_query_applies_default_cap(drv, monkeypatch):
+    import anton_state.sqlite_driver as sd
+    monkeypatch.setattr(sd, "DEFAULT_QUERY_LIMIT", 5)
+    for i in range(8):
+        drv.put({"pk": "u1", "sk": f"k{i:03d}"}, if_not_exists=False, if_version=None)
+    assert len(drv.query("u1", sk_prefix=None, filters=None, consistent=True, limit=None)) == 5
+
+
+def test_query_clamps_to_max_limit(drv, monkeypatch):
+    import anton_state.sqlite_driver as sd
+    monkeypatch.setattr(sd, "MAX_QUERY_LIMIT", 3)
+    for i in range(8):
+        drv.put({"pk": "u1", "sk": f"k{i:03d}"}, if_not_exists=False, if_version=None)
+    assert len(drv.query("u1", sk_prefix=None, filters=None, consistent=True, limit=1000)) == 3

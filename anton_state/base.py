@@ -13,6 +13,16 @@ Item = dict[str, Any]
 # (the request body is not trusted). Single place for all drivers.
 _VERSION_ATTR = "_v"
 
+# Server-side query bounds, mirrored by the cloud broker
+# (mindshub_services functions/artifact_state/state_store.py). A query with no
+# limit returns at most DEFAULT_QUERY_LIMIT rows and an explicit limit is clamped
+# to MAX_QUERY_LIMIT — unbounded reads either OOM the broker or run it to its
+# timeout, and it serves every artifact from one shared concurrency pool. Both
+# drivers apply the same numbers so an artifact behaves identically local and
+# published.
+DEFAULT_QUERY_LIMIT = 1000
+MAX_QUERY_LIMIT = 5000
+
 
 class Driver(Protocol):
     def get(self, pk: str, sk: str | None, *, consistent: bool) -> Item | None: ...
@@ -78,6 +88,13 @@ class Store:
         consistent: bool = True,
         limit: int | None = None,
     ) -> list[Item]:
+        """Items under `pk`, optionally narrowed by sk prefix and equality filters.
+
+        BOUNDED: `limit=None` means DEFAULT_QUERY_LIMIT rows, not "all of them",
+        and an explicit limit is clamped to MAX_QUERY_LIMIT. Both drivers apply
+        the same caps, so paginate with `sk_prefix` if a collection can exceed
+        them — do not assume one call returns the whole partition.
+        """
         return await asyncio.to_thread(
             self._driver.query,
             pk,
