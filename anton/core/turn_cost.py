@@ -103,6 +103,18 @@ class TurnCost:
     # books it was handed even when a newer turn already owns the slot
     # (#309 review).
     emitted: bool = False
+    # Per-turn facts stamped at books-OPEN, not read at emit. A late finalizer
+    # emits books whose turn ended long ago, and reading live session state
+    # there gave the abandoned turn a LATER, unrelated turn's index — the
+    # cost→Langfuse hop then pointed at the wrong turn (#309 review follow-up).
+    turn_index: int = 0
+    # When the turn ended. None until resolved. A late finalizer cannot know the
+    # real end, so it falls back to `last_activity_monotonic` (the last LLM
+    # call) — understating but bounded, rather than measuring up to whenever
+    # asyncio happened to run the finalizer, which inflates the field a runaway
+    # query sorts on.
+    ended_monotonic: float | None = None
+    last_activity_monotonic: float | None = None
     # Per-role attribution. A turn routinely mixes an expensive planning model
     # with a cheap coding model (the completion verifier runs on the latter),
     # so a single blended token total cannot be priced at any one rate —
@@ -123,6 +135,7 @@ class TurnCost:
         self.cache_read_tokens += usage.cache_read_tokens
         self.cache_creation_tokens += usage.cache_creation_tokens
         self.peak_context_tokens = max(self.peak_context_tokens, usage.context_tokens)
+        self.last_activity_monotonic = time.monotonic()
         # An empty role lands in `unknown`, which the event emits alongside the
         # three real roles — so the per-role sum always reconciles with
         # `total_tokens` instead of silently losing a bucket (#309 review).
@@ -147,4 +160,9 @@ class TurnCost:
 
     @property
     def duration_ms(self) -> int:
-        return int((time.monotonic() - self.started_monotonic) * 1000)
+        end = (
+            self.ended_monotonic
+            if self.ended_monotonic is not None
+            else time.monotonic()
+        )
+        return int((end - self.started_monotonic) * 1000)

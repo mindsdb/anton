@@ -385,3 +385,93 @@ async def test_callers_already_handled_exception_is_not_reported_as_error(worksp
                 pass
 
     assert _ended_by(send) == "completed"
+
+
+async def test_abandoned_turn_keeps_its_own_index_not_a_later_turns(workspace):
+    """Per-turn facts are stamped at books-open, not read at emit.
+
+    A late finalizer emits books whose turn ended long ago; reading
+    ``self._turn_count`` there gave the abandoned turn a LATER, unrelated
+    turn's index (#309 review follow-up). Sequence: abandon turn 1 → finish
+    turn 2 → finalize turn 1 → finish turn 3.
+
+    Note on uniqueness, which is NOT what this asserts: ``_turn_count``
+    advances only after a turn completes, so an abandoned turn and its
+    successor legitimately share an index — and the Langfuse trace context
+    derives its ``turn_id`` from the *same* expression (``session.py`` where
+    ``TraceContext`` is built). So a shared index means "two attempts at one
+    conversational turn" on both sides, and the cost→trace hop stays
+    consistent. Claiming `(conversation_id, turn_index)` were a unique event
+    key would have been wrong; it is a join key.
+    """
+    mock_llm = make_mock_llm()
+    hang = asyncio.Event()
+
+    def _stream(**kwargs):
+        async def _gen():
+            yield StreamTextDelta(text="partial")
+            await hang.wait()
+            yield StreamComplete(response=_text())
+        return _gen()
+
+    def _quick(**kwargs):
+        return _Iter([StreamComplete(response=_text("done"))])
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+        mock_llm.plan_stream = _stream
+        abandoned = session.turn_stream("turn one — abandoned")
+        async for _ in abandoned:
+            break                                    # turn 1 left open
+
+        mock_llm.plan_stream = _quick
+        async for _ in session.turn_stream("turn two"):
+            pass                                     # completes -> _turn_count 1
+
+        await abandoned.aclose()                     # turn 1's late finalizer
+
+        async for _ in session.turn_stream("turn three"):
+            pass
+
+    events = [(c.kwargs["ended_by"], c.kwargs["turn_index"]) for c in send.call_args_list]
+    assert len(events) == 3, f"expected 3 events, got {events}"
+
+    # The abandoned turn is the cancelled one. It opened as turn 1 and must
+    # still say 1 — reading live state at emit would report 2 (turn 3's).
+    cancelled = [idx for ended, idx in events if ended == "cancelled"]
+    assert cancelled == ["1"], f"abandoned turn drifted to a later index: {events}"
+
+
+async def test_late_emit_duration_is_bounded_by_last_activity(workspace):
+    """A late finalizer must not measure duration up to whenever asyncio ran
+    it — that inflates the field a runaway query sorts on. With no owning turn
+    ending, the last LLM call is the bounded approximation used instead.
+    """
+    from anton.core.turn_cost import TurnCost
+
+    session = ChatSession.__new__(ChatSession)
+    session._llm = MagicMock()
+    session._llm.planning_model = "p"
+    session._llm.coding_model = "c"
+    session._session_id = "conv"
+    session._harness = "cli"
+    session._turn_count = 5
+    session._cancel_event = MagicMock(is_set=lambda: False)
+    session._settings = None
+
+    stale = TurnCost(turn_index=2)
+    stale.add("planning", "sonnet", Usage(input_tokens=10, output_tokens=1))
+    stale.last_activity_monotonic = stale.started_monotonic + 0.010  # ~10ms of work
+    session._turn_cost = TurnCost(turn_index=6)                      # newer owner
+
+    await asyncio.sleep(0.05)  # the finalizer fires much later
+
+    with patch("anton.analytics.send_event") as send:
+        session._emit_turn_cost(expected=stale)
+
+    kw = send.call_args.kwargs
+    assert kw["turn_index"] == "2"
+    assert int(kw["duration_ms"]) < 40, (
+        f"duration measured to finalizer time, not turn end: {kw['duration_ms']}ms"
+    )

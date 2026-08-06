@@ -1778,7 +1778,19 @@ class ChatSession:
         if tc is None or tc.emitted:
             return
         tc.emitted = True  # the double-emit guard, now on the books themselves
-        if self._turn_cost is tc:
+        is_owner = self._turn_cost is tc
+        if tc.ended_monotonic is None:
+            # The owning turn is ending right now; a late finalizer is not — so
+            # it reports up to the last LLM call rather than up to whenever
+            # asyncio ran it (#309 review follow-up).
+            import time as _t
+
+            tc.ended_monotonic = (
+                _t.monotonic()
+                if is_owner or tc.last_activity_monotonic is None
+                else tc.last_activity_monotonic
+            )
+        if is_owner:
             self._turn_cost = None
             try:
                 self._llm.usage_listener = None
@@ -1809,7 +1821,9 @@ class ChatSession:
         elif exc is not None:
             tc.ended_by = "error"
 
-        turn_index = self._turn_count + 1
+        # Stamped at books-open; the live lookup remains only for bare-session
+        # tests and the legacy non-streaming path.
+        turn_index = tc.turn_index or (self._turn_count + 1)
         logger.info(
             "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
@@ -2256,7 +2270,7 @@ class ChatSession:
         # emission happens at both returns; an exception propagating out of
         # this method skips emission (stated gap: the CLI path's error exits
         # go unreported rather than restructuring the method around it).
-        self._turn_cost = TurnCost()
+        self._turn_cost = TurnCost(turn_index=self._turn_count + 1)
         self._llm.usage_listener = self._turn_cost.add
 
         user_msg_str = (
@@ -2517,7 +2531,7 @@ class ChatSession:
         # Open the turn's cost books and listen at the LLM-client narrow
         # waist — planning, coding (incl. verifier verdicts), and router
         # calls all report here (ENG-1288).
-        self._turn_cost = TurnCost()
+        self._turn_cost = TurnCost(turn_index=self._turn_count + 1)
         _turn_cost_books = self._turn_cost
         self._llm.usage_listener = self._turn_cost.add
 
