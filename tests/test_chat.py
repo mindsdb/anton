@@ -178,6 +178,56 @@ class TestContextCompaction:
         compacted = [e for e in events if isinstance(e, StreamContextCompacted)]
         assert len(compacted) == 0
 
+    async def test_failed_compaction_emits_no_event_and_closes_gate(self):
+        """A failed/no-op compaction (returns False) must not emit
+        StreamContextCompacted and must leave _compacted_this_turn False —
+        reverting the `if compacted:` guards to unconditional breaks this. It
+        also sets _compaction_failed_this_turn so the proactive check won't
+        re-fire for the rest of the turn (ENG-1274 #1)."""
+        async def _plan_stream(**kwargs):
+            yield StreamComplete(
+                response=LLMResponse(content="Done", usage=Usage(context_pressure=0.9))
+            )
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
+        session._summarize_history = AsyncMock(return_value=False)
+
+        events = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.call_count == 1
+        assert not any(isinstance(e, StreamContextCompacted) for e in events)
+        assert session._compacted_this_turn is False
+        assert session._compaction_failed_this_turn is True
+
+    async def test_failed_compaction_not_retried_every_round(self):
+        """A persistently-failing compaction must not re-fire on every check.
+        Overflow (reactive path) followed by a high-pressure retry (proactive
+        path) is the ceiling: two summarize calls, never one-per-round, and no
+        event on a failed attempt (ENG-1274 #1)."""
+        call_count = 0
+
+        async def _plan_stream(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ContextOverflowError("overflow")
+            yield StreamComplete(
+                response=LLMResponse(content="Done", usage=Usage(context_pressure=0.9))
+            )
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
+        session._summarize_history = AsyncMock(return_value=False)
+
+        events = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.call_count == 2
+        assert not any(isinstance(e, StreamContextCompacted) for e in events)
+        assert session._compaction_failed_this_turn is True
+
 
 class TestHardTruncateHistory:
     def _make_session(self) -> ChatSession:
