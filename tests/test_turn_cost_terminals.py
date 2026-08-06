@@ -119,10 +119,15 @@ async def test_task_cancel_reports_cancelled_not_error(workspace):
 
 
 async def test_abandoned_generator_still_emits_exactly_once(workspace):
-    """CLI ESC abandons the generator without ``aclose()``. The deferred
-    finalizer runs in a copied context where ``reset_trace_context`` raises
-    ValueError — which used to abort the finally before emission, so an
-    ESC-cancelled turn was never counted at all.
+    """Abandoning mid-iteration still books the turn exactly once, as
+    ``cancelled``.
+
+    Scope note (#309 fix-verification): this is the SAME-TASK abandon path.
+    ``aclose()`` here runs the ``finally`` in the original context, so
+    ``reset_trace_context`` succeeds and the cross-context ValueError never
+    fires — this test therefore does NOT cover the emit-before-reset fix.
+    That mechanism is pinned by
+    ``test_emit_survives_reset_trace_context_valueerror`` below; keep both.
     """
     mock_llm = make_mock_llm()
 
@@ -139,11 +144,38 @@ async def test_abandoned_generator_still_emits_exactly_once(workspace):
     with patch("anton.analytics.send_event") as send:
         gen = session.turn_stream("start then abandon")
         async for _ in gen:
-            break  # abandon mid-iteration, no aclose()
-        await gen.aclose()  # what asyncio's finalizer eventually does
+            break  # abandon mid-iteration
+        # Same-task close — NOT what a deferred finalizer does (that runs in a
+        # fresh task with a copied context); see the scope note above.
+        await gen.aclose()
 
         assert send.call_count == 1
         assert _ended_by(send) == "cancelled"
+
+
+async def test_emit_survives_reset_trace_context_valueerror(workspace):
+    """The real deferred-finalizer condition: ``reset_trace_context`` raises.
+
+    asyncio runs an abandoned async generator's ``finally`` in a fresh task
+    with a COPIED context, where resetting a token created elsewhere raises
+    ``ValueError: Token ... created in a different Context``. That used to
+    abort the finally before emission — so an ESC-cancelled CLI turn was
+    never counted at all. Patching the raise is deliberate: the ValueError
+    *is* the mechanism, and forcing a genuine deferred finalizer is
+    timing-dependent and flaky by comparison (#309 fix-verification).
+    """
+    mock_llm = make_mock_llm()
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    def _boom(_token):
+        raise ValueError("Token was created in a different Context")
+
+    with patch("anton.core.session.reset_trace_context", side_effect=_boom), \
+         patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("hello"):
+            pass
+
+        assert send.call_count == 1, "books must emit even when reset raises"
 
 
 async def test_late_finalizer_cannot_close_a_newer_turns_books(workspace):
