@@ -10,7 +10,12 @@ instead of at each call site.
 
 Consumers, in order:
 - observability: one structured log line + one ``turn_completed`` analytics
-  event per turn (see ``ChatSession._emit_turn_cost``);
+  event per turn (see ``ChatSession._emit_turn_cost``). The event relays into
+  PostHog project 355390, where each field lands as a queryable property —
+  one event per turn also makes turn VOLUME countable, not just cost. The
+  field names are therefore a published schema: renaming one breaks queries
+  downstream. Identity there is per-install (``aid``), so per-user cost needs
+  the ``conversation_id`` -> Langfuse hop;
 - ENG-1286's per-turn spend ceiling: reads ``total_tokens`` mid-turn.
 
 Component semantics follow ``Usage`` (normalized across providers): input
