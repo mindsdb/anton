@@ -201,11 +201,11 @@ class TestContextCompaction:
         assert session._compacted_this_turn is False
         assert session._compaction_failed_this_turn is True
 
-    async def test_failed_compaction_not_retried_every_round(self):
-        """A persistently-failing compaction must not re-fire on every check.
-        Overflow (reactive path) followed by a high-pressure retry (proactive
-        path) is the ceiling: two summarize calls, never one-per-round, and no
-        event on a failed attempt (ENG-1274 #1)."""
+    async def test_failed_compaction_overflow_plus_proactive_bounded(self):
+        """Overflow (reactive path) followed by a high-pressure retry
+        (proactive path) is the ceiling for a non-looping turn: two summarize
+        calls, and no StreamContextCompacted on a failed attempt (ENG-1274 #1).
+        The across-tool-rounds test below is what pins the proactive guard."""
         call_count = 0
 
         async def _plan_stream(**kwargs):
@@ -227,6 +227,45 @@ class TestContextCompaction:
         assert session._summarize_history.call_count == 2
         assert not any(isinstance(e, StreamContextCompacted) for e in events)
         assert session._compaction_failed_this_turn is True
+
+    # The unknown-tool dispatch path touches the AsyncMock llm client and
+    # leaks one never-awaited coroutine per turn — a test-double artifact (the
+    # real provider awaits/schedules it), not product behaviour.
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    async def test_failed_compaction_not_retried_across_tool_rounds(self):
+        """Several tool rounds all above the pressure threshold must still
+        yield at most one proactive compaction attempt. This is what actually
+        pins the `and not self._compaction_failed_this_turn` guard: remove it
+        and the count climbs to one summarize call per round (ENG-1274 #1).
+        `<=` rather than `==` so it isn't a tripwire on unrelated recovery-path
+        changes."""
+        rounds = 6
+
+        async def _plan_stream(**kwargs):
+            nonlocal rounds
+            rounds -= 1
+            if rounds > 0:
+                yield StreamComplete(response=LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id=f"t{rounds}", name="no_such_tool", input={})],
+                    usage=Usage(context_pressure=0.9),
+                    stop_reason="tool_use",
+                ))
+            else:
+                yield StreamComplete(response=LLMResponse(
+                    content="done",
+                    usage=Usage(context_pressure=0.9),
+                    stop_reason="end_turn",
+                ))
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
+        session._summarize_history = AsyncMock(return_value=False)
+
+        events = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.call_count <= 2
 
 
 class TestHardTruncateHistory:
