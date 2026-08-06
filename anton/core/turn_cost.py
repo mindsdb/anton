@@ -42,8 +42,16 @@ from dataclasses import dataclass, field
 from anton.core.llm.provider import Usage
 
 
-# Roles the event reports. `unknown` catches an empty/unexpected role so the
-# per-role token sum always equals the turn total; it should stay empty.
+# The roles the event reports — a closed set, which is what lets the event carry
+# per-role figures as flat properties. `TurnCost.add` folds any role outside it
+# (empty, None, novel, or a case/whitespace variant) into `unknown`, so the
+# per-role token sum always equals the turn total.
+#
+# `unknown` is EXPECTED to stay at zero, not guaranteed to: a non-zero value is
+# the alarm that some caller invented a role, and the fold is what keeps that
+# alarm's tokens from disappearing instead. The folded role's name is lost, but
+# the log line keeps the model (`unknown=haiku:320/1`), which is usually enough
+# to find the caller.
 UNKNOWN_ROLE = "unknown"
 EVENT_ROLES = ("planning", "coding", "router", UNKNOWN_ROLE)
 
