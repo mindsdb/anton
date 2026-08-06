@@ -2531,7 +2531,15 @@ class ChatSession:
         # Open the turn's cost books and listen at the LLM-client narrow
         # waist — planning, coding (incl. verifier verdicts), and router
         # calls all report here (ENG-1288).
-        self._turn_cost = TurnCost(turn_index=self._turn_count + 1)
+        # Stamp the SAME expression the trace context uses above — including an
+        # explicit host-supplied `turn_id`. Deriving it independently from
+        # `_turn_count` was correct only by accident (no host passes `turn_id`
+        # today); the moment one does, the cost event and the Langfuse trace
+        # would name different turns, which is the defect this stamping exists
+        # to prevent. Consistent by construction, not by coincidence.
+        self._turn_cost = TurnCost(
+            turn_index=turn_id if turn_id is not None else self._turn_count + 1
+        )
         _turn_cost_books = self._turn_cost
         self._llm.usage_listener = self._turn_cost.add
 

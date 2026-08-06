@@ -112,7 +112,11 @@ class TurnCost:
     # real end, so it falls back to `last_activity_monotonic` (the last LLM
     # call) — understating but bounded, rather than measuring up to whenever
     # asyncio happened to run the finalizer, which inflates the field a runaway
-    # query sorts on.
+    # query sorts on. Known residual: a turn abandoned BEFORE its first LLM call
+    # has no watermark, so its duration still runs to finalizer time. Accepted —
+    # it has `llm_calls == 0` and `tokens_total == 0`, so it is trivially
+    # excluded from any cost or runaway query, which is the only consumer that
+    # reads duration.
     ended_monotonic: float | None = None
     last_activity_monotonic: float | None = None
     # Per-role attribution. A turn routinely mixes an expensive planning model

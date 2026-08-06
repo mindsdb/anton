@@ -475,3 +475,28 @@ async def test_late_emit_duration_is_bounded_by_last_activity(workspace):
     assert int(kw["duration_ms"]) < 40, (
         f"duration measured to finalizer time, not turn end: {kw['duration_ms']}ms"
     )
+
+
+async def test_host_supplied_turn_id_is_what_the_event_reports(workspace):
+    """The cost event's turn_index must equal the trace's turn_id.
+
+    `turn_stream(turn_id=...)` exists so a host can supply its own identifier
+    "so downstream telemetry can correlate" — and the trace context prefers it.
+    Deriving the books' index independently from `_turn_count` agreed only
+    because no host passes `turn_id` today; if one did, the cost event and the
+    Langfuse trace would name different turns — the exact defect the stamping
+    exists to prevent (#309 review follow-up, second pass).
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(
+        side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("hello", turn_id=4242):
+            pass
+
+    assert send.call_args.kwargs["turn_index"] == "4242", (
+        "the event must report the host's turn_id, not the internal counter"
+    )
