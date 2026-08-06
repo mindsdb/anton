@@ -741,6 +741,10 @@ class ChatSession:
         # at the start of each turn. Prevents double-summarization when
         # the post-recovery response still reports high pressure.
         self._compacted_this_turn = False
+        # Stops a *failed* proactive compaction from being re-attempted every
+        # tool round. A transient blip still gets a fresh attempt next
+        # turn (both flags reset per turn).
+        self._compaction_failed_this_turn = False
         # Backends launched via the launch_backend tool. Keyed by
         # artifact slug; each entry holds the asyncio.subprocess.Process
         # plus its port. Reaped in close() so backend processes don't
@@ -1302,7 +1306,9 @@ class ChatSession:
         Returns True only if history was actually replaced. Every no-op path
         (too short, negligible new material, summarization failure) returns
         False so callers don't set `_compacted_this_turn` or emit a
-        StreamContextCompacted event for a compaction that didn't happen.
+        StreamContextCompacted event for a compaction that didn't happen. On a
+        failure specifically, proactive callers also set
+        `_compaction_failed_this_turn` so it isn't re-attempted every round.
         """
         if len(self._history) < 6:
             return False  # Too short to summarize
@@ -2123,19 +2129,23 @@ class ChatSession:
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
+        self._compaction_failed_this_turn = False
 
         response = await self.plan_with_recovery(system=system, tools=tools)
 
-        # Proactive compaction — gated so we never double-summarize within
-        # a single turn (the recovery helper may already have compacted).
+        # Proactive compaction — attempted at most once per turn, and not
+        # re-attempted after a failure (see `_compaction_failed_this_turn`).
         if (
             not self._compacted_this_turn
+            and not self._compaction_failed_this_turn
             and response.usage.context_pressure > self._context_pressure_threshold
         ):
             compacted = await self._summarize_history()
             self._compact_scratchpads()
             if compacted:
                 self._compacted_this_turn = True
+            else:
+                self._compaction_failed_this_turn = True
 
         # Handle tool calls
         tool_round = 0
@@ -2243,16 +2253,19 @@ class ChatSession:
             # Get follow-up from LLM
             response = await self.plan_with_recovery(system=system, tools=tools)
 
-            # Proactive compaction during tool loop — gated to at most
-            # once per turn.
+            # Proactive compaction during tool loop — at most once per turn,
+            # and not re-attempted after a failure.
             if (
                 not self._compacted_this_turn
+                and not self._compaction_failed_this_turn
                 and response.usage.context_pressure > self._context_pressure_threshold
             ):
                 compacted = await self._summarize_history()
                 self._compact_scratchpads()
                 if compacted:
                     self._compacted_this_turn = True
+                else:
+                    self._compaction_failed_this_turn = True
 
         # Text-only response
         reply = response.content or ""
@@ -2660,6 +2673,7 @@ class ChatSession:
         tools = self._build_tools()
         system = await self._build_system_prompt(user_message)
         self._compacted_this_turn = False
+        self._compaction_failed_this_turn = False
 
         response: StreamComplete | None = None
 
@@ -2692,10 +2706,11 @@ class ChatSession:
                 return
             llm_response = response.response
 
-        # Proactive compaction — gated via _compacted_this_turn so we
-        # never double-summarize within a single turn.
+        # Proactive compaction — at most once per turn, and not re-attempted
+        # after a failure (see `_compaction_failed_this_turn`).
         if (
             not self._compacted_this_turn
+            and not self._compaction_failed_this_turn
             and llm_response.usage.context_pressure > self._context_pressure_threshold
         ):
             compacted = await self._summarize_history()
@@ -2705,6 +2720,8 @@ class ChatSession:
                 yield StreamContextCompacted(
                     message="Context was getting long — older history has been summarized."
                 )
+            else:
+                self._compaction_failed_this_turn = True
 
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
@@ -3138,10 +3155,11 @@ class ChatSession:
                         return
                     llm_response = response.response
 
-                # Proactive compaction during tool loop — gated to at
-                # most once per turn.
+                # Proactive compaction during tool loop — at most once per
+                # turn, and not re-attempted after a failure.
                 if (
                     not self._compacted_this_turn
+                    and not self._compaction_failed_this_turn
                     and llm_response.usage.context_pressure
                     > self._context_pressure_threshold
                 ):
@@ -3152,6 +3170,8 @@ class ChatSession:
                         yield StreamContextCompacted(
                             message="Context was getting long — older history has been summarized."
                         )
+                    else:
+                        self._compaction_failed_this_turn = True
 
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A always skips at
