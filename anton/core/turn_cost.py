@@ -42,6 +42,12 @@ from dataclasses import dataclass, field
 from anton.core.llm.provider import Usage
 
 
+# Roles the event reports. `unknown` catches an empty/unexpected role so the
+# per-role token sum always equals the turn total; it should stay empty.
+UNKNOWN_ROLE = "unknown"
+EVENT_ROLES = ("planning", "coding", "router", UNKNOWN_ROLE)
+
+
 @dataclass
 class RoleCost:
     """One role's slice of a turn: which model ran it and what it spent.
@@ -92,6 +98,11 @@ class TurnCost:
     # the turn didn't end on its own terms.
     ended_by: str = "completed"
     started_monotonic: float = field(default_factory=time.monotonic)
+    # Set when these books have been reported. Replaces "the shared slot is
+    # None" as the double-emit guard, because a late finalizer now emits the
+    # books it was handed even when a newer turn already owns the slot
+    # (#309 review).
+    emitted: bool = False
     # Per-role attribution. A turn routinely mixes an expensive planning model
     # with a cheap coding model (the completion verifier runs on the latter),
     # so a single blended token total cannot be priced at any one rate —
@@ -112,7 +123,10 @@ class TurnCost:
         self.cache_read_tokens += usage.cache_read_tokens
         self.cache_creation_tokens += usage.cache_creation_tokens
         self.peak_context_tokens = max(self.peak_context_tokens, usage.context_tokens)
-        slice_ = self.by_role.setdefault(role or "unknown", RoleCost())
+        # An empty role lands in `unknown`, which the event emits alongside the
+        # three real roles — so the per-role sum always reconciles with
+        # `total_tokens` instead of silently losing a bucket (#309 review).
+        slice_ = self.by_role.setdefault(role or UNKNOWN_ROLE, RoleCost())
         slice_.observe(
             model,
             usage.input_tokens

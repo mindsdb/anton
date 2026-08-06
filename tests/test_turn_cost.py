@@ -475,3 +475,101 @@ class TestPerRoleAttribution:
         assert kw["planning_tokens"] == "0"
         assert kw["router_model"] == ""            # no router configured name
         assert kw["router_calls"] == "0"
+
+
+class TestRoleIsPassedNotInferred:
+    """Role must not be derived from model equality (#309 review).
+
+    Deployments run one model for several roles — cowork-server's Gemini
+    defaults are identical across planning/coding/router — and inferring the
+    role from `model == planning_model` booked every generate_object_code call
+    (verifier verdicts, compaction, identity extraction) to `planning`,
+    collapsing exactly the split this exists to provide.
+    """
+
+    @pytest.mark.asyncio
+    async def test_structured_coding_call_books_to_coding_when_models_match(self):
+        from pydantic import BaseModel
+
+        class _S(BaseModel):
+            x: str
+
+        provider = AsyncMock()
+        provider.complete.return_value = LLMResponse(
+            content="",
+            tool_calls=[
+                type("TC", (), {"input": {"x": "y"}, "name": "_S", "id": "1"})()
+            ],
+            usage=_usage(1000, 100),
+        )
+        same = "gemini-3.6-flash"
+        client = LLMClient(
+            planning_provider=provider, planning_model=same,
+            coding_provider=provider, coding_model=same,
+        )
+        tc = TurnCost()
+        client.usage_listener = tc.add
+        try:
+            await client.generate_object_code(_S, system="s", messages=[])
+        except Exception:
+            pass  # unwrapping the stub tool call may fail; the booking is the point
+        assert "coding" in tc.by_role, (
+            f"coding call booked to {list(tc.by_role)} — role was inferred, not passed"
+        )
+        assert "planning" not in tc.by_role
+
+    @pytest.mark.asyncio
+    async def test_structured_planning_call_books_to_planning_when_models_match(self):
+        from pydantic import BaseModel
+
+        class _S(BaseModel):
+            x: str
+
+        provider = AsyncMock()
+        provider.complete.return_value = LLMResponse(
+            content="", tool_calls=[], usage=_usage(500, 50)
+        )
+        same = "gemini-3.6-flash"
+        client = LLMClient(
+            planning_provider=provider, planning_model=same,
+            coding_provider=provider, coding_model=same,
+        )
+        tc = TurnCost()
+        client.usage_listener = tc.add
+        with pytest.raises(Exception):
+            await client.generate_object(_S, system="s", messages=[])
+        assert "planning" in tc.by_role and "coding" not in tc.by_role
+
+
+class TestUnknownRoleReconciles:
+    """An unexpected role must not silently vanish from the breakdown (#309
+    review): it is emitted, so per-role tokens always sum to tokens_total."""
+
+    def test_unknown_bucket_is_emitted(self):
+        s = _bare_session()
+        s._turn_cost.add("", "mystery-model", _usage(400, 20))
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        kw = send.call_args.kwargs
+        assert kw["unknown_tokens"] == "420"
+        assert kw["unknown_calls"] == "1"
+        per_role = sum(
+            int(kw[f"{r}_tokens"])
+            for r in ("planning", "coding", "router", "unknown")
+        )
+        assert per_role == int(kw["tokens_total"]), "per-role sum must reconcile"
+
+    def test_reconciliation_holds_with_every_role_populated(self):
+        s = _bare_session()
+        s._turn_cost.add("planning", "sonnet", _usage(1000, 100, 500))
+        s._turn_cost.add("coding", "haiku", _usage(200, 20))
+        s._turn_cost.add("router", "mindshub_air", _usage(50, 5))
+        s._turn_cost.add("", "mystery", _usage(10, 1))
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        kw = send.call_args.kwargs
+        per_role = sum(
+            int(kw[f"{r}_tokens"])
+            for r in ("planning", "coding", "router", "unknown")
+        )
+        assert per_role == int(kw["tokens_total"]) == 1886

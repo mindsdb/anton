@@ -250,6 +250,7 @@ class LLMClient:
         *,
         provider: LLMProvider,
         model: str,
+        role: str,
         system: str,
         messages: list[dict],
         max_tokens: int | None,
@@ -283,14 +284,13 @@ class LLMClient:
         )
         # Count BEFORE the no-tool-call raise below: a structured call that
         # failed (and its bigger-budget retry) still spent real tokens
-        # (ENG-1288). Role is coding for both generate_object variants today;
-        # derive it from the provider/model actually used.
-        self._notify_usage(
-            "planning" if model == self._planning_model else "coding",
-            model,
-            response.usage,
-            listener,
-        )
+        # (ENG-1288). The role is PASSED, not inferred from model equality:
+        # deployments exist where planning and coding resolve to the same
+        # model (cowork-server's Gemini defaults are identical across all
+        # three roles), and inference collapsed every generate_object_code
+        # call — verifier verdicts, compaction, identity extraction — into
+        # `planning`, defeating the split this exists to provide (#309 review).
+        self._notify_usage(role, model, response.usage, listener)
 
         if not response.tool_calls:
             # Shared with the scratchpad's sync twin so both paths classify the
@@ -369,6 +369,7 @@ class LLMClient:
             schema_class,
             provider=self._planning_provider,
             model=self._planning_model,
+            role="planning",
             system=system,
             messages=messages,
             max_tokens=max_tokens,
@@ -395,6 +396,7 @@ class LLMClient:
             schema_class,
             provider=self._coding_provider,
             model=self._coding_model,
+            role="coding",
             system=system,
             messages=messages,
             max_tokens=max_tokens,

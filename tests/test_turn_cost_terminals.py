@@ -195,14 +195,27 @@ async def test_late_finalizer_cannot_close_a_newer_turns_books(workspace):
     session._settings = None
 
     stale, current = TurnCost(), TurnCost()
+    stale.add("planning", "sonnet", Usage(input_tokens=777, output_tokens=3))
     session._turn_cost = current
     with patch("anton.analytics.send_event") as send:
+        # The invariant is narrow: a late finalizer must not close a NEWER
+        # turn's books — NOT that it must emit nothing. The stale books hold a
+        # complete, real turn (often the runaway the user just cancelled), so
+        # they get reported; only the owning turn may clear the shared slot
+        # (#309 review — the earlier version of this test codified the drop).
+        session._emit_turn_cost(expected=stale)
+        assert send.called, "the abandoned turn must still be counted"
+        assert send.call_args.kwargs["tokens_total"] == "780"
+        assert session._turn_cost is current, "current turn keeps its books"
+
+        # Re-emitting the same books is still a no-op (now via `emitted`).
+        send.reset_mock()
         session._emit_turn_cost(expected=stale)
         assert not send.called
-        assert session._turn_cost is current, "current turn keeps its books"
 
         session._emit_turn_cost(expected=current)
         assert send.called
+        assert session._turn_cost is None, "the owner clears the slot"
 
 
 async def test_exhausted_retries_is_not_reported_as_completed(workspace):
@@ -289,3 +302,86 @@ async def test_non_streaming_turn_marks_round_cap(workspace):
         await session.turn("loop forever")
 
     assert _ended_by(send) == "round_cap"
+
+
+# ---------------------------------------------------------------------------
+# The three hand-back terminals. Every one of these marks survived deletion
+# with the suite green (#309 review mutation run) — and they are precisely the
+# "expensive turn ended badly" values the `group by ended_by` contract needs.
+# ---------------------------------------------------------------------------
+
+
+def _verdict_llm(status: str, *, tool_rounds: int = 1):
+    """A mock client whose turn does `tool_rounds` rounds then gets `status`."""
+    mock_llm = make_mock_llm()
+    plans = [_Iter([StreamComplete(response=_tool_call(i))]) for i in range(tool_rounds)]
+    plans.append(_Iter([StreamComplete(response=_text("reply"))]))
+    # Any further re-entries (continuations) just reply again.
+    def _next_plan(**kw):
+        return plans.pop(0) if plans else _Iter(
+            [StreamComplete(response=_text("reply again"))]
+        )
+    mock_llm.plan_stream = MagicMock(side_effect=_next_plan)
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status=status, reason="because")
+    )
+    return mock_llm
+
+
+async def test_stuck_verdict_reports_handback_stuck(workspace):
+    session = ChatSession(
+        ChatSessionConfig(llm_client=_verdict_llm("STUCK"), workspace=workspace)
+    )
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("connect to the database"):
+            pass
+    assert _ended_by(send) == "handback_stuck"
+
+
+async def test_exhausted_continuations_report_handback_budget(workspace):
+    # INCOMPLETE forever + no continuation budget = the budget-exhausted
+    # hand-back, the path ENG-1155 rewrote.
+    session = ChatSession(
+        ChatSessionConfig(llm_client=_verdict_llm("INCOMPLETE"), workspace=workspace)
+    )
+    _stub_tools(session)
+    session._max_continuations = 0
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("do a multi-part job"):
+            pass
+    assert _ended_by(send) == "handback_budget"
+
+
+async def test_verifier_failure_reports_handback_verifier_failure(workspace):
+    # The verdict call itself failing (ENG-1079's fail-safe), not a verdict.
+    mock_llm = _verdict_llm("COMPLETE")
+    mock_llm.generate_object_code = AsyncMock(side_effect=RuntimeError("provider hiccup"))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "handback_verifier_failure"
+
+
+async def test_callers_already_handled_exception_is_not_reported_as_error(workspace):
+    """`sys.exc_info()` returns whatever the thread is handling — including an
+    exception the CALLER already caught. Asking the interpreter instead of
+    capturing this turn's own exception reported `error` for a clean turn
+    (#309 review). Latent today; `ended_by` is what error-rate queries key on.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(
+        side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+        try:
+            raise ValueError("caller's own, already-handled error")
+        except ValueError:
+            async for _ in session.turn_stream("hello"):
+                pass
+
+    assert _ended_by(send) == "completed"

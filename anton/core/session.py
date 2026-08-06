@@ -60,7 +60,7 @@ from anton.core.llm.tracing import (
 )
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
-from anton.core.turn_cost import TurnCost
+from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
@@ -465,6 +465,12 @@ def _render_verify_transcript(
     kept = convo[-max_convo:] + tools[-max_tool:]
     kept.sort(key=lambda entry: entry[0])
     return "\n".join(line for _, line in kept) or "(no conversation)"
+
+
+# Distinguishes "caller captured no exception" (a clean turn — authoritative)
+# from "caller didn't tell us" (fall back to sys.exc_info()). A plain None
+# default would conflate them and re-open the leak this closes.
+_EXC_UNSET = object()
 
 
 def _role_model(tc: TurnCost, role: str) -> str:
@@ -1742,7 +1748,11 @@ class ChatSession:
         self.hard_truncate_history()
         return await self._llm.plan(messages=factory_validated(), **kwargs)
 
-    def _emit_turn_cost(self, expected: TurnCost | None = None) -> None:
+    def _emit_turn_cost(
+        self,
+        expected: TurnCost | None = None,
+        exc: BaseException | None | object = _EXC_UNSET,
+    ) -> None:
         """Close the turn's cost books: disarm the listener, resolve the
         terminal path, and emit the two reporting sinks (ENG-1288).
 
@@ -1758,23 +1768,33 @@ class ChatSession:
         the listener is disarmed here precisely so late usage can't leak
         into the next turn's books (stated ENG-1288 gap).
         """
-        tc = self._turn_cost
-        if tc is None:
+        # Report the books this call was handed. A late async-generator
+        # finalizer for an ABANDONED turn runs in a fresh task long after the
+        # fact, by which point a newer turn may own the shared slot — but the
+        # stale books still hold a complete, real turn, and dropping them lost
+        # exactly the runaway the user just cancelled (#309 review). So: emit
+        # whichever books came in, and let only the OWNING turn clear the slot.
+        tc = expected if expected is not None else self._turn_cost
+        if tc is None or tc.emitted:
             return
-        if expected is not None and tc is not expected:
-            # A late async-generator finalizer for an ABANDONED turn: asyncio
-            # runs it in a fresh task long after the fact, by which point a
-            # newer turn may own the books. Closing those would emit the next
-            # turn's partial totals mid-turn and leave it uncounted. Only the
-            # turn that opened these books may close them (#309 review).
-            return
-        self._turn_cost = None
-        try:
-            self._llm.usage_listener = None
-        except Exception:
-            pass
+        tc.emitted = True  # the double-emit guard, now on the books themselves
+        if self._turn_cost is tc:
+            self._turn_cost = None
+            try:
+                self._llm.usage_listener = None
+            except Exception:
+                pass
 
-        exc = sys.exc_info()[1]
+        # A caller that captured its own exception is authoritative — including
+        # when it captured NOTHING (a clean turn), which is why this needs a
+        # sentinel rather than `if exc is None`. `sys.exc_info()` returns
+        # whatever the thread is CURRENTLY handling, including an exception the
+        # caller had already caught before invoking the turn, and reading it on
+        # a clean turn reported `error` for one that succeeded. The lookup
+        # remains only for the legacy non-streaming `turn()`, which has no
+        # wrapping handler to capture from (#309 review).
+        if exc is _EXC_UNSET:
+            exc = sys.exc_info()[1]
         cancelled = bool(
             getattr(self, "_cancel_event", None) and self._cancel_event.is_set()
         )
@@ -1853,6 +1873,11 @@ class ChatSession:
                 router_model=_role_model(tc, "router"),
                 router_tokens=_role_tokens(tc, "router"),
                 router_calls=_role_calls(tc, "router"),
+                # Should always be 0. Emitted anyway so the per-role sum
+                # reconciles with tokens_total even if a future caller passes
+                # an unexpected role — a non-zero value here is the alarm.
+                unknown_tokens=_role_tokens(tc, UNKNOWN_ROLE),
+                unknown_calls=_role_calls(tc, UNKNOWN_ROLE),
                 # Configured provider name (anthropic / openai /
                 # openai-compatible): separates gateway traffic from BYOK in
                 # queries. The finer per-model provider split is a follow-up.
@@ -2496,6 +2521,7 @@ class ChatSession:
         _turn_cost_books = self._turn_cost
         self._llm.usage_listener = self._turn_cost.add
 
+        _turn_exc: BaseException | None = None
         try:
             # Cheap front-model routing (ENG-648). Text-only turns first
             # hit the thalamus model, which either answers trivial/from-
@@ -2674,6 +2700,13 @@ class ChatSession:
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break
+        except BaseException as _e:
+            # Capture, don't classify — the finally needs to know whether THIS
+            # turn failed, rather than asking the interpreter what the thread
+            # happens to be handling (#309 review). Covers GeneratorExit and
+            # CancelledError too, both BaseException, both real turn endings.
+            _turn_exc = _e
+            raise
         finally:
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
@@ -2685,7 +2718,7 @@ class ChatSession:
             # finally and drop the turn's books entirely (#309 review). The
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
-            self._emit_turn_cost(expected=_turn_cost_books)
+            self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
             try:
                 reset_trace_context(_trace_token)
             except ValueError:
