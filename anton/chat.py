@@ -1884,7 +1884,13 @@ async def _chat_loop(
                         elif isinstance(event, StreamContextCompacted):
                             display.show_context_compacted(event.message)
                         elif isinstance(event, StreamComplete):
-                            total_input += event.response.usage.input_tokens
+                            # ALL prompt-side tokens, not just the fresh ones:
+                            # `input_tokens` became fresh-only when cache
+                            # components were split out (ENG-1288), so reading
+                            # it alone would silently shrink this counter on
+                            # warm-cache turns — the same number it showed
+                            # before the split is `context_tokens`.
+                            total_input += event.response.usage.context_tokens
                             total_output += event.response.usage.output_tokens
 
                 elapsed = time.monotonic() - t0
