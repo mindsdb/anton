@@ -234,11 +234,17 @@ def resolve_minds_models(
 
 @dataclass
 class LLMTestResult:
-    """Outcome of an LLM connectivity probe, with the provider's own error."""
+    """Outcome of an LLM connectivity probe, with the provider's own error.
+
+    ``http_status`` is set when the server answered with an HTTP error — which
+    proves the transport (TLS included) worked, so callers can skip
+    no-SSL-verification retries that cannot change the outcome.
+    """
 
     ok: bool
     rate_limited: bool = False
     error: str | None = None
+    http_status: int | None = None
 
 
 def _http_error_detail(e: urllib.error.HTTPError) -> str:
@@ -287,8 +293,8 @@ def test_llm(
         return LLMTestResult(ok=True)
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            return LLMTestResult(ok=False, rate_limited=True)
-        return LLMTestResult(ok=False, error=_http_error_detail(e))
+            return LLMTestResult(ok=False, rate_limited=True, http_status=429)
+        return LLMTestResult(ok=False, error=_http_error_detail(e), http_status=e.code)
     except Exception as e:
         headline, _advice = describe_minds_connection_error(e)
         return LLMTestResult(ok=False, error=headline)

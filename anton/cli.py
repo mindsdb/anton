@@ -752,6 +752,10 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
             rate_limited = True
         elif result.ok:
             llm_ok = True
+        elif result.http_status is not None:
+            # The server answered — TLS worked, so retrying without SSL
+            # verification cannot change the outcome.
+            error_detail = result.error
         else:
             error_detail = result.error
             planning_model, coding_model = resolve_minds_models(

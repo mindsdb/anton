@@ -148,6 +148,37 @@ class TestResolveMindsModels:
         assert "_reason_" not in pair and "_code_" not in pair
 
 
+def test_setup_minds_skips_no_ssl_retry_on_http_error(monkeypatch):
+    """An HTTP-level failure (server answered → TLS worked) must not trigger
+    the verify=False retry — it can only repeat the same error."""
+    import anton.cli as cli
+
+    settings = AntonSettings(_env_file=None)
+    workspace = MagicMock()
+    probe_calls = []
+
+    monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
+    monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: False)  # no retry
+    monkeypatch.setattr(
+        "anton.cli.resolve_minds_models", lambda *a, **kw: ("sonnet", "haiku")
+    )
+
+    def fake_test_llm(*a, **kw):
+        probe_calls.append(kw)
+        return minds_client.LLMTestResult(
+            ok=False, error="model_not_found: nope", http_status=404
+        )
+
+    monkeypatch.setattr("anton.cli.test_llm", fake_test_llm)
+
+    import pytest
+
+    with pytest.raises(cli._SetupRetry):
+        cli._setup_minds(settings, workspace)
+
+    assert len(probe_calls) == 1
+
+
 def test_setup_minds_writes_catalog_resolved_models(monkeypatch):
     """End-to-end through _setup_minds: on a passing probe the resolved pair —
     not the dead _reason_/_code_ aliases — is persisted (ENG-1140)."""
