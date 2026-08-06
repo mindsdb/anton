@@ -80,7 +80,7 @@ from anton.minds_client import (
     describe_minds_connection_error,
     list_minds,
     list_datasources,
-    resolve_minds_models,
+    resolve_and_probe,
     test_llm,
 )
 from anton.core.datasources.data_vault import LocalDataVault
@@ -275,8 +275,7 @@ async def _handle_connect(
 
     # --- Test if the Minds server also supports LLM endpoints ---
     # (silenced: was printing "Testing LLM endpoints..." and "not available" messages)
-    models = resolve_minds_models(minds_url, api_key, verify=ssl_verify)
-    llm_result = test_llm(minds_url, api_key, verify=ssl_verify, model=models.probe)
+    models, llm_result = resolve_and_probe(minds_url, api_key, verify=ssl_verify)
 
     # A 429 proves the endpoint is THERE — it answered, it just throttled this
     # probe. Treating it as unavailable dropped a throttled-but-valid MindsHub

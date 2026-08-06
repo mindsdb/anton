@@ -253,16 +253,26 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
 class MindsModels:
     """Resolved (planning, coding) pair plus the model to probe with.
 
-    When the pair came from the live catalogue, probing the coding model
-    validates the actual configuration. With no catalogue to trust, the pair
-    is the tier defaults but the probe uses the free-bucket model — a paid
-    default would 403 for free-tier keys on exactly the hosts that don't
-    serve the listing route (the ENG-576 shape).
+    ``probe`` is always one of the pair, so a passing probe validates the
+    configuration that gets persisted — that invariant is the point of
+    ENG-1140 and must hold on every branch.
+
+    With no catalogue to trust, the pair is the tier defaults and
+    ``free_fallback`` names the free-bucket model to *escalate down to* if the
+    paid probe is denied. Probing the free model directly instead would pass
+    for a free-tier key and then persist an unvalidated paid pair that 403s on
+    the first real request — "Connected" masking a broken install, which is
+    the exact class this ticket exists to remove (#317 re-review). Probing the
+    paid default alone would wrongly block free-tier keys (ENG-576), so
+    neither single probe is correct: the escalation is.
     """
 
     planning: str
     coding: str
     probe: str
+    # None when the pair came from the live catalogue (already access-aware —
+    # /v1/models only lists what the key may use, so no escalation exists).
+    free_fallback: str | None = None
 
 
 def resolve_minds_models(
@@ -279,10 +289,13 @@ def resolve_minds_models(
     except Exception:
         ids = []
     if not ids:
+        # Probe the model we would actually configure, and let the caller
+        # escalate down to the free bucket if that probe is denied.
         return MindsModels(
             planning=MINDS_DEFAULT_PLANNING_MODEL,
             coding=MINDS_DEFAULT_CODING_MODEL,
-            probe=MINDS_FREE_TIER_MODEL,
+            probe=MINDS_DEFAULT_CODING_MODEL,
+            free_fallback=MINDS_FREE_TIER_MODEL,
         )
 
     def pick(preferred: tuple[str, ...], fallback: str) -> str:
@@ -377,3 +390,40 @@ def test_llm(
     except Exception as e:
         headline, _advice = describe_minds_connection_error(e)
         return LLMTestResult(ok=False, error=headline)
+
+
+def resolve_and_probe(
+    base_url: str, api_key: str, verify: bool = True
+) -> tuple[MindsModels, LLMTestResult]:
+    """Resolve the setup models and validate them with one probe.
+
+    Returns the pair that should be PERSISTED together with the probe result
+    for it — so callers never persist a configuration no probe covered
+    (ENG-1140's invariant).
+
+    On the no-catalogue branch, a paid-default probe denied for model-access
+    reasons escalates once to the free bucket and, on success, returns the
+    free pair. Only access denials escalate: a 401 is a bad key, a 429 is
+    throttling, and a transport failure says nothing about entitlement — all
+    of those must surface as themselves rather than be retried as if the model
+    were the problem (#317 re-review).
+    """
+    models = resolve_minds_models(base_url, api_key, verify=verify)
+    result = test_llm(base_url, api_key, verify=verify, model=models.probe)
+    if (
+        result.ok
+        or models.free_fallback is None
+        or models.free_fallback == models.probe
+        # 403 = model_access_denied/model_disabled, 404 = model_not_found.
+        # Anything else is not an entitlement signal.
+        or result.http_status not in (403, 404)
+    ):
+        return models, result
+
+    free = models.free_fallback
+    free_result = test_llm(base_url, api_key, verify=verify, model=free)
+    if not free_result.ok:
+        # Report the ORIGINAL denial: it names the model the user actually
+        # asked to be set up with, which is the more useful message.
+        return models, result
+    return MindsModels(planning=free, coding=free, probe=free), free_result

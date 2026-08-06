@@ -162,9 +162,24 @@ class TestResolveMindsModels:
             minds_client.MINDS_DEFAULT_PLANNING_MODEL,
             minds_client.MINDS_DEFAULT_CODING_MODEL,
         )
-        # No catalogue to trust → probe with the universal free-bucket model,
-        # not a paid default that 403s on free-tier keys (ENG-576).
-        assert r.probe == minds_client.MINDS_FREE_TIER_MODEL
+        # No catalogue to trust → probe the model we would actually CONFIGURE,
+        # and expose the free bucket as the escalation target. Probing the free
+        # model directly (the old behaviour) passed for free-tier keys and then
+        # persisted an unvalidated paid pair that 403s on first real use —
+        # "Connected" masking a broken install (#317 re-review). Escalation is
+        # what keeps free-tier keys unblocked; see resolve_and_probe.
+        assert r.probe == r.coding
+        assert r.free_fallback == minds_client.MINDS_FREE_TIER_MODEL
+
+    def test_catalogue_resolved_pair_has_no_escalation_target(self, monkeypatch):
+        """A catalogue-derived pair is already access-aware — /v1/models only
+        lists what the key may use — so there is nothing to escalate to."""
+        monkeypatch.setattr(
+            "anton.minds_client.list_models", lambda *a, **k: ["sonnet", "haiku"]
+        )
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding, r.probe) == ("sonnet", "haiku", "haiku")
+        assert r.free_fallback is None
 
     def test_never_returns_dead_smart_router_aliases(self, monkeypatch):
         """The legacy mdb.ai aliases must never be picked, whatever the server
@@ -308,15 +323,12 @@ class TestSetupErrorTextIsMarkupSafe:
         import anton.cli as cli
 
         monkeypatch.setattr(
-            cli, "resolve_minds_models",
-            lambda *a, **k: minds_client.MindsModels(
-                planning="sonnet", coding="haiku", probe="haiku"
-            ),
-        )
-        monkeypatch.setattr(
-            cli, "test_llm",
-            lambda *a, **k: minds_client.LLMTestResult(
-                ok=False, error=detail, http_status=404
+            cli, "resolve_and_probe",
+            lambda *a, **k: (
+                minds_client.MindsModels(
+                    planning="sonnet", coding="haiku", probe="haiku"
+                ),
+                minds_client.LLMTestResult(ok=False, error=detail, http_status=404),
             ),
         )
         monkeypatch.setattr(cli, "_setup_prompt", lambda *a, **k: "key")
@@ -350,6 +362,123 @@ class TestSetupErrorTextIsMarkupSafe:
         )
 
 
+class TestResolveAndProbeEscalation:
+    """The invariant: never persist a pair no probe covered (#317 re-review).
+
+    On the no-catalogue branch the paid default is probed first. A model-access
+    denial escalates ONCE to the free bucket and returns the free pair — so a
+    free-tier key is neither blocked (ENG-576) nor handed an unvalidated paid
+    pair that 403s on the first real request.
+    """
+
+    def _probes(self, monkeypatch, results: dict):
+        """Stub the catalogue away (no-catalogue branch) and script the probes."""
+        monkeypatch.setattr("anton.minds_client.list_models", lambda *a, **k: [])
+        seen: list[str] = []
+
+        def fake_test_llm(base_url, api_key, verify=True, model=None):
+            seen.append(model)
+            return results[model]
+
+        monkeypatch.setattr("anton.minds_client.test_llm", fake_test_llm)
+        return seen
+
+    def test_paid_probe_passing_persists_the_paid_pair(self, monkeypatch):
+        seen = self._probes(
+            monkeypatch, {"haiku": minds_client.LLMTestResult(ok=True)}
+        )
+        models, result = minds_client.resolve_and_probe("https://x", "k")
+        assert result.ok
+        assert (models.planning, models.coding) == ("sonnet", "haiku")
+        assert seen == ["haiku"], "no needless second probe"
+
+    def test_denied_paid_probe_escalates_and_persists_the_free_pair(self, monkeypatch):
+        seen = self._probes(monkeypatch, {
+            "haiku": minds_client.LLMTestResult(
+                ok=False, error="model_access_denied", http_status=403
+            ),
+            "mindshub_air": minds_client.LLMTestResult(ok=True),
+        })
+        models, result = minds_client.resolve_and_probe("https://x", "k")
+        assert result.ok
+        # The pair PERSISTED is the one that was validated — the whole point.
+        assert models.planning == models.coding == minds_client.MINDS_FREE_TIER_MODEL
+        assert models.probe == minds_client.MINDS_FREE_TIER_MODEL
+        assert seen == ["haiku", "mindshub_air"]
+
+    def test_model_not_found_also_escalates(self, monkeypatch):
+        self._probes(monkeypatch, {
+            "haiku": minds_client.LLMTestResult(
+                ok=False, error="model_not_found", http_status=404
+            ),
+            "mindshub_air": minds_client.LLMTestResult(ok=True),
+        })
+        models, result = minds_client.resolve_and_probe("https://x", "k")
+        assert result.ok and models.coding == minds_client.MINDS_FREE_TIER_MODEL
+
+    def test_bad_key_does_not_escalate(self, monkeypatch):
+        # A 401 is not an entitlement signal — escalating would burn a second
+        # call and could report the wrong cause.
+        seen = self._probes(monkeypatch, {
+            "haiku": minds_client.LLMTestResult(
+                ok=False, error="Invalid API key", http_status=401
+            ),
+        })
+        models, result = minds_client.resolve_and_probe("https://x", "k")
+        assert not result.ok and result.http_status == 401
+        assert seen == ["haiku"]
+
+    def test_rate_limit_does_not_escalate(self, monkeypatch):
+        seen = self._probes(monkeypatch, {
+            "haiku": minds_client.LLMTestResult(
+                ok=False, rate_limited=True, error="Rate limit", http_status=429
+            ),
+        })
+        _, result = minds_client.resolve_and_probe("https://x", "k")
+        assert result.rate_limited
+        assert seen == ["haiku"]
+
+    def test_transport_failure_does_not_escalate(self, monkeypatch):
+        # http_status None = never reached the server; says nothing about models.
+        seen = self._probes(monkeypatch, {
+            "haiku": minds_client.LLMTestResult(ok=False, error="timed out"),
+        })
+        _, result = minds_client.resolve_and_probe("https://x", "k")
+        assert not result.ok and result.http_status is None
+        assert seen == ["haiku"]
+
+    def test_both_denied_reports_the_original_denial(self, monkeypatch):
+        # The first error names the model the user asked to be set up with.
+        self._probes(monkeypatch, {
+            "haiku": minds_client.LLMTestResult(
+                ok=False, error="paid model denied", http_status=403
+            ),
+            "mindshub_air": minds_client.LLMTestResult(
+                ok=False, error="free model denied too", http_status=403
+            ),
+        })
+        models, result = minds_client.resolve_and_probe("https://x", "k")
+        assert result.error == "paid model denied"
+        assert models.coding == "haiku"
+
+    def test_catalogue_pair_never_escalates(self, monkeypatch):
+        monkeypatch.setattr(
+            "anton.minds_client.list_models", lambda *a, **k: ["sonnet", "haiku"]
+        )
+        seen: list[str] = []
+
+        def fake_test_llm(base_url, api_key, verify=True, model=None):
+            seen.append(model)
+            return minds_client.LLMTestResult(
+                ok=False, error="denied", http_status=403
+            )
+
+        monkeypatch.setattr("anton.minds_client.test_llm", fake_test_llm)
+        _, result = minds_client.resolve_and_probe("https://x", "k")
+        assert not result.ok
+        assert seen == ["haiku"], "catalogue pair is already access-aware"
+
+
 def test_setup_minds_skips_no_ssl_retry_on_http_error(monkeypatch):
     """An HTTP-level failure (server answered → TLS worked) must not trigger
     the verify=False retry — it can only repeat the same error."""
@@ -361,18 +490,16 @@ def test_setup_minds_skips_no_ssl_retry_on_http_error(monkeypatch):
 
     monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
     monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: False)  # no retry
-    monkeypatch.setattr(
-        "anton.cli.resolve_minds_models",
-        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
-    )
-
-    def fake_test_llm(*a, **kw):
+    def fake_resolve_and_probe(*a, **kw):
         probe_calls.append(kw)
-        return minds_client.LLMTestResult(
-            ok=False, error="model_not_found: nope", http_status=404
+        return (
+            minds_client.MindsModels("sonnet", "haiku", "haiku"),
+            minds_client.LLMTestResult(
+                ok=False, error="model_not_found: nope", http_status=404
+            ),
         )
 
-    monkeypatch.setattr("anton.cli.test_llm", fake_test_llm)
+    monkeypatch.setattr("anton.cli.resolve_and_probe", fake_resolve_and_probe)
 
     import pytest
 
@@ -393,12 +520,11 @@ def test_setup_minds_writes_catalog_resolved_models(monkeypatch):
     monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
     monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
     monkeypatch.setattr(
-        "anton.cli.resolve_minds_models",
-        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
-    )
-    monkeypatch.setattr(
-        "anton.cli.test_llm",
-        lambda *a, **kw: minds_client.LLMTestResult(ok=True),
+        "anton.cli.resolve_and_probe",
+        lambda *a, **kw: (
+            minds_client.MindsModels("sonnet", "haiku", "haiku"),
+            minds_client.LLMTestResult(ok=True),
+        ),
     )
 
     cli._setup_minds(settings, workspace)
@@ -421,11 +547,11 @@ def test_setup_minds_honors_env_url_override(monkeypatch):
     monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
     monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
     monkeypatch.setattr(
-        "anton.cli.resolve_minds_models",
-        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
-    )
-    monkeypatch.setattr(
-        "anton.cli.test_llm", lambda *a, **kw: minds_client.LLMTestResult(ok=True)
+        "anton.cli.resolve_and_probe",
+        lambda *a, **kw: (
+            minds_client.MindsModels("sonnet", "haiku", "haiku"),
+            minds_client.LLMTestResult(ok=True),
+        ),
     )
 
     cli._setup_minds(settings, workspace)
@@ -450,16 +576,14 @@ def test_setup_minds_persists_the_base_url_the_probe_validated(monkeypatch):
     monkeypatch.setenv("ANTON_MINDS_URL", "https://api.staging.mindshub.ai/v1")
     monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
     monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
-    monkeypatch.setattr(
-        "anton.cli.resolve_minds_models",
-        lambda *a, **kw: minds_client.MindsModels("sonnet", "haiku", "haiku"),
-    )
-
-    def fake_test_llm(base_url, api_key, verify=True, model=None):
+    def fake_resolve_and_probe(base_url, api_key, verify=True):
         probed["base"] = minds_client.minds_v1_base(base_url)
-        return minds_client.LLMTestResult(ok=True)
+        return (
+            minds_client.MindsModels("sonnet", "haiku", "haiku"),
+            minds_client.LLMTestResult(ok=True),
+        )
 
-    monkeypatch.setattr("anton.cli.test_llm", fake_test_llm)
+    monkeypatch.setattr("anton.cli.resolve_and_probe", fake_resolve_and_probe)
 
     cli._setup_minds(settings, workspace)
 

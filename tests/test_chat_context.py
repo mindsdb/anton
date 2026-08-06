@@ -351,12 +351,11 @@ class TestMindsSetupRecovery:
 
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
         monkeypatch.setattr(
-            "anton.chat.test_llm",
-            lambda *args, **kwargs: LLMTestResult(ok=True),
-        )
-        monkeypatch.setattr(
-            "anton.chat.resolve_minds_models",
-            lambda *args, **kwargs: MindsModels("sonnet", "haiku", "haiku"),
+            "anton.chat.resolve_and_probe",
+            lambda *args, **kwargs: (
+                MindsModels("sonnet", "haiku", "haiku"),
+                LLMTestResult(ok=True),
+            ),
         )
         rebuilt = object()
         monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
@@ -417,14 +416,16 @@ class TestMindsSetupRecovery:
             lambda *a, **k: [{"name": "warehouse", "datasources": []}],
         )
         monkeypatch.setattr(
-            "anton.chat.test_llm",
-            lambda *a, **k: LLMTestResult(
-                ok=False, rate_limited=True, error="Rate limit exceeded", http_status=429
+            "anton.chat.resolve_and_probe",
+            lambda *a, **k: (
+                MindsModels("sonnet", "haiku", "haiku"),
+                LLMTestResult(
+                    ok=False,
+                    rate_limited=True,
+                    error="Rate limit exceeded",
+                    http_status=429,
+                ),
             ),
-        )
-        monkeypatch.setattr(
-            "anton.chat.resolve_minds_models",
-            lambda *a, **k: MindsModels("sonnet", "haiku", "haiku"),
         )
         monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: object())
 
@@ -477,12 +478,11 @@ class TestMindsSetupRecovery:
 
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
         monkeypatch.setattr(
-            "anton.chat.test_llm",
-            lambda *args, **kwargs: LLMTestResult(ok=True),
-        )
-        monkeypatch.setattr(
-            "anton.chat.resolve_minds_models",
-            lambda *args, **kwargs: MindsModels("sonnet", "haiku", "haiku"),
+            "anton.chat.resolve_and_probe",
+            lambda *args, **kwargs: (
+                MindsModels("sonnet", "haiku", "haiku"),
+                LLMTestResult(ok=True),
+            ),
         )
         rebuilt = object()
         monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)

@@ -37,7 +37,7 @@ from anton.commands.datasource import (
     handle_list_data_sources,
     handle_test_datasource
 )
-from anton.minds_client import minds_v1_base, resolve_minds_models, test_llm
+from anton.minds_client import minds_v1_base, resolve_and_probe, test_llm
 
 
 def _build_scratchpad_manager(
@@ -741,8 +741,7 @@ def _setup_minds(settings, ws) -> None:
         # Resolve the models from the live catalogue first, then probe with
         # the model we're about to configure — a passing probe validates the
         # actual configuration, not a hardcoded alias (ENG-1140).
-        models = resolve_minds_models(minds_url, api_key, verify=True)
-        result = test_llm(minds_url, api_key, verify=True, model=models.probe)
+        models, result = resolve_and_probe(minds_url, api_key, verify=True)
         if result.rate_limited:
             rate_limited = True
             error_detail = result.error
@@ -754,9 +753,8 @@ def _setup_minds(settings, ws) -> None:
             error_detail = result.error
         else:
             error_detail = result.error
-            models = resolve_minds_models(minds_url, api_key, verify=False)
-            result_no_ssl = test_llm(
-                minds_url, api_key, verify=False, model=models.probe
+            models, result_no_ssl = resolve_and_probe(
+                minds_url, api_key, verify=False
             )
             if result_no_ssl.rate_limited:
                 rate_limited = True
