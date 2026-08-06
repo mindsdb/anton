@@ -877,6 +877,16 @@ class OpenAIProvider(LLMProvider):
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:
             extra["harness"] = ctx.harness
+        # Our own build (ENG-1279). The router lifts this onto the trace's
+        # native `version` field, the only form the Langfuse metrics API can
+        # group by — so "did this fix change behaviour in production?" becomes
+        # a query instead of a guess about release dates. Set here rather than
+        # by the host so it is also correct for anton standalone (CLI, hub
+        # instances, evals) and so it wins over a host that reports a stale
+        # value: only anton knows which anton is running.
+        from anton import __version__ as _anton_version
+
+        extra["anton_version"] = _anton_version
         if extra:
             headers["Langfuse-Metadata"] = json.dumps(extra)
         return headers or None
