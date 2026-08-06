@@ -23,12 +23,155 @@ def test_minds_test_llm_uses_modern_openai_token_parameter(monkeypatch):
 
     monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
 
-    assert minds_client.test_llm("https://example.com", "test-key") is True
+    result = minds_client.test_llm("https://example.com", "test-key")
+    assert result.ok is True
 
     payload = json.loads(captured["payload"].decode())
-    assert payload["model"] == "_code_"
+    assert payload["model"] == minds_client.MINDS_DEFAULT_CODING_MODEL
     assert payload["max_completion_tokens"] == 1
     assert "max_tokens" not in payload
+
+
+def _http_error(code: int, body: dict | None = None, reason: str = "err"):
+    import io
+    import urllib.error
+
+    raw = json.dumps(body).encode() if body is not None else b""
+    return urllib.error.HTTPError(
+        "https://example.com/v1/chat/completions", code, reason, {}, io.BytesIO(raw)
+    )
+
+
+def test_minds_test_llm_probes_with_given_model(monkeypatch):
+    captured: dict = {}
+
+    def fake_minds_request(url, api_key, method="GET", payload=None, verify=True, **kwargs):
+        captured["payload"] = payload
+        return b"{}"
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+    assert minds_client.test_llm("https://example.com", "k", model="sonnet").ok
+    assert json.loads(captured["payload"].decode())["model"] == "sonnet"
+
+
+def test_minds_test_llm_propagates_provider_error_message(monkeypatch):
+    """Regression for ENG-1140: a 404 model_not_found must surface the
+    provider's message, not collapse into a bare False that gets rendered as
+    'Check your API key and URL'."""
+
+    err = _http_error(404, {"error": {"code": "model_not_found",
+                                      "message": "The model '_code_' does not exist"}})
+
+    def fake_minds_request(*args, **kwargs):
+        raise err
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+    result = minds_client.test_llm("https://example.com", "test-key")
+    assert result.ok is False
+    assert result.rate_limited is False
+    assert "model_not_found" in result.error
+    assert "_code_" in result.error
+
+
+def test_minds_test_llm_flags_rate_limit(monkeypatch):
+    def fake_minds_request(*args, **kwargs):
+        raise _http_error(429, {"error": {"message": "limit"}})
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+    result = minds_client.test_llm("https://example.com", "test-key")
+    assert result.ok is False
+    assert result.rate_limited is True
+
+
+def test_minds_test_llm_falls_back_to_status_when_body_unparseable(monkeypatch):
+    def fake_minds_request(*args, **kwargs):
+        import io
+        import urllib.error
+
+        raise urllib.error.HTTPError(
+            "https://example.com", 502, "Bad Gateway", {}, io.BytesIO(b"<html>")
+        )
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+    result = minds_client.test_llm("https://example.com", "test-key")
+    assert result.ok is False
+    assert "502" in result.error
+
+
+class TestResolveMindsModels:
+    def _catalog(self, ids):
+        return json.dumps({"data": [{"id": i} for i in ids]}).encode()
+
+    def test_prefers_tier_defaults_from_catalog(self, monkeypatch):
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._catalog(
+                ["mindshub_air", "haiku", "sonnet", "opus", "fable"]
+            ),
+        )
+        assert minds_client.resolve_minds_models("https://x", "k") == ("sonnet", "haiku")
+
+    def test_falls_back_within_catalog_when_defaults_missing(self, monkeypatch):
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._catalog(["fable", "mindshub_air"]),
+        )
+        planning, coding = minds_client.resolve_minds_models("https://x", "k")
+        assert planning == "fable"
+        assert coding == "fable"  # no haiku → coding follows planning
+
+    def test_falls_back_to_defaults_when_models_route_missing(self, monkeypatch):
+        """/v1/models is not deployed on every MindsHub host — a 404 there
+        must not block setup (same caution as cowork-server's validate_minds)."""
+
+        def fake_minds_request(*args, **kwargs):
+            raise _http_error(404)
+
+        monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+        assert minds_client.resolve_minds_models("https://x", "k") == (
+            minds_client.MINDS_DEFAULT_PLANNING_MODEL,
+            minds_client.MINDS_DEFAULT_CODING_MODEL,
+        )
+
+    def test_never_returns_dead_smart_router_aliases(self, monkeypatch):
+        """The legacy mdb.ai aliases must never be picked, whatever the server says."""
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._catalog(["sonnet", "haiku"]),
+        )
+        pair = minds_client.resolve_minds_models("https://x", "k")
+        assert "_reason_" not in pair and "_code_" not in pair
+
+
+def test_setup_minds_writes_catalog_resolved_models(monkeypatch):
+    """End-to-end through _setup_minds: on a passing probe the resolved pair —
+    not the dead _reason_/_code_ aliases — is persisted (ENG-1140)."""
+    import anton.cli as cli
+
+    settings = AntonSettings(_env_file=None)
+    workspace = MagicMock()
+
+    monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: "mdb_test-key")
+    monkeypatch.setattr("anton.cli.Confirm.ask", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        "anton.cli.resolve_minds_models", lambda *a, **kw: ("sonnet", "haiku")
+    )
+    monkeypatch.setattr(
+        "anton.cli.test_llm",
+        lambda *a, **kw: minds_client.LLMTestResult(ok=True),
+    )
+
+    cli._setup_minds(settings, workspace)
+
+    assert settings.planning_model == "sonnet"
+    assert settings.coding_model == "haiku"
+    workspace.set_secret.assert_any_call("ANTON_PLANNING_MODEL", "sonnet")
+    workspace.set_secret.assert_any_call("ANTON_CODING_MODEL", "haiku")
 
 
 def test_setup_openai_uses_modern_openai_token_parameter(monkeypatch):

@@ -10,6 +10,7 @@ from tests.conftest import make_mock_llm
 import pytest
 
 from anton.chat import ChatSession, _handle_connect
+from anton.minds_client import LLMTestResult
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.minds_client import describe_minds_connection_error
@@ -349,7 +350,14 @@ class TestMindsSetupRecovery:
             return [{"name": "warehouse", "datasources": []}]
 
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
-        monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            "anton.chat.test_llm",
+            lambda *args, **kwargs: LLMTestResult(ok=True),
+        )
+        monkeypatch.setattr(
+            "anton.chat.resolve_minds_models",
+            lambda *args, **kwargs: ("sonnet", "haiku"),
+        )
         rebuilt = object()
         monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
 
@@ -409,7 +417,14 @@ class TestMindsSetupRecovery:
             return [{"name": "warehouse", "datasources": []}]
 
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
-        monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            "anton.chat.test_llm",
+            lambda *args, **kwargs: LLMTestResult(ok=True),
+        )
+        monkeypatch.setattr(
+            "anton.chat.resolve_minds_models",
+            lambda *args, **kwargs: ("sonnet", "haiku"),
+        )
         rebuilt = object()
         monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
 

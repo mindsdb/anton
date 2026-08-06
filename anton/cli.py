@@ -36,7 +36,7 @@ from anton.commands.datasource import (
     handle_list_data_sources,
     handle_test_datasource
 )
-from anton.minds_client import test_llm
+from anton.minds_client import resolve_minds_models, test_llm
 
 
 def _build_scratchpad_manager(
@@ -443,9 +443,9 @@ def _onboard(settings) -> None:
     _INTRO_LINES = [
         "Hi Boss! I'm Anton, your AI coworker.",
         "",
-        "For the best experience, I recommend Minds-Enterprise-Cloud as your LLM Provider:",
+        "For the best experience, I recommend MindsHub as your LLM Provider:",
         "",
-        "  \u2713 Smart model routing",
+        "  \u2713 Latest frontier models",
         "  \u2713 Faster responses",
         "  \u2713 Cost optimized",
         "  \u2713 Secure data connectors",
@@ -555,21 +555,12 @@ async def _animate_onboard(
     console.print()
     console.print(f"[anton.glow] {'━' * 40}[/]")
     console.print()
-    console.print(
-        "  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]"
-    )
-    console.print(
-        "  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]"
-    )
-    console.print(
-        "  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]"
-    )
-    console.print()
+    _print_provider_choices()
 
     while True:
         choice = await prompt_or_cancel(
             "(anton) Choose LLM Provider",
-            choices=["1", "2", "3"],
+            choices=["1", "2"],
             default="1",
             allow_cancel=False,
         )
@@ -578,22 +569,11 @@ async def _animate_onboard(
             if choice == "1":
                 _setup_minds(settings, ws)
             elif choice == "2":
-                _setup_minds(settings, ws, default_url=None)
-            elif choice == "3":
                 _setup_other_provider(settings, ws)
             break  # success
         except _SetupRetry:
             console.print()
-            console.print(
-                "  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]"
-            )
-            console.print(
-                "  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]"
-            )
-            console.print(
-                "  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]"
-            )
-            console.print()
+            _print_provider_choices()
             continue
 
     # Reload env vars so the scratchpad subprocess inherits them
@@ -607,9 +587,10 @@ async def _animate_onboard(
     model_label = settings.planning_model
     if provider_label == "openai-compatible":
         base = settings.openai_base_url or ""
-        if settings.minds_url and "mdb.ai" in settings.minds_url:
-            provider_label = "Minds-Enterprise-Cloud"
-            model_label = "smart_router"
+        if settings.minds_url and (
+            "mindshub.ai" in settings.minds_url or "mdb.ai" in settings.minds_url
+        ):
+            provider_label = "MindsHub"
         elif url_hostname(base) == "generativelanguage.googleapis.com":
             provider_label = "Google Gemini"
         elif base:
@@ -695,8 +676,19 @@ def _setup_prompt(
     return result
 
 
+def _print_provider_choices() -> None:
+    """Print the LLM-provider menu (shared by first-run onboarding and retry)."""
+    console.print(
+        "  [bold]1[/]  [link=https://mindshub.ai][anton.cyan]MindsHub[/][/link] [anton.success](recommended)[/]"
+    )
+    console.print(
+        "  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]"
+    )
+    console.print()
+
+
 def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshub.ai") -> None:
-    """Set up Minds as the LLM provider (cloud or enterprise)."""
+    """Set up MindsHub as the LLM provider."""
     console.print()
 
     is_cloud = default_url and default_url.endswith(("mindshub.ai", "mdb.ai"))
@@ -717,7 +709,7 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
         )
         console.print()
         has_key = Confirm.ask(
-            "  Do you have an mdb.ai API key?",
+            "  Do you have a MindsHub API key?",
             default=True,
             console=console,
         )
@@ -745,20 +737,36 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
     ssl_verify = True
     llm_ok = False
     rate_limited = False
+    error_detail: str | None = None
+    planning_model = coding_model = None
 
     with Live(Spinner("dots", text="  Connecting...", style="anton.cyan"), console=console, transient=True):
-        result = test_llm(minds_url, api_key, verify=True)
-        if result == "rate_limited":
+        # Resolve the models from the live catalogue first, then probe with
+        # the model we're about to configure — a passing probe validates the
+        # actual configuration, not a hardcoded alias (ENG-1140).
+        planning_model, coding_model = resolve_minds_models(
+            minds_url, api_key, verify=True
+        )
+        result = test_llm(minds_url, api_key, verify=True, model=coding_model)
+        if result.rate_limited:
             rate_limited = True
-        elif not result:
-            result_no_ssl = test_llm(minds_url, api_key, verify=False)
-            if result_no_ssl == "rate_limited":
+        elif result.ok:
+            llm_ok = True
+        else:
+            error_detail = result.error
+            planning_model, coding_model = resolve_minds_models(
+                minds_url, api_key, verify=False
+            )
+            result_no_ssl = test_llm(
+                minds_url, api_key, verify=False, model=coding_model
+            )
+            if result_no_ssl.rate_limited:
                 rate_limited = True
-            elif result_no_ssl:
+            elif result_no_ssl.ok:
                 ssl_verify = False
                 llm_ok = True
-        else:
-            llm_ok = True
+            else:
+                error_detail = result_no_ssl.error or error_detail
 
     if llm_ok and not ssl_verify:
         console.print("  [anton.warning]SSL certificate verification failed.[/]")
@@ -774,28 +782,31 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://api.mindshu
         console.print("  [anton.success]Connected[/]")
         settings.planning_provider = "openai-compatible"
         settings.coding_provider = "openai-compatible"
-        settings.planning_model = "_reason_"
-        settings.coding_model = "_code_"
+        settings.planning_model = planning_model
+        settings.coding_model = coding_model
         settings.minds_ssl_verify = ssl_verify
         derived_base_url = f"{minds_url}/v1"
         settings.openai_api_key = api_key
         settings.openai_base_url = derived_base_url
         ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
-        ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
-        ws.set_secret("ANTON_CODING_MODEL", "_code_")
+        ws.set_secret("ANTON_PLANNING_MODEL", planning_model)
+        ws.set_secret("ANTON_CODING_MODEL", coding_model)
         ws.set_secret("ANTON_MINDS_SSL_VERIFY", "true" if ssl_verify else "false")
         ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
         ws.set_secret("ANTON_OPENAI_BASE_URL", derived_base_url)
     elif rate_limited:
         console.print(
-            "[anton.error]Token limit exceeded. Visit https://mdb.ai to upgrade or to top up your tokens.[/]"
+            "[anton.error]Token limit exceeded. Visit https://console.mindshub.ai to upgrade or to top up your tokens.[/]"
         )
         raise _SetupRetry()
     else:
-        console.print(
-            "  [anton.error]Could not connect. Check your API key and URL.[/]"
-        )
+        if error_detail:
+            console.print(f"  [anton.error]Could not connect: {error_detail}[/]")
+        else:
+            console.print(
+                "  [anton.error]Could not connect. Check your API key and URL.[/]"
+            )
         retry = Confirm.ask("  Try again?", default=True, console=console)
         if retry:
             _setup_minds(settings, ws, default_url=default_url)

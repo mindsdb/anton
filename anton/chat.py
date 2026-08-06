@@ -80,6 +80,7 @@ from anton.minds_client import (
     describe_minds_connection_error,
     list_minds,
     list_datasources,
+    resolve_minds_models,
     test_llm,
 )
 from anton.core.datasources.data_vault import LocalDataVault
@@ -273,23 +274,26 @@ async def _handle_connect(
 
     # --- Test if the Minds server also supports LLM endpoints ---
     # (silenced: was printing "Testing LLM endpoints..." and "not available" messages)
-    llm_ok = test_llm(minds_url, api_key, verify=ssl_verify)
+    planning_model, coding_model = resolve_minds_models(
+        minds_url, api_key, verify=ssl_verify
+    )
+    llm_result = test_llm(minds_url, api_key, verify=ssl_verify, model=coding_model)
 
-    if llm_ok:
+    if llm_result.ok:
         console.print(
             "[anton.success]LLM endpoints available — using Minds server as LLM provider.[/]"
         )
         settings.planning_provider = "openai-compatible"
         settings.coding_provider = "openai-compatible"
-        settings.planning_model = "_reason_"
-        settings.coding_model = "_code_"
+        settings.planning_model = planning_model
+        settings.coding_model = coding_model
         # openai_api_key and openai_base_url are derived at runtime from
         # minds_api_key and minds_url via model_post_init — no need to persist them.
         settings.model_post_init(None)
         global_ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         global_ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
-        global_ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
-        global_ws.set_secret("ANTON_CODING_MODEL", "_code_")
+        global_ws.set_secret("ANTON_PLANNING_MODEL", planning_model)
+        global_ws.set_secret("ANTON_CODING_MODEL", coding_model)
     else:
         # Check if Anthropic key is already configured
         has_anthropic = settings.anthropic_api_key or os.environ.get(
@@ -378,7 +382,7 @@ async def _handle_remote(
         console.print("  [anton.muted]To use remote scratchpad you need a free Minds account.[/]")
         console.print()
         has_key = await prompt_or_cancel(
-            "  Do you have an mdb.ai API key?",
+            "  Do you have a MindsHub API key?",
             choices=["y", "n"],
             choices_display="y/n",
             default="y",
@@ -441,7 +445,7 @@ async def _handle_publish(
         console.print("  [anton.muted]To publish dashboards you need a free Minds account.[/]")
         console.print()
         has_key = await prompt_or_cancel(
-            "  Do you have an mdb.ai API key?",
+            "  Do you have a MindsHub API key?",
             choices=["y", "n"],
             choices_display="y/n",
             default="y",
@@ -1917,7 +1921,7 @@ async def _chat_loop(
                     console.print(
                         f"[anton.warning]Approaching token limit: {last_token_status.used:,} / "
                         f"{last_token_status.limit:,} tokens used ({pct}%). "
-                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
+                        "Visit console.mindshub.ai to upgrade your plan or top up your tokens.[/]"
                     )
                     console.print()
                 if _query_count == 1:

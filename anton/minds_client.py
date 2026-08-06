@@ -13,12 +13,19 @@ import json as _json
 import ssl
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from anton.core.llm.openai import build_chat_completion_kwargs
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
+
+# Tier-default models on MindsHub Cloud — bare catalogue ids, the same pair
+# cowork-server's apply_model_defaults seeds. Used when /v1/models is not
+# deployed on the target host (not every MindsHub host serves listing routes).
+MINDS_DEFAULT_PLANNING_MODEL = "sonnet"
+MINDS_DEFAULT_CODING_MODEL = "haiku"
 
 
 def minds_request(
@@ -185,13 +192,91 @@ def list_datasources(
     return data.get("datasources", data if isinstance(data, list) else [])
 
 
-def test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
-    """Test if the Minds server supports LLM endpoints (_code_/_reason_ models).
+def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
+    """List model ids from the server's OpenAI-compatible /v1/models catalogue."""
+    url = f"{base_url}/v1/models"
+    raw = minds_request(url, api_key, verify=verify)
+    data = _json.loads(raw.decode())
+    entries = data.get("data") if isinstance(data, dict) else data
+    ids: list[str] = []
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get("id"):
+            ids.append(str(entry["id"]))
+    return ids
 
+
+def resolve_minds_models(
+    base_url: str, api_key: str, verify: bool = True
+) -> tuple[str, str]:
+    """Pick the (planning, coding) model pair from the live catalogue.
+
+    Falls back to the tier defaults when /v1/models is unreachable — listing
+    routes are not deployed on every MindsHub host and can 404 even for valid
+    keys — so setup never blocks on the catalogue being available.
+    """
+    try:
+        ids = list_models(base_url, api_key, verify=verify)
+    except Exception:
+        ids = []
+    if not ids:
+        return (MINDS_DEFAULT_PLANNING_MODEL, MINDS_DEFAULT_CODING_MODEL)
+
+    def pick(preferred: tuple[str, ...], fallback: str) -> str:
+        for name in preferred:
+            if name in ids:
+                return name
+        return fallback
+
+    planning = pick((MINDS_DEFAULT_PLANNING_MODEL, "opus", "fable"), ids[0])
+    coding = pick((MINDS_DEFAULT_CODING_MODEL,), planning)
+    return (planning, coding)
+
+
+@dataclass
+class LLMTestResult:
+    """Outcome of an LLM connectivity probe, with the provider's own error."""
+
+    ok: bool
+    rate_limited: bool = False
+    error: str | None = None
+
+
+def _http_error_detail(e: urllib.error.HTTPError) -> str:
+    """Extract the provider's error message from an HTTP error body.
+
+    MindsHub returns OpenAI-shaped error envelopes ({"error": {"code":
+    "model_not_found", "message": ...}}); surface that instead of a bare
+    status so setup can tell the user what actually failed.
+    """
+    try:
+        body = _json.loads(e.read().decode())
+        err = body.get("error", body) if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            message = err.get("message")
+            code = err.get("code")
+            if message:
+                return f"{code}: {message}" if code else str(message)
+        elif isinstance(err, str) and err:
+            return err
+    except Exception:
+        pass
+    return f"HTTP {e.code}: {e.reason or 'error'}"
+
+
+def test_llm(
+    base_url: str,
+    api_key: str,
+    verify: bool = True,
+    model: str = MINDS_DEFAULT_CODING_MODEL,
+) -> LLMTestResult:
+    """Probe the server's chat-completions endpoint with a 1-token request.
+
+    Probes with the model setup is about to configure (resolved from the live
+    catalogue by the caller), so a passing probe validates the actual config.
     Uses the new /v1/ format (legacy /api/v1/ is still supported by the server).
     """
     payload = _json.dumps(build_chat_completion_kwargs(
-        model="_code_",
+        model=model,
         messages=[{"role": "user", "content": "ping"}],
         max_tokens=1,
     )).encode()
@@ -199,10 +284,11 @@ def test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
     url = f"{base_url}/v1/chat/completions"
     try:
         minds_request(url, api_key, method="POST", payload=payload, verify=verify)
-        return True
+        return LLMTestResult(ok=True)
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            return "rate_limited"
-        return False
-    except Exception:
-        return False
+            return LLMTestResult(ok=False, rate_limited=True)
+        return LLMTestResult(ok=False, error=_http_error_detail(e))
+    except Exception as e:
+        headline, _advice = describe_minds_connection_error(e)
+        return LLMTestResult(ok=False, error=headline)

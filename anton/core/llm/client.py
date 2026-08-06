@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 def _resolve_openai_compatible_flavor(settings: AntonSettings) -> str:
     """Distinguish mdb.ai passthrough from a generic openai-compatible endpoint.
 
-    The "Minds-Enterprise-Cloud" setup path writes ``openai_base_url =
+    The MindsHub setup path writes ``openai_base_url =
     f"{minds_url.rstrip('/')}/api/v1"`` and ``openai_api_key = minds_api_key``
     (see ``AntonSettings.model_post_init``). When that exact pairing matches
     the user's current settings, the OpenAI provider is talking to mdb.ai and
