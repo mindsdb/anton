@@ -43,6 +43,33 @@ from anton.core.llm.provider import Usage
 
 
 @dataclass
+class RoleCost:
+    """One role's slice of a turn: which model ran it and what it spent.
+
+    Roles are a closed set (planning / coding / router), which is why the turn
+    event can carry this as flat properties instead of a nested blob.
+
+    ``model`` is the alias anton REQUESTED. The gateway may resolve or fail
+    over to a different model server-side and does not report that back on the
+    response (``LLMResponse`` carries no model field), so this is the client's
+    intent, not proof of what served the call — Langfuse holds the latter.
+    Normally one model per role per turn; if a role somehow sees more, they are
+    joined with ``|`` so the ambiguity is visible rather than silently dropping
+    one (a joined value means per-model dollar math for that role is unsafe).
+    """
+
+    model: str = ""
+    tokens: int = 0
+    calls: int = 0
+
+    def observe(self, model: str, tokens: int) -> None:
+        if model and model not in self.model.split("|"):
+            self.model = f"{self.model}|{model}" if self.model else model
+        self.tokens += tokens
+        self.calls += 1
+
+
+@dataclass
 class TurnCost:
     """Running token totals for one turn. Mutated only via ``add`` plus the
     session's explicit shape/outcome writes (rounds, continuations, ended_by).
@@ -65,14 +92,19 @@ class TurnCost:
     # the turn didn't end on its own terms.
     ended_by: str = "completed"
     started_monotonic: float = field(default_factory=time.monotonic)
+    # Per-role attribution. A turn routinely mixes an expensive planning model
+    # with a cheap coding model (the completion verifier runs on the latter),
+    # so a single blended token total cannot be priced at any one rate —
+    # dollars are only computable from (model, tokens) pairs, which this
+    # provides. Also the only place the router model is recorded at all.
+    by_role: dict[str, RoleCost] = field(default_factory=dict)
 
     def add(self, role: str, model: str, usage: Usage) -> None:
         """Count one LLM call. Installed as ``LLMClient.usage_listener``.
 
-        ``role``/``model`` are accepted (they're the listener contract and
-        what a future per-role breakdown would key on) but not yet stored
-        per-role — the turn event carries the client's planning/coding model
-        names instead.
+        Records both the turn total and the per-``role`` slice, so the event
+        can answer "which model was this user actually on" and "what did each
+        model cost" rather than only a blended sum.
         """
         self.llm_calls += 1
         self.input_tokens += usage.input_tokens
@@ -80,6 +112,14 @@ class TurnCost:
         self.cache_read_tokens += usage.cache_read_tokens
         self.cache_creation_tokens += usage.cache_creation_tokens
         self.peak_context_tokens = max(self.peak_context_tokens, usage.context_tokens)
+        slice_ = self.by_role.setdefault(role or "unknown", RoleCost())
+        slice_.observe(
+            model,
+            usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_tokens
+            + usage.cache_creation_tokens,
+        )
 
     @property
     def total_tokens(self) -> int:

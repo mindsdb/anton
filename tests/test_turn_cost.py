@@ -398,3 +398,80 @@ class TestListenerCapturedAtIssueTime:
 
         assert turn_two.llm_calls == 0, "late call must not book into the next turn"
         assert turn_one.llm_calls == 1, "it belongs to the turn that issued it"
+
+
+class TestPerRoleAttribution:
+    """Which model the user was actually on, and what each model cost.
+
+    The turn total alone can't be priced: a turn routinely mixes an expensive
+    planning model with the cheap coding model the verifier runs on, so dollars
+    are only computable from (model, tokens) pairs.
+    """
+
+    def test_role_slices_track_model_tokens_and_calls(self):
+        tc = TurnCost()
+        tc.add("planning", "sonnet", _usage(1000, 200))
+        tc.add("planning", "sonnet", _usage(500, 100))
+        tc.add("coding", "haiku", _usage(300, 50))
+        assert tc.by_role["planning"].model == "sonnet"
+        assert tc.by_role["planning"].tokens == 1800
+        assert tc.by_role["planning"].calls == 2
+        assert tc.by_role["coding"].model == "haiku"
+        assert tc.by_role["coding"].tokens == 350
+        # Role slices must reconcile with the turn total, or dollar math
+        # computed per-role silently disagrees with the headline number.
+        assert sum(s.tokens for s in tc.by_role.values()) == tc.total_tokens
+
+    def test_role_slices_include_cache_components(self):
+        tc = TurnCost()
+        tc.add("planning", "sonnet", _usage(100, 10, 5000, 200))
+        assert tc.by_role["planning"].tokens == 5310
+        assert tc.by_role["planning"].tokens == tc.total_tokens
+
+    def test_multiple_models_in_one_role_are_visible_not_dropped(self):
+        # Shouldn't happen, but silently keeping one would make the role's
+        # dollar math wrong with no way to tell. A joined value is the signal.
+        tc = TurnCost()
+        tc.add("coding", "haiku", _usage(100, 10))
+        tc.add("coding", "mindshub_air", _usage(100, 10))
+        assert tc.by_role["coding"].model == "haiku|mindshub_air"
+        assert tc.by_role["coding"].calls == 2
+
+    def test_verifier_call_is_attributed_to_the_coding_role(self):
+        # The completion verifier runs on the coding model — its cost must be
+        # separable from the user-facing loop's.
+        tc = TurnCost()
+        tc.add("planning", "sonnet", _usage(50_000, 500))
+        tc.add("coding", "haiku", _usage(2_000, 60))
+        assert tc.by_role["coding"].tokens == 2_060
+        assert tc.by_role["planning"].tokens == 50_500
+
+    def test_event_carries_the_model_that_actually_ran(self):
+        s = _bare_session()
+        # Configured says one thing; what ran says another. The event must
+        # report what ran — that's "the model the user was on".
+        s._llm.planning_model = "configured-sonnet"
+        s._turn_cost.add("planning", "opus", _usage(100, 10))
+        s._turn_cost.add("coding", "haiku", _usage(20, 5))
+        s._turn_cost.add("router", "mindshub_air", _usage(10, 2))
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        kw = send.call_args.kwargs
+        assert kw["planning_model"] == "opus"
+        assert kw["planning_tokens"] == "110"
+        assert kw["planning_calls"] == "1"
+        assert kw["coding_model"] == "haiku"
+        assert kw["coding_tokens"] == "25"
+        # The router model is recorded nowhere else.
+        assert kw["router_model"] == "mindshub_air"
+        assert kw["router_tokens"] == "12"
+
+    def test_event_falls_back_to_configured_name_when_a_role_never_ran(self):
+        s = _bare_session()
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        kw = send.call_args.kwargs
+        assert kw["planning_model"] == "planner"   # configured
+        assert kw["planning_tokens"] == "0"
+        assert kw["router_model"] == ""            # no router configured name
+        assert kw["router_calls"] == "0"

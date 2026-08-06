@@ -467,6 +467,22 @@ def _render_verify_transcript(
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
 
+def _role_model(tc: TurnCost, role: str) -> str:
+    """Model that ran ``role`` this turn ("" if the role never ran)."""
+    slice_ = tc.by_role.get(role)
+    return slice_.model if slice_ else ""
+
+
+def _role_tokens(tc: TurnCost, role: str) -> str:
+    slice_ = tc.by_role.get(role)
+    return str(slice_.tokens if slice_ else 0)
+
+
+def _role_calls(tc: TurnCost, role: str) -> str:
+    slice_ = tc.by_role.get(role)
+    return str(slice_.calls if slice_ else 0)
+
+
 def _build_verify_request(
     history: list[dict], user_message: str | None
 ) -> tuple[str, list[dict]]:
@@ -1777,11 +1793,16 @@ class ChatSession:
         logger.info(
             "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
-            "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d",
+            "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
+            "by_role=%s",
             self._session_id, turn_index, tc.ended_by, tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
             tc.continuations, tc.peak_context_tokens, tc.duration_ms,
+            ",".join(
+                f"{role}={s.model}:{s.tokens}/{s.calls}"
+                for role, s in sorted(tc.by_role.items())
+            ) or "-",
         )
 
         # Analytics sink — same settings-resolution pattern as the
@@ -1813,8 +1834,25 @@ class ChatSession:
                 continuations=str(tc.continuations),
                 peak_context_tokens=str(tc.peak_context_tokens),
                 duration_ms=str(tc.duration_ms),
-                planning_model=str(self._llm.planning_model or ""),
-                coding_model=str(self._llm.coding_model or ""),
+                # Per-role attribution: which model actually ran each role and
+                # what it spent. `<role>_model` is the model the USER was on
+                # for the conversational loop (planning) — the configured names
+                # can drift from what ran, and dollars are only computable from
+                # (model, tokens) pairs since a turn mixes rates. Roles are a
+                # closed set, so these stay flat and queryable.
+                planning_model=_role_model(tc, "planning") or str(
+                    self._llm.planning_model or ""
+                ),
+                planning_tokens=_role_tokens(tc, "planning"),
+                planning_calls=_role_calls(tc, "planning"),
+                coding_model=_role_model(tc, "coding") or str(
+                    self._llm.coding_model or ""
+                ),
+                coding_tokens=_role_tokens(tc, "coding"),
+                coding_calls=_role_calls(tc, "coding"),
+                router_model=_role_model(tc, "router"),
+                router_tokens=_role_tokens(tc, "router"),
+                router_calls=_role_calls(tc, "router"),
                 # Configured provider name (anthropic / openai /
                 # openai-compatible): separates gateway traffic from BYOK in
                 # queries. The finer per-model provider split is a follow-up.
