@@ -76,6 +76,7 @@ from anton.core.tools.tool_defs import (
 )
 from anton.core.interaction.selection import SelectionElicitor
 from anton.core.utils.scratchpad import (
+    build_workspace_discovery_context,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
@@ -1142,6 +1143,16 @@ class ChatSession:
         # Inject connected datasource context without credentials
         ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
+        # Turn-start workspace discovery (ENG-578): volatile, so it rides the
+        # tail — never the cache-stable prefix. Best-effort; a failure here
+        # must not break the turn.
+        workspace_ctx = ""
+        if self._scratchpads is not None:
+            try:
+                workspace_ctx = build_workspace_discovery_context(self._scratchpads)
+            except Exception:
+                workspace_ctx = ""
+
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
 
@@ -1159,6 +1170,7 @@ class ChatSession:
             self_awareness_context=sa_section,
             datasource_context=ds_ctx,
             skill_store=self._skill_store,
+            workspace_context=workspace_ctx,
         )
 
         return prompt

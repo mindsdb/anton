@@ -59,6 +59,32 @@ class ScratchpadManager:
         """Read-only view of the active scratchpad runtimes."""
         return self._pads
 
+    @property
+    def workspace_path(self) -> Path | None:
+        """Project root this manager serves — discovery needs it for listings."""
+        return self._workspace_path
+
+    def pad_snapshot_mtime(self, name: str) -> float | None:
+        """Epoch mtime of `name`'s ENG-1124 snapshot, or None when unknowable.
+
+        None covers every non-answer (unscoped session, no snapshot dir,
+        never persisted): discovery renders those pads without an age rather
+        than failing the block.
+        """
+        if not self._session_id or not name:
+            return None
+        try:
+            from anton.core.backends.local import default_venvs_base, snapshot_file
+
+            path = snapshot_file(
+                default_venvs_base(self._workspace_path), self._session_id, name
+            )
+            return path.stat().st_mtime if path is not None else None
+        except OSError:
+            return None
+        except Exception:
+            return None
+
     def _agent_pads_file(self):
         """Where this conversation's agent-chosen pad names are recorded, or None.
 
