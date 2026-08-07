@@ -244,7 +244,10 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
 
     from anton.commands.datasource import handle_connect_datasource
 
-    before = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
+    # Track (engine, name) pairs rather than joined slugs: engine names may
+    # contain a dash (custom engines are free-form), so a joined string
+    # cannot be split back into its parts reliably.
+    before = {(c["engine"], c["name"]) for c in vault.list_connections()}
 
     # Clear any stale status from a previous run
     setattr(session, "_pending_connect_redirect", None)
@@ -262,12 +265,12 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     )
 
     # Check if a new connection was actually added
-    after = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
+    after = {(c["engine"], c["name"]) for c in vault.list_connections()}
     new_connections = after - before
 
     if new_connections:
-        slug = next(iter(new_connections))
-        engine_saved, name_saved = slug.split("-", 1)
+        engine_saved, name_saved = sorted(new_connections)[0]
+        slug = f"{engine_saved}-{name_saved}"
         saved_fields = vault.load(engine_saved, name_saved) or {}
         saved_label = saved_fields.get("_user_label", "")
         # ── Telemetry: connection succeeded ──────────────────────────

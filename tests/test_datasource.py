@@ -4494,3 +4494,68 @@ class TestPromptCopyConsistency:
         assert "[y/n]" not in label
         assert "[reconnect/cancel]" not in label
         assert "(y/n" in label or _PROMPT_RECONNECT_CANCEL in label
+
+
+class TestToolConnectResultParsing:
+    """The connect_new_datasource tool must report the saved label correctly.
+
+    After the interactive flow returns, the tool wrapper diffs the vault
+    to find the connection that was just added, then loads it back to
+    read `_user_label`. It must carry (engine, name) through as a pair:
+    joining them into an "engine-name" slug and splitting on the first
+    dash misattributes the parts whenever the engine name contains a
+    dash (custom engines are free-form, e.g. "optima-api").
+
+    LocalDataVault happens to mask this — it resolves a record by the
+    concatenated path `sanitize(engine)-sanitize(name)`, which is
+    unchanged by a misplaced split — so this test uses a vault that
+    keys on (engine, name) separately, as the DataVault protocol allows.
+    """
+
+    class _KeyedVault:
+        """Minimal DataVault keying records on the (engine, name) tuple."""
+
+        def __init__(self):
+            self._records: dict[tuple[str, str], dict[str, str]] = {}
+
+        def save(self, engine, name, credentials, *, secure_keys=None):
+            self._records[(engine, name)] = dict(credentials)
+
+        def load(self, engine, name):
+            return self._records.get((engine, name))
+
+        def list_connections(self):
+            return [
+                {"engine": e, "name": n, "created_at": ""}
+                for e, n in self._records
+            ]
+
+    @pytest.mark.asyncio
+    async def test_hyphenated_engine_reports_saved_label(self, make_session):
+        from anton import tools as anton_tools
+
+        session = make_session()
+        session._console = MagicMock()
+        vault = self._KeyedVault()
+        session._data_vault = vault
+
+        async def _fake_flow(*args, **kwargs):
+            vault.save(
+                "optima-api",
+                "a12345",
+                {"token": "s3cr3t", "_user_label": "Optima 1"},
+            )
+
+        with (
+            patch("anton.analytics.send_event", new=MagicMock()),
+            patch(
+                "anton.commands.datasource.handle_connect_datasource",
+                new=AsyncMock(side_effect=_fake_flow),
+            ),
+        ):
+            result = await anton_tools.handle_connect_datasource(
+                session, {"engine": "optima-api"}
+            )
+
+        assert "optima-api-a12345" in result
+        assert 'label "Optima 1"' in result
