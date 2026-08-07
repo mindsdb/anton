@@ -1,3 +1,4 @@
+from anton.core.tools.progress import ToolProgress
 from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
@@ -21,7 +22,11 @@ class ToolDef:
     name: str
     description: str
     input_schema: dict
-    handler: Callable  # async (session, tc_input) -> str
+    # async (session, tc_input) -> str | list[dict]. May instead be an async
+    # generator yielding ToolProgress markers followed by one final
+    # str | list[dict] — see anton/core/tools/progress.py and
+    # ToolRegistry.dispatch_tool_stream (anton/core/tools/registry.py).
+    handler: Callable
     prompt: Optional[str] = (
         None  # Optional prompt relevant to the tool to be injected into the system prompt.
     )

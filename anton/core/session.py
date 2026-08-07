@@ -4,6 +4,7 @@ import asyncio
 import httpx
 import random
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import json
@@ -62,6 +63,7 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
@@ -2494,7 +2496,7 @@ class ChatSession:
             for tc in response.tool_calls:
                 try:
                     outcome = await self.tool_registry.dispatch_tool(
-                        self, tc.name, tc.input
+                        self, tc.name, tc.input, tool_call_id=tc.id,
                     )
                 except Exception as exc:
                     # A raise is a definitive failure verdict — no text
@@ -2592,7 +2594,13 @@ class ChatSession:
         Yields ``("event", ev)`` for each out-of-band event, then
         ``("result", outcome)`` — the ``ToolOutcome`` ``dispatch_tool``
         returns, so the caller reads ``.content`` and ``.ok`` off it rather
-        than receiving bare text. Four details are load-bearing:
+        than receiving bare text. "Out of band" covers both an ``ask_user``
+        question (ENG-1276, #292) and a streaming tool's ``ToolProgress``
+        markers (ENG-763) — ``dispatch_tool`` relays the latter through
+        ``session.emitter`` too, since it has no other way to reach the
+        caller while running inside this method's background task; both
+        kinds arrive here as plain ``("event", ev)`` tuples, indistinguishable
+        by this method. Four details are load-bearing:
 
         1. Cancelling BOTH futures in ``finally`` — ``asyncio.wait`` does NOT
            cancel its futures when the awaiting coroutine is cancelled. Without
@@ -2620,7 +2628,9 @@ class ChatSession:
            only runs on finalization, which GC would otherwise defer.
         """
         task = asyncio.create_task(
-            self.tool_registry.dispatch_tool(self, tc.name, tc.input)
+            self.tool_registry.dispatch_tool(
+                self, tc.name, tc.input, tool_call_id=tc.id,
+            )
         )
         # Bound before the try: the `finally` cancels it, and if the first
         # `ensure_future` below raised, an unbound name there would turn the
@@ -3464,50 +3474,91 @@ class ChatSession:
                                 message="Analyzing results...",
                             )
                         else:
-                            # Non-scratchpad, non-interactive tool — track elapsed
+                            # Non-scratchpad, non-interactive tool — track elapsed.
+                            # dispatch_tool_stream() forwards ToolProgress markers
+                            # from a streaming handler as they arrive; a plain
+                            # (non-streaming) handler yields exactly one item (its
+                            # result), so this same loop works for both kinds.
                             yield StreamTaskProgress(
                                 phase="tool_start",
                                 message=tc.name,
                             )
+                            # Runs through _dispatch_draining (ENG-1276/ask-user,
+                            # #292) so a generic tool can elicit() mid-call just
+                            # like the interactive branch above. ToolProgress
+                            # markers (ENG-763) are relayed by dispatch_tool
+                            # itself via session.emitter — _dispatch_draining
+                            # forwards them here as ordinary ("event", ev)
+                            # tuples, no different from an ask_user event.
                             self.answer_wait_s = 0.0
+                            _tool_error: Exception | None = None
                             agen = self._dispatch_draining(tc)
                             try:
-                                async for _kind, _payload in agen:
-                                    if _kind == "event":
-                                        yield _payload
-                                    else:
-                                        _outcome = _payload
-                            finally:
-                                await agen.aclose()
-                            # Anything a tool queued after the helper handed us
-                            # the result — a background task outliving its tool
-                            # call — would otherwise sit in the queue until the
-                            # next tool's drain, or forever if this was the last
-                            # tool of the turn, leaving a published card that is
-                            # never retired. Not reachable by any tool today
-                            # (every ask_user emit happens inside elicit(),
-                            # before the handler returns, and a
-                            # generate_artifact sub-agent runs inside the drained
-                            # window too), so this is a guard for the next one.
-                            #
-                            # An ordinary in-loop yield, deliberately NOT in a
-                            # `finally`: you cannot yield from an async
-                            # generator's finally.
-                            while not self.emitter.empty():
-                                yield self.emitter.get_nowait()
-                            result_text = _outcome.content
-                            tool_ok = _outcome.ok
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            _outcome = _payload
+                                finally:
+                                    await agen.aclose()
+                                # Anything a tool queued after the helper handed us
+                                # the result — a background task outliving its tool
+                                # call — would otherwise sit in the queue until the
+                                # next tool's drain, or forever if this was the last
+                                # tool of the turn, leaving a published card that is
+                                # never retired. Not reachable by any tool today
+                                # (every ask_user emit happens inside elicit(),
+                                # before the handler returns, and a
+                                # generate_artifact sub-agent runs inside the drained
+                                # window too), so this is a guard for the next one.
+                                #
+                                # An ordinary in-loop yield, deliberately NOT in a
+                                # `finally`: you cannot yield from an async
+                                # generator's finally.
+                                while not self.emitter.empty():
+                                    yield self.emitter.get_nowait()
+                                result_text = _outcome.content
+                                tool_ok = _outcome.ok
+                            except Exception as exc:
+                                # Caught locally ONLY so the tool_done marker
+                                # below can still be yielded from ordinary
+                                # (non-unwinding) execution; re-raised right
+                                # after, so the outer handler a few lines below
+                                # still builds "Tool 'x' failed: ...".
+                                # GeneratorExit is a BaseException, not an
+                                # Exception, so cancellation via the consumer
+                                # closing this generator is NOT caught here —
+                                # it propagates straight through and the
+                                # generator closes without a tool_done, same as
+                                # any other stream abort. NOT a try/finally
+                                # with a yield inside: yielding while the
+                                # generator is being closed raises "async
+                                # generator ignored GeneratorExit".
+                                _tool_error = exc
+
                             # Human thinking time is not the tool's runtime:
                             # a 4-minute ask_user would otherwise show up in
                             # the CLI report and in telemetry as a slow tool.
                             _tool_elapsed = (
                                 _time.monotonic() - _tool_t0 - self.answer_wait_s
                             )
+                            # A raised exception is a definitive failure verdict
+                            # regardless of tool_ok — without this, tool_done
+                            # firing (guaranteed even on error, by design) with
+                            # no verdict at all rendered as an unconditional
+                            # success in every consumer (PR #304 review): the
+                            # CLI printed a green checkmark for a tool that
+                            # just raised.
                             yield StreamTaskProgress(
                                 phase="tool_done",
                                 message=tc.name,
                                 eta_seconds=max(_tool_elapsed, 0.0),
+                                id=tc.id,
+                                ok=False if _tool_error is not None else tool_ok,
                             )
+                            if _tool_error is not None:
+                                raise _tool_error
                             if (
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"
