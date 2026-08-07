@@ -5,7 +5,7 @@ import httpx
 import random
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -175,6 +175,27 @@ def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
         else b
         for b in user_input
     ]
+
+
+def _stamp_user_content(
+    user_input: str | list[dict], now: datetime
+) -> str | list[dict]:
+    """Prefix a user turn with its send time as ``[YYYY-MM-DD HH:MM]``.
+
+    The live clock lives here, on the message, instead of in the system prompt
+    — so the cache-stable prefix (system + tools + settled history) stays
+    byte-identical across turns. The format matches cowork-server's history
+    stamp (``anton_harness/harness.py``), so a message reads the same whether
+    it's this turn's live input or replayed from persisted history — the caller
+    MUST pass a UTC ``now`` to match that history stamp (built from the DB's
+    UTC ``created_at``); a local-time stamp would drift by the TZ offset.
+
+    Only string content is stamped; mixed image/file turns pass through
+    unchanged, mirroring cowork-server's behaviour.
+    """
+    if isinstance(user_input, str) and user_input:
+        return f"[{now.strftime('%Y-%m-%d %H:%M')}] {user_input}"
+    return user_input
 
 
 class _VerifierVerdict(BaseModel):
@@ -1167,16 +1188,13 @@ class ChatSession:
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
-        # Two stamps, deliberately split for cache-stability AND correctness:
-        #  • conversation_started — the task's creation time (self._started_at),
-        #    a FIXED fact rendered in the cache-stable prefix; identical every
-        #    turn so it never busts the prefix cache.
-        #  • current_datetime — the real wall clock, rendered in the VOLATILE
-        #    tail (after the cached prefix) so it's always accurate even when a
-        #    conversation is resumed days/weeks later, without touching the cache.
+        # conversation_started — the task's creation time (self._started_at), a
+        # FIXED fact rendered in the cache-stable prefix; identical every turn so
+        # it never busts the prefix cache. The live "now" is NOT in the system
+        # prompt: it rides on each user message's bracketed timestamp (see
+        # turn_stream), keeping the whole prefix cacheable across turns.
         _started = self._started_at or _dt.datetime.now()
         _conversation_started = _started.strftime("%A, %B %d, %Y")
-        _current_datetime = _dt.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
@@ -1212,7 +1230,6 @@ class ChatSession:
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
             conversation_started=_conversation_started,
-            current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -2384,7 +2401,11 @@ class ChatSession:
 
     async def turn(self, user_input: str | list[dict]) -> str:
         user_input = _scrub_user_input(user_input)
-        self._append_history({"role": "user", "content": user_input})
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
+        self._append_history({"role": "user", "content": stamped_input})
 
         # Open the turn's cost books (ENG-1288) — same contract as
         # turn_stream. This non-streaming path has no wrapping finally, so
@@ -2723,7 +2744,11 @@ class ChatSession:
         """
         self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
-        self._append_history({"role": "user", "content": user_input})
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
+        self._append_history({"role": "user", "content": stamped_input})
 
         # Log user input to episodic memory
         if self._episodic is not None:
