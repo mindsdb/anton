@@ -1,0 +1,40 @@
+name: Scratchpad image - Dev build on PR
+
+# Builds and pushes the minds-anton-scratchpad image (the sandbox pod image) to ECR as
+# development-<sha> when a PR carries a deploy label. The scratchpad-controller references
+# the resulting tag via SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE; there is no Helm chart for
+# this image, so this workflow only builds and scans (no deploy job).
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow_ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  build:
+    runs-on: mdb-dev
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: mindsdb/github-actions/setup-env@main
+      - id: build
+        uses: mindsdb/github-actions/build-push-ecr@main
+        with:
+          # Override the repo-slug default so the image lands at .../minds-anton-scratchpad.
+          module-name: minds-anton-scratchpad
+          build-for-environment: development

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.filters import to_filter
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.styles import Style as PTStyle
 
 from rich.console import Console
@@ -47,6 +50,34 @@ def display_value(key: str, value: str) -> str:
     if is_secret_key(key) and value:
         return mask_secret(value)
     return value or "[dim]<empty>[/]"
+
+
+def _pin_input_window_height(session: PromptSession) -> None:
+    """Stop the input line's Window from swallowing the bottom toolbar's space.
+
+    PromptSession reserves render height down to the bottom of the terminal
+    (needed so a `bottom_toolbar` can be shown at all — see
+    `Renderer.request_absolute_cursor_position`). Of the windows in its
+    layout, only the toolbar's is built with `dont_extend_height=True`; the
+    input line's is not, so it absorbs all of that reserved space and the
+    toolbar ends up pinned to the terminal's last row, with a big gap above
+    it. Pinning the input line's own height here keeps the toolbar right
+    below it instead.
+    """
+    seen: set[int] = set()
+
+    def walk(container) -> None:
+        if id(container) in seen:
+            return
+        seen.add(id(container))
+        if isinstance(container, Window) and isinstance(container.content, BufferControl):
+            if container.content.buffer is session.default_buffer:
+                container.dont_extend_height = to_filter(True)
+                return
+        for child in container.get_children():
+            walk(child)
+
+    walk(session.layout.container)
 
 
 async def prompt_or_cancel(
@@ -108,6 +139,7 @@ async def prompt_or_cancel(
         key_bindings=bindings,
         is_password=password,
     )
+    _pin_input_window_height(pt_session)
 
     from anton.channel.theme import get_palette as _get_palette
     _prompt_color = _get_palette().prompt

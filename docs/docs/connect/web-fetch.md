@@ -13,7 +13,7 @@ your LLM provider:
 | --- | --- |
 | Anthropic BYOK | Anthropic native server tool |
 | OpenAI BYOK | covered by `web_search` |
-| Minds-Enterprise-Cloud (mdb.ai) | mdb.ai passthrough |
+| MindsHub | MindsHub passthrough |
 | Generic OpenAI-compatible | built-in HTTP GET fallback (no key needed) |
 
 The fallback needs no API key at all: Anton performs a plain HTTP GET,

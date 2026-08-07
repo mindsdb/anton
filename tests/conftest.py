@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import os
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCall, Usage
+
+# Tests that drive full turns now reach the turn-cost analytics sink
+# (ENG-1288): _emit_turn_cost falls back to a fresh AntonSettings(), whose
+# default analytics_url is the real collector. Kill analytics for the whole
+# suite so no test run — local or CI — ever fires a real event. (CI is also
+# dropped by send_event's own CI detection; this covers local dev runs.)
+os.environ.setdefault("ANTON_ANALYTICS_ENABLED", "false")
 
 
 def make_mock_llm() -> AsyncMock:
@@ -28,6 +37,22 @@ def make_mock_llm() -> AsyncMock:
     # unless a specific test configures otherwise via ChatSessionConfig.
     mock.planning_provider.native_web_tools = MagicMock(return_value=set())
     return mock
+
+
+@pytest.fixture()
+def make_session():
+    """A ChatSession with a mock LLM and no console — the minimum needed to
+    exercise session-level wiring without touching a terminal or a provider.
+    """
+
+    def _factory(**over):
+        from anton.core.session import ChatSession, ChatSessionConfig
+
+        kwargs = dict(llm_client=make_mock_llm())
+        kwargs.update(over)
+        return ChatSession(ChatSessionConfig(**kwargs))
+
+    return _factory
 
 
 @pytest.fixture()

@@ -58,6 +58,7 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 markers = [
     "stub_only: test requires stub server (skipped when --live is passed)",
+    "slow: test spawns a real scratchpad venv/subprocess (seconds)",
 ]
 
  [tool.hatch.build.targets.wheel]
