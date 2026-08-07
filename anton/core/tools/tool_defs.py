@@ -1,6 +1,7 @@
 from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
+    handle_generate_artifact,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -163,12 +164,18 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "files — the tool returns the absolute folder path you should write "
         "into. Each artifact gets its own subfolder under `<workspace>/artifacts/`, "
         "with a `metadata.json` + `README.md` written automatically.\n\n"
-        "SKILL PREREQUISITE: `html-app` and the two fullstack types have "
-        "detailed output contracts stored as skills. If you haven't already "
-        "done so this conversation, call `recall_skill(\"build-html-dashboard\")` "
-        "before an html-app, and `recall_skill(\"build-fullstack-backend\")` "
-        "before a fullstack app — BEFORE writing any files. When unsure, "
-        "recall; skipping breaks rendering/launch.\n\n"
+        "AFTER REGISTERING: for `html-app` and the two fullstack types, call "
+        "`generate_artifact(slug, context)` and let it write every file — that "
+        "is the normal path and it verifies its own output. For `document`, "
+        "`dataset`, `image` and `mixed` there is no generator: write the files "
+        "yourself into the returned path.\n\n"
+        "If you do end up building one of the three generator-backed types BY "
+        "HAND (editing an existing artifact, or `generate_artifact` failed and "
+        "the user asked you to continue), the output contract lives in a skill: "
+        "call `recall_skill(\"build-html-dashboard\")` for an html-app or "
+        "`recall_skill(\"build-fullstack-backend\")` for a fullstack app before "
+        "writing anything. Hand-written code that skips it breaks "
+        "rendering/launch.\n\n"
         "Pick `type` from the closed enum:\n"
         "- html-app: a single self-contained HTML page (charts, dashboards, demos)\n"
         "- document: a doc, report, or markdown file the user reads\n"
@@ -177,10 +184,14 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "- mixed: multi-modal output that doesn't fit the above\n"
         "- fullstack-stateless-app: fullstack web app (backend + frontend) that keeps "
         "no local state between requests; all persistence goes to external data sources. "
-        "DEFAULT for fullstack apps\n"
+        "Reading from or writing to an external database (Postgres, MySQL, etc.) is "
+        "stateless — the external DB is a data source, not local state. PREFER this type: "
+        "use it for anything that just queries/serves external data.\n"
         "- fullstack-stateful-app: fullstack web app (backend + frontend) that keeps "
-        "local state between requests (e.g. an on-disk SQLite DB). Use ONLY when that "
-        "state truly cannot live in an external data source; prefer stateless when in doubt\n\n"
+        "local state between requests inside the artifact itself (e.g. an on-disk SQLite "
+        "DB, a file the backend writes and re-reads). Choose this ONLY when the app must "
+        "persist its own state locally between requests; otherwise use "
+        "fullstack-stateless-app.\n\n"
         "Pass `primary` (optional) when you already know the entry-point "
         "filename you'll write — e.g. `\"dashboard.html\"` for an html-app, "
         "`\"static/index.html\"` for a fullstack app, `\"report.pdf\"` for a "
@@ -327,11 +338,12 @@ LAUNCH_BACKEND_TOOL = ToolDef(
         "(plus any `extra_args`), waits until the server is reachable, "
         "records the port in the artifact's `metadata.json`, and returns "
         "`{slug, port, pid, url, log_path}` as JSON.\n\n"
+        "You normally do NOT call this: `generate_artifact` launches the backend "
+        "itself and records the port. Use this tool for a hand-built backend, or "
+        "to restart one after editing its code.\n\n"
         "The backend MUST follow the contract in the `build-fullstack-backend` "
-        "skill (template, `--port`, `/api/*` prefix, SECRETS). If you haven't "
-        "recalled it this conversation, call "
-        "`recall_skill(\"build-fullstack-backend\")` before writing or fixing "
-        "backend code.\n\n"
+        "skill (template, `--port`, `/api/*` prefix, SECRETS) — a hand-written "
+        "backend that skips it will not start.\n\n"
         "The spawned process inherits Anton's environment, including the "
         "`DS_<ENGINE>_<NAME>__<FIELD>` variables of connected data sources.\n\n"
         "Runs in a scratchpad named exactly `<slug>` (created on first call). "
@@ -377,6 +389,147 @@ LAUNCH_BACKEND_TOOL = ToolDef(
         "required": ["slug"],
     },
     handler=handle_launch_backend,
+)
+
+
+GENERATE_ARTIFACT_TOOL = ToolDef(
+    name="generate_artifact",
+    description=(
+        "Populate an already-registered artifact's folder via a dedicated "
+        "sub-generator. Use INSTEAD OF writing files yourself in the "
+        "scratchpad. Reads `type` from the artifact's metadata (must be "
+        "`html-app`, `fullstack-stateless-app`, or `fullstack-stateful-app`).\n\n"
+        "Inputs:\n"
+        "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
+        "- `context`: a markdown brief with these four sections:\n"
+        "  ## User request — the user's literal ask\n"
+        "  ## Conversation context — relevant decisions/history from this chat\n"
+        "  ## Functional Requirements Specification — what the system does from "
+        "the user's point of view: what the user sees on screen, how they "
+        "interact with it, and what result they get. MUST be technology-agnostic — "
+        "do NOT mention frameworks, libraries, endpoints, HTTP methods, env vars, "
+        "database engines, file paths, CSS colours, fonts, or any implementation "
+        "detail. Describe behaviour and user-visible outcomes, not how to build them. "
+        "For simple tasks a short plain-language description is enough.\n"
+        "  ## Data — free-form, list everything known at call time about the "
+        "data sources needed for the task and their properties: what each "
+        "source is and where it conceptually lives (e.g. \"PostgreSQL "
+        "`integration` table\", \"CoinGecko `/coins/markets` endpoint\"), the "
+        "schema/columns with types, row counts, and any stable contextual "
+        "facts that help frame the data. Include only what is needed and only "
+        "what is already known. IF you have already interacted with the data "
+        "sources, you MUST also name the scratchpad(s), the specific cells, and "
+        "what exactly was done in them — which query/extraction ran, which "
+        "variables were produced, and what the result showed — because the "
+        "generator can open those scratchpads and will pull or rebuild the data "
+        "itself. You may include a `### Sample` subsection with 2–5 real rows "
+        "if you have actually observed them. DO NOT include env var names, "
+        "connection strings, credentials, API endpoint paths the generator "
+        "must implement, backend file layout, or any other implementation "
+        "detail — those belong in the generator's own planning step, not in "
+        "this brief.\n\n"
+        "For fullstack apps the tool launches the backend itself (health-checked "
+        "on `/api/health`) and records the port in metadata; you do NOT call "
+        "`launch_backend` yourself. On success it returns "
+        "`{slug, path, files_written, internal_files, summary, trace}` — "
+        "`files_written` are the artifact's own files (report those to the "
+        "user), `internal_files` are generation inputs like `spec.md` and "
+        "`openapi.json` (do NOT present them as deliverables), and `trace` "
+        "lists the generation steps and their outcomes; on failure a single error string "
+        "naming the node that stopped the run. If generation fails, report the "
+        "failure to the user and ask how to proceed — NEVER fall back to "
+        "building the artifact yourself via scratchpad or any other means."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Slug of an already-registered artifact.",
+            },
+            "context": {
+                "type": "string",
+                "description": (
+                    "Markdown brief with sections `## User request`, "
+                    "`## Conversation context`, "
+                    "`## Functional Requirements Specification`, `## Data`. "
+                    "The FRS section MUST describe behaviour from the user's "
+                    "point of view (what they see, how they interact, what "
+                    "result they get) and MUST NOT mention technologies, "
+                    "frameworks, endpoints, env vars, file paths, colours, "
+                    "or any implementation detail. "
+                    "The `## Data` section is free-form: list everything known "
+                    "about the needed data sources and their properties "
+                    "(source, schema, types, row counts), and — if you already "
+                    "interacted with the sources — name the scratchpad(s), the "
+                    "cells, and what was done in them (the generator can open "
+                    "those scratchpads to pull/rebuild the data). NO env var "
+                    "names, connection details, API endpoint paths, or backend "
+                    "layout. Add a `### Sample` of 2–5 real rows only if you "
+                    "actually observed them (never fabricate). "
+                    "Passed verbatim to the sub-generator."
+                ),
+            },
+        },
+        "required": ["slug", "context"],
+    },
+    handler=handle_generate_artifact,
+    prompt=(
+        "ARTIFACT GENERATION:\n"
+        "`generate_artifact` produces every file for an already-registered "
+        "artifact by running a strict internal generation state machine "
+        "(data-sufficiency check → technical spec → REST API spec → backend & "
+        "frontend generation with verification → launch & health check). Use it "
+        "INSTEAD of writing artifact files yourself in the scratchpad.\n"
+        "  1. Call `create_artifact` to register the slug and pick the type "
+        "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
+        "  2. Call `generate_artifact(slug=<slug>, context=<markdown brief>)`.\n"
+        "     - `context` MUST be a markdown document with these four sections:\n"
+        "         ## User request\n"
+        "         ## Conversation context\n"
+        "         ## Functional Requirements Specification\n"
+        "         ## Data\n"
+        "       For `## Functional Requirements Specification`: describe ONLY "
+        "user-facing behaviour:\n"
+        "         • what the user sees on screen (content, structure, states),\n"
+        "         • how the user interacts with it (clicks, inputs, navigation),\n"
+        "         • what result the user gets in response (output, feedback, "
+        "error states).\n"
+        "       DO NOT mention any of the following in this section:\n"
+        "         • technologies, frameworks, or libraries (FastAPI, ECharts, "
+        "psycopg2, React, etc.),\n"
+        "         • system architecture, file layout, or module boundaries,\n"
+        "         • API endpoints, HTTP methods, request/response shapes, "
+        "or status codes,\n"
+        "         • database engines, table/column names, SQL, ORM details,\n"
+        "         • environment variables, secrets, config keys,\n"
+        "         • CSS colours, fonts, exact pixel sizes, or other styling "
+        "internals (general phrases like \"dark theme\" or \"responsive\" are fine),\n"
+        "         • any other implementation detail or technical constraint.\n"
+        "       Use plain language a non-technical user would understand. Names "
+        "of real-world entities the user knows about (e.g. \"companies\", "
+        "\"integrations\") are fine; internal column names and engine slugs "
+        "belong in `## Data`, not here. For simple tasks a short plain "
+        "description is enough.\n"
+        "       For `## Data`: free-form — list everything known about the data "
+        "sources needed and their properties (the source and where it "
+        "conceptually lives, schema/columns with types, row counts, stable "
+        "facts). IF you already interacted with the sources, you MUST name the "
+        "scratchpad(s), the specific cells, and what was done in them (which "
+        "query/extraction ran, which variables were produced, what the result "
+        "showed) — the generator can open those scratchpads and will pull or "
+        "rebuild the data itself. Add a `### Sample` of 2–5 real rows only if "
+        "you actually observed them; never fabricate one. DO NOT mention in "
+        "this section:\n"
+        "         • env var names (DS_POSTGRES_*, API_KEY, etc.) or any "
+        "credentials/connection strings,\n"
+        "         • API endpoint paths the generator must implement "
+        "(`GET /api/...`),\n"
+        "         • backend file layout, modules, or implementation details.\n"
+        "       Those are the generator's job to design — not yours to dictate.\n"
+        "For fullstack apps the tool launches the backend itself and records the "
+        "port — you do NOT need to call `launch_backend` afterwards."
+    ),
 )
 
 
