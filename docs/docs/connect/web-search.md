@@ -12,7 +12,7 @@ default. How it executes depends on your LLM provider:
 | --- | --- | --- |
 | Anthropic BYOK | Anthropic native server tool | None — billed on your Anthropic key |
 | OpenAI BYOK | OpenAI Responses API native | None — billed on your OpenAI key |
-| Minds-Enterprise-Cloud (mdb.ai) | mdb.ai passthrough | None — billed on your Minds key |
+| MindsHub | MindsHub passthrough | None — billed on your MindsHub key |
 | Generic OpenAI-compatible (Together, Groq, Ollama, vLLM, …) | Exa.ai or Brave (you choose) | Run `anton setup-search` once |
 
 For the first three rows there is nothing to configure — the LLM provider

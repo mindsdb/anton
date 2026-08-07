@@ -718,6 +718,53 @@ def build_chat_completion_kwargs(
     return kwargs
 
 
+def _split_cached_input(usage) -> tuple[int, int, int]:
+    """Return (fresh_input, cache_read, cache_write) from an OpenAI-shaped usage.
+
+    OpenAI-dialect prompt counts are INCLUSIVE of cache activity, unlike
+    Anthropic's which excludes it — subtract both cached buckets out so
+    ``Usage`` components mean the same thing on every provider (ENG-1288).
+
+    Both cache buckets are real on our own gateway: mindshub_inference
+    publishes ``prompt_tokens_details.{cached_tokens, cache_write_tokens}``
+    and composes ``prompt_tokens = fresh + reads + writes``
+    (``minds/schemas/chat.py``, ``minds/inference/types.py``). Reading only
+    ``cached_tokens`` left the write share misfiled as fresh input and
+    reported ``cache_creation_tokens`` as a constant 0 on the majority
+    production surface — which breaks per-component dollar weighting (writes
+    bill at a premium) and any "is caching working" query (#309 review).
+
+    Handles both naming schemes: chat.completions (``prompt_tokens`` +
+    ``prompt_tokens_details``) and the Responses API (``input_tokens`` +
+    ``input_tokens_details``). A third-party endpoint that omits the write
+    field simply reports 0 for it.
+    """
+    if usage is None:
+        return 0, 0, 0
+
+    def _as_int(value) -> int:
+        # Gateways and test doubles put non-numeric junk in usage fields;
+        # anything that isn't a real number counts as 0, never a crash.
+        return value if isinstance(value, int) else 0
+
+    total = _as_int(getattr(usage, "prompt_tokens", None)) or _as_int(
+        getattr(usage, "input_tokens", None)
+    )
+    details = (
+        getattr(usage, "prompt_tokens_details", None)
+        or getattr(usage, "input_tokens_details", None)
+    )
+    read = _as_int(getattr(details, "cached_tokens", None)) if details is not None else 0
+    write = (
+        _as_int(getattr(details, "cache_write_tokens", None)) if details is not None else 0
+    )
+    # Clamp jointly: a malformed payload must never yield negative fresh input.
+    if read + write > total:
+        read = min(read, total)
+        write = max(0, total - read)
+    return total - read - write, read, write
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -877,6 +924,16 @@ class OpenAIProvider(LLMProvider):
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:
             extra["harness"] = ctx.harness
+        # Our own build (ENG-1279). The router lifts this onto the trace's
+        # native `version` field, the only form the Langfuse metrics API can
+        # group by — so "did this fix change behaviour in production?" becomes
+        # a query instead of a guess about release dates. Set here rather than
+        # by the host so it is also correct for anton standalone (CLI, hub
+        # instances, evals) and so it wins over a host that reports a stale
+        # value: only anton knows which anton is running.
+        from anton import __version__ as _anton_version
+
+        extra["anton_version"] = _anton_version
         if extra:
             headers["Langfuse-Metadata"] = json.dumps(extra)
         return headers or None
@@ -974,14 +1031,22 @@ class OpenAIProvider(LLMProvider):
         )
 
         usage_obj = response.usage
-        input_tokens = usage_obj.prompt_tokens if usage_obj else 0
+        input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(
+            usage_obj
+        )
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
             usage=Usage(
                 input_tokens=input_tokens,
                 output_tokens=usage_obj.completion_tokens if usage_obj else 0,
-                context_pressure=compute_context_pressure(model, input_tokens),
+                # All prompt-side tokens, exactly as before this split existed
+                # (the OpenAI dialect's prompt_tokens is cache-inclusive).
+                context_pressure=compute_context_pressure(
+                    model, input_tokens + cache_read_tokens + cache_creation_tokens
+                ),
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
             ),
             stop_reason=choice.finish_reason,
         )
@@ -1032,6 +1097,8 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         stop_reason: str | None = None
 
         # Track tool call deltas by index
@@ -1048,7 +1115,11 @@ class OpenAIProvider(LLMProvider):
             stream_started = True
             async for chunk in stream:
                 if chunk.usage:
-                    input_tokens = chunk.usage.prompt_tokens
+                    (
+                        input_tokens,
+                        cache_read_tokens,
+                        cache_creation_tokens,
+                    ) = _split_cached_input(chunk.usage)
                     output_tokens = chunk.usage.completion_tokens
 
                 if not chunk.choices:
@@ -1220,7 +1291,11 @@ class OpenAIProvider(LLMProvider):
                 usage=Usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
+                    context_pressure=compute_context_pressure(
+                        model, input_tokens + cache_read_tokens + cache_creation_tokens
+                    ),
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
             )
@@ -1339,6 +1414,8 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         stop_reason: str | None = None
 
         # Map output_index → in-flight function-call state. Responses API uses
@@ -1424,7 +1501,11 @@ class OpenAIProvider(LLMProvider):
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
                         if usage is not None:
-                            input_tokens = getattr(usage, "input_tokens", 0) or 0
+                            (
+                                input_tokens,
+                                cache_read_tokens,
+                                cache_creation_tokens,
+                            ) = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
                         stop_reason = getattr(final_response, "status", None)
         except openai.BadRequestError as exc:
@@ -1490,7 +1571,11 @@ class OpenAIProvider(LLMProvider):
                 usage=Usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
+                    context_pressure=compute_context_pressure(
+                        model, input_tokens + cache_read_tokens + cache_creation_tokens
+                    ),
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
             )
@@ -1531,7 +1616,7 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     # `or 0` guards an explicit None (the attr is present but null) — the
     # Responses API returns usage.input_tokens=None on web-search responses,
     # which a bare getattr default does NOT catch. Mirrors the streaming path.
-    input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
     status = getattr(response, "status", None)
@@ -1545,7 +1630,11 @@ def _parse_response_object(response, model: str) -> LLMResponse:
         usage=Usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            context_pressure=compute_context_pressure(model, input_tokens),
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
         ),
         stop_reason=status,
     )

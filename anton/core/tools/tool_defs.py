@@ -41,14 +41,15 @@ SCRATCHPAD_TOOL = ToolDef(
         "- dump: Show a clean notebook-style summary of cells (code + truncated output)\n"
         "- install: Install Python packages into the scratchpad's environment. "
         "Packages persist across resets.\n\n"
-        "IMPORTANT: Cells have an inactivity timeout of 30 seconds — if a cell produces "
-        "no output and no progress() calls for 30s, it is killed and all state is lost. "
-        "For long-running code (API calls, data extraction, heavy computation), call "
-        "progress(message) periodically to signal work is ongoing and reset the timer. "
-        "The total timeout scales from your estimated_execution_time_seconds "
-        "(roughly 2x the estimate). You MUST provide estimated_execution_time_seconds "
-        "for every exec call. For very long operations, provide a realistic estimate "
-        "and use progress() to keep the cell alive.\n\n"
+        "IMPORTANT: Cells are kept alive automatically while the worker is running — "
+        "deliberate sleeps and blocking calls (e.g. a throttled batch loop with "
+        "time.sleep between sends) are safe in a single cell and are the preferred "
+        "shape for batch work. A cell is killed only when its total time budget runs "
+        "out or the worker itself dies or wedges; a kill loses the cell's state. "
+        "You MUST provide estimated_execution_time_seconds for every exec call — it "
+        "sizes the total budget (roughly 2x the estimate; without one the default "
+        "budget is small). Call progress(message) to narrate long phases — it is "
+        "user-visible status, not a survival requirement.\n\n"
         "Use print() to produce output. Host Python packages are available by default. "
         "Include a 'packages' array on exec calls for any libraries your code needs — "
         "they'll be auto-installed before the cell runs (already-installed ones are skipped).\n"
@@ -92,7 +93,7 @@ SCRATCHPAD_TOOL = ToolDef(
             },
             "estimated_execution_time_seconds": {
                 "type": "integer",
-                "description": "Estimated execution time in seconds. Drives the total timeout (roughly 2x estimate). Use progress() for long cells.",
+                "description": "Estimated execution time in seconds. Drives the total time budget (roughly 2x estimate).",
             },
             "confirm_new_scratchpad": {
                 "type": "boolean",

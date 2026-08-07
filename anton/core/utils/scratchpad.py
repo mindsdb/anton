@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import os
 from typing import TYPE_CHECKING
 
 from anton.core.tools.registry import ToolOutcome
@@ -12,6 +14,93 @@ def _acc_observe(session, kind: str, detail: dict, *, severity: int = 1) -> None
     fn = getattr(session, "_acc_observe", None)
     if fn is not None:
         fn(kind, detail, severity=severity)
+
+
+_DISCOVERY_MAX_PADS = 10
+_DISCOVERY_MAX_ROOT_ENTRIES = 30
+
+
+def _age_label(mtime: float | None) -> str:
+    if mtime is None:
+        return ""
+    import time
+
+    mins = max(0, int((time.time() - mtime) / 60))
+    if mins < 60:
+        return f" (snapshot {mins}m old)"
+    if mins < 60 * 48:
+        return f" (snapshot {mins // 60}h old)"
+    return f" (snapshot {mins // (60 * 24)}d old)"
+
+
+def build_workspace_discovery_context(manager) -> str:
+    """Compact turn-start block: known pads + project-root names (ENG-578).
+
+    Cold-start blindness made the agent invent pad names and rebuild state it
+    already had on disk. Source of truth is agent_pads() — live pads only add
+    the "active" label, so system-created pads never leak in. Best-effort by
+    construction: any failure degrades to omitting that part or the whole
+    block, never to breaking the turn.
+    """
+    pads_line = ""
+    try:
+        known = sorted(manager.agent_pads())
+        if known:
+            shown = known[:_DISCOVERY_MAX_PADS]
+            live = set(manager.pads)
+            parts = []
+            for name in shown:
+                label = (
+                    " (active)"
+                    if name in live
+                    else _age_label(manager.pad_snapshot_mtime(name))
+                )
+                parts.append(f"{name}{label}")
+            more = (
+                f" … and {len(known) - len(shown)} more"
+                if len(known) > len(shown)
+                else ""
+            )
+            pads_line = (
+                "\nScratchpads for this conversation: "
+                + ", ".join(parts)
+                + more
+                + " — reuse via scratchpad exec with the same name; each name is a "
+                "separate environment."
+            )
+    except Exception:
+        pads_line = ""
+
+    root_line = ""
+    try:
+        root = manager.workspace_path
+        if root is not None:
+            # Hidden entries are excluded deliberately: this block ships to
+            # the model, and filenames hinting at secret locations (.env,
+            # .aws) don't belong in LLM-visible context — even names-only.
+            # scandir rather than iterdir+is_dir: dir-ness comes from the
+            # dirent for free instead of a stat per entry, and this runs
+            # every turn. Full iteration is inherent to a sorted first-30.
+            with os.scandir(root) as it:
+                entries = sorted(
+                    entry.name + ("/" if entry.is_dir() else "")
+                    for entry in it
+                    if not entry.name.startswith(".")
+                )
+            if entries:
+                shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
+                more = (
+                    f" … and {len(entries) - len(shown_entries)} more"
+                    if len(entries) > len(shown_entries)
+                    else ""
+                )
+                root_line = "\nProject root: " + ", ".join(shown_entries) + more
+    except Exception:
+        root_line = ""
+
+    if not pads_line and not root_line:
+        return ""
+    return "\n\nWorkspace state:" + pads_line + root_line
 
 
 def observe_scratchpad_cell(session, name: str, cell) -> None:

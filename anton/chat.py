@@ -80,6 +80,7 @@ from anton.minds_client import (
     describe_minds_connection_error,
     list_minds,
     list_datasources,
+    resolve_and_probe,
     test_llm,
 )
 from anton.core.datasources.data_vault import LocalDataVault
@@ -94,6 +95,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style as PTStyle
+from rich.markup import escape
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
 from anton.commands.goal import parse_goal_args, run_goal_loop
@@ -273,23 +275,40 @@ async def _handle_connect(
 
     # --- Test if the Minds server also supports LLM endpoints ---
     # (silenced: was printing "Testing LLM endpoints..." and "not available" messages)
-    llm_ok = test_llm(minds_url, api_key, verify=ssl_verify)
+    models, llm_result = resolve_and_probe(minds_url, api_key, verify=ssl_verify)
 
-    if llm_ok:
+    # A 429 proves the endpoint is THERE — it answered, it just throttled this
+    # probe. Treating it as unavailable dropped a throttled-but-valid MindsHub
+    # endpoint and fell through to the BYOK prompt (#317 review); the previous
+    # truthy "rate_limited" string had adopted it.
+    llm_available = llm_result.ok or llm_result.rate_limited
+
+    if not llm_available and llm_result.error:
+        console.print(
+            f"[anton.muted]Minds LLM endpoints unavailable "
+            f"({escape(llm_result.error)}) — keeping the current LLM provider.[/]"
+        )
+    elif llm_result.rate_limited:
+        console.print(
+            "[anton.muted]Minds LLM endpoints are rate-limited right now — "
+            "using them anyway; limits clear on their own.[/]"
+        )
+
+    if llm_available:
         console.print(
             "[anton.success]LLM endpoints available — using Minds server as LLM provider.[/]"
         )
         settings.planning_provider = "openai-compatible"
         settings.coding_provider = "openai-compatible"
-        settings.planning_model = "_reason_"
-        settings.coding_model = "_code_"
+        settings.planning_model = models.planning
+        settings.coding_model = models.coding
         # openai_api_key and openai_base_url are derived at runtime from
         # minds_api_key and minds_url via model_post_init — no need to persist them.
         settings.model_post_init(None)
         global_ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         global_ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
-        global_ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
-        global_ws.set_secret("ANTON_CODING_MODEL", "_code_")
+        global_ws.set_secret("ANTON_PLANNING_MODEL", models.planning)
+        global_ws.set_secret("ANTON_CODING_MODEL", models.coding)
     else:
         # Check if Anthropic key is already configured
         has_anthropic = settings.anthropic_api_key or os.environ.get(
@@ -378,7 +397,7 @@ async def _handle_remote(
         console.print("  [anton.muted]To use remote scratchpad you need a free Minds account.[/]")
         console.print()
         has_key = await prompt_or_cancel(
-            "  Do you have an mdb.ai API key?",
+            "  Do you have a MindsHub API key?",
             choices=["y", "n"],
             choices_display="y/n",
             default="y",
@@ -441,7 +460,7 @@ async def _handle_publish(
         console.print("  [anton.muted]To publish dashboards you need a free Minds account.[/]")
         console.print()
         has_key = await prompt_or_cancel(
-            "  Do you have an mdb.ai API key?",
+            "  Do you have a MindsHub API key?",
             choices=["y", "n"],
             choices_display="y/n",
             default="y",
@@ -1884,7 +1903,13 @@ async def _chat_loop(
                         elif isinstance(event, StreamContextCompacted):
                             display.show_context_compacted(event.message)
                         elif isinstance(event, StreamComplete):
-                            total_input += event.response.usage.input_tokens
+                            # ALL prompt-side tokens, not just the fresh ones:
+                            # `input_tokens` became fresh-only when cache
+                            # components were split out (ENG-1288), so reading
+                            # it alone would silently shrink this counter on
+                            # warm-cache turns — the same number it showed
+                            # before the split is `context_tokens`.
+                            total_input += event.response.usage.context_tokens
                             total_output += event.response.usage.output_tokens
 
                 elapsed = time.monotonic() - t0
@@ -1917,7 +1942,7 @@ async def _chat_loop(
                     console.print(
                         f"[anton.warning]Approaching token limit: {last_token_status.used:,} / "
                         f"{last_token_status.limit:,} tokens used ({pct}%). "
-                        "Visit mdb.ai to upgrade your plan or top up your tokens.[/]"
+                        "Visit console.mindshub.ai to upgrade your plan or top up your tokens.[/]"
                     )
                     console.print()
                 if _query_count == 1:
