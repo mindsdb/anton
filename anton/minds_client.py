@@ -13,12 +13,45 @@ import json as _json
 import ssl
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from anton.core.llm.openai import build_chat_completion_kwargs
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
+
+# Tier-default models on MindsHub Cloud — bare catalogue ids, the same pair
+# cowork-server's apply_model_defaults seeds. Used when /v1/models is not
+# deployed on the target host (not every MindsHub host serves listing routes).
+MINDS_DEFAULT_PLANNING_MODEL = "sonnet"
+MINDS_DEFAULT_CODING_MODEL = "haiku"
+
+# The free-bucket model present in every tier (auth's model_policy.json sets
+# free_bucket only for it) — the last resort when the catalogue says the key
+# cannot use the tier defaults, and cowork-server's probe model (ENG-576).
+MINDS_FREE_TIER_MODEL = "mindshub_air"
+
+# Dead mdb.ai smart-router aliases — never usable, whatever a server claims
+# to serve (ENG-1140).
+LEGACY_SMART_ROUTER_ALIASES = frozenset({"_reason_", "_code_"})
+
+
+def minds_v1_base(base_url: str) -> str:
+    """Host-aware OpenAI-compatible base URL.
+
+    api.mindshub.ai serves the OpenAI-compatible API at /v1, the legacy
+    mdb.ai host at /api/v1. Same rule as AntonSettings.model_post_init
+    (ENG-436) and cowork-server's minds_chat_base_url; a shell twin lives in
+    anton_services snapshots/cowork/setup.sh (mh_fetch_model_catalog) — keep
+    them aligned.
+    """
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        return base
+    if "mdb.ai" in base:
+        return f"{base}/api/v1"
+    return f"{base}/v1"
 
 
 def minds_request(
@@ -185,24 +218,212 @@ def list_datasources(
     return data.get("datasources", data if isinstance(data, list) else [])
 
 
-def test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
-    """Test if the Minds server supports LLM endpoints (_code_/_reason_ models).
+def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
+    """List the chat-model ids this key can actually use.
 
-    Uses the new /v1/ format (legacy /api/v1/ is still supported by the server).
+    Filters the catalogue on the fields that say whether a model is usable,
+    not just listed: ``embedding`` models can't chat, and ``enabled`` is
+    auth's wallet/allowance-aware access decision — a free-tier or
+    wallet-empty key sees paid models with ``enabled: false`` (clients must
+    not recompute access themselves; ENG-576). Entries without the flag are
+    kept, so older hosts that don't send it still work. The dead smart-router
+    aliases are dropped defensively.
+
+    Short timeout: the catalogue is advisory (callers fall back to defaults),
+    so it must not double the worst-case spinner hang of the probe itself.
+    """
+    url = f"{minds_v1_base(base_url)}/models"
+    raw = minds_request(url, api_key, verify=verify, timeout=10)
+    data = _json.loads(raw.decode())
+    entries = data.get("data") if isinstance(data, dict) else data
+    ids: list[str] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        if entry.get("embedding") or entry.get("enabled") is False:
+            continue
+        model_id = str(entry["id"])
+        if model_id in LEGACY_SMART_ROUTER_ALIASES:
+            continue
+        ids.append(model_id)
+    return ids
+
+
+@dataclass
+class MindsModels:
+    """Resolved (planning, coding) pair plus the model to probe with.
+
+    ``probe`` is always one of the pair, so a passing probe validates the
+    configuration that gets persisted — that invariant is the point of
+    ENG-1140 and must hold on every branch.
+
+    With no catalogue to trust, the pair is the tier defaults and
+    ``free_fallback`` names the free-bucket model to *escalate down to* if the
+    paid probe is denied. Probing the free model directly instead would pass
+    for a free-tier key and then persist an unvalidated paid pair that 403s on
+    the first real request — "Connected" masking a broken install, which is
+    the exact class this ticket exists to remove (#317 re-review). Probing the
+    paid default alone would wrongly block free-tier keys (ENG-576), so
+    neither single probe is correct: the escalation is.
+    """
+
+    planning: str
+    coding: str
+    probe: str
+    # None when the pair came from the live catalogue (already access-aware —
+    # /v1/models only lists what the key may use, so no escalation exists).
+    free_fallback: str | None = None
+
+
+def resolve_minds_models(
+    base_url: str, api_key: str, verify: bool = True
+) -> MindsModels:
+    """Pick the setup models from the live catalogue.
+
+    Falls back to the tier defaults when /v1/models is unreachable — listing
+    routes are not deployed on every MindsHub host and can 404 even for valid
+    keys — so setup never blocks on the catalogue being available.
+    """
+    try:
+        ids = list_models(base_url, api_key, verify=verify)
+    except Exception:
+        ids = []
+    if not ids:
+        # Probe the model we would actually configure, and let the caller
+        # escalate down to the free bucket if that probe is denied.
+        return MindsModels(
+            planning=MINDS_DEFAULT_PLANNING_MODEL,
+            coding=MINDS_DEFAULT_CODING_MODEL,
+            probe=MINDS_DEFAULT_CODING_MODEL,
+            free_fallback=MINDS_FREE_TIER_MODEL,
+        )
+
+    def pick(preferred: tuple[str, ...], fallback: str) -> str:
+        for name in preferred:
+            if name in ids:
+                return name
+        return fallback
+
+    # The free-bucket model sits last in each chain: when the catalogue says
+    # the key can't use the paid defaults (free tier / empty wallet), land on
+    # the model it is entitled to instead of one that will 403 (ENG-576).
+    planning = pick(
+        (MINDS_DEFAULT_PLANNING_MODEL, "opus", "fable", MINDS_FREE_TIER_MODEL),
+        ids[0],
+    )
+    coding = pick((MINDS_DEFAULT_CODING_MODEL, MINDS_FREE_TIER_MODEL), planning)
+    return MindsModels(planning=planning, coding=coding, probe=coding)
+
+
+@dataclass
+class LLMTestResult:
+    """Outcome of an LLM connectivity probe, with the provider's own error.
+
+    ``http_status`` is set when the server answered with an HTTP error — which
+    proves the transport (TLS included) worked, so callers can skip
+    no-SSL-verification retries that cannot change the outcome.
+    """
+
+    ok: bool
+    rate_limited: bool = False
+    error: str | None = None
+    http_status: int | None = None
+
+
+def _http_error_detail(e: urllib.error.HTTPError) -> str:
+    """Extract the provider's error message from an HTTP error body.
+
+    MindsHub returns OpenAI-shaped error envelopes ({"error": {"code":
+    "model_not_found", "message": ...}}); surface that instead of a bare
+    status so setup can tell the user what actually failed.
+    """
+    try:
+        body = _json.loads(e.read().decode())
+        err = body.get("error", body) if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            message = err.get("message")
+            code = err.get("code")
+            if message:
+                return f"{code}: {message}" if code else str(message)
+        elif isinstance(err, str) and err:
+            return err
+    except Exception:
+        pass
+    return f"HTTP {e.code}: {e.reason or 'error'}"
+
+
+def test_llm(
+    base_url: str,
+    api_key: str,
+    verify: bool = True,
+    model: str = MINDS_DEFAULT_CODING_MODEL,
+) -> LLMTestResult:
+    """Probe the server's chat-completions endpoint with a tiny request.
+
+    Probes with the model setup is about to configure (resolved from the live
+    catalogue by the caller), so a passing probe validates the actual config.
+
+    max_tokens must be >= 16: the OpenAI-backed catalogue entries (gpt-*,
+    mindshub_air) reject smaller values with integer_below_min_value, so a
+    1-token probe was a deterministic false negative on those models. 20
+    matches cowork-server's validate_minds.
     """
     payload = _json.dumps(build_chat_completion_kwargs(
-        model="_code_",
+        model=model,
         messages=[{"role": "user", "content": "ping"}],
-        max_tokens=1,
+        max_tokens=20,
     )).encode()
 
-    url = f"{base_url}/v1/chat/completions"
+    url = f"{minds_v1_base(base_url)}/chat/completions"
     try:
         minds_request(url, api_key, method="POST", payload=payload, verify=verify)
-        return True
+        return LLMTestResult(ok=True)
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            return "rate_limited"
-        return False
-    except Exception:
-        return False
+            return LLMTestResult(
+                ok=False,
+                rate_limited=True,
+                error=_http_error_detail(e),
+                http_status=429,
+            )
+        return LLMTestResult(ok=False, error=_http_error_detail(e), http_status=e.code)
+    except Exception as e:
+        headline, _advice = describe_minds_connection_error(e)
+        return LLMTestResult(ok=False, error=headline)
+
+
+def resolve_and_probe(
+    base_url: str, api_key: str, verify: bool = True
+) -> tuple[MindsModels, LLMTestResult]:
+    """Resolve the setup models and validate them with one probe.
+
+    Returns the pair that should be PERSISTED together with the probe result
+    for it — so callers never persist a configuration no probe covered
+    (ENG-1140's invariant).
+
+    On the no-catalogue branch, a paid-default probe denied for model-access
+    reasons escalates once to the free bucket and, on success, returns the
+    free pair. Only access denials escalate: a 401 is a bad key, a 429 is
+    throttling, and a transport failure says nothing about entitlement — all
+    of those must surface as themselves rather than be retried as if the model
+    were the problem (#317 re-review).
+    """
+    models = resolve_minds_models(base_url, api_key, verify=verify)
+    result = test_llm(base_url, api_key, verify=verify, model=models.probe)
+    if (
+        result.ok
+        or models.free_fallback is None
+        or models.free_fallback == models.probe
+        # 403 = model_access_denied/model_disabled, 404 = model_not_found.
+        # Anything else is not an entitlement signal.
+        or result.http_status not in (403, 404)
+    ):
+        return models, result
+
+    free = models.free_fallback
+    free_result = test_llm(base_url, api_key, verify=verify, model=free)
+    if not free_result.ok:
+        # Report the ORIGINAL denial: it names the model the user actually
+        # asked to be set up with, which is the more useful message.
+        return models, result
+    return MindsModels(planning=free, coding=free, probe=free), free_result

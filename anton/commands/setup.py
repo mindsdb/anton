@@ -42,8 +42,10 @@ async def handle_setup_models(
     def _provider_label(provider: str) -> str:
         if provider == "openai-compatible":
             base = settings.openai_base_url or ""
-            if settings.minds_url and "mdb.ai" in settings.minds_url:
-                return "Minds-Enterprise-Cloud"
+            if settings.minds_url and (
+                "mindshub.ai" in settings.minds_url or "mdb.ai" in settings.minds_url
+            ):
+                return "MindsHub"
             else:
                 hostname = None
                 if base:
@@ -59,14 +61,9 @@ async def handle_setup_models(
             return "OpenAI-compatible"
         return provider.capitalize()
 
-    def _model_label(model: str, role: str) -> str:
-        if model in ("_reason_", "_code_"):
-            return f"smart_router({role})"
-        return model
-
     provider_display = _provider_label(settings.planning_provider)
-    planning_display = _model_label(settings.planning_model, "planning")
-    coding_display = _model_label(settings.coding_model, "coding")
+    planning_display = settings.planning_model
+    coding_display = settings.coding_model
 
     console.print()
     console.print("[anton.cyan]Current configuration:[/]")
@@ -79,9 +76,8 @@ async def handle_setup_models(
     console.print()
 
     def _print_choices():
-        console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
-        console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]")
-        console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]")
+        console.print("  [bold]1[/]  [link=https://mindshub.ai][anton.cyan]MindsHub[/][/link] [anton.success](recommended)[/]")
+        console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI / Gemini[/]")
         console.print("  [bold]q[/]  [anton.muted]Back[/]")
         console.print()
 
@@ -90,7 +86,7 @@ async def handle_setup_models(
     while True:
         choice = await prompt_or_cancel(
             "(anton) Choose LLM Provider",
-            choices=["1", "2", "3", "q"],
+            choices=["1", "2", "q"],
             default="1",
         )
         if choice is None or choice == "q":
@@ -100,8 +96,6 @@ async def handle_setup_models(
             if choice == "1":
                 _setup_minds(settings, global_ws)
             elif choice == "2":
-                _setup_minds(settings, global_ws, default_url=None)
-            elif choice == "3":
                 _setup_other_provider(settings, global_ws)
             break
         except _SetupRetry:

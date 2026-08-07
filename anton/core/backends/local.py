@@ -16,14 +16,21 @@ from pathlib import Path
 from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.wire import (
     CELL_DELIM,
+    HEARTBEAT_MARKER,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
+    STDOUT_CHUNK_MARKER,
 )
 from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
+
+# Bound on accumulated salvage chunks per cell — mirrors the boot script's
+# _MAX_OUTPUT so a killed cell can never report more stdout than a successful
+# one would have.
+_SALVAGE_MAX = 10_000
 
 
 def _read_boot_script() -> str:
@@ -517,13 +524,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         os.close(fd)
         self._boot_path = path
 
-        # Force UTF-8 mode in the child so its I/O never depends on the host
-        # code page (ENG-824).
+        # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
+        # Propagate provider credentials from the ANTON_* names into the SDK
+        # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
             env["ANTHROPIC_API_KEY"] = env["ANTON_ANTHROPIC_API_KEY"]
         if "OPENAI_API_KEY" not in env and "ANTON_OPENAI_API_KEY" in env:
@@ -698,6 +706,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             )
             return
 
+        # Fresh salvage state per cell: _read_result accumulates the worker's
+        # stdout chunks here so a kill/crash can still report partial output.
+        self._salvage: list[str] = []
+        self._salvage_truncated = False
+
         payload = code + "\n" + CELL_DELIM + "\n"
         self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
@@ -729,9 +742,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "For Snowflake: use SHOW RUNNING QUERIES and "
                 "SELECT SYSTEM$CANCEL_ALL_QUERIES(<session_id>)."
             )
+            salvaged = "".join(self._salvage)
+            if salvaged:
+                if self._salvage_truncated:
+                    salvaged = "(truncated to most recent output)\n" + salvaged
+                error_msg += (
+                    "\n\nPartial output from before the kill was recovered "
+                    "and is shown in stdout (current to within one heartbeat "
+                    "interval) — use it to determine which side effects "
+                    "already happened."
+                )
             cell = Cell(
                 code=code,
-                stdout="",
+                stdout=salvaged,
                 stderr="",
                 error=error_msg,
                 description=description,
@@ -798,13 +821,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
 
+        # A budget kill with zero salvaged output is ambiguous: a stuck call
+        # and silent heavy work look identical from outside, so the message
+        # says so instead of implying "too heavy" (the confident wrong guess
+        # that taught the ENG-578 per-item pattern). The phrase routes to its
+        # own nudge — lockstep constraint, see the silence-kill raise below.
+        def _total_timeout_message() -> str:
+            base = f"Cell timed out after {total_timeout:.0f}s total"
+            if not self._salvage:
+                return base + (
+                    " without producing any output — either a call is stuck "
+                    "or the work is heavier than estimated"
+                )
+            return base
+
         while True:
             elapsed = _time.monotonic() - start
             remaining_total = total_timeout - elapsed
             if remaining_total <= 0:
-                raise asyncio.TimeoutError(
-                    f"Cell timed out after {total_timeout:.0f}s total"
-                )
+                raise asyncio.TimeoutError(_total_timeout_message())
 
             line_timeout = min(current_inactivity, remaining_total)
             try:
@@ -815,23 +850,60 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             except asyncio.TimeoutError:
                 elapsed_now = _time.monotonic() - start
                 if elapsed_now >= total_timeout - 0.5:
-                    raise asyncio.TimeoutError(
-                        f"Cell timed out after {total_timeout:.0f}s total"
-                    ) from None
+                    raise asyncio.TimeoutError(_total_timeout_message()) from None
+                # Wording is load-bearing in THREE places (ENG-578 lockstep):
+                # _select_resilience_nudge routes on "liveness"/"timed out"/
+                # "without producing any output", the ACC kill-loop detector
+                # classifies on the same phrases, and observe_scratchpad_cell
+                # records only the FIRST 120 chars as the ACC reason — the
+                # routing keywords must stay inside that slice. Change all of
+                # them together.
+                #
+                # Only two things actually reach this timer now: a dead worker
+                # (EOF follows shortly) or one pinned below Python by a native
+                # call holding the GIL — a userland deadlock or spin keeps
+                # heartbeating and runs to the total budget instead.
                 raise asyncio.TimeoutError(
-                    f"Cell killed after {current_inactivity:.0f}s of inactivity "
-                    "(no output or progress() calls)"
+                    f"Cell killed after {current_inactivity:.0f}s without a "
+                    "liveness signal from the scratchpad worker — the worker "
+                    "process died, or a native call is stuck holding it below "
+                    "Python. Deliberate sleeps and blocking calls are kept "
+                    "alive automatically, so this is NOT caused by "
+                    "quiet-but-working code"
                 ) from None
 
             if not raw:
+                # Crash/EOF: attach whatever stdout chunks were salvaged —
+                # the process died with side effects possibly already done.
                 yield {
-                    "stdout": "",
+                    "stdout": "".join(self._salvage),
                     "stderr": "",
                     "error": "Process exited unexpectedly.",
                 }
                 return
 
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+            if line.startswith(HEARTBEAT_MARKER):
+                # Liveness only: arrival already re-armed the readline timer.
+                continue
+
+            if line.startswith(STDOUT_CHUNK_MARKER):
+                # Salvage: accumulate silently (arrival is also liveness).
+                # Keep the TAIL when over budget — after a kill the newest
+                # output ("sent 47/50") is the valuable part, unlike normal
+                # stdout truncation which keeps the head.
+                try:
+                    chunk = json.loads(line[len(STDOUT_CHUNK_MARKER) :].strip())
+                except json.JSONDecodeError:
+                    chunk = ""
+                if isinstance(chunk, str) and chunk:
+                    self._salvage.append(chunk)
+                    total = sum(len(c) for c in self._salvage)
+                    while total > _SALVAGE_MAX and len(self._salvage) > 1:
+                        total -= len(self._salvage.pop(0))
+                        self._salvage_truncated = True
+                continue
 
             if line.startswith(PROGRESS_MARKER):
                 current_inactivity = max(

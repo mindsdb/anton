@@ -9,6 +9,7 @@ from datetime import datetime
 import json
 import logging
 import re
+import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
 
@@ -27,10 +28,13 @@ from anton.memory.history_store import is_user_turn
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
+    SCRATCHPAD_SILENT_TIMEOUT_NUDGE,
+    SCRATCHPAD_STUCK_NUDGE,
     SCRATCHPAD_TIMEOUT_NUDGE,
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMResponse,
     ModelUnavailableError,
     ProviderOverloadedError,
@@ -59,7 +63,9 @@ from anton.core.llm.tracing import (
 )
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
+from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
+    ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
@@ -72,8 +78,10 @@ from anton.core.tools.tool_defs import (
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
-from anton.core.interaction.selection import SelectionElicitor
+from anton.core.interaction.elicit import Elicitor
+from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
+    build_workspace_discovery_context,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
@@ -465,6 +473,28 @@ def _render_verify_transcript(
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
 
+# Distinguishes "caller captured no exception" (a clean turn — authoritative)
+# from "caller didn't tell us" (fall back to sys.exc_info()). A plain None
+# default would conflate them and re-open the leak this closes.
+_EXC_UNSET = object()
+
+
+def _role_model(tc: TurnCost, role: str) -> str:
+    """Model that ran ``role`` this turn ("" if the role never ran)."""
+    slice_ = tc.by_role.get(role)
+    return slice_.model if slice_ else ""
+
+
+def _role_tokens(tc: TurnCost, role: str) -> str:
+    slice_ = tc.by_role.get(role)
+    return str(slice_.tokens if slice_ else 0)
+
+
+def _role_calls(tc: TurnCost, role: str) -> str:
+    slice_ = tc.by_role.get(role)
+    return str(slice_.calls if slice_ else 0)
+
+
 def _build_verify_request(
     history: list[dict], user_message: str | None
 ) -> tuple[str, list[dict]]:
@@ -560,11 +590,20 @@ class ChatSessionConfig:
     # so resuming a conversation days later still reports the real "now".
     # None → fall back to today.
     started_at: datetime | None = None
-    selection_elicitor: SelectionElicitor | None = None
+    # Strategy for mid-turn questions (`ask_user`, `select_path`). Hosts
+    # inject a concrete elicitor — a GUI card in cowork-server, a terminal
+    # prompt on the CLI. None + a console falls back to the CLI elicitor;
+    # None + no console means questions are unavailable and the tools that
+    # need one are not registered.
+    elicitor: Elicitor | None = None
     # Cheap front-model routing (ENG-648). None (default) defers to the
     # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
     # explicit bool to override per session.
     router_enabled: bool | None = None
+    # When set, only these tool names survive the build; ``None`` = full desktop
+    # set. Applied on every ``_build_tools`` call so a lazy rebuild can't leak a
+    # non-allowlisted tool.
+    tool_allowlist: frozenset[str] | None = None
 
 
 class ChatSession:
@@ -622,6 +661,7 @@ class ChatSession:
         self._act_first = config.act_first
         self._started_at = config.started_at
         self._extra_tools = config.tools
+        self._tool_allowlist = config.tool_allowlist
         # Deferred tool bundles: tools tagged with `unlock_skill`
         # are held here, keyed by skill label, and registered only when that
         # skill is recalled. Populated in `_build_tools`.
@@ -646,18 +686,35 @@ class ChatSession:
         self._history_store = config.history_store
         self._session_id = config.session_id
         self._harness = config.harness
+        # Per-turn token cost books (ENG-1288). Created and armed at each
+        # turn's start; emitted and disarmed in the turn's finally. None
+        # outside a turn.
+        self._turn_cost: TurnCost | None = None
         # Set per-turn by `turn_stream` so any LLM call made during that
         # turn can read the current turn identifier (used by telemetry /
         # langfuse propagation in the provider layer).
         self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
-        self._escape_watcher: EscapeWatcher | None = None
+        self.escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
-        # Strategy for mid-turn file/folder disambiguation (the `select_path`
-        # tool). Hosts inject a concrete elicitor — a streaming GUI picker in
-        # cowork-server, a terminal picker on the CLI. None falls back to the
-        # console picker (CLI) or a graceful no-op (headless).
-        self.selection_elicitor: SelectionElicitor | None = config.selection_elicitor
+        # Resolved once, here, because tool registration reads
+        # `supported_kinds` and `answer_hint` off the instance.
+        # Host-injected first; a console-backed session (the real CLI,
+        # chat.py passes console=console) falls back to CLIElicitor so it
+        # always gets a working elicitor.
+        self.elicitor: Elicitor | None = config.elicitor
+        if self.elicitor is None and config.console is not None:
+            from anton.core.interaction.cli import CLIElicitor
+
+            self.elicitor = CLIElicitor(config.console)
+        # Out-of-band event path, attached for the duration of a
+        # `turn_stream` turn only. `turn()` leaves it None, which is what
+        # makes questions unavailable on the non-streaming path.
+        self.emitter = None
+        self.question_count = 0
+        # Seconds spent waiting on humans during the current tool dispatch,
+        # subtracted from the tool's reported elapsed time.
+        self.answer_wait_s = 0.0
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -748,6 +805,10 @@ class ChatSession:
         # at the start of each turn. Prevents double-summarization when
         # the post-recovery response still reports high pressure.
         self._compacted_this_turn = False
+        # Stops a *failed* proactive compaction from being re-attempted every
+        # tool round. A transient blip still gets a fresh attempt next
+        # turn (both flags reset per turn).
+        self._compaction_failed_this_turn = False
         # Backends launched via the launch_backend tool. Keyed by
         # artifact slug; each entry holds the asyncio.subprocess.Process
         # plus its port. Reaped in close() so backend processes don't
@@ -866,7 +927,20 @@ class ChatSession:
         if tool_name != "scratchpad":
             return RESILIENCE_NUDGE
         low = result_text.lower()
-        if "timed out" in low or "inactivity" in low:
+        # A silence/liveness kill means the worker looked dead — "make the
+        # cell smaller" is exactly the wrong advice there (ENG-578: it taught
+        # per-item LLM round-trips). A budget kill that produced no output is
+        # ambiguous (stuck vs silently heavy) and gets its own honest nudge.
+        # Only a budget kill that WAS producing output genuinely means too
+        # heavy. "inactivity" keeps matching kills reported by remote/
+        # old-version workers. Order matters: both specific messages also
+        # contain "timed out"-adjacent words, so they must not fall through
+        # to the too-heavy branch.
+        if "liveness" in low or "inactivity" in low:
+            return SCRATCHPAD_STUCK_NUDGE
+        if "without producing any output" in low:
+            return SCRATCHPAD_SILENT_TIMEOUT_NUDGE
+        if "timed out" in low:
             return SCRATCHPAD_TIMEOUT_NUDGE
         # Match the empty-code dispatcher message specifically — generic
         # phrases like "too large"/"truncated" appear in unrelated errors
@@ -1129,6 +1203,16 @@ class ChatSession:
         # Inject connected datasource context without credentials
         ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
 
+        # Turn-start workspace discovery (ENG-578): volatile, so it rides the
+        # tail — never the cache-stable prefix. Best-effort; a failure here
+        # must not break the turn.
+        workspace_ctx = ""
+        if self._scratchpads is not None:
+            try:
+                workspace_ctx = build_workspace_discovery_context(self._scratchpads)
+            except Exception:
+                workspace_ctx = ""
+
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
 
@@ -1146,6 +1230,7 @@ class ChatSession:
             self_awareness_context=sa_section,
             datasource_context=ds_ctx,
             skill_store=self._skill_store,
+            workspace_context=workspace_ctx,
         )
 
         return prompt
@@ -1217,6 +1302,20 @@ class ChatSession:
             # loaded history, at the same tail position the live path uses, so
             # tool order stays cache-stable across turns.
             self._replay_tool_bundles_from_history()
+        # Enforce the allowlist on every build (None = full desktop set).
+        if self._tool_allowlist is not None:
+            built = {t.name for t in self.tool_registry.get_tool_defs()}
+            # Fail loud on a name that matches no built tool (typo / unavailable
+            # here) rather than silently dropping it.
+            unknown = set(self._tool_allowlist) - built
+            if unknown:
+                raise ValueError(
+                    "tool_allowlist names not registered in this session: "
+                    + ", ".join(sorted(unknown))
+                    + f" (available: {', '.join(sorted(built))})"
+                )
+            for name in built - set(self._tool_allowlist):
+                self.tool_registry.unregister_tool(name)
         return self.tool_registry.dump()
 
     def _register_tool_bundle(self, label: str) -> None:
@@ -1274,8 +1373,27 @@ class ChatSession:
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
         # Interactive file/folder disambiguation — always available; degrades
-        # to a plain-text prompt when no elicitor/console is present.
+        # to picker_unavailable (and still auto-resolves a single candidate)
+        # when no elicitor supports path questions.
         self.tool_registry.register_tool(SELECT_PATH_TOOL)
+
+        # Multiple-choice questions — only when some host can actually render
+        # them. Without this the model would ask into a void. The cowork kill
+        # switch works by withholding the elicitor, so it needs no case here.
+        if self.elicitor is not None and "choice" in self.elicitor.supported_kinds:
+            # Copy, don't mutate: ToolDefs are module-level singletons and the
+            # hint is per-host, so an in-place edit would leak across every
+            # session sharing this process.
+            self.tool_registry.register_tool(
+                replace(
+                    ASK_USER_TOOL,
+                    description=(
+                        ASK_USER_TOOL.description
+                        + "\n\n"
+                        + self.elicitor.answer_hint
+                    ),
+                )
+            )
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -1316,6 +1434,14 @@ class ChatSession:
         await self._reap_tracked_backends()
         await self._scratchpads.close_all()
 
+    async def emit(self, event) -> None:
+        """Push an out-of-band event to the host, if one is listening.
+
+        A no-op without an emitter, so callers never need to guard.
+        """
+        if self.emitter is not None:
+            await self.emitter.emit(event)
+
     async def _reap_tracked_backends(self) -> None:
         """Terminate every backend launched via launch_backend.
 
@@ -1337,7 +1463,7 @@ class ChatSession:
                 pass
         self._tracked_backends.clear()
 
-    async def _summarize_history(self) -> None:
+    async def _summarize_history(self) -> bool:
         """Compress old conversation turns into a summary.
 
         Splits history into old (first 60%) and recent (last 40%), keeping at
@@ -1345,9 +1471,16 @@ class ChatSession:
         summarization model (the router role, which falls back to the coding
         model when no distinct one is configured) and replaced with a single
         user message.
+
+        Returns True only if history was actually replaced. Every no-op path
+        (too short, negligible new material, summarization failure) returns
+        False so callers don't set `_compacted_this_turn` or emit a
+        StreamContextCompacted event for a compaction that didn't happen. On a
+        failure specifically, proactive callers also set
+        `_compaction_failed_this_turn` so it isn't re-attempted every round.
         """
         if len(self._history) < 6:
-            return  # Too short to summarize
+            return False  # Too short to summarize
 
         min_recent = 4
         # Number of leading messages to fold into the summary; doubles as the
@@ -1356,7 +1489,7 @@ class ChatSession:
         # Ensure we keep at least min_recent turns
         compacted_count = min(compacted_count, len(self._history) - min_recent)
         if compacted_count < 2:
-            return
+            return False
 
         # Walk the cut backward to avoid breaking tool_use / tool_result
         # pairs. A user message containing tool_result blocks must stay with
@@ -1382,7 +1515,7 @@ class ChatSession:
                 compacted_count -= 1
 
         if compacted_count < 2:
-            return
+            return False
 
         old_turns = self._history[:compacted_count]
         recent_turns = self._history[compacted_count:]
@@ -1411,7 +1544,7 @@ class ChatSession:
         new_old_len = _approx_len(new_old_turns)
         recent_len = _approx_len(recent_turns)
         if new_old_len < 0.10 * (new_old_len + recent_len):
-            return
+            return False
 
         # Serialize old turns. Pull out any prior compacted summary so we
         # UPDATE it in place rather than summarize a summary (which compounds
@@ -1487,9 +1620,20 @@ class ChatSession:
             summary = summary_response.content or "(summary unavailable)"
             # Record the compaction ONLY on success.
             self._last_compacted_count = compacted_count
-        except Exception:
-            # If summarization fails, just do a simple truncation
-            summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
+        except Exception as exc:
+            # Don't discard history on failure — losing the earlier turns is
+            # worse than carrying them. Leave `self._history` untouched and let
+            # the reactive overflow path handle it if the provider actually
+            # rejects the request. Never silently: an unlogged swallow made a
+            # dropped conversation indistinguishable from a successful
+            # compaction (ENG-1274). Type name only; the message can quote
+            # conversation-derived content.
+            logger.warning(
+                "history summarization failed (%s) — keeping %d turns intact",
+                type(exc).__name__,
+                len(old_turns),
+            )
+            return False
 
         # 3b-light: reference-only framing so the model treats this as compacted
         # history, not a fresh instruction, and never resumes superseded/cancelled
@@ -1515,6 +1659,7 @@ class ChatSession:
             ]
         else:
             self._history = [summary_msg] + recent_turns
+        return True
 
     def _compact_scratchpads(self) -> bool:
         """Compact all active scratchpads. Returns True if any were compacted."""
@@ -1756,9 +1901,10 @@ class ChatSession:
         except ContextOverflowError:
             pass
 
-        await self._summarize_history()
+        compacted = await self._summarize_history()
         self._compact_scratchpads()
-        self._compacted_this_turn = True
+        if compacted:
+            self._compacted_this_turn = True
         try:
             return await self._llm.plan(messages=factory_validated(), **kwargs)
         except ContextOverflowError:
@@ -1766,6 +1912,169 @@ class ChatSession:
 
         self.hard_truncate_history()
         return await self._llm.plan(messages=factory_validated(), **kwargs)
+
+    def _emit_turn_cost(
+        self,
+        expected: TurnCost | None = None,
+        exc: BaseException | None | object = _EXC_UNSET,
+    ) -> None:
+        """Close the turn's cost books: disarm the listener, resolve the
+        terminal path, and emit the two reporting sinks (ENG-1288).
+
+        Called from the turn's ``finally`` so it fires on every exit —
+        normal completion, hand-backs, generator close (client disconnect /
+        cancel), and errors. The in-flight exception, if any, wins the
+        ``ended_by`` resolution; explicit marks set at the terminal sites
+        (round_cap / handback_*) survive a clean exit; everything else is
+        "completed".
+
+        Post-turn background work (cerebellum flush, identity extraction)
+        runs after this and is deliberately NOT attributed to any turn —
+        the listener is disarmed here precisely so late usage can't leak
+        into the next turn's books (stated ENG-1288 gap).
+        """
+        # Report the books this call was handed. A late async-generator
+        # finalizer for an ABANDONED turn runs in a fresh task long after the
+        # fact, by which point a newer turn may own the shared slot — but the
+        # stale books still hold a complete, real turn, and dropping them lost
+        # exactly the runaway the user just cancelled (#309 review). So: emit
+        # whichever books came in, and let only the OWNING turn clear the slot.
+        tc = expected if expected is not None else self._turn_cost
+        if tc is None or tc.emitted:
+            return
+        tc.emitted = True  # the double-emit guard, now on the books themselves
+        is_owner = self._turn_cost is tc
+        if tc.ended_monotonic is None:
+            # The owning turn is ending right now; a late finalizer is not — so
+            # it reports up to the last LLM call rather than up to whenever
+            # asyncio ran it (#309 review follow-up).
+            import time as _t
+
+            tc.ended_monotonic = (
+                _t.monotonic()
+                if is_owner or tc.last_activity_monotonic is None
+                else tc.last_activity_monotonic
+            )
+        if is_owner:
+            self._turn_cost = None
+            try:
+                self._llm.usage_listener = None
+            except Exception:
+                pass
+
+        # A caller that captured its own exception is authoritative — including
+        # when it captured NOTHING (a clean turn), which is why this needs a
+        # sentinel rather than `if exc is None`. `sys.exc_info()` returns
+        # whatever the thread is CURRENTLY handling, including an exception the
+        # caller had already caught before invoking the turn, and reading it on
+        # a clean turn reported `error` for one that succeeded. The lookup
+        # remains only for the legacy non-streaming `turn()`, which has no
+        # wrapping handler to capture from (#309 review).
+        if exc is _EXC_UNSET:
+            exc = sys.exc_info()[1]
+        cancelled = bool(
+            getattr(self, "_cancel_event", None) and self._cancel_event.is_set()
+        )
+        # asyncio.CancelledError is the SHAPE USER STOP TAKES on the primary
+        # host: cowork-server's RunHandle.cancel() calls task.cancel(), which
+        # raises it inside the suspended generator frame — and nothing there
+        # sets `_cancel_event` (that's anton's CLI only). Without it every
+        # Stop filed as "error" (#309 review). GeneratorExit covers the
+        # narrower case where the cancel lands exactly at a yield boundary.
+        if isinstance(exc, (GeneratorExit, asyncio.CancelledError)) or cancelled:
+            tc.ended_by = "cancelled"
+        elif exc is not None:
+            tc.ended_by = "error"
+
+        # Stamped at books-open; the live lookup remains only for bare-session
+        # tests and the legacy non-streaming path.
+        turn_index = tc.turn_index or (self._turn_count + 1)
+        logger.info(
+            "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
+            "input=%d output=%d cache_read=%d cache_creation=%d "
+            "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
+            "by_role=%s",
+            self._session_id, turn_index, tc.ended_by, tc.total_tokens,
+            tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
+            tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
+            tc.continuations, tc.peak_context_tokens, tc.duration_ms,
+            ",".join(
+                f"{role}={s.model}:{s.tokens}/{s.calls}"
+                for role, s in sorted(tc.by_role.items())
+            ) or "-",
+        )
+
+        # Analytics sink — same settings-resolution pattern as the
+        # ds_connect_* events (anton/tools.py): the session's settings when
+        # the host provided AntonSettings, else a fresh resolve so
+        # analytics_enabled / the CI drop still apply. send_event is
+        # fire-and-forget and never raises. Numbers, names, and IDs only —
+        # never conversation content (ENG-1288).
+        try:
+            settings = getattr(self, "_settings", None)
+            if settings is None or not hasattr(settings, "analytics_enabled"):
+                from anton.config.settings import AntonSettings
+
+                settings = AntonSettings()
+            from anton import __version__ as _anton_version
+            from anton.analytics import send_event
+
+            send_event(
+                settings,
+                "turn_completed",
+                ended_by=tc.ended_by,
+                tokens_total=str(tc.total_tokens),
+                input_tokens=str(tc.input_tokens),
+                output_tokens=str(tc.output_tokens),
+                cache_read_tokens=str(tc.cache_read_tokens),
+                cache_creation_tokens=str(tc.cache_creation_tokens),
+                llm_calls=str(tc.llm_calls),
+                rounds=str(tc.rounds),
+                continuations=str(tc.continuations),
+                peak_context_tokens=str(tc.peak_context_tokens),
+                duration_ms=str(tc.duration_ms),
+                # Per-role attribution: which model actually ran each role and
+                # what it spent. `<role>_model` is the model the USER was on
+                # for the conversational loop (planning) — the configured names
+                # can drift from what ran, and dollars are only computable from
+                # (model, tokens) pairs since a turn mixes rates. Roles are a
+                # closed set, so these stay flat and queryable.
+                planning_model=_role_model(tc, "planning") or str(
+                    self._llm.planning_model or ""
+                ),
+                planning_tokens=_role_tokens(tc, "planning"),
+                planning_calls=_role_calls(tc, "planning"),
+                coding_model=_role_model(tc, "coding") or str(
+                    self._llm.coding_model or ""
+                ),
+                coding_tokens=_role_tokens(tc, "coding"),
+                coding_calls=_role_calls(tc, "coding"),
+                router_model=_role_model(tc, "router"),
+                router_tokens=_role_tokens(tc, "router"),
+                router_calls=_role_calls(tc, "router"),
+                # Should always be 0. Emitted so the per-role sum reconciles
+                # with tokens_total for ANY role a caller passes — `TurnCost.add`
+                # folds anything outside `EVENT_ROLES` into this bucket, so a
+                # novel role shows up here rather than vanishing. A non-zero
+                # value is the alarm that some caller invented a role.
+                unknown_tokens=_role_tokens(tc, UNKNOWN_ROLE),
+                unknown_calls=_role_calls(tc, UNKNOWN_ROLE),
+                # Configured provider name (anthropic / openai /
+                # openai-compatible): separates gateway traffic from BYOK in
+                # queries. The finer per-model provider split is a follow-up.
+                llm_provider=str(getattr(settings, "planning_provider", "") or ""),
+                harness=str(self._harness or ""),
+                anton_version=_anton_version,
+                # Join keys: the same session/turn identity the MindsHub
+                # trace headers carry, so an analytics row links back to
+                # its Langfuse trace (and through it, to the user) for
+                # forensics.
+                conversation_id=str(self._session_id or ""),
+                turn_index=str(turn_index),
+            )
+        except Exception:
+            # Reporting must never affect the turn that just ran.
+            pass
 
     async def _stream_handback_diagnosis(self, *, system: str, label: str):
         """Stream a hand-back diagnosis and persist exactly what the user read.
@@ -1841,12 +2150,13 @@ class ChatSession:
         except ContextOverflowError:
             pass
 
-        await self._summarize_history()
+        compacted = await self._summarize_history()
         self._compact_scratchpads()
-        self._compacted_this_turn = True
-        yield StreamContextCompacted(
-            message="Context was getting long — older history has been summarized."
-        )
+        if compacted:
+            self._compacted_this_turn = True
+            yield StreamContextCompacted(
+                message="Context was getting long — older history has been summarized."
+            )
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 yield event
@@ -2126,6 +2436,14 @@ class ChatSession:
         user_input = _scrub_user_input(user_input)
         self._append_history({"role": "user", "content": user_input})
 
+        # Open the turn's cost books (ENG-1288) — same contract as
+        # turn_stream. This non-streaming path has no wrapping finally, so
+        # emission happens at both returns; an exception propagating out of
+        # this method skips emission (stated gap: the CLI path's error exits
+        # go unreported rather than restructuring the method around it).
+        self._turn_cost = TurnCost(turn_index=self._turn_count + 1)
+        self._llm.usage_listener = self._turn_cost.add
+
         user_msg_str = (
             user_input
             if isinstance(user_input, str)
@@ -2147,6 +2465,7 @@ class ChatSession:
                     self._cortex.maybe_vacuum()
                 self._schedule_cerebellum_flush()
                 self._schedule_acc_flush()
+                self._emit_turn_cost()
                 return decision.text
             if decision is not None and decision.skills:
                 self._inject_recalled_skills(decision.skills)
@@ -2154,18 +2473,23 @@ class ChatSession:
         tools = self._build_tools()
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
+        self._compaction_failed_this_turn = False
 
         response = await self.plan_with_recovery(system=system, tools=tools)
 
-        # Proactive compaction — gated so we never double-summarize within
-        # a single turn (the recovery helper may already have compacted).
+        # Proactive compaction — attempted at most once per turn, and not
+        # re-attempted after a failure (see `_compaction_failed_this_turn`).
         if (
             not self._compacted_this_turn
+            and not self._compaction_failed_this_turn
             and response.usage.context_pressure > self._context_pressure_threshold
         ):
-            await self._summarize_history()
+            compacted = await self._summarize_history()
             self._compact_scratchpads()
-            self._compacted_this_turn = True
+            if compacted:
+                self._compacted_this_turn = True
+            else:
+                self._compaction_failed_this_turn = True
 
         # Handle tool calls
         tool_round = 0
@@ -2174,7 +2498,14 @@ class ChatSession:
 
         while response.tool_calls:
             tool_round += 1
+            if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+                self._turn_cost.rounds += 1
             if tool_round > self._max_tool_rounds:
+                # Mirror turn_stream's cap mark (#309 review) — this path is
+                # public API even without in-repo callers, and the books are
+                # wired here too.
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "round_cap"
                 self._append_history(
                     {"role": "assistant", "content": response.content or ""}
                 )
@@ -2277,15 +2608,19 @@ class ChatSession:
             # Get follow-up from LLM
             response = await self.plan_with_recovery(system=system, tools=tools)
 
-            # Proactive compaction during tool loop — gated to at most
-            # once per turn.
+            # Proactive compaction during tool loop — at most once per turn,
+            # and not re-attempted after a failure.
             if (
                 not self._compacted_this_turn
+                and not self._compaction_failed_this_turn
                 and response.usage.context_pressure > self._context_pressure_threshold
             ):
-                await self._summarize_history()
+                compacted = await self._summarize_history()
                 self._compact_scratchpads()
-                self._compacted_this_turn = True
+                if compacted:
+                    self._compacted_this_turn = True
+                else:
+                    self._compaction_failed_this_turn = True
 
         # Text-only response
         reply = response.content or ""
@@ -2302,9 +2637,123 @@ class ChatSession:
         self._schedule_cerebellum_flush()
         self._schedule_acc_flush()
 
+        self._emit_turn_cost()
         return reply
 
+    async def _dispatch_draining(self, tc):
+        """Run one tool while forwarding whatever it emits out of band.
+
+        Yields ``("event", ev)`` for each out-of-band event, then
+        ``("result", outcome)`` — the ``ToolOutcome`` ``dispatch_tool``
+        returns, so the caller reads ``.content`` and ``.ok`` off it rather
+        than receiving bare text. Four details are load-bearing:
+
+        1. Cancelling BOTH futures in ``finally`` — ``asyncio.wait`` does NOT
+           cancel its futures when the awaiting coroutine is cancelled. Without
+           ``task.cancel()`` a Stop unwinds the turn while the tool keeps
+           waiting on a human for the full timeout, holding its answer channel
+           open; without ``getter.cancel()`` the pending ``emitter.get()``
+           stays registered in the queue's ``_getters`` and asyncio later logs
+           "Task was destroyed but it is pending!".
+        2. The tail drain — events queued immediately before the tool
+           returns (``StreamAskUserAnswered`` above all) would otherwise be
+           dropped, leaving a live card that can never be retired. It is
+           reachable because resolving ``asyncio.wait``'s waiter takes two
+           ``call_soon`` hops (``_on_completion`` -> ``waiter.set_result`` ->
+           our ``__wakeup``): an emit landing between those hops leaves the
+           item sitting in ``Queue._queue`` with the getter still pending, so
+           the loop breaks past it and only the tail drain recovers it. Pinned
+           by ``test_an_event_emitted_one_hop_late_is_recovered_by_the_tail_drain``
+           — that test is the reason to not delete this loop.
+        3. ``task.result()`` rather than a bare ``await`` — ``asyncio.wait``
+           never re-raises a completed task's exception, and the caller's
+           ``except Exception`` is what turns a tool failure into a tool
+           result for the model.
+        4. Callers must ``aclose()`` this generator: if the turn is
+           cancelled while we are suspended at a ``yield``, our ``finally``
+           only runs on finalization, which GC would otherwise defer.
+        """
+        task = asyncio.create_task(
+            self.tool_registry.dispatch_tool(self, tc.name, tc.input)
+        )
+        # Bound before the try: the `finally` cancels it, and if the first
+        # `ensure_future` below raised, an unbound name there would turn the
+        # real cause into a NameError.
+        getter = None
+        try:
+            while True:
+                getter = asyncio.ensure_future(self.emitter.get())
+                done, _ = await asyncio.wait(
+                    {task, getter}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if getter in done:
+                    yield ("event", getter.result())
+                    continue
+                # Cancel here, not only in the `finally`: the yields below are
+                # suspension points, and a doomed-but-still-registered getter
+                # would be handed any event emitted while the host processes
+                # them. `gather` would then discard that event, and it would
+                # not even be left in the queue for a later drain to recover.
+                getter.cancel()
+                break
+            while not self.emitter.empty():
+                yield ("event", self.emitter.get_nowait())
+            yield ("result", task.result())
+        finally:
+            # Both futures, not just the dispatch: asyncio.wait cancels neither
+            # of its own (that is hazard 1's premise), so a Stop landing while
+            # we are parked in wait — a tool running without emitting, i.e. the
+            # common Stop — would leave a pending emitter.get() registered in
+            # the queue's _getters forever, and asyncio later logs
+            # "Task was destroyed but it is pending!".
+            task.cancel()
+            pending = [task]
+            if getter is not None:
+                getter.cancel()
+                pending.append(getter)
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def turn_stream(
+        self,
+        user_input: str | list[dict],
+        *,
+        turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Streaming turn. Owns the out-of-band emitter's lifetime.
+
+        The emitter exists only for the duration of one streaming turn, which
+        is what makes questions unavailable on the non-streaming `turn()`
+        path: nothing there would render them.
+        """
+        self.emitter = TurnEmitter()
+        self.question_count = 0
+        self.answer_wait_s = 0.0
+        # Bind the inner generator so we can close it explicitly. A bare
+        # `async for` would leave it suspended at its own `yield` when a host
+        # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
+        # torn down, and the inner `finally` — which owns the turn-cost
+        # terminal (`_emit_turn_cost`) — is left to the event loop's async
+        # generator finalization, i.e. deferred to a fresh task with a copied
+        # context, or to GC. `aclose()` on this wrapper must be a same-task
+        # close all the way down. Pinned by
+        # tests/test_turn_cost_terminals.py::test_abandoned_generator_still_emits_exactly_once.
+        # Same discipline as `_dispatch_draining`'s point 4.
+        inner = self._turn_stream_inner(
+            user_input,
+            turn_id=turn_id,
+            trace_tags=trace_tags,
+            trace_metadata=trace_metadata,
+        )
+        try:
+            async for event in inner:
+                yield event
+        finally:
+            await inner.aclose()
+            self.emitter = None
+
+    async def _turn_stream_inner(
         self,
         user_input: str | list[dict],
         *,
@@ -2376,6 +2825,22 @@ class ChatSession:
             )
         )
 
+        # Open the turn's cost books and listen at the LLM-client narrow
+        # waist — planning, coding (incl. verifier verdicts), and router
+        # calls all report here (ENG-1288).
+        # Stamp the SAME expression the trace context uses above — including an
+        # explicit host-supplied `turn_id`. Deriving it independently from
+        # `_turn_count` was correct only by accident (no host passes `turn_id`
+        # today); the moment one does, the cost event and the Langfuse trace
+        # would name different turns, which is the defect this stamping exists
+        # to prevent. Consistent by construction, not by coincidence.
+        self._turn_cost = TurnCost(
+            turn_index=turn_id if turn_id is not None else self._turn_count + 1
+        )
+        _turn_cost_books = self._turn_cost
+        self._llm.usage_listener = self._turn_cost.add
+
+        _turn_exc: BaseException | None = None
         try:
             # Cheap front-model routing (ENG-648). Text-only turns first
             # hit the thalamus model, which either answers trivial/from-
@@ -2419,12 +2884,15 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limits and model-gate 403s are
-                    # deterministic — the auto-retry below would just re-send
-                    # the same doomed request (and burn its budget) before
-                    # failing anyway. Don't retry; let the chat loop / server
-                    # map them to their cards.
-                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
+                    # Token/billing limits, model-gate 403s, and endpoint/model
+                    # 404s (ENG-1139) are deterministic — the auto-retry below
+                    # would just re-send the same doomed request (and burn its
+                    # budget) before failing anyway. Don't retry; let the chat
+                    # loop / server map them to their cards.
+                    if isinstance(
+                        _agent_exc,
+                        (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError),
+                    ):
                         raise
 
                     # ENG-673: a mid-stream transient failure that had NO prior
@@ -2509,7 +2977,14 @@ class ChatSession:
                         # again with the error context now in history
                         continue
                     else:
-                        # Exhausted retries — stop and summarize for the user
+                        # Exhausted retries — stop and summarize for the user.
+                        # Mark the terminal: the apology below is yielded as
+                        # ordinary text and nothing is in flight when the
+                        # finally runs, so without this the turn reported
+                        # "completed" — undercounting the most common failure
+                        # mode in any error-rate query (#309 review).
+                        if self._turn_cost is not None:
+                            self._turn_cost.ended_by = "retry_exhausted"
                         self._append_history(
                             {
                                 "role": "user",
@@ -2547,12 +3022,31 @@ class ChatSession:
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break
+        except BaseException as _e:
+            # Capture, don't classify — the finally needs to know whether THIS
+            # turn failed, rather than asking the interpreter what the thread
+            # happens to be handling (#309 review). Covers GeneratorExit and
+            # CancelledError too, both BaseException, both real turn endings.
+            _turn_exc = _e
+            raise
         finally:
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
                 )
-            reset_trace_context(_trace_token)
+            # Emit BEFORE reset_trace_context: on an abandoned generator the
+            # finalizer runs in a copied context, where resetting a token
+            # created elsewhere raises ValueError — which used to abort this
+            # finally and drop the turn's books entirely (#309 review). The
+            # guard passes the books this turn opened so a late finalizer
+            # can't close a newer turn's.
+            self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            try:
+                reset_trace_context(_trace_token)
+            except ValueError:
+                # Cross-context finalizer — the ContextVar copy dies with the
+                # task anyway, so there is nothing to restore.
+                pass
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:
@@ -2693,6 +3187,7 @@ class ChatSession:
         tools = self._build_tools()
         system = await self._build_system_prompt(user_message)
         self._compacted_this_turn = False
+        self._compaction_failed_this_turn = False
 
         response: StreamComplete | None = None
 
@@ -2725,18 +3220,22 @@ class ChatSession:
                 return
             llm_response = response.response
 
-        # Proactive compaction — gated via _compacted_this_turn so we
-        # never double-summarize within a single turn.
+        # Proactive compaction — at most once per turn, and not re-attempted
+        # after a failure (see `_compaction_failed_this_turn`).
         if (
             not self._compacted_this_turn
+            and not self._compaction_failed_this_turn
             and llm_response.usage.context_pressure > self._context_pressure_threshold
         ):
-            await self._summarize_history()
+            compacted = await self._summarize_history()
             self._compact_scratchpads()
-            self._compacted_this_turn = True
-            yield StreamContextCompacted(
-                message="Context was getting long — older history has been summarized."
-            )
+            if compacted:
+                self._compacted_this_turn = True
+                yield StreamContextCompacted(
+                    message="Context was getting long — older history has been summarized."
+                )
+            else:
+                self._compaction_failed_this_turn = True
 
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
@@ -2765,8 +3264,18 @@ class ChatSession:
 
             while llm_response.tool_calls:
                 tool_round += 1
+                # Accumulate, don't assign: `tool_round` is loop-local and
+                # resets to 0 on every verifier-forced continuation, so
+                # assigning reported only the last continuation's rounds —
+                # breaking the metric for exactly the expensive shape it
+                # exists to classify. Counted before the cap check so a
+                # capped turn reports the cap, not cap+1 (#309 review).
+                if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+                    self._turn_cost.rounds += 1
                 if tool_round > self._max_tool_rounds:
                     _max_rounds_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "round_cap"
                     self._acc_observe(
                         "cap_exhausted",
                         {"cap": self._max_tool_rounds},
@@ -2966,28 +3475,44 @@ class ChatSession:
                                     )
                         elif (
                             tc.name == "connect_new_datasource"
-                            or tc.name == "select_path"
                             or (
                                 tc.name == "publish_or_preview"
                                 and tc.input.get("action") == "publish"
                             )
                         ):
-                            # Interactive tool — pause spinner AND escape watcher
+                            # Interactive tool — pause spinner AND escape
+                            # watcher. `select_path` is deliberately NOT here:
+                            # elicit() owns its own spinner and watcher
+                            # handling, and EscapeWatcher._paused is a boolean
+                            # flag rather than a counter, so a nested pause
+                            # would let the first resume() hand the terminal
+                            # back while this branch still believed it was
+                            # paused.
                             yield StreamTaskProgress(
                                 phase="interactive",
                                 message="",
                             )
-                            if self._escape_watcher:
-                                self._escape_watcher.pause()
+                            if self.escape_watcher:
+                                self.escape_watcher.pause()
                             try:
-                                _outcome = await self.tool_registry.dispatch_tool(
-                                    self, tc.name, tc.input
-                                )
+                                agen = self._dispatch_draining(tc)
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            _outcome = _payload
+                                finally:
+                                    await agen.aclose()
+                                # See the twin drain on the general branch
+                                # below.
+                                while not self.emitter.empty():
+                                    yield self.emitter.get_nowait()
                                 result_text = _outcome.content
                                 tool_ok = _outcome.ok
                             finally:
-                                if self._escape_watcher:
-                                    self._escape_watcher.resume()
+                                if self.escape_watcher:
+                                    self.escape_watcher.resume()
                             yield StreamTaskProgress(
                                 phase="analyzing",
                                 message="Analyzing results...",
@@ -2998,16 +3523,44 @@ class ChatSession:
                                 phase="tool_start",
                                 message=tc.name,
                             )
-                            _outcome = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
-                            )
+                            self.answer_wait_s = 0.0
+                            agen = self._dispatch_draining(tc)
+                            try:
+                                async for _kind, _payload in agen:
+                                    if _kind == "event":
+                                        yield _payload
+                                    else:
+                                        _outcome = _payload
+                            finally:
+                                await agen.aclose()
+                            # Anything a tool queued after the helper handed us
+                            # the result — a background task outliving its tool
+                            # call — would otherwise sit in the queue until the
+                            # next tool's drain, or forever if this was the last
+                            # tool of the turn, leaving a published card that is
+                            # never retired. Not reachable by any tool today
+                            # (every ask_user emit happens inside elicit(),
+                            # before the handler returns, and a
+                            # generate_artifact sub-agent runs inside the drained
+                            # window too), so this is a guard for the next one.
+                            #
+                            # An ordinary in-loop yield, deliberately NOT in a
+                            # `finally`: you cannot yield from an async
+                            # generator's finally.
+                            while not self.emitter.empty():
+                                yield self.emitter.get_nowait()
                             result_text = _outcome.content
                             tool_ok = _outcome.ok
-                            _tool_elapsed = _time.monotonic() - _tool_t0
+                            # Human thinking time is not the tool's runtime:
+                            # a 4-minute ask_user would otherwise show up in
+                            # the CLI report and in telemetry as a slow tool.
+                            _tool_elapsed = (
+                                _time.monotonic() - _tool_t0 - self.answer_wait_s
+                            )
                             yield StreamTaskProgress(
                                 phase="tool_done",
                                 message=tc.name,
-                                eta_seconds=_tool_elapsed,
+                                eta_seconds=max(_tool_elapsed, 0.0),
                             )
                             if (
                                 tc.name == "scratchpad"
@@ -3174,19 +3727,23 @@ class ChatSession:
                         return
                     llm_response = response.response
 
-                # Proactive compaction during tool loop — gated to at
-                # most once per turn.
+                # Proactive compaction during tool loop — at most once per
+                # turn, and not re-attempted after a failure.
                 if (
                     not self._compacted_this_turn
+                    and not self._compaction_failed_this_turn
                     and llm_response.usage.context_pressure
                     > self._context_pressure_threshold
                 ):
-                    await self._summarize_history()
+                    compacted = await self._summarize_history()
                     self._compact_scratchpads()
-                    self._compacted_this_turn = True
-                    yield StreamContextCompacted(
-                        message="Context was getting long — older history has been summarized."
-                    )
+                    if compacted:
+                        self._compacted_this_turn = True
+                        yield StreamContextCompacted(
+                            message="Context was getting long — older history has been summarized."
+                        )
+                    else:
+                        self._compaction_failed_this_turn = True
 
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A always skips at
@@ -3223,6 +3780,8 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing incomplete task..."
                 )
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted"
                 ):
@@ -3418,6 +3977,8 @@ class ChatSession:
                     phase="analyzing",
                     message="Something went wrong — checking in with you...",
                 )
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure"
                 ):
@@ -3456,6 +4017,8 @@ class ChatSession:
                 yield StreamTaskProgress(
                     phase="analyzing", message="Diagnosing blocked task..."
                 )
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck"
                 ):
@@ -3464,6 +4027,8 @@ class ChatSession:
 
             # INCOMPLETE — continue working
             continuation += 1
+            if self._turn_cost is not None:
+                self._turn_cost.continuations = continuation
             self._append_history(
                 {
                     "role": "user",

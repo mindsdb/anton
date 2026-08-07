@@ -40,7 +40,7 @@ class TestLastCompaction:
         mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nTest goal"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=original))
-        await session._summarize_history()
+        assert await session._summarize_history() is True  # actually compacted
 
         # split = min(int(10*0.6), 10-4) = 6 — matches the plain 60/40 cut since
         # none of these messages carry tool_result blocks.
@@ -61,12 +61,19 @@ class TestLastCompaction:
         mock_llm = make_mock_llm()
         mock_llm.summarize = AsyncMock(side_effect=RuntimeError("blip"))
 
+        original = _alternating_history(10, "x" * 50)
         session = ChatSession(ChatSessionConfig(
-            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+            llm_client=mock_llm, initial_history=list(original),
         ))
-        await session._summarize_history()
+        # Returns False so callers skip `_compacted_this_turn` and the
+        # StreamContextCompacted event for a compaction that didn't happen.
+        assert await session._summarize_history() is False
 
         assert session.last_compaction is None
+        # A failed summarization must NOT mutate history — the earlier turns
+        # stay intact rather than being replaced by a fact-free placeholder
+        # (ENG-1274).
+        assert session.history == original
 
     async def test_hard_truncate_clears_compaction_record(self):
         """compact then hard_truncate in one turn (the recovery ladder's
