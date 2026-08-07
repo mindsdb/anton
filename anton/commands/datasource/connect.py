@@ -10,6 +10,8 @@ from anton.connect_collector import ConnectionCollector, extract_variables
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
 from anton.utils.datasources import (
+    default_user_label,
+    ensure_unique_user_label,
     find_matching_connection,
     parse_connection_slug,
     register_secret_vars,
@@ -75,9 +77,12 @@ async def _reconnect_to_saved(
         engine_label = recon_engine_def.display_name
     else:
         engine_label = conn["engine"]
+    fields = vault.load(conn["engine"], conn["name"]) or {}
+    user_label = str(fields.get("_user_label", "")).strip()
+    label_suffix = f' (label "{user_label}")' if user_label else ""
     console.print()
     console.print(
-        f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
+        f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold]{label_suffix}.[/]'
     )
     console.print()
     if not from_tool_call:
@@ -85,7 +90,7 @@ async def _reconnect_to_saved(
             {
                 "role": "assistant",
                 "content": (
-                    f'I\'ve reconnected to the {engine_label} connection "{slug}" '
+                    f'I\'ve reconnected to the {engine_label} connection "{slug}"{label_suffix} '
                     f"in the Local Vault. I can now query this data source when needed."
                 ),
             }
@@ -102,6 +107,7 @@ async def handle_connect_datasource(
     known_variables: dict[str, str] | None = None,
     from_tool_call: bool = False,
     vault: "DataVault | None" = None,
+    prefill_label: str | None = None,
 ) -> "ChatSession":
     """
     Connect a data source by entering credentials, either for a new name or re-entering for an existing one.
@@ -191,6 +197,21 @@ async def handle_connect_datasource(
             ):
                 _telemetry("ds_connect_failed", engine=edit_engine)
                 return session
+
+        current_label = credentials.get("_user_label") or credentials.get("_label") or ""
+        new_label = await prompt_or_cancel("(anton) Label", default=current_label)
+        if new_label is None:
+            return session
+        # Explicit fallback for the same reason as the /connect prompt in
+        # Task 5 — don't rely on prompt_or_cancel's own empty-input-returns-
+        # default behavior, since a test mock replacing the whole function
+        # bypasses it. Without this, an empty response here would overwrite
+        # an existing label with "".
+        new_label = (new_label or "").strip() or current_label
+        if new_label != current_label:
+            credentials["_user_label"] = ensure_unique_user_label(
+                vault, new_label, exclude=(edit_engine, edit_name)
+            )
 
         vault.save(edit_engine, edit_name, credentials)
         _telemetry("ds_connect_success", engine=edit_engine)
@@ -289,11 +310,13 @@ async def handle_connect_datasource(
                 _telemetry("ds_connect_failed", engine=engine_def.engine)
                 return session
         conn_name = uuid.uuid4().hex[:8]
+        credentials["_user_label"] = default_user_label(vault, engine_def.engine)
         slug = save_connection(vault, engine_def, conn_name, credentials)
         _telemetry("ds_connect_success", engine=engine_def.engine)
         session._active_datasource = slug
+        label = credentials.get("_user_label", "")
         console.print(
-            f'        Saved to Local Vault as [bold]"{slug}"[/bold].'
+            f'        Saved as [bold]"{label}"[/bold] (slug [bold]"{slug}"[/bold]).'
         )
         console.print()
         console.print("[anton.muted]        Ready to query your data.[/]")
@@ -374,6 +397,15 @@ async def handle_connect_datasource(
                 f"        {marker}[bold]{f.name}[/] "
                 f"[anton.muted]— {f.description} (optional)[/]"
             )
+        # `label` isn't one of `engine_def.fields` — it's prompted for
+        # separately after the per-engine fields are collected (see the
+        # `prompt_or_cancel("(anton) Label", ...)` call below) — but it's
+        # listed here too so the user knows it's coming and what it's for.
+        console.print(
+            "        • [bold]label[/] "
+            "[anton.muted]— a name to identify this connection later, "
+            "e.g. \"prod-db\" (optional, defaults to the engine name)[/]"
+        )
         console.print()
 
     while not collector.is_complete:
@@ -498,6 +530,9 @@ async def handle_connect_datasource(
 
     if partial:
         auto_name = uuid.uuid4().hex[:8]
+        while vault.load(engine_def.engine, auto_name) is not None:
+            auto_name = uuid.uuid4().hex[:8]
+        credentials["_user_label"] = default_user_label(vault, engine_def.engine)
         vault.save(engine_def.engine, auto_name, credentials)
         slug = f"{engine_def.engine}-{auto_name}"
         console.print()
@@ -526,7 +561,26 @@ async def handle_connect_datasource(
             conn_name = uuid.uuid4().hex[:8]
         is_update = False
 
+        default_label = prefill_label or default_user_label(vault, engine_def.engine)
+        user_label = await prompt_or_cancel("(anton) Label", default=default_label)
+        if user_label is None:
+            console.print("[anton.muted]Cancelled.[/]")
+            console.print()
+            return session
+        # `prompt_or_cancel` already returns `default` when the user submits
+        # empty input in production — but this explicit fallback is kept
+        # anyway: it makes the "empty means accept the default" behavior a
+        # property of *this* code, not an assumption about prompt_or_cancel's
+        # internals that a test-time mock (which replaces the whole function)
+        # silently bypasses.
+        user_label = (user_label or "").strip() or default_label
+        credentials["_user_label"] = ensure_unique_user_label(vault, user_label)
+
     slug = f"{engine_def.engine}-{conn_name}"
+
+    if is_update:
+        existing = vault.load(engine_def.engine, conn_name) or {}
+        credentials = {**existing, **credentials}
 
     save_connection(vault, engine_def, conn_name, credentials)
     _telemetry("ds_connect_success", engine=engine_def.engine)
@@ -536,7 +590,10 @@ async def handle_connect_datasource(
             f'        Updated existing connection [bold]"{slug}"[/bold].'
         )
     else:
-        console.print(f'        Saved to Local Vault as [bold]"{slug}"[/bold].')
+        label = credentials.get("_user_label", "")
+        console.print(
+            f'        Saved as [bold]"{label}"[/bold] (slug [bold]"{slug}"[/bold]).'
+        )
 
     console.print()
     console.print("[anton.muted]        Ready to query your data.[/]")
