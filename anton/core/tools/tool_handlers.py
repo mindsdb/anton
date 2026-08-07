@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
 from anton.core.tools.registry import ToolOutcome
+from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -78,34 +79,32 @@ def _artifact_store(session: "ChatSession"):
     return ArtifactStore(workspace.artifacts_dir)
 
 
-async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
+async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Create a fresh artifact folder + metadata.json + README.md.
 
-    Returns a JSON-shaped string the LLM can parse into the artifact
-    path. The agent is expected to write its output files under
-    `<path>/...` after this call returns.
+    Returns a `SideEffectResult` whose `message` carries the artifact path the
+    agent writes output files under (`<path>/...`) after this call returns.
     """
-    import json
-
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session)."
+        )
 
     name = (tc_input.get("name") or "").strip()
     description = (tc_input.get("description") or "").strip()
     artifact_type = (tc_input.get("type") or "").strip()
     primary = tc_input.get("primary")
     if not name:
-        return "Error: `name` is required."
+        return SideEffectResult.failed("Error: `name` is required.")
     if not description:
-        return "Error: `description` is required."
+        return SideEffectResult.failed("Error: `description` is required.")
 
     from anton.core.artifacts.models import ARTIFACT_TYPES
 
     if artifact_type not in ARTIFACT_TYPES:
-        return (
-            f"Error: `type` must be one of {ARTIFACT_TYPES}. "
-            f"Got: {artifact_type!r}."
+        return SideEffectResult.failed(
+            f"Error: `type` must be one of {ARTIFACT_TYPES}. Got: {artifact_type!r}."
         )
 
     artifact = store.create(  # type: ignore[arg-type]
@@ -115,17 +114,20 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
         primary=primary if isinstance(primary, str) else None,
     )
     folder = store.folder_for(artifact.slug)
-    return json.dumps({
-        "id": artifact.id,
-        "slug": artifact.slug,
-        "name": artifact.name,
-        "type": artifact.type,
-        "primary": artifact.primary,
-        "path": str(folder),
-    }, indent=2)
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Created artifact `{artifact.slug}` ({artifact.type}). "
+            f"Write output files under: {folder}"
+            + (f" (primary: {artifact.primary})" if artifact.primary else "")
+        ),
+        resource_id=artifact.slug,
+        idempotency_key=artifact.slug,
+        committed_at=now_iso(),
+    ).to_outcome()
 
 
-async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> str:
+async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Update mutable metadata fields on an existing artifact.
 
     Only fields present in the input are modified. Supports:
@@ -134,15 +136,15 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
     """
-    import json
-
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session)."
+        )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        return SideEffectResult.failed("Error: `slug` is required.")
 
     kwargs: dict = {}
     if "primary" in tc_input:
@@ -151,7 +153,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         try:
             kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
         except (TypeError, ValueError):
-            return "Error: `port` must be a number."
+            return SideEffectResult.failed("Error: `port` must be a number.")
 
     if "datasources" in tc_input:
         from anton.core.artifacts.models import DatasourceRef
@@ -159,7 +161,9 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
 
         raw_list = tc_input.get("datasources") or []
         if not isinstance(raw_list, list):
-            return "Error: `datasources` must be a list of slug strings."
+            return SideEffectResult.failed(
+                "Error: `datasources` must be a list of slug strings."
+            )
 
         vault = session._data_vault or LocalDataVault()
         known = {f"{c['engine']}-{c['name']}": (c["engine"], c["name"])
@@ -169,7 +173,9 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         unknown: list[str] = []
         for item in raw_list:
             if not isinstance(item, str):
-                return "Error: each entry in `datasources` must be a slug string."
+                return SideEffectResult.failed(
+                    "Error: each entry in `datasources` must be a slug string."
+                )
             ref_slug = item.strip()
             if not ref_slug:
                 continue
@@ -179,7 +185,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             engine, name = known[ref_slug]
             refs.append(DatasourceRef(engine=engine, name=name))
         if unknown:
-            return (
+            return SideEffectResult.failed(
                 f"Error: unknown datasource slug(s): {', '.join(unknown)}. "
                 f"Each slug must match an existing vault connection "
                 f"(format: `<engine>-<name>`)."
@@ -188,16 +194,22 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
 
     artifact = store.update(slug, **kwargs)
     if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
-    return json.dumps({
-        "slug": artifact.slug,
-        "primary": artifact.primary,
-        "port": artifact.port,
-        "datasources": [d.slug for d in artifact.datasources],
-    }, indent=2)
+        return SideEffectResult.failed(f"Error: no artifact found for slug `{slug}`.")
+    datasources = [d.slug for d in artifact.datasources]
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Updated artifact `{artifact.slug}` "
+            f"(primary={artifact.primary}, port={artifact.port}, "
+            f"datasources={datasources})."
+        ),
+        resource_id=artifact.slug,
+        idempotency_key=artifact.slug,
+        committed_at=now_iso(),
+    ).to_outcome()
 
 
-async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
+async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Launch the artifact's backend script as a standalone subprocess.
 
     Thin wrapper over `launch_artifact_backend`: validates tool-call shape,
@@ -210,20 +222,20 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     `anton.core.artifacts.backend_launcher.launch_artifact_backend` so
     other entry points (e.g. cowork's auto-relaunch) can reuse it.
     """
-    import json
-
     from anton.core.artifacts.backend_launcher import launch_artifact_backend
 
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session)."
+        )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        return SideEffectResult.failed("Error: `slug` is required.")
     artifact = store.open(slug)
     if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
+        return SideEffectResult.failed(f"Error: no artifact found for slug `{slug}`.")
 
     rel_path = (tc_input.get("path") or "backend.py").strip()
     extra_args = tc_input.get("extra_args") or []
@@ -231,7 +243,7 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     try:
         health_timeout = float(tc_input.get("health_timeout", 10))
     except (TypeError, ValueError):
-        return "Error: `health_timeout` must be a number."
+        return SideEffectResult.failed("Error: `health_timeout` must be a number.")
 
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:
@@ -248,14 +260,25 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
         health_path=health_path,
         health_timeout=health_timeout,
     )
+    # The launcher rolls back on failure (kills the process, never tracks it),
+    # so a string result means nothing committed.
     if isinstance(result, str):
-        return result
+        return SideEffectResult.failed(result)
 
     store.update(slug, port=result["port"])
-    return json.dumps(
-        {k: v for k, v in result.items() if k != "proc"},
-        indent=2,
-    )
+    url = result.get("url", "")
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Backend for `{slug}` is running at {url} "
+            f"(pid {result.get('pid')}, port {result.get('port')}, "
+            f"log {result.get('log_path')})."
+        ),
+        resource_id=slug,
+        external_url=url or None,
+        idempotency_key=slug,
+        committed_at=now_iso(),
+    ).to_outcome()
 
 
 async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
