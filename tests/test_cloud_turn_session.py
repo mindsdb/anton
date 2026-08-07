@@ -53,7 +53,6 @@ def _build(tmp_path, monkeypatch, **req_overrides):
 
 def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
-    assert cfg.cortex is None            # personal memory OFF
     assert cfg.episodic is None
     assert cfg.self_awareness is None
     assert cfg.data_vault is None        # connectors / vault OFF
@@ -291,3 +290,223 @@ async def test_scratchpad_inherits_parent_env(tmp_path, monkeypatch):
         assert cell.stdout.strip() == "DESKTOP-VISIBLE"
     finally:
         await pad.close()
+
+
+# ── org memory (server-supplied, read-only) ──────────────────────────────────
+
+_MEMORY = {
+    "global": {"profile": "Name: Zoran", "rules": "## Always\n- Reply in Spanish"},
+    "project": {"lessons": "- The staging DB is read-only"},
+}
+
+
+@pytest.fixture()
+def memory_dir(tmp_path_factory, monkeypatch):
+    """Redirect the pod-local memory scratch so tests never touch the real one.
+
+    Deliberately outside `tmp_path` — that IS the workspace mount here, and the
+    real scratch lives outside the mount (see the isolation test below).
+    """
+    import anton.cloud_turn.session as cloud_session
+
+    path = tmp_path_factory.mktemp("mem-scratch")
+    monkeypatch.setattr(cloud_session, "_MEMORY_DIR", path)
+    return path
+
+
+def test_empty_memory_still_allows_a_first_memory(tmp_path, monkeypatch, memory_dir):
+    """A fresh org sends no slots, but must still be able to remember something —
+    core only registers `memorize` when a cortex exists."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.cortex is not None
+    assert "memorize" in cfg.tool_allowlist
+    # staged dirs exist but hold no slots, so no memory section is injected
+    assert list((memory_dir / "global").iterdir()) == []
+
+
+def test_memory_block_builds_cortex_without_background_passes(tmp_path, monkeypatch, memory_dir):
+    _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
+    assert cfg.cortex is not None
+    # Not "off" — that would make the memorize tool refuse. The passes it unlocks
+    # (identity extraction, vacuum, consolidation) are disabled separately.
+    assert cfg.cortex.mode == "autopilot"
+    assert cfg.background_memory is False
+    assert (memory_dir / "global" / "profile.md").read_text() == "Name: Zoran"
+    assert (memory_dir / "project" / "lessons.md").is_file()
+
+
+async def test_memory_reaches_the_prompt(tmp_path, monkeypatch, memory_dir):
+    """The point of the feature: the tenant's memory lands in the system prompt."""
+    _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
+    context = await cfg.cortex.build_memory_context("hola")
+    assert "Name: Zoran" in context
+    assert "Reply in Spanish" in context
+    assert "staging DB is read-only" in context
+
+
+def test_unknown_slots_ignored(tmp_path, monkeypatch, memory_dir):
+    _build(tmp_path, monkeypatch, memory={"global": {"../escape": "x", "secrets": "y"}})
+    assert [p.name for p in (memory_dir / "global").iterdir()] == []
+
+
+def test_stale_slot_cleared_between_turns(tmp_path, monkeypatch, memory_dir):
+    # A long-lived pod reuses the dir, so a slot deleted server-side must vanish.
+    _build(tmp_path, monkeypatch, memory=_MEMORY)
+    assert (memory_dir / "global" / "rules.md").is_file()
+
+    _build(tmp_path, monkeypatch, memory={"global": {"profile": "Name: Zoran"}})
+    assert not (memory_dir / "global" / "rules.md").exists()
+    assert (memory_dir / "global" / "profile.md").is_file()
+
+
+def test_memory_never_lands_in_the_tenant_workspace(tmp_path, monkeypatch, memory_dir):
+    # Memory is server-owned: it must not persist in the PVC or be readable by
+    # scratchpad code running against the mount.
+    _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
+    for slot_file in ("profile.md", "rules.md", "lessons.md"):
+        assert list(cfg.workspace.base.rglob(slot_file)) == []
+
+
+def test_memory_scratch_is_outside_the_mount_by_default():
+    """The shipped path, not the test override: scratch must not be in the PVC."""
+    import anton.cloud_turn.session as cloud_session
+
+    assert not cloud_session._MEMORY_DIR.is_relative_to(
+        cloud_session.DEFAULT_CLOUD_WORKSPACE_PATH
+    )
+
+
+def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: _mock_llm()),
+    )
+    body = dict(protocol_version=1, conversation_id="c", input="hi")
+    body.update(req_overrides)
+    session = build_cloud_chat_session(TurnRequestV1(**body))  # REAL ChatSession
+    session._scratchpads = MagicMock(available_packages=[])
+    return session
+
+
+def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypatch, memory_dir):
+    """The allowlist names `memorize` unconditionally, and an allowlist name that
+    matches no built tool is a hard error — so a cortex must always exist. Both
+    directions are checked because an empty store is the case that used to break.
+    """
+    for overrides in ({}, {"memory": _MEMORY}):
+        session = _real_cloud_session(tmp_path, monkeypatch, **overrides)
+        session._build_tools()
+        names = {t.name for t in session.tool_registry.get_tool_defs()}
+        assert names == set(CLOUD_TOOL_ALLOWLIST)
+        assert "memorize" in names
+
+
+# ── memory write path (pod reports, never persists) ──────────────────────────
+
+def _engram(**kw):
+    from anton.core.memory.base import Engram
+
+    return Engram(**{"text": "Reply in Spanish", "kind": "always", "scope": "global", **kw})
+
+
+async def test_encode_captures_instead_of_writing(tmp_path, monkeypatch, memory_dir):
+    from anton.cloud_turn.session import drain_pending_memory
+
+    session, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
+    before = (memory_dir / "global" / "rules.md").read_text()
+
+    actions = await cfg.cortex.encode([_engram()])
+    assert actions == ["Encoded always: Reply in Spanish"]
+    # nothing persisted pod-side — the staged file is untouched
+    assert (memory_dir / "global" / "rules.md").read_text() == before
+
+    assert cfg.cortex.pending_memory == [{
+        "text": "Reply in Spanish", "kind": "always", "scope": "global",
+        "topic": "", "confidence": "medium", "source": "llm",
+    }]
+
+
+async def test_encode_normalizes_and_drops_blanks(tmp_path, monkeypatch, memory_dir):
+    """The pod normalizes; cowork validates. Kinds/scopes are deliberately NOT
+    checked here — this runs inside the sandbox the check would be guarding
+    against, so it buys nothing and a second allowlist could only drift."""
+    _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
+    await cfg.cortex.encode([_engram(scope=None), _engram(text="   ")])
+
+    assert [(e["scope"], e["confidence"]) for e in cfg.cortex.pending_memory] == [
+        ("global", "medium"),                # scope defaulted, blank dropped
+    ]
+
+
+async def test_drain_is_idempotent(tmp_path, monkeypatch, memory_dir):
+    from anton.cloud_turn.session import drain_pending_memory
+
+    session, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
+    session._cortex = cfg.cortex  # the fake session stands in for the real one
+    await cfg.cortex.encode([_engram()])
+
+    assert len(drain_pending_memory(session)) == 1
+    assert drain_pending_memory(session) == []   # cleared: no double-apply
+
+
+async def test_memorize_registers_its_write_for_settling(tmp_path, monkeypatch, memory_dir):
+    """`handle_memorize` fires encoding as a task; the pod exits at end of turn, so
+    the task must be registered for `settle_memory_writes` to await it."""
+    from anton.core.tools.tool_handlers import handle_memorize
+    from anton.cloud_turn.session import drain_pending_memory
+
+    session = _real_cloud_session(tmp_path, monkeypatch, memory=_MEMORY)
+    result = await handle_memorize(session, {"entries": [
+        {"text": "Answer in Spanish", "kind": "always", "scope": "global"},
+    ]})
+    assert "Memory updated" in result
+    assert len(session._memory_writes) == 1        # registered, not yet awaited
+
+    await session.settle_memory_writes()
+    assert session._memory_writes == set()         # done-callback cleared it
+    assert [e["text"] for e in drain_pending_memory(session)] == ["Answer in Spanish"]
+
+
+async def test_settling_is_a_noop_without_writes(tmp_path, monkeypatch, memory_dir):
+    from anton.cloud_turn.session import drain_pending_memory
+
+    session = _real_cloud_session(tmp_path, monkeypatch, memory=_MEMORY)
+    await session.settle_memory_writes()           # must not hang or raise
+    assert drain_pending_memory(session) == []
+
+
+def test_background_memory_passes_are_off_in_cloud(tmp_path, monkeypatch, memory_dir):
+    """One turn per pod: identity/vacuum/consolidation would spend LLM calls on
+    writes that are discarded when the process exits."""
+    _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
+    assert cfg.background_memory is False
+    assert cfg.cortex.mode == "autopilot"   # required for `memorize` to encode at all
+
+
+def test_cerebellum_and_acc_do_not_fire_without_background_memory(tmp_path, monkeypatch):
+    """Both flushes guard on cortex.mode, which cloud must set to "autopilot" —
+    so background_memory is the only thing keeping their LLM passes off.
+    """
+    from unittest.mock import MagicMock
+
+    spawned = []
+    monkeypatch.setattr(session_mod.asyncio, "create_task",
+                        lambda coro, **kw: (spawned.append(coro), coro.close())[0])
+
+    for background, tasks in ((False, 0), (True, 1)):
+        session = _real_session_with_workspace(
+            tmp_path, cortex=MagicMock(mode="autopilot"), background_memory=background,
+        )
+        session._cerebellum = MagicMock(buffered_count=3)
+        session._acc = MagicMock(at_end_of_turn=MagicMock(return_value=[]))
+        spawned.clear()
+
+        session._schedule_cerebellum_flush()
+        assert len(spawned) == tasks             # the LLM diff pass
+        assert session._cerebellum.reset.called is (not background)
+
+        session._schedule_acc_flush()
+        assert session._acc.at_end_of_turn.called is background
