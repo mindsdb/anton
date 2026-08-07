@@ -40,6 +40,22 @@ def make_mock_llm() -> AsyncMock:
 
 
 @pytest.fixture()
+def make_session():
+    """A ChatSession with a mock LLM and no console — the minimum needed to
+    exercise session-level wiring without touching a terminal or a provider.
+    """
+
+    def _factory(**over):
+        from anton.core.session import ChatSession, ChatSessionConfig
+
+        kwargs = dict(llm_client=make_mock_llm())
+        kwargs.update(over)
+        return ChatSession(ChatSessionConfig(**kwargs))
+
+    return _factory
+
+
+@pytest.fixture()
 def make_llm_response():
     def _factory(
         content: str = "",

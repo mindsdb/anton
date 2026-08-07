@@ -3,7 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from anton.core.interaction.elicit import AskAnswer, AskRequest
 
 
 @dataclass
@@ -132,6 +135,33 @@ class StreamContextCompacted:
 
 
 @dataclass
+class StreamAskUser:
+    """A question the user must answer before the turn can continue.
+
+    ``id`` is the question id the host echoes back with the answer, and an
+    opaque correlation/dedup key as far as the host is concerned: a minted
+    uuid, prefixed by origin (``ask:``, ``path:``). It is deliberately NOT the
+    originating ``tool_use.id``, which a tool handler cannot see —
+    ``dispatch_tool`` passes only the tool name and input.
+    """
+
+    id: str
+    request: AskRequest
+
+
+@dataclass
+class StreamAskUserAnswered:
+    """Retires a previously published question.
+
+    Emitted so a client replaying the buffer from the start does not show
+    live buttons on a question that was already answered.
+    """
+
+    id: str
+    answer: AskAnswer
+
+
+@dataclass
 class StreamReasoningDelta:
     """A chunk of the model's own extended-thinking/reasoning text.
 
@@ -155,6 +185,8 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamAskUser
+    | StreamAskUserAnswered
     | StreamReasoningDelta
 )
 
