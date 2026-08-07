@@ -3,7 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from anton.core.interaction.elicit import AskAnswer, AskRequest
 
 
 @dataclass
@@ -23,9 +26,35 @@ class ToolCall:
 
 @dataclass
 class Usage:
+    """Token usage for one LLM call, normalized across providers (ENG-1288).
+
+    Component semantics are UNIFORM regardless of provider:
+    - ``input_tokens``: fresh (non-cached) prompt tokens only. Anthropic's
+      ``input_tokens`` already excludes cache activity; OpenAI's
+      ``prompt_tokens`` INCLUDES cached tokens, so the OpenAI provider
+      subtracts ``cached_tokens`` out — without that, the same call would
+      report different components depending on the wire format.
+    - ``cache_read_tokens`` / ``cache_creation_tokens``: prompt tokens served
+      from / written to the provider prompt cache. Both are populated on the
+      OpenAI dialect too — our gateway publishes
+      ``prompt_tokens_details.{cached_tokens, cache_write_tokens}`` — and are
+      subtracted out of ``prompt_tokens`` by ``_split_cached_input``. A
+      third-party endpoint that omits either field reports 0 for it.
+    - Total context for a call = input + cache_read + cache_creation
+      (cache tokens ARE context; dropping them understates a warm-cache
+      call by ~10x).
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
     context_pressure: float = 0.0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+
+    @property
+    def context_tokens(self) -> int:
+        """Total prompt-side tokens the call carried (all three components)."""
+        return self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens
 
 
 @dataclass
@@ -105,6 +134,48 @@ class StreamContextCompacted:
     message: str
 
 
+@dataclass
+class StreamAskUser:
+    """A question the user must answer before the turn can continue.
+
+    ``id`` is the question id the host echoes back with the answer, and an
+    opaque correlation/dedup key as far as the host is concerned: a minted
+    uuid, prefixed by origin (``ask:``, ``path:``). It is deliberately NOT the
+    originating ``tool_use.id``, which a tool handler cannot see —
+    ``dispatch_tool`` passes only the tool name and input.
+    """
+
+    id: str
+    request: AskRequest
+
+
+@dataclass
+class StreamAskUserAnswered:
+    """Retires a previously published question.
+
+    Emitted so a client replaying the buffer from the start does not show
+    live buttons on a question that was already answered.
+    """
+
+    id: str
+    answer: AskAnswer
+
+
+@dataclass
+class StreamReasoningDelta:
+    """A chunk of the model's own extended-thinking/reasoning text.
+
+    NOT part of the final answer — Anthropic's `thinking_delta` content
+    blocks (surfaced via `output_config.effort`'s adaptive thinking) and
+    OpenAI's `response.reasoning_summary_text.delta` Responses-API events
+    both map to this. Kept distinct from `StreamTextDelta` so the harness
+    layer can route it to a separate "current thought" channel instead of
+    the persisted answer body.
+    """
+
+    text: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -114,6 +185,9 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamAskUser
+    | StreamAskUserAnswered
+    | StreamReasoningDelta
 )
 
 
@@ -404,6 +478,33 @@ _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
 )
 
+# The MindsHub M3 authorization gate's out-of-credits deny codes (ENG-1169):
+# ``wallet_empty`` rides a 402, ``included_allowance_exhausted`` a 429 (with NO
+# FastAPI ``detail``, so the legacy 429-quota branch never sees it). Both are
+# permanent for the identical request — they belong on the out-of-credits card,
+# never in the retry loop. The gate's velocity 429 (``rate_limited``) is NOT
+# here on purpose: that one means "slow down", and stays transient.
+_WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
+
+
+def wallet_denial_code(body: Any) -> str | None:
+    """The M3 gate's out-of-credits code carried in an error body, if any.
+
+    Reads ``code`` from both dialects — the SDK-unwrapped top level (OpenAI
+    SDK peels the ``error`` envelope, ENG-747) and the wire envelope
+    (Anthropic SDK / proxies that deliver it unmodified). Detection is
+    code-exact on purpose: BYOK 402s (e.g. OpenRouter's insufficient-credits
+    402) carry no such code and must stay generic — the remedy there is the
+    user's own provider billing, not MindsHub credits.
+    """
+    b = body if isinstance(body, dict) else {}
+    err = b.get("error") if isinstance(b.get("error"), dict) else {}
+    code = b.get("code") or err.get("code")
+    # isinstance first: `in` on a frozenset HASHES the value, so a hostile/buggy
+    # endpoint sending a list `code` would otherwise TypeError the classifier
+    # (every other wire-value membership check in these mappers uses tuples).
+    return code if isinstance(code, str) and code in _WALLET_DENIAL_CODES else None
+
 
 def classify_transient(
     status_code: int | None, body: Any, *, provider: str = "", model: str = ""
@@ -442,13 +543,48 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
         )
     if status_code == 429 and not b.get("detail"):
-        # Plain rate-limit ("slow down"), NOT an out-of-quota 429 (that carries a
-        # `detail` and is mapped to TokenLimitExceeded upstream of this call).
+        # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
+        # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
+        # ``insufficient_quota``, the M3 gate's allowance 429 carries a wallet
+        # code); the guards here are defense for direct callers — a billing
+        # failure is permanent and must never enter the retry loop (ENG-1169).
+        if etype == "insufficient_quota":
+            return None
+        if wallet_denial_code(b):
+            return None
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
             provider=provider, code="rate_limited", session_backoff=False, model=model,
         )
     return None
+
+
+def raise_on_empty_response(
+    *, content: str, tool_calls: list, stop_reason: str | None,
+    provider: str = "", model: str = "",
+) -> None:
+    """Fail loud on an empty 200: no content, no tool calls, no stop reason.
+
+    The non-streaming mirror of the streaming truncated-response guard (ENG-673).
+    An empty-from-start 200 is:
+
+    - a weak incident signal (real mid-incident silence surfaces as a dropped
+      connection / read timeout, which back off above), and
+    - a strong broken/misconfigured-endpoint signal.
+
+    So it fails fast (``session_backoff=False``) rather than looping the retry
+    budget — and, critically, raises instead of handing back an empty
+    ``LLMResponse`` the agent would misdiagnose as a backend outage.
+    """
+    # Empty-string stop_reason ("" — no real provider sends it) is treated as
+    # absent, same as None: a truthiness check keeps the guard from being fooled.
+    if content or tool_calls or stop_reason:
+        return
+    raise TransientProviderError(
+        f"{provider or 'The model provider'} returned an empty response — try again in a moment.",
+        provider=provider or "The model provider", code="empty_response",
+        session_backoff=False, model=model,
+    )
 
 
 class ModelUnavailableError(ConnectionError):
@@ -470,6 +606,84 @@ class ModelUnavailableError(ConnectionError):
         super().__init__(message)
         self.code = code
         self.model = model
+
+
+def classify_404(
+    model: str,
+    *,
+    message: str | None,
+    code: str | None = None,
+    status: str | None = None,
+    error_type: str | None = None,
+) -> "ModelUnavailableError | EndpointConfigurationError":
+    """Classify a bare 404 as model-not-found vs. endpoint-misconfiguration.
+
+    Shared by the OpenAI-compatible and Anthropic status-error mappers
+    (ENG-1139) so the heuristic — and the exact non-duplicated wording —
+    can't drift between them. A bare 404 does NOT by itself mean the model
+    is missing: a wrong base URL, a missing ``/v1``, a reverse-proxy route,
+    or an unsupported API path all 404 too, and there "switch models" is
+    the wrong remedy (ENG-1145). Only treat it as model-not-found when the
+    structured body actually points at the model: OpenAI's
+    ``code="model_not_found"``, Anthropic's ``error.type="not_found_error"``,
+    or a model-oriented message (Gemini's ``status="NOT_FOUND"`` with
+    "models/<id> is not found / no longer available"). Everything else is
+    surfaced as an endpoint/configuration failure carrying the provider's
+    own words.
+    """
+    msg_l = message.lower() if isinstance(message, str) else ""
+    status_str = (status or "").upper()
+    model_specific = (
+        code == "model_not_found"
+        or error_type == "not_found_error"
+        or (
+            "model" in msg_l
+            and (
+                status_str == "NOT_FOUND"
+                or "not found" in msg_l
+                or "not available" in msg_l
+                or "no longer available" in msg_l
+                or "does not exist" in msg_l
+            )
+        )
+    )
+    # Provider message as a leading-space fragment with a normalized
+    # terminator, so the appended copy reads cleanly whether or not the
+    # provider punctuated its own message (Gemini's ends in a period; a raw
+    # proxy/FastAPI detail may not).
+    clean = message.strip() if isinstance(message, str) else ""
+    if clean and clean[-1] not in ".!?":
+        clean += "."
+    suffix = f" {clean}" if clean else ""
+    if model_specific:
+        reason = f":{suffix}" if suffix else "."
+        return ModelUnavailableError(
+            f"The model '{model}' isn't available{reason} Switch models in Settings.",
+            code="model_not_found", model=model,
+        )
+    # Not model-specific → almost always a misrouted/misconfigured endpoint
+    # (bad base URL, missing /v1, proxy route). Permanent for this request,
+    # but the remedy is the endpoint config, not the model — a distinct type
+    # so the CLI defaults it to `setup` (fix provider/endpoint), not `retry`,
+    # and never to "switch models" (ENG-1145 review).
+    return EndpointConfigurationError(
+        f"The model endpoint returned 404 — check the endpoint URL and model "
+        f"configuration.{suffix}"
+    )
+
+
+class EndpointConfigurationError(ConnectionError):
+    """Raised when a request fails in a way that points at the endpoint
+    configuration — a wrong base URL, a missing ``/v1``, a reverse-proxy route,
+    or an unsupported API path — rather than at the model or a transient outage.
+
+    Permanent for the identical request (a retry re-sends it to the same broken
+    route), and the remedy is the provider *setup* flow (fix the base URL /
+    route), NOT switching models and NOT waiting. Subclasses ConnectionError so
+    legacy call sites that only know the ConnectionError mapping keep working;
+    the interactive CLI reads the type to default such a failure to ``setup``
+    rather than ``retry`` (ENG-1145 review).
+    """
 
 
 @dataclass

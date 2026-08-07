@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import hashlib
+import re
 import shutil
 import sys
 import tempfile
@@ -14,14 +16,21 @@ from pathlib import Path
 from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.wire import (
     CELL_DELIM,
+    HEARTBEAT_MARKER,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
+    STDOUT_CHUNK_MARKER,
 )
 from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
+
+# Bound on accumulated salvage chunks per cell — mirrors the boot script's
+# _MAX_OUTPUT so a killed cell can never report more stdout than a successful
+# one would have.
+_SALVAGE_MAX = 10_000
 
 
 def _read_boot_script() -> str:
@@ -80,6 +89,85 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
 _MAX_OUTPUT = 10_000
 
 
+# ── Namespace-snapshot layout (ENG-1124) ────────────────────────────────────
+# One derivation, shared by the writer (the runtime) and the single-scratchpad
+# guard (which needs to know which pads a conversation has already used, across
+# turns). Keeping it in one place is the point: if these two disagreed, the guard
+# would silently stop firing again.
+
+def default_venvs_base(workspace_path: Path | None) -> Path:
+    """Where a workspace's scratchpad venvs live."""
+    if workspace_path is not None:
+        return workspace_path / ".anton" / "scratchpad-venvs"
+    return Path("~/.anton/scratchpad-venvs").expanduser()
+
+
+def _safe_segment(value: str, fallback: str) -> str:
+    """A path-safe version of a model-chosen string.
+
+    Deliberately NOT case-folded or separator-collapsed — that would change which
+    pads share state, and belongs with the venv-path normalisation in ENG-1133.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value or "").strip("._") or fallback
+
+
+def snapshot_dir(venvs_base: Path, session_id: str | None) -> Path | None:
+    """Namespace-snapshot directory for one conversation, or None if it must not persist.
+
+    Requires a session id, and requires that id to be path-safe as supplied. There is
+    deliberately NO shared fallback bucket:
+
+    * A shared bucket is a confidentiality boundary, not a convenience. Cowork's
+      transient `CredentialProbe` builds a `ChatSession` with **no** session id and
+      parses `DS_*` datasource credentials in the scratchpad — and
+      `ANTON_SCRATCHPAD_PERSIST_SESSION` is process-global, so a probe inherits it once
+      any normal chat has switched it on. With a shared bucket those credentials land on
+      disk under a predictable path and a later probe reusing the pad name reloads them.
+    * `_safe_segment` is not injective, so `tenant/a` and `tenant_a` would resolve to one
+      directory. Rather than transform the id (which would break the path cowork-server
+      computes when it prunes), refuse anything that is not already path-safe. A UUID —
+      what every real host passes — is unchanged, so this enforces the cross-repo
+      invariant instead of merely documenting it.
+
+    The cost is that bare CLI use gets no cross-process persistence. That is the right
+    trade: the CLI is one long-lived process, so its namespace lives in memory anyway.
+    """
+    if not session_id:
+        return None
+    if _safe_segment(session_id, "") != session_id:
+        return None
+    return venvs_base.parent / "scratchpad-sessions" / session_id
+
+
+def _pad_filename(pad_name: str) -> str:
+    """An injective, length-bounded filename for a pad.
+
+    `_safe_segment` alone is NOT injective — it maps every unsafe character to `_`, so
+    `'my pad'`, `'my_pad'` and `'my/pad'` all collapse to `my_pad` and would share one
+    snapshot, meaning one pad loads another's namespace. Appending a digest of the
+    ORIGINAL name keeps distinct pads distinct. Also truncated, because a pad name is
+    model-chosen and most filesystems cap a path component at 255 bytes — an
+    over-long name would fail the write instead of saving state.
+    """
+    stem = _safe_segment(pad_name, "scratchpad")[:80]
+    digest = hashlib.sha1((pad_name or "").encode("utf-8")).hexdigest()[:8]
+    return f"{stem}-{digest}.pkl"
+
+
+def snapshot_file(venvs_base: Path, session_id: str | None, pad_name: str) -> Path | None:
+    """Snapshot path for one pad, or None if it must not or cannot be persisted."""
+    base = snapshot_dir(venvs_base, session_id)
+    if base is None:
+        return None
+    path = base / _pad_filename(pad_name)
+    # Belt for the sanitiser: never hand back a path outside the snapshot root.
+    try:
+        path.resolve().relative_to(base.resolve())
+    except (ValueError, OSError):
+        return None
+    return path
+
+
 class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
@@ -95,6 +183,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_base_url: str,
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
+        session_id: str | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -114,16 +203,61 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # is a "where to put scratchpad venvs" hint; the explicit
         # arg is "the agent's project, when known".
         self._explicit_workspace_path: Path | None = workspace_path
+        # Conversation id when the host supplies one (cowork-server passes the
+        # conversation's UUID as `session_id`). Only used to scope the namespace
+        # snapshot — see `_session_snapshot_path`.
+        self._session_id: str | None = session_id
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
-        if _venvs_base is not None:
-            self._venvs_base = _venvs_base
-        elif workspace_path is not None:
-            self._venvs_base = workspace_path / ".anton" / "scratchpad-venvs"
-        else:
-            self._venvs_base = Path("~/.anton/scratchpad-venvs").expanduser()
+        self._venvs_base = (
+            _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
+        )
+
+    def _session_snapshot_path(self, *, create: bool = False) -> Path | None:
+        """Where this pad's namespace snapshot lives, or None if it can't be written.
+
+        Scoped per conversation *and* per pad. Both matter: without the pad segment two
+        named scratchpads would overwrite each other, and without the conversation
+        segment two conversations in the same workspace that happen to use the same pad
+        name would read each other's variables — a correctness bug and a confidentiality
+        one.
+
+        Returns None when there is nowhere safe to write: no session id, or one that is
+        not already path-safe. There is deliberately no shared fallback bucket — see
+        `snapshot_dir` for why (the unscoped `CredentialProbe` would leave `DS_*`
+        credentials in it). Bare CLI use and tests therefore get no snapshot at all,
+        keeping their namespace in memory as before.
+
+        Also returns None when the directory cannot be created; the caller then leaves
+        ANTON_SCRATCHPAD_SESSION_PATH unset so the failure is reported rather than silent.
+        """
+        path = snapshot_file(self._venvs_base, self._session_id, self.name)
+        if path is None or not create:
+            return path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        return path
+
+    def _discard_session_snapshot(self) -> None:
+        """Delete this pad's namespace snapshot, if any. Best-effort."""
+        path = self._session_snapshot_path()
+        if path is None:
+            return
+        candidates = [path]
+        # The writer suffixes its temp file with a pid, so match any of them.
+        try:
+            candidates += sorted(path.parent.glob(f"{path.name}.*.tmp"))
+        except OSError:
+            pass
+        for candidate in candidates:
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
 
     def _ensure_venv(self) -> None:
         if self._venv_dir is not None and self._verify_venv_python():
@@ -390,13 +524,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         os.close(fd)
         self._boot_path = path
 
-        # Force UTF-8 mode in the child so its I/O never depends on the host
-        # code page (ENG-824).
+        # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
+        # Propagate provider credentials from the ANTON_* names into the SDK
+        # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
             env["ANTHROPIC_API_KEY"] = env["ANTON_ANTHROPIC_API_KEY"]
         if "OPENAI_API_KEY" not in env and "ANTON_OPENAI_API_KEY" in env:
@@ -447,6 +582,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             env["ANTON_UV_PATH"] = uv
 
+        # Namespace snapshot path (ENG-1124). The boot script reads
+        # ANTON_SCRATCHPAD_SESSION_PATH and nothing ever set it, so it fell back to a
+        # hardcoded "/anton_scratchpad_session.pkl" — the filesystem root, which no
+        # Cowork process can write to. Every save failed and every failure was
+        # discarded, so state never survived a turn. This is the only place that knows
+        # the pad name, so it is where the path is composed.
+        snapshot = self._session_snapshot_path(create=True)
+        if snapshot is not None:
+            env["ANTON_SCRATCHPAD_SESSION_PATH"] = str(snapshot)
+        else:
+            # Leaving it unset makes the boot script *report* that state will not
+            # persist, rather than silently pretending it does.
+            env.pop("ANTON_SCRATCHPAD_SESSION_PATH", None)
+
         _anton_root = str(Path(__file__).resolve().parent.parent.parent.parent)
         python_path = env.get("PYTHONPATH", "")
         if _anton_root not in python_path:
@@ -493,6 +642,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Kill the process, clear cells, and restart."""
         await self._stop_process()
         self.cells.clear()
+        # The tool contract for `reset` is "clearing all state (installed packages
+        # survive)". Since the namespace is now snapshotted to disk (ENG-1124), the
+        # snapshot has to go too — otherwise start() below reloads it and `reset`
+        # silently stops resetting anything.
+        self._discard_session_snapshot()
         if not self._verify_venv_python():
             self._nuke_venv()
         await self.start()
@@ -530,6 +684,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """Kill process and delete the venv entirely."""
         await self._stop_process()
         self._nuke_venv()
+        self._discard_session_snapshot()
 
     async def execute_streaming(
         self,
@@ -550,6 +705,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
             )
             return
+
+        # Fresh salvage state per cell: _read_result accumulates the worker's
+        # stdout chunks here so a kill/crash can still report partial output.
+        self._salvage: list[str] = []
+        self._salvage_truncated = False
 
         payload = code + "\n" + CELL_DELIM + "\n"
         self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
@@ -582,9 +742,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "For Snowflake: use SHOW RUNNING QUERIES and "
                 "SELECT SYSTEM$CANCEL_ALL_QUERIES(<session_id>)."
             )
+            salvaged = "".join(self._salvage)
+            if salvaged:
+                if self._salvage_truncated:
+                    salvaged = "(truncated to most recent output)\n" + salvaged
+                error_msg += (
+                    "\n\nPartial output from before the kill was recovered "
+                    "and is shown in stdout (current to within one heartbeat "
+                    "interval) — use it to determine which side effects "
+                    "already happened."
+                )
             cell = Cell(
                 code=code,
-                stdout="",
+                stdout=salvaged,
                 stderr="",
                 error=error_msg,
                 description=description,
@@ -651,13 +821,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
 
+        # A budget kill with zero salvaged output is ambiguous: a stuck call
+        # and silent heavy work look identical from outside, so the message
+        # says so instead of implying "too heavy" (the confident wrong guess
+        # that taught the ENG-578 per-item pattern). The phrase routes to its
+        # own nudge — lockstep constraint, see the silence-kill raise below.
+        def _total_timeout_message() -> str:
+            base = f"Cell timed out after {total_timeout:.0f}s total"
+            if not self._salvage:
+                return base + (
+                    " without producing any output — either a call is stuck "
+                    "or the work is heavier than estimated"
+                )
+            return base
+
         while True:
             elapsed = _time.monotonic() - start
             remaining_total = total_timeout - elapsed
             if remaining_total <= 0:
-                raise asyncio.TimeoutError(
-                    f"Cell timed out after {total_timeout:.0f}s total"
-                )
+                raise asyncio.TimeoutError(_total_timeout_message())
 
             line_timeout = min(current_inactivity, remaining_total)
             try:
@@ -668,23 +850,60 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             except asyncio.TimeoutError:
                 elapsed_now = _time.monotonic() - start
                 if elapsed_now >= total_timeout - 0.5:
-                    raise asyncio.TimeoutError(
-                        f"Cell timed out after {total_timeout:.0f}s total"
-                    ) from None
+                    raise asyncio.TimeoutError(_total_timeout_message()) from None
+                # Wording is load-bearing in THREE places (ENG-578 lockstep):
+                # _select_resilience_nudge routes on "liveness"/"timed out"/
+                # "without producing any output", the ACC kill-loop detector
+                # classifies on the same phrases, and observe_scratchpad_cell
+                # records only the FIRST 120 chars as the ACC reason — the
+                # routing keywords must stay inside that slice. Change all of
+                # them together.
+                #
+                # Only two things actually reach this timer now: a dead worker
+                # (EOF follows shortly) or one pinned below Python by a native
+                # call holding the GIL — a userland deadlock or spin keeps
+                # heartbeating and runs to the total budget instead.
                 raise asyncio.TimeoutError(
-                    f"Cell killed after {current_inactivity:.0f}s of inactivity "
-                    "(no output or progress() calls)"
+                    f"Cell killed after {current_inactivity:.0f}s without a "
+                    "liveness signal from the scratchpad worker — the worker "
+                    "process died, or a native call is stuck holding it below "
+                    "Python. Deliberate sleeps and blocking calls are kept "
+                    "alive automatically, so this is NOT caused by "
+                    "quiet-but-working code"
                 ) from None
 
             if not raw:
+                # Crash/EOF: attach whatever stdout chunks were salvaged —
+                # the process died with side effects possibly already done.
                 yield {
-                    "stdout": "",
+                    "stdout": "".join(self._salvage),
                     "stderr": "",
                     "error": "Process exited unexpectedly.",
                 }
                 return
 
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+            if line.startswith(HEARTBEAT_MARKER):
+                # Liveness only: arrival already re-armed the readline timer.
+                continue
+
+            if line.startswith(STDOUT_CHUNK_MARKER):
+                # Salvage: accumulate silently (arrival is also liveness).
+                # Keep the TAIL when over budget — after a kill the newest
+                # output ("sent 47/50") is the valuable part, unlike normal
+                # stdout truncation which keeps the head.
+                try:
+                    chunk = json.loads(line[len(STDOUT_CHUNK_MARKER) :].strip())
+                except json.JSONDecodeError:
+                    chunk = ""
+                if isinstance(chunk, str) and chunk:
+                    self._salvage.append(chunk)
+                    total = sum(len(c) for c in self._salvage)
+                    while total > _SALVAGE_MAX and len(self._salvage) > 1:
+                        total -= len(self._salvage.pop(0))
+                        self._salvage_truncated = True
+                continue
 
             if line.startswith(PROGRESS_MARKER):
                 current_inactivity = max(
@@ -807,6 +1026,7 @@ def local_scratchpad_runtime_factory(
     coding_base_url: str,
     cells: list[Cell] | None,
     workspace_path: Path | None,
+    session_id: str | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -816,4 +1036,5 @@ def local_scratchpad_runtime_factory(
         coding_base_url=coding_base_url,
         cells=cells,
         workspace_path=workspace_path,
+        session_id=session_id,
     )

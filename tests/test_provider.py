@@ -3,9 +3,62 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import _parse_response_object
-from anton.core.llm.provider import LLMResponse, ToolCall, compute_context_pressure
+from anton.core.llm.provider import (
+    LLMResponse,
+    ToolCall,
+    TransientProviderError,
+    compute_context_pressure,
+    raise_on_empty_response,
+)
+
+
+def _output_text_item(text: str) -> SimpleNamespace:
+    """A minimal Responses API ``message`` item carrying one output_text block."""
+    return SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text=text)],
+    )
+
+
+class TestRaiseOnEmptyResponse:
+    def test_raises_on_empty_200(self):
+        # No content, no tool calls, no stop reason → the empty-200 failure mode.
+        with pytest.raises(TransientProviderError) as exc:
+            raise_on_empty_response(content="", tool_calls=[], stop_reason=None)
+        assert exc.value.code == "empty_response"
+        # Fail fast, don't loop the retry budget on a broken endpoint.
+        assert exc.value.session_backoff is False
+
+    def test_passthrough_with_content(self):
+        raise_on_empty_response(content="hi", tool_calls=[], stop_reason=None)
+
+    def test_passthrough_with_tool_calls(self):
+        raise_on_empty_response(
+            content="", tool_calls=[ToolCall(id="1", name="t", input={})], stop_reason=None
+        )
+
+    def test_passthrough_with_stop_reason(self):
+        # A real stop_reason means the provider terminated deliberately (e.g. a
+        # legitimately empty turn) — not a truncated/empty 200.
+        raise_on_empty_response(content="", tool_calls=[], stop_reason="stop")
+
+    def test_empty_string_stop_reason_counts_as_absent(self):
+        # An empty-string stop_reason is treated as absent (no real provider
+        # sends ""), so an otherwise-empty response still raises. Pins the
+        # truthiness predicate against a revert to `stop_reason is not None`.
+        with pytest.raises(TransientProviderError):
+            raise_on_empty_response(content="", tool_calls=[], stop_reason="")
+
+    def test_parse_response_object_raises_on_empty_200(self):
+        # End-to-end: an empty output with no status is the silent-empty 200 the
+        # guard exists to catch — it must raise, not return an empty LLMResponse.
+        response = SimpleNamespace(output=[], usage=None)
+        with pytest.raises(TransientProviderError):
+            _parse_response_object(response, "claude-sonnet-4-6")
 
 
 class TestComputeContextPressure:
@@ -31,7 +84,8 @@ class TestComputeContextPressure:
         # must coerce them to 0 (not pass None into compute_context_pressure)
         # and must not raise.
         response = SimpleNamespace(
-            output=[],
+            output=[_output_text_item("ok")],
+            status="completed",
             usage=SimpleNamespace(input_tokens=None, output_tokens=None),
         )
         result = _parse_response_object(response, "claude-sonnet-4-6")
@@ -42,7 +96,8 @@ class TestComputeContextPressure:
     def test_parse_response_object_keeps_real_usage_tokens(self):
         # Sanity: valid counts are preserved unchanged.
         response = SimpleNamespace(
-            output=[],
+            output=[_output_text_item("ok")],
+            status="completed",
             usage=SimpleNamespace(input_tokens=100_000, output_tokens=250),
         )
         result = _parse_response_object(response, "claude-sonnet-4-6")
@@ -186,6 +241,114 @@ class TestAnthropicProvider:
             mock_anthropic.AsyncAnthropic.return_value = AsyncMock()
             provider = AnthropicProvider()
             mock_anthropic.AsyncAnthropic.assert_called_once_with()
+
+
+class _FakeAnthropicStream:
+    """Minimal async-context-manager + async-iterator stand-in for the
+    object `client.messages.stream(**kwargs)` returns (NOT awaited itself
+    — used via `async with ... as stream: async for event in stream:`)."""
+
+    def __init__(self, events):
+        self._events = events
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    def __aiter__(self):
+        return self._iter()
+
+    async def _iter(self):
+        for event in self._events:
+            yield event
+
+
+class TestAnthropicProviderReasoningStream:
+    """ENG-1109: extended-thinking content blocks (triggered server-side by
+    `output_config.effort`, already sent whenever reasoning_effort is set)
+    must surface as StreamReasoningDelta, not get misclassified as text or
+    silently dropped."""
+
+    async def test_thinking_delta_becomes_stream_reasoning_delta(self):
+        from anton.core.llm.provider import StreamReasoningDelta, StreamTextDelta
+
+        events = [
+            SimpleNamespace(
+                type="message_start",
+                message=SimpleNamespace(usage=SimpleNamespace(input_tokens=5, output_tokens=0)),
+            ),
+            SimpleNamespace(
+                type="content_block_start", index=0,
+                content_block=SimpleNamespace(type="thinking"),
+            ),
+            SimpleNamespace(
+                type="content_block_delta", index=0,
+                delta=SimpleNamespace(type="thinking_delta", thinking="Let me check that first."),
+            ),
+            SimpleNamespace(
+                type="content_block_delta", index=0,
+                delta=SimpleNamespace(type="signature_delta", signature="sig-abc"),
+            ),
+            SimpleNamespace(type="content_block_stop", index=0),
+            SimpleNamespace(
+                type="content_block_start", index=1,
+                content_block=SimpleNamespace(type="text"),
+            ),
+            SimpleNamespace(
+                type="content_block_delta", index=1,
+                delta=SimpleNamespace(type="text_delta", text="The real answer."),
+            ),
+            SimpleNamespace(type="content_block_stop", index=1),
+            SimpleNamespace(
+                type="message_delta",
+                delta=SimpleNamespace(stop_reason="end_turn"),
+                usage=SimpleNamespace(output_tokens=12),
+            ),
+        ]
+
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_client.messages.stream = MagicMock(return_value=_FakeAnthropicStream(events))
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+
+            provider = AnthropicProvider(api_key="test-key", reasoning_effort="medium")
+            yielded = [
+                e async for e in provider.stream(
+                    model="claude-sonnet-4-6",
+                    system="be helpful",
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+            ]
+
+        reasoning_events = [e for e in yielded if isinstance(e, StreamReasoningDelta)]
+        text_events = [e for e in yielded if isinstance(e, StreamTextDelta)]
+        assert reasoning_events == [StreamReasoningDelta(text="Let me check that first.")]
+        assert text_events == [StreamTextDelta(text="The real answer.")]
+
+    async def test_stream_passes_effort_via_extra_body(self):
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_client.messages.stream = MagicMock(
+                return_value=_FakeAnthropicStream([
+                    SimpleNamespace(
+                        type="message_delta",
+                        delta=SimpleNamespace(stop_reason="end_turn"),
+                        usage=SimpleNamespace(output_tokens=0),
+                    ),
+                ])
+            )
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+
+            provider = AnthropicProvider(api_key="k", reasoning_effort="high")
+            async for _ in provider.stream(
+                model="claude-sonnet-4-6", system="s", messages=[{"role": "user", "content": "hi"}],
+            ):
+                pass
+
+            call_kwargs = mock_client.messages.stream.call_args[1]
+            assert call_kwargs["extra_body"] == {"output_config": {"effort": "high"}}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

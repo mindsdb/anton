@@ -16,12 +16,91 @@ from anton.core.backends.wire import (
 
 # --- Python session persistence and namespace injection ---
 PERSIST_SESSION = os.environ.get("ANTON_SCRATCHPAD_PERSIST_SESSION", "false").lower() in {"1", "true", "yes", "on"}
-SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "/anton_scratchpad_session.pkl")
+
+# NO default path (ENG-1124). The historical default was "/anton_scratchpad_session.pkl"
+# — the filesystem ROOT, which no Cowork process can write to: macOS desktop gets EROFS
+# from the sealed system volume, and the hosted container runs as non-root `anton`
+# (uid 1000) so `/` is EACCES. Every dump failed, every failure was discarded, and
+# session persistence was silently a no-op for ~2 months while reporting as enabled.
+# An unset path now disables persistence *loudly* (see `_load_namespace`) rather than
+# aiming writes at somewhere unwritable. The caller owns the path: `local.py` composes
+# a per-pad, per-conversation one under the workspace and creates the directory.
+SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "")
+
+# Snapshot size ceiling. Persisting after every cell costs nothing while it always
+# fails; once it works, a namespace holding large frames would be rewritten on each
+# cell. Above the cap we skip the write and say so, rather than stalling every cell on
+# hundreds of MB of pickling.
+_SESSION_MAX_DEFAULT = 100 * 1024 * 1024
+try:
+    SESSION_MAX_BYTES = int(
+        os.environ.get("ANTON_SCRATCHPAD_SESSION_MAX_BYTES", str(_SESSION_MAX_DEFAULT))
+    )
+except ValueError:
+    # A malformed override must never stop the scratchpad from booting.
+    SESSION_MAX_BYTES = _SESSION_MAX_DEFAULT
+
+# Never snapshot these: rebuilt on every boot, and per-cell state.
+_SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", "_anton_explainability_queries"})
+
+# Helpers this module injects. They are excluded because they are rebuilt fresh each
+# boot and some (`get_llm`, `web_search`, `query_minds_data`) close over live network
+# clients that must not be pickled or carried between processes.
+#
+# Excluded BY IDENTITY, not by name (`_INJECTED_HELPERS` below). Excluding by name
+# silently destroyed agent data: `sample` and `progress` are perfectly ordinary
+# variable names (`sample = df.sample(100)`), and a name-based skip meant the agent's
+# value was dropped from the snapshot and then re-injected as the helper on the next
+# turn — so `print(sample)` returned `<function sample>` with no error. If the agent
+# rebinds one of these names, its value is data and gets persisted like any other.
+_INJECTED_HELPER_NAMES = frozenset(
+    {"get_llm", "agentic_loop", "web_search", "query_minds_data", "progress", "sample"}
+)
+
+# The helper objects this boot actually created, recorded by `_inject_helper` at the
+# point of definition. It must NOT be built from `namespace` after injection: on a
+# restore the namespace already holds the agent's own value under that name, and
+# `setdefault` leaves it there — so reading it back recorded the agent's DATA as though
+# it were our helper, and the next dump then excluded it. Symptom: the value survived
+# exactly one restart and became `<function sample>` on the second.
+_INJECTED_HELPERS: dict = {}
+
+
+def _inject_helper(name: str, fn) -> None:
+    """Expose a helper to scratchpad code, and remember the object we injected.
+
+    `setdefault`, not assignment: injections run after `_load_namespace`, so a plain
+    assign would clobber an agent value restored under this name. Recording and
+    injecting in one place keeps the two from drifting apart — that drift was the bug.
+    """
+    _INJECTED_HELPERS[name] = fn
+    namespace.setdefault(name, fn)
+
+# Names whose value dill could not pickle, mapped to the id() of the value that failed.
+# Pickling is all-or-nothing per file, so ONE unpicklable object used to lose the whole
+# namespace — and the objects that fail are exactly the ones long stateful tasks hold:
+# DB connections (`sqlite3.Connection`, psycopg2, pyodbc), sockets (SMTP for a mail
+# campaign), and generators. Verified with dill 0.4.1. Remembering the offenders keeps
+# the expensive per-key scan to the first cell that hits one; keying on id() means a
+# rebind to something picklable is retried rather than excluded forever.
+_UNPICKLABLE: dict = {}
+
+# Persistence notes for the next cell's `logs`. Deliberately NOT `error` — a snapshot
+# problem must not make the cell look failed, or it would feed the consecutive-error
+# circuit breaker and the resilience nudge.
+_session_notes: list[str] = []
 
 
 def _load_namespace() -> tuple[dict, str | None]:
     if not PERSIST_SESSION:
         return {"__builtins__": __builtins__}, None
+    if not SESSION_PATH:
+        return (
+            {"__builtins__": __builtins__},
+            "Scratchpad session persistence is enabled but "
+            "ANTON_SCRATCHPAD_SESSION_PATH is unset, so nothing will survive this "
+            "process. Variables and imports are lost when this scratchpad restarts.",
+        )
     try:
         with open(SESSION_PATH, "rb") as f:
             ns = dill.load(f)
@@ -30,27 +109,134 @@ def _load_namespace() -> tuple[dict, str | None]:
         ns.setdefault("__builtins__", __builtins__)
         return ns, None
     except FileNotFoundError:
+        # First cell of a brand-new pad — expected, not a problem.
         return {"__builtins__": __builtins__}, None
     except Exception:
+        # Includes unpickling failures from package-version skew between turns (e.g. a
+        # later cell installed a newer pandas). Degrading to a fresh namespace is the
+        # old behaviour; the difference is that now it is reported.
         return (
             {"__builtins__": __builtins__},
             "Failed to load scratchpad session; starting fresh.\n" + traceback.format_exc(),
         )
 
 
+class _TooBig(Exception):
+    """Raised mid-write once the snapshot passes SESSION_MAX_BYTES."""
+
+
+class _CappedWriter:
+    """File wrapper that aborts the write once it exceeds `limit` bytes.
+
+    Checking the size *after* serialising bounded what we keep but not what it cost:
+    a multi-GB namespace still paid a full serialise + write on every cell before being
+    deleted, which is the exact cost the cap exists to avoid. Failing fast mid-write
+    bounds both.
+    """
+
+    def __init__(self, fh, limit: int) -> None:
+        self._fh = fh
+        self._limit = limit
+        self.written = 0
+
+    def write(self, chunk) -> int:
+        self.written += len(chunk)
+        if self.written > self._limit:
+            raise _TooBig()
+        return self._fh.write(chunk)
+
+    def flush(self) -> None:
+        self._fh.flush()
+
+
+def _snapshot_payload(ns: dict) -> dict:
+    """The subset of `ns` worth persisting."""
+    return {
+        k: v
+        for k, v in ns.items()
+        if k not in _SESSION_EXCLUDE_ALWAYS
+        # Injected helpers are skipped by IDENTITY, not by name: if the agent rebinds
+        # `sample` or `progress` to its own data, that value is data and gets saved.
+        and not (k in _INJECTED_HELPERS and v is _INJECTED_HELPERS[k])
+        # Known-unpicklable, and still the same object that failed before.
+        and _UNPICKLABLE.get(k) != id(v)
+    }
+
+
+def _write_snapshot(payload: dict, tmp_path: str) -> None:
+    """Serialise `payload` to `tmp_path`, aborting past the size cap."""
+    with open(tmp_path, "wb") as f:
+        dill.dump(payload, _CappedWriter(f, SESSION_MAX_BYTES))
+
+
 def _dump_namespace(ns: dict) -> str | None:
-    if not PERSIST_SESSION:
+    if not PERSIST_SESSION or not SESSION_PATH:
         return None
+    payload = _snapshot_payload(ns)
+    # Include the pid: a pad can briefly overlap with its own replacement, and two
+    # writers sharing one .tmp would corrupt each other's snapshot.
+    tmp_path = f"{SESSION_PATH}.{os.getpid()}.tmp"
     try:
-        with open(SESSION_PATH, "wb") as f:
-            dill.dump(ns, f)
+        # Write-then-replace. This process is killed abruptly at the end of a turn (and
+        # by the inactivity watchdog mid-cell), so writing straight to SESSION_PATH
+        # would eventually leave a torn pickle that the next process fails to load.
+        # os.replace is atomic within a filesystem.
+        _write_snapshot(payload, tmp_path)
+        os.replace(tmp_path, SESSION_PATH)
         return None
+    except _TooBig:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return (
+            f"Scratchpad session NOT saved: the namespace exceeds the "
+            f"{SESSION_MAX_BYTES:,}-byte snapshot cap. Variables will not survive a "
+            "restart of this scratchpad — write large results to disk (or an artifact) "
+            "instead of holding them in memory."
+        )
     except Exception:
-        return "Failed to dump scratchpad session.\n" + traceback.format_exc()
+        first_failure = traceback.format_exc()
+        # Save what we can instead of losing everything to one bad object. Only reached
+        # the first time a given object fails; after that it is pre-excluded above.
+        dropped = []
+        for key in list(payload):
+            try:
+                dill.dumps(payload[key])
+            except Exception:
+                _UNPICKLABLE[key] = id(payload[key])
+                dropped.append(key)
+                payload.pop(key)
+        if not dropped:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            return "Failed to dump scratchpad session.\n" + first_failure
+        try:
+            _write_snapshot(payload, tmp_path)
+            os.replace(tmp_path, SESSION_PATH)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            return "Failed to dump scratchpad session.\n" + first_failure
+        return (
+            "Scratchpad session saved, but these variables could not be preserved and "
+            "will be undefined if this scratchpad restarts: "
+            + ", ".join(sorted(dropped))
+            + ". Objects holding live resources (database connections, sockets, "
+            "generators) cannot be saved — recreate them rather than relying on them "
+            "persisting."
+        )
 
 
-# Persistent namespace across cells
-namespace, _ = _load_namespace()
+# Persistent namespace across cells. Keep the load note — discarding it is how the
+# broken path went unnoticed; it is surfaced on the first cell's `logs`.
+namespace, _session_load_note = _load_namespace()
+if _session_load_note:
+    _session_notes.append(_session_load_note)
 namespace["_anton_explainability_queries"] = []
 
 # --- Inject get_llm() for LLM access from scratchpad code ---
@@ -120,9 +306,9 @@ if _scratchpad_model:
         async def _run_with_heartbeat(coro):
             """Run an async coroutine while emitting progress heartbeats.
 
-            LLM API calls can block for 30s+.  Without heartbeats, the
-            scratchpad inactivity timeout (30s) kills the process.  This
-            wrapper runs a heartbeat task alongside the real work.
+            Survival is covered by the cell-level liveness heartbeat thread;
+            these progress lines exist for the user — "Waiting for LLM… (Ns)"
+            is visible status during an in-cell LLM call that can block 30s+.
             """
 
             async def _heartbeat():
@@ -130,10 +316,16 @@ if _scratchpad_model:
                 while True:
                     await _llm_asyncio.sleep(_LLM_HEARTBEAT_INTERVAL)
                     elapsed += _LLM_HEARTBEAT_INTERVAL
-                    _real_stdout.write(
-                        PROGRESS_MARKER + f" Waiting for LLM… ({elapsed}s)\n"
-                    )
-                    _real_stdout.flush()
+                    # Same lock as every other _real_stdout writer (see _wire_lock
+                    # below): the liveness heartbeat thread is a genuine OS thread
+                    # that writes for the whole cell span, including in-cell LLM
+                    # calls, so an unlocked write here could land inside another
+                    # writer's multi-line block and tear the parent's protocol.
+                    with _wire_lock:
+                        _real_stdout.write(
+                            PROGRESS_MARKER + f" Waiting for LLM… ({elapsed}s)\n"
+                        )
+                        _real_stdout.flush()
 
             beat = _llm_asyncio.create_task(_heartbeat())
             try:
@@ -157,8 +349,9 @@ if _scratchpad_model:
             ):
                 """Call the LLM synchronously. Returns an LLMResponse.
 
-                Automatically emits progress heartbeats every 10s so that
-                long API calls don't trip the scratchpad inactivity timeout.
+                Emits "Waiting for LLM…" progress every 10s so the user sees
+                status during long API calls (liveness is handled by the
+                cell-level heartbeat thread).
                 """
                 return _llm_asyncio.run(
                     _run_with_heartbeat(
@@ -371,9 +564,9 @@ if _scratchpad_model:
             )
             return response.content
 
-        namespace["get_llm"] = get_llm
-        namespace["agentic_loop"] = agentic_loop
-        namespace["web_search"] = web_search
+        _inject_helper("get_llm", get_llm)
+        _inject_helper("agentic_loop", agentic_loop)
+        _inject_helper("web_search", web_search)
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 
@@ -460,7 +653,7 @@ if _minds_datasource and _minds_api_key and _minds_url:
                     "error_message": str(e),
                 }
 
-        namespace["query_minds_data"] = query_minds_data
+        _inject_helper("query_minds_data", query_minds_data)
     except Exception:
         pass  # Minds query not available — not fatal
 
@@ -468,18 +661,72 @@ if _minds_datasource and _minds_api_key and _minds_url:
 _real_stdout = sys.stdout
 _real_stdin = sys.stdin
 
-from anton.core.backends.wire import PROGRESS_MARKER
+import threading
+
+from anton.core.backends.wire import (
+    HEARTBEAT_MARKER,
+    PROGRESS_MARKER,
+    STDOUT_CHUNK_MARKER,
+)
+
+# All _real_stdout writes go through this lock: the heartbeat thread writes
+# concurrently with the main thread's progress()/result emission, and a torn
+# line would corrupt the parent's line-oriented protocol.
+_wire_lock = threading.Lock()
+
+# Env override exists for tests only; <= 0 disables the heartbeat entirely
+# (restoring pre-heartbeat watchdog behavior). Same guard as SESSION_MAX_BYTES:
+# a malformed override must never stop the scratchpad from booting.
+try:
+    _HEARTBEAT_INTERVAL = float(
+        os.environ.get("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "10")
+    )
+except ValueError:
+    _HEARTBEAT_INTERVAL = 10.0
+
+# Per-tick cap on salvage chunk size: bounds a single wire line even when a
+# cell floods stdout between ticks; the remainder ships on later ticks.
+_CHUNK_MAX = 8_192
+
+# The heartbeat thread reads this; the main loop points "buf" at the current
+# cell's out_buf (it is swapped on auto-install retry). "shipped" is used by
+# the stdout-salvage chunking (see the main loop).
+_cell_out: dict = {"buf": None, "shipped": 0}
+
+
+def _heartbeat_loop(stop: threading.Event) -> None:
+    # A tick with new cell output ships it as a salvage chunk instead of a
+    # bare beat — any line is liveness, and the parent keeps the chunks so a
+    # killed cell can still report what it printed before dying. json.dumps
+    # gives one-line framing (newlines/unicode escaped); a torn trailing
+    # line read off the StringIO mid-write is acceptable in a salvage path.
+    while not stop.wait(_HEARTBEAT_INTERVAL):
+        buf = _cell_out["buf"]
+        text = buf.getvalue() if buf is not None else ""
+        new = text[_cell_out["shipped"] :]
+        with _wire_lock:
+            if new:
+                chunk = new[:_CHUNK_MAX]
+                _cell_out["shipped"] += len(chunk)
+                _real_stdout.write(
+                    STDOUT_CHUNK_MARKER + " " + json.dumps(chunk) + "\n"
+                )
+            else:
+                _real_stdout.write(HEARTBEAT_MARKER + "\n")
+            _real_stdout.flush()
+
 
 _MAX_OUTPUT = 10_000
 
 
 def progress(message=""):
     """Signal that long-running work is still active. Resets the inactivity timer."""
-    _real_stdout.write(PROGRESS_MARKER + " " + str(message) + "\n")
-    _real_stdout.flush()
+    with _wire_lock:
+        _real_stdout.write(PROGRESS_MARKER + " " + str(message) + "\n")
+        _real_stdout.flush()
 
 
-namespace["progress"] = progress
+_inject_helper("progress", progress)
 
 
 def sample(var, mode="preview", _name=None):
@@ -680,7 +927,7 @@ def _truncate_sample(text, max_chars):
     return text[:max_chars] + f"\n... (truncated, {len(text)} chars total)"
 
 
-namespace["sample"] = sample
+_inject_helper("sample", sample)
 
 # --- Logging capture ---
 # Libraries like httpx, urllib3, etc. use Python logging. By default these
@@ -709,6 +956,7 @@ class _CellLogHandler(_logging.Handler):
 _cell_log_handler = _CellLogHandler()
 _logging.root.addHandler(_cell_log_handler)
 _logging.root.setLevel(_logging.INFO)
+
 
 while True:
     lines = []
@@ -740,98 +988,158 @@ while True:
     code = heal_surrogate_source(code)
     if not code.strip():
         result = {"stdout": "", "stderr": "", "logs": "", "error": None}
-        _real_stdout.write(RESULT_START + "\n")
-        _real_stdout.write(json.dumps(result) + "\n")
-        _real_stdout.write(RESULT_END + "\n")
-        _real_stdout.flush()
+        with _wire_lock:
+            _real_stdout.write(RESULT_START + "\n")
+            _real_stdout.write(json.dumps(result) + "\n")
+            _real_stdout.write(RESULT_END + "\n")
+            _real_stdout.flush()
         continue
 
-    out_buf = io.StringIO()
-    err_buf = io.StringIO()
-    log_buf = io.StringIO()
-    error = None
-    namespace["_anton_explainability_queries"] = []
-    _cell_log_handler.buf = log_buf
-
-    sys.stdout = out_buf
-    sys.stderr = err_buf
-    _auto_installed = []
+    # Liveness heartbeat: a daemon thread pings the real pipe while this cell
+    # runs, so the parent's inactivity watchdog sees activity through a
+    # deliberate sleep or a blocking call, not just through stdout/progress().
+    # Span covers the auto-install retry below too (ENG-1275: a silent
+    # in-cell install used to be indistinguishable from a wedged process).
+    _hb_stop = threading.Event()
+    _hb_thread = None
+    if _HEARTBEAT_INTERVAL > 0:
+        _hb_thread = threading.Thread(
+            target=_heartbeat_loop, args=(_hb_stop,), daemon=True
+        )
+        _hb_thread.start()
     try:
-        compiled = compile(code, "<scratchpad>", "exec")
-        exec(compiled, namespace)
-    except ModuleNotFoundError as _mnf:
-        # Auto-install the missing module and retry the cell once
-        _missing = _mnf.name
-        if _missing:
+        _cwd_before = os.getcwd()
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        log_buf = io.StringIO()
+        # Reset "shipped" BEFORE re-pointing "buf": the heartbeat thread may
+        # read between the two assignments, and the worst case must be a
+        # re-shipped duplicate chunk, never a skipped one.
+        _cell_out["shipped"] = 0
+        _cell_out["buf"] = out_buf
+        error = None
+        namespace["_anton_explainability_queries"] = []
+        _cell_log_handler.buf = log_buf
+
+        sys.stdout = out_buf
+        sys.stderr = err_buf
+        _auto_installed = []
+        try:
+            compiled = compile(code, "<scratchpad>", "exec")
+            exec(compiled, namespace)
+        except ModuleNotFoundError as _mnf:
+            # Auto-install the missing module and retry the cell once
+            _missing = _mnf.name
+            if _missing:
+                sys.stdout = _real_stdout
+                sys.stderr = sys.__stderr__
+                _cell_log_handler.buf = None
+                with _wire_lock:
+                    _real_stdout.write(
+                        PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n"
+                    )
+                    _real_stdout.flush()
+                import subprocess as _sp
+
+                _uv_path = os.environ.get("ANTON_UV_PATH", "")
+                if _uv_path:
+                    _pip = _sp.run(
+                        [_uv_path, "pip", "install", "--python", sys.executable, _missing],
+                        capture_output=True,
+                        timeout=120,
+                    )
+                else:
+                    _pip = _sp.run(
+                        [sys.executable, "-m", "pip", "install", _missing],
+                        capture_output=True,
+                        timeout=120,
+                    )
+                # Reset buffers and retry
+                out_buf = io.StringIO()
+                err_buf = io.StringIO()
+                log_buf = io.StringIO()
+                # Same ordering rule as the first cell setup: shipped first,
+                # so the swap can only duplicate a chunk, never skip one.
+                _cell_out["shipped"] = 0
+                _cell_out["buf"] = out_buf
+                _cell_log_handler.buf = log_buf
+                sys.stdout = out_buf
+                sys.stderr = err_buf
+                if _pip.returncode == 0:
+                    _auto_installed.append(_missing)
+                    try:
+                        exec(compiled, namespace)
+                    except Exception:
+                        error = traceback.format_exc()
+                else:
+                    error = (
+                        f"ModuleNotFoundError: No module named '{_missing}'\n"
+                        f"Auto-install failed:\n{_pip.stderr.decode()}"
+                    )
+            else:
+                error = traceback.format_exc()
+        except Exception:
+            error = traceback.format_exc()
+        finally:
             sys.stdout = _real_stdout
             sys.stderr = sys.__stderr__
             _cell_log_handler.buf = None
-            _real_stdout.write(
-                PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n"
+
+        stdout_val = out_buf.getvalue()
+        if len(stdout_val) > _MAX_OUTPUT:
+            stdout_val = (
+                stdout_val[:_MAX_OUTPUT]
+                + f"\n\n... (truncated, {len(stdout_val)} chars total)"
             )
-            _real_stdout.flush()
-            import subprocess as _sp
 
-            _uv_path = os.environ.get("ANTON_UV_PATH", "")
-            if _uv_path:
-                _pip = _sp.run(
-                    [_uv_path, "pip", "install", "--python", sys.executable, _missing],
-                    capture_output=True,
-                    timeout=120,
-                )
-            else:
-                _pip = _sp.run(
-                    [sys.executable, "-m", "pip", "install", _missing],
-                    capture_output=True,
-                    timeout=120,
-                )
-            # Reset buffers and retry
-            out_buf = io.StringIO()
-            err_buf = io.StringIO()
-            log_buf = io.StringIO()
-            _cell_log_handler.buf = log_buf
-            sys.stdout = out_buf
-            sys.stderr = err_buf
-            if _pip.returncode == 0:
-                _auto_installed.append(_missing)
-                try:
-                    exec(compiled, namespace)
-                except Exception:
-                    error = traceback.format_exc()
-            else:
-                error = (
-                    f"ModuleNotFoundError: No module named '{_missing}'\n"
-                    f"Auto-install failed:\n{_pip.stderr.decode()}"
-                )
-        else:
-            error = traceback.format_exc()
-    except Exception:
-        error = traceback.format_exc()
+        # Warn-only chdir visibility (ENG-578 fix #5): a cell's os.chdir
+        # silently persists into every later cell of this pad — tell the
+        # model instead of resetting, so deliberate chdir workflows keep
+        # working. Appended AFTER the truncation clamp so the note can never
+        # be truncated away, and regardless of `error` so a cell that raised
+        # after the chdir still reports it.
+        _cwd_after = os.getcwd()
+        if _cwd_after != _cwd_before:
+            stdout_val = (
+                stdout_val
+                + ("\n" if stdout_val and not stdout_val.endswith("\n") else "")
+                + f"Note: this cell changed the working directory from {_cwd_before} "
+                f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
+            )
+
+        # Persist session after each cell. Keep the return value: a swallowed failure here
+        # is exactly how ENG-1124 stayed invisible for two months.
+        _session_dump_note = _dump_namespace(namespace)
+        if _session_dump_note:
+            _session_notes.append(_session_dump_note)
+
+        # Surface persistence problems on `logs`, never on `error` — see `_session_notes`.
+        logs_val = log_buf.getvalue()
+        if _session_notes:
+            logs_val = (logs_val.rstrip("\n") + "\n\n" if logs_val.strip() else "") + "\n".join(
+                _session_notes
+            )
+            _session_notes.clear()
     finally:
-        sys.stdout = _real_stdout
-        sys.stderr = sys.__stderr__
-        _cell_log_handler.buf = None
-
-    stdout_val = out_buf.getvalue()
-    if len(stdout_val) > _MAX_OUTPUT:
-        stdout_val = (
-            stdout_val[:_MAX_OUTPUT]
-            + f"\n\n... (truncated, {len(stdout_val)} chars total)"
-        )
-
-    # Persist session after each cell.
-    _dump_namespace(namespace)
+        # Always stop the heartbeat, even if result assembly above raised —
+        # otherwise the thread leaks and keeps ticking into the next cell's
+        # read loop (see test_no_stray_beats_corrupt_next_cell).
+        _hb_stop.set()
+        if _hb_thread is not None:
+            _hb_thread.join(timeout=2)
+        _cell_out["buf"] = None
 
     result = {
         "stdout": stdout_val,
         "stderr": err_buf.getvalue(),
-        "logs": log_buf.getvalue(),
+        "logs": logs_val,
         "error": error,
         "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
     }
     if _auto_installed:
         result["auto_installed"] = _auto_installed
-    _real_stdout.write(RESULT_START + "\n")
-    _real_stdout.write(json.dumps(result) + "\n")
-    _real_stdout.write(RESULT_END + "\n")
-    _real_stdout.flush()
+    with _wire_lock:
+        _real_stdout.write(RESULT_START + "\n")
+        _real_stdout.write(json.dumps(result) + "\n")
+        _real_stdout.write(RESULT_END + "\n")
+        _real_stdout.flush()

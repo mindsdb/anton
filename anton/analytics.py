@@ -1,9 +1,43 @@
-"""Fire-and-forget anonymous analytics events.
+"""Fire-and-forget analytics events.
 
 Every call spawns a daemon thread that issues a single GET request to the
-configured analytics URL.  The request carries only the action name, a
-timestamp, and an anonymous machine fingerprint — no PII, no payload
-beyond what the query string contains.
+configured analytics URL.  The request carries the action name, a timestamp,
+an anonymous machine fingerprint, and whatever the caller passes as
+``extra`` query parameters.  No conversation content, ever.
+
+Where these events actually land
+================================
+
+The collector lambda RELAYS into PostHog — verified 2026-08-06 against
+project 355390 ("Anton"), where anton's events appear tagged
+``source = mindsdb-zoominfo-lambda``.  Two consequences worth knowing before
+adding a caller:
+
+* **Every ``extra`` kwarg becomes a queryable PostHog event property.**  Not
+  an allowlist — ``ds_connect_success`` carries its ``engine=postgres``
+  through, and ``turn_completed`` carries its full token breakdown.  So the
+  parameter names here ARE the analytics schema; renaming one silently breaks
+  whatever queries or dashboards read it.
+* **``distinct_id`` is the ``aid`` fingerprint, so these events are
+  per-INSTALL, not per-user.**  They do not join to the Keycloak ``sub`` that
+  the console, the desktop renderer's PostHog client, and the billing mirror
+  all key on.  Per-user questions need either that identified client or the
+  ``conversation_id`` -> Langfuse -> user hop.
+* PostHog additionally enriches server-side with IP and GeoIP.
+
+Identifier policy
+=================
+
+Events were originally fingerprint-only.  ``turn_completed`` (the per-turn
+cost event) also sends an opaque **join key** — ``conversation_id``, the same
+value emitted as ``Langfuse-Session-Id`` — so a turn's cost can be tied to
+its trace when investigating a runaway.  The id carries no personal data on
+its own; resolving it to a person requires Langfuse access, and Langfuse
+already holds the full conversation content for the same session, so this
+adds no disclosure that path doesn't already have.
+
+Still never sent, by any caller: message text, prompts, tool output, file
+paths, credentials, hostnames, or email addresses.
 
 Guarantees:
   • Never blocks the caller.

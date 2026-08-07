@@ -16,6 +16,7 @@ from .provider import (
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolUseDelta,
     StreamToolUseEnd,
@@ -24,8 +25,11 @@ from .provider import (
     ToolCall,
     TransientProviderError,
     Usage,
+    classify_404,
     classify_transient,
     compute_context_pressure,
+    wallet_denial_code,
+    raise_on_empty_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,12 @@ def _raise_for_status_error(
 
     - 401 → ConnectionError (invalid-key copy; cowork-server keys on this phrase).
     - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
+    - 402/429 with an M3 gate wallet code (``wallet_empty`` /
+      ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
+      → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
+    - 404 → ModelUnavailableError or EndpointConfigurationError via the
+      shared ``classify_404`` (ENG-1139) — permanent, non-duplicated copy
+      instead of the generic "temporarily unavailable, try again".
     - overloaded/api_error (incl. the mid-stream HTTP-200 case), 5xx, plain 429
       → TransientProviderError (retryable — see ENG-673).
     - anything else → the generic "temporarily unavailable" ConnectionError.
@@ -57,6 +67,44 @@ def _raise_for_status_error(
         msg = f"Server returned 429 — {body['detail']}"
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
         raise TokenLimitExceeded(msg) from exc
+
+    # MindsHub M3 wallet taxonomy (ENG-1169) — same branch as the openai twin
+    # so the mapping can't drift. Today the gateway's anthropic-dialect lane
+    # strips both the code and the X-MindsHub-* headers (tracked separately),
+    # so this fires only against a fixed gateway or a proxy that preserves
+    # them — but a wallet denial that DOES arrive here must hit the credits
+    # card, not the generic copy. Code/reason-exact: a BYOK Anthropic billing
+    # error carries neither and stays generic.
+    gate_reason = ""
+    if getattr(exc, "response", None) is not None:
+        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    wallet_code = wallet_denial_code(body) or (
+        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+    )
+    if exc.status_code in (402, 429) and wallet_code:
+        what = (
+            "your MindsHub credits are used up."
+            if wallet_code == "wallet_empty"
+            else "your included token allowance is exhausted."
+        )
+        raise TokenLimitExceeded(
+            f"Server returned {exc.status_code} — {what} Add credits at "
+            "https://console.mindshub.ai/settings/organization/billing to continue."
+        ) from exc
+
+    # A 404 from the Anthropic Messages API means the model isn't recognized
+    # (there's no alternate route to misconfigure on this fixed endpoint) —
+    # ``error.type="not_found_error"`` is Anthropic's own signal. Shared
+    # classifier with the openai.py mapper (ENG-1139) so the wording — and
+    # the "permanent, switch models" framing instead of the misleading
+    # "temporarily unavailable, try again" — can't drift between providers.
+    if exc.status_code == 404:
+        envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+        raise classify_404(
+            model,
+            message=envelope.get("message") or body.get("message"),
+            error_type=envelope.get("type"),
+        ) from exc
 
     transient = classify_transient(exc.status_code, body, provider=provider, model=model)
     if transient is not None:
@@ -189,6 +237,11 @@ class AnthropicProvider(LLMProvider):
                     ToolCall(id=block.id, name=block.name, input=block.input)
                 )
 
+        raise_on_empty_response(
+            content=content_text, tool_calls=tool_calls,
+            stop_reason=response.stop_reason, provider="Anthropic", model=model,
+        )
+
         input_tokens = response.usage.input_tokens
         return LLMResponse(
             content=content_text,
@@ -197,6 +250,11 @@ class AnthropicProvider(LLMProvider):
                 input_tokens=input_tokens,
                 output_tokens=response.usage.output_tokens,
                 context_pressure=compute_context_pressure(model, input_tokens),
+                # Anthropic reports cache activity as separate fields and its
+                # input_tokens already excludes them — pass through as-is
+                # (ENG-1288). getattr-guarded: absent on older SDK responses.
+                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
             ),
             stop_reason=response.stop_reason,
         )
@@ -231,6 +289,8 @@ class AnthropicProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         stop_reason: str | None = None
 
         # Track content blocks by index for tool correlation
@@ -250,6 +310,8 @@ class AnthropicProvider(LLMProvider):
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
                         output_tokens = getattr(usage, "output_tokens", 0)
+                        cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
+                        cache_creation_tokens = getattr(usage, "cache_creation_input_tokens", 0) or 0
 
                     elif event.type == "content_block_start":
                         idx = event.index
@@ -262,6 +324,11 @@ class AnthropicProvider(LLMProvider):
                                 "json_parts": [],
                             }
                             yield StreamToolUseStart(id=block.id, name=block.name)
+                        elif block.type in ("thinking", "redacted_thinking"):
+                            # Adaptive thinking (triggered by output_config.effort,
+                            # set above when self._reasoning_effort is configured)
+                            # — the model's own reasoning, not the final answer.
+                            blocks[idx] = {"type": "thinking"}
                         else:
                             blocks[idx] = {"type": "text"}
 
@@ -278,6 +345,10 @@ class AnthropicProvider(LLMProvider):
                                 yield StreamToolUseDelta(
                                     id=info["id"], json_delta=delta.partial_json
                                 )
+                        elif delta.type == "thinking_delta":
+                            yield StreamReasoningDelta(text=delta.thinking)
+                        # signature_delta carries only a verification signature
+                        # for the thinking block, no user-facing text — ignored.
 
                     elif event.type == "content_block_stop":
                         idx = event.index
@@ -358,6 +429,8 @@ class AnthropicProvider(LLMProvider):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     context_pressure=compute_context_pressure(model, input_tokens),
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
             )

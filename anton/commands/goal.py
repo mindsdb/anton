@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -22,6 +23,27 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.chat_ui import StreamDisplay
     from anton.core.session import ChatSession
+
+
+@contextlib.contextmanager
+def without_ask_user(tool_registry):
+    """Withhold `ask_user` for the duration of an autonomous run.
+
+    `/goal` exists to walk away from the terminal, and `CLIElicitor.timeout_s`
+    is None — it waits on stdin forever — so a question would hang the loop
+    with nobody there to answer. The session belongs to the interactive chat
+    that started the run, so the tool has to come back on exit.
+    """
+    stashed = next(
+        (t for t in tool_registry.get_tool_defs() if t.name == "ask_user"), None
+    )
+    if stashed is not None:
+        tool_registry.unregister_tool("ask_user")
+    try:
+        yield stashed
+    finally:
+        if stashed is not None:
+            tool_registry.register_tool(stashed)
 
 
 def parse_goal_args(raw: str, default_turns: int = 50) -> tuple[str, int]:
@@ -84,6 +106,8 @@ async def run_goal_loop(
     # Ensure the core tools are built, then register the goal tool on top.
     session._build_tools()
     session.tool_registry.register_tool(mark_goal_complete_tool)
+    _tools = contextlib.ExitStack()
+    _tools.enter_context(without_ask_user(session.tool_registry))
 
     console.print()
     console.print(f"[anton.cyan]Goal:[/] {objective}")
@@ -110,7 +134,7 @@ async def run_goal_loop(
 
             try:
                 async with EscapeWatcher(on_cancel=display.show_cancelling) as esc:
-                    session._escape_watcher = esc
+                    session.escape_watcher = esc
                     async for event in session.turn_stream(continuation_msg):
                         if esc.cancelled.is_set():
                             session._cancel_event.set()
@@ -164,6 +188,7 @@ async def run_goal_loop(
 
     finally:
         session.tool_registry.unregister_tool("mark_goal_complete")
+        _tools.close()
         # Anchor the model back to normal chat mode. Two synthetic turns:
         #
         # 1. If repair_history() ran, history ends with user:[tool_results].

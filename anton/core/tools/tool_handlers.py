@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
+from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -476,13 +478,27 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
     return "Memory updated: " + "; ".join(descriptions)
 
 
-async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
-    """Dispatch a scratchpad tool call by action."""
+async def handle_scratchpad(
+    session: ChatSession, tc_input: dict
+) -> str | ToolOutcome:
+    """Dispatch a scratchpad tool call by action.
+
+    The exec path returns a ``ToolOutcome`` carrying the runtime's own
+    failure verdict, so the error streak doesn't re-classify the result by
+    reading it (ENG-1276). The other actions still return plain strings
+    (legacy substring classification).
+    """
     action = tc_input.get("action", "")
     name = tc_input.get("name", "")
 
     if not name:
-        return "Scratchpad name is required."
+        # Explicit failure: this text has no legacy marker phrase, so the
+        # substring fallback used to RESET the streak on it (ENG-1276).
+        return ToolOutcome(
+            content="Scratchpad name is required.",
+            ok=False,
+            reason="scratchpad_missing_name",
+        )
 
     # ACC emit helper: use the session's safe wrapper if it exists,
     # otherwise no-op. Defined as a local closure so each emit site
@@ -500,7 +516,7 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         # paths. A str return is a message the call should not run past
         # (empty code, single-scratchpad challenge, or install failure).
         result = await prepare_scratchpad_exec(session, tc_input)
-        if isinstance(result, str):
+        if isinstance(result, ToolOutcome):
             return result
         pad, code, description, estimated_time, estimated_seconds = result
 
@@ -532,13 +548,27 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
-        return format_cell_result(cell)
+        # The runtime's verdict: a raised error/timeout/kill is a failure;
+        # stderr-only output (warnings) is not, and stdout containing words
+        # like "failed" is not either — the streak reads this flag, never the
+        # text (ENG-1276). The reason is the traceback's LAST line (the cause),
+        # the machine-comparable key ENG-1286's thrash breaker will consume.
+        error = (cell.error or "").strip() if cell is not None else ""
+        return ToolOutcome(
+            content=format_cell_result(cell),
+            ok=not error,
+            reason=error.splitlines()[-1][:160] if error else "",
+        )
 
     elif action == "view":
         # get_or_create: new ChatSession has empty _pads but replayed cells on the
         # manager — same hydration path as exec so view works on the first tool call.
         pad = await session._scratchpads.get_or_create(name)
-        return pad.view()
+        # ok=True: viewing succeeded even when the notebook being viewed
+        # contains old "[error]" cells — the substring fallback used to count
+        # a successful view of a failed cell as a fresh tool failure
+        # (ENG-1276 false positive).
+        return ToolOutcome(content=pad.view(), ok=True)
 
     elif action == "reset":
         pad = session._scratchpads.pads.get(name)
@@ -559,7 +589,9 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         # get_or_create: dump must materialize the runtime from replayed cells when this
         # is the first scratchpad call in a new session (pads.get would miss every time).
         pad = await session._scratchpads.get_or_create(name)
-        return pad.render_notebook()
+        # ok=True for the same reason as view: rendering a notebook whose
+        # cells include past "[error]" output is a success, not a failure.
+        return ToolOutcome(content=pad.render_notebook(), ok=True)
 
     elif action == "install":
         packages = tc_input.get("packages", [])
@@ -748,31 +780,57 @@ def _collect_selection_candidates(tc_input: dict, root: "Path", kind: str) -> "l
 
 
 def _selection_option(path: "Path", root: "Path"):
-    """Build a display option for *path* (label = path relative to the root)."""
-    from anton.core.interaction.selection import SelectionOption
+    """One picker entry for *path*, labelled relative to the project root."""
+    from anton.core.interaction.elicit import AskOption
 
     try:
         label = str(path.relative_to(root))
     except ValueError:
         label = str(path)
-    return SelectionOption(
+    return AskOption(
         value=str(path),
         label=label,
         kind="folder" if path.is_dir() else "file",
     )
 
 
-def _resolve_selection_elicitor(session: "ChatSession"):
-    """The host-injected elicitor, falling back to a terminal picker on the CLI."""
-    elicitor = getattr(session, "selection_elicitor", None)
-    if elicitor is not None:
-        return elicitor
-    console = getattr(session, "_console", None)
-    if console is None:
+def _chosen_path(answer) -> "str | None":
+    """The single path an ``AskAnswer`` carries, or None if there is none."""
+    if answer.status != "answered":
         return None
-    from anton.core.interaction.cli import CLISelectionElicitor
+    if answer.values:
+        return answer.values[0]
+    return (answer.text or "").strip() or None
 
-    return CLISelectionElicitor(console)
+
+def _path_answer_failure(answer) -> "str | None":
+    """Map a non-``answered`` outcome onto ``select_path``'s own status, or None.
+
+    Collapsing every failure into ``cancelled`` would tell the model "the user
+    dismissed the picker" when the user was never asked — the per-turn question
+    budget was spent, the question timed out, or no host could render it. The
+    model's documented reaction to ``cancelled`` is to ask how to proceed, so a
+    false ``cancelled`` costs a turn on a question nobody ever saw.
+    """
+    if answer.status == "answered":
+        return None
+    if answer.status == "cancelled":
+        return _status(
+            "cancelled",
+            "The user dismissed the picker without choosing. Ask how they would like to proceed.",
+        )
+    if answer.status == "unavailable":
+        return _status(
+            "picker_unavailable",
+            "An interactive picker is unavailable here; ask the user for the path in plain text.",
+        )
+    if answer.status == "limit":
+        return _status(
+            "error",
+            "Too many questions this turn; choose a path yourself and state which you picked, "
+            "or ask in plain text.",
+        )
+    return _status("error", f"The picker did not return a selection ({answer.status}).")
 
 
 def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
@@ -790,15 +848,6 @@ def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
 def _status(status: str, message: str = "", **extra) -> str:
     """Serialize a select_path tool result, omitting an empty message."""
     return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
-
-
-async def _run_elicitor(elicitor, request):
-    """Run the elicitor, returning (chosen, error_json). error_json is None on success."""
-    try:
-        return await elicitor.elicit(request), None
-    except Exception as exc:
-        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
-        return None, _status("error", f"Selection failed: {exc}")
 
 
 def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
@@ -833,7 +882,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     The result is fed back as the tool result, so the agent continues without a
     separate user message.
     """
-    from anton.core.interaction.selection import SelectionRequest
+    from anton.core.interaction.elicit import AskRequest, elicit
 
     prompt = (tc_input.get("prompt") or "Select a file or folder.").strip()
     kind = (tc_input.get("kind") or "any").strip().lower()
@@ -841,23 +890,40 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         kind = "any"
 
     root = _selection_root(session)
-    elicitor = _resolve_selection_elicitor(session)
+    elicitor = getattr(session, "elicitor", None)
+    # Early-out only: elicit() re-checks kind support itself and answers
+    # "unavailable" (mapped to picker_unavailable below) if this check were
+    # ever removed or bypassed, so this is not the sole guard.
+    can_pick = elicitor is not None and "path" in getattr(elicitor, "supported_kinds", ())
+    timeout_s = getattr(elicitor, "timeout_s", None)
     has_candidates = isinstance(tc_input.get("candidates"), list) and bool(tc_input.get("candidates"))
     has_pattern = bool((tc_input.get("pattern") or "").strip())
 
     # ── browse — locate an unspecified path ──────────────────────────────
     if not has_candidates and not has_pattern:
-        if elicitor is None:
+        if not can_pick:
             return _status(
                 "picker_unavailable",
                 "An interactive picker is unavailable here; ask the user for the path in plain text.",
             )
-        request = SelectionRequest(
-            prompt=prompt, kind=kind, mode="browse", root=str(_browse_start_dir(tc_input, root))
+        request = AskRequest(
+            prompt=prompt,
+            kind="path",
+            timeout_s=timeout_s,
+            path_kind=kind,
+            path_mode="browse",
+            root=str(_browse_start_dir(tc_input, root)),
         )
-        chosen, error = await _run_elicitor(elicitor, request)
+        try:
+            answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+        except Exception as exc:  # noqa: BLE001 — the picker is host code
+            _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+            return _status("error", f"Selection failed: {exc}")
+        failure = _path_answer_failure(answer)
+        if failure is not None:
+            return failure
         browse_root = Path(request.root) if request.root else root
-        return error or _finalize_browse_choice(chosen, kind, browse_root)
+        return _finalize_browse_choice(_chosen_path(answer), kind, browse_root)
 
     # ── pick — disambiguate concrete candidates within the project ───────
     candidates = _collect_selection_candidates(tc_input, root, kind)
@@ -868,7 +934,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         )
     if len(candidates) == 1:
         return _status("resolved", auto_resolved=True, path=str(candidates[0]))
-    if elicitor is None:
+    if not can_pick:
         return _status(
             "picker_unavailable",
             "An interactive picker is unavailable here; ask the user which of these paths they meant.",
@@ -876,11 +942,157 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         )
 
     options = tuple(_selection_option(p, root) for p in candidates)
-    chosen, error = await _run_elicitor(elicitor, SelectionRequest(prompt=prompt, options=options, kind=kind))
-    if error:
-        return error
-    if chosen is None:
-        return _status("cancelled", "The user dismissed the picker without choosing. Ask how they would like to proceed.")
+    request = AskRequest(
+        prompt=prompt,
+        kind="path",
+        timeout_s=timeout_s,
+        options=options,
+        path_kind=kind,
+    )
+    try:
+        answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+        return _status("error", f"Selection failed: {exc}")
+    failure = _path_answer_failure(answer)
+    if failure is not None:
+        return failure
+    chosen = _chosen_path(answer)
     if chosen not in {option.value for option in options}:
         return _status("invalid", "The returned selection was not one of the offered options.")
     return _status("resolved", path=chosen)
+
+
+# ---------------------------------------------------------------------------
+# ask_user — a multiple-choice question answered inside the current turn
+# ---------------------------------------------------------------------------
+
+
+def build_ask_request(tc_input: dict, timeout_s: "int | None"):
+    """Parse the tool input into an ``AskRequest``, or None if it is junk.
+
+    Parsing only — the well-formedness rules (option count, uniqueness) live
+    in ``validate_request`` so the orchestrator, which builds requests in
+    Python and never comes through here, gets them too.
+    """
+    from anton.core.interaction.elicit import AskOption, AskRequest
+
+    question = (tc_input.get("question") or "").strip()
+    if not question:
+        return None
+
+    raw_options = tc_input.get("options")
+    if not isinstance(raw_options, list) or not raw_options:
+        return None
+    options = []
+    for raw in raw_options:
+        if not isinstance(raw, dict):
+            return None
+        value = (raw.get("value") or "").strip()
+        if not value:
+            return None
+        options.append(
+            AskOption(
+                value=value,
+                label=(raw.get("label") or value).strip(),
+                detail=(raw.get("detail") or "").strip(),
+            )
+        )
+
+    select = (tc_input.get("select") or "one").strip().lower()
+    if select not in ("one", "many"):
+        return None
+
+    allow_custom = tc_input.get("allow_custom")
+    return AskRequest(
+        prompt=question,
+        kind="choice",
+        timeout_s=timeout_s,
+        options=tuple(options),
+        select=select,
+        allow_custom=True if allow_custom is None else bool(allow_custom),
+    )
+
+
+_ASK_USER_UNAVAILABLE = (
+    "Interactive questions are unavailable here, or the question was malformed "
+    "(it needs 2-10 options with unique values). Ask in plain text instead and "
+    "end your turn."
+)
+_ASK_USER_LIMIT = (
+    "Question limit reached for this turn; proceed on a stated assumption "
+    "instead of asking again."
+)
+
+
+def _ask_user_telemetry_settings(session: "ChatSession"):
+    """Best-effort settings object for `send_event`, mirroring the pattern
+    already used at every other call site (see `anton/tools.py`)."""
+    settings = getattr(session, "_settings", None)
+    if settings is not None:
+        return settings
+    try:
+        from anton.config.settings import AntonSettings
+
+        return AntonSettings()
+    except Exception:
+        return None
+
+
+def _send_ask_user_event(session: "ChatSession", action: str, props: dict) -> None:
+    """Fire one telemetry event. Never raises — analytics must not break a turn."""
+    try:
+        settings = _ask_user_telemetry_settings(session)
+        if not settings:
+            return
+        from anton.analytics import send_event
+
+        send_event(settings, action, **props)
+    except Exception:
+        pass
+
+
+async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
+    """Ask the user to choose, and return the answer as the tool result."""
+    from anton.core.interaction.elicit import elicit
+
+    elicitor = getattr(session, "elicitor", None)
+    request = build_ask_request(
+        tc_input, timeout_s=getattr(elicitor, "timeout_s", None)
+    )
+    if request is None:
+        return _status("error", _ASK_USER_UNAVAILABLE)
+
+    # send_event only accepts string extras (see every existing call site).
+    props = {"select": request.select, "options": str(len(request.options))}
+    _send_ask_user_event(session, "ask_user_asked", props)
+
+    # The question id doubles as the correlation key the host echoes back
+    # with the answer. The originating tool_use.id is not visible here
+    # (dispatch_tool passes only name + input), so mint one.
+    question_id = f"ask:{uuid.uuid4().hex}"
+    answer = await elicit(session, question_id, request)
+    _send_ask_user_event(session, f"ask_user_{answer.status}", props)
+
+    if answer.status == "limit":
+        return _status("error", _ASK_USER_LIMIT)
+    if answer.status == "unavailable":
+        return _status("error", _ASK_USER_UNAVAILABLE)
+    if answer.status in ("cancelled", "timeout"):
+        return _status(answer.status)
+
+    if answer.status == "answered":
+        extra: dict = {}
+        if answer.values:
+            extra["values"] = list(answer.values)
+        if answer.text:
+            extra["text"] = answer.text
+        return _status("answered", **extra)
+
+    # Explicit rather than a fall-through to "answered": `Elicitor` is a
+    # structural Protocol implemented out of tree, so an unlisted status (a
+    # host-side typo, a future status) is reachable without touching this
+    # repo — and telling the LLM the user answered and chose nothing is the
+    # worst failure shape a decision tool has. Same shape as
+    # `_path_answer_failure`.
+    return _status("error", f"The question did not return an answer ({answer.status}).")

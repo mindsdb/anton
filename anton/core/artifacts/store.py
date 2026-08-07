@@ -117,6 +117,13 @@ class ArtifactStore:
         return self._root
 
     def folder_for(self, slug: str) -> Path:
+        # `open`/`update` take the slug straight from tool input. Reject anything
+        # that resolves outside the root (``..``, absolute, or symlink escape);
+        # nested-but-contained paths are fine (create never emits them).
+        candidate = (self._root / slug).resolve()
+        root = self._root.resolve()
+        if candidate != root and root not in candidate.parents:
+            raise ValueError(f"artifact slug escapes the workspace: {slug!r}")
         return self._root / slug
 
     def metadata_path(self, slug: str) -> Path:
@@ -385,7 +392,12 @@ class ArtifactStore:
         self.readme_path(artifact.slug).write_text(readme, encoding="utf-8")
 
     def _load_silent(self, slug: str) -> Artifact | None:
-        path = self.metadata_path(slug)
+        try:
+            path = self.metadata_path(slug)
+        except ValueError:
+            # Escaping slug → treat as "no such artifact" so open/update stay graceful.
+            logger.warning("Rejected out-of-workspace artifact slug %r", slug)
+            return None
         if not path.is_file():
             return None
         try:
