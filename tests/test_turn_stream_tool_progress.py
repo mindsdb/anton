@@ -27,6 +27,7 @@ from anton.core.llm.provider import (
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.progress import ToolProgress
+from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 
 
@@ -76,6 +77,13 @@ async def _raising_after_progress_handler(_session, _input):
 
 async def _no_result_handler(_session, _input):
     yield ToolProgress("only progress")
+
+
+async def _declared_failure_handler(_session, _input):
+    # Returns its own ToolOutcome verdict (ENG-1276) instead of raising —
+    # a "soft" failure the handler classified itself, no exception involved.
+    yield ToolProgress("checking")
+    yield ToolOutcome(content="the tool declined to run", ok=False, reason="declined")
 
 
 def _make_session_with_tool(handler):
@@ -186,6 +194,11 @@ class TestTurnStreamToolProgress:
             ]
             assert len(done) == 1
             assert done[0].id == "tc_1"
+            # Handler returned a plain string — unclassified/legacy (ENG-1276),
+            # ToolOutcome.ok defaults to None. Must NOT be coerced to False;
+            # consumers render None as success, same as before this field
+            # existed (PR #304 review).
+            assert done[0].ok is None
         finally:
             await session.close()
 
@@ -200,10 +213,30 @@ class TestTurnStreamToolProgress:
             ]
             assert len(done) == 1
             assert done[0].id == "tc_1"
+            # A raised exception is always a definitive failure verdict,
+            # regardless of what the (never-returned) ToolOutcome would have
+            # been — this is the exact gap PR #304's review caught: tool_done
+            # firing unconditionally (by design) with no verdict rendered as
+            # an unconditional success in every consumer.
+            assert done[0].ok is False
             # The failure itself must still reach conversation history — the
             # done-marker must not swallow or replace the exception.
             texts = _tool_result_texts(session)
             assert any("failed" in t and "boom" in t for t in texts)
+        finally:
+            await session.close()
+
+    async def test_tool_done_carries_ok_false_for_a_declared_failure_without_an_exception(self):
+        session, mock_llm = _make_session_with_tool(_declared_failure_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            done = [
+                e for e in events
+                if isinstance(e, StreamTaskProgress) and e.phase == "tool_done"
+            ]
+            assert len(done) == 1
+            assert done[0].ok is False
         finally:
             await session.close()
 

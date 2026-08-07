@@ -3543,11 +3543,19 @@ class ChatSession:
                             _tool_elapsed = (
                                 _time.monotonic() - _tool_t0 - self.answer_wait_s
                             )
+                            # A raised exception is a definitive failure verdict
+                            # regardless of tool_ok — without this, tool_done
+                            # firing (guaranteed even on error, by design) with
+                            # no verdict at all rendered as an unconditional
+                            # success in every consumer (PR #304 review): the
+                            # CLI printed a green checkmark for a tool that
+                            # just raised.
                             yield StreamTaskProgress(
                                 phase="tool_done",
                                 message=tc.name,
                                 eta_seconds=max(_tool_elapsed, 0.0),
                                 id=tc.id,
+                                ok=False if _tool_error is not None else tool_ok,
                             )
                             if _tool_error is not None:
                                 raise _tool_error

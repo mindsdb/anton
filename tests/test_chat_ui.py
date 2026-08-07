@@ -239,6 +239,74 @@ class TestActivityTracking:
         # Memorize now shows a witty phrase (random, so just check it's a string)
         assert display._activities[1].description  # non-empty
 
+    @patch("anton.chat_ui.Live")
+    def test_tool_done_with_ok_false_marks_activity_failed(self, MockLive):
+        display, _ = self._make_display()
+        display.start()
+
+        display.on_tool_use_start("tool_1", "my_tool")
+        display.on_tool_use_delta("tool_1", "{}")
+        display.on_tool_use_end("tool_1")
+        display.update_progress("tool_done", "my_tool", 1.0, ok=False)
+
+        assert display._activities[0].ok is False
+
+    @patch("anton.chat_ui.Live")
+    def test_tool_done_without_ok_defaults_to_none(self, MockLive):
+        # A tool that never declared a verdict (legacy/unclassified,
+        # ENG-1276) must keep rendering as success, same as today.
+        display, _ = self._make_display()
+        display.start()
+
+        display.on_tool_use_start("tool_1", "my_tool")
+        display.on_tool_use_delta("tool_1", "{}")
+        display.on_tool_use_end("tool_1")
+        display.update_progress("tool_done", "my_tool", 1.0)
+
+        assert display._activities[0].ok is None
+
+    @patch("anton.chat_ui.Live")
+    def test_failed_tool_prints_red_cross_not_green_check(self, MockLive):
+        from rich.text import Text as RichText
+
+        display, console = self._make_display()
+        display.start()
+
+        display.on_tool_use_start("tool_1", "my_tool")
+        display.on_tool_use_delta("tool_1", "{}")
+        display.on_tool_use_end("tool_1")
+        display.update_progress("tool_done", "my_tool", 1.0, ok=False)
+        display.finish()
+
+        done_lines = [
+            c.args[0]
+            for c in console.print.call_args_list
+            if c.args and isinstance(c.args[0], RichText) and "✘" in c.args[0].plain
+        ]
+        assert len(done_lines) == 1
+        assert "✔" not in done_lines[0].plain
+
+    @patch("anton.chat_ui.Live")
+    def test_successful_tool_still_prints_green_check(self, MockLive):
+        from rich.text import Text as RichText
+
+        display, console = self._make_display()
+        display.start()
+
+        display.on_tool_use_start("tool_1", "my_tool")
+        display.on_tool_use_delta("tool_1", "{}")
+        display.on_tool_use_end("tool_1")
+        display.update_progress("tool_done", "my_tool", 1.0, ok=True)
+        display.finish()
+
+        done_lines = [
+            c.args[0]
+            for c in console.print.call_args_list
+            if c.args and isinstance(c.args[0], RichText) and "✔" in c.args[0].plain
+        ]
+        assert len(done_lines) == 1
+        assert "✘" not in done_lines[0].plain
+
     def test_malformed_json_fallback(self):
         # Bad JSON should not crash — falls back to a default
         result = _tool_display_text("scratchpad", "{broken json")
