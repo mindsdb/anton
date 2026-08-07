@@ -34,6 +34,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMResponse,
     ModelUnavailableError,
     ProviderOverloadedError,
@@ -2669,12 +2670,15 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limits and model-gate 403s are
-                    # deterministic — the auto-retry below would just re-send
-                    # the same doomed request (and burn its budget) before
-                    # failing anyway. Don't retry; let the chat loop / server
-                    # map them to their cards.
-                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
+                    # Token/billing limits, model-gate 403s, and endpoint/model
+                    # 404s (ENG-1139) are deterministic — the auto-retry below
+                    # would just re-send the same doomed request (and burn its
+                    # budget) before failing anyway. Don't retry; let the chat
+                    # loop / server map them to their cards.
+                    if isinstance(
+                        _agent_exc,
+                        (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError),
+                    ):
                         raise
 
                     # ENG-673: a mid-stream transient failure that had NO prior
