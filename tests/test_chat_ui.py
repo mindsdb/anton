@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import threading
+
 from unittest.mock import MagicMock, patch
 
-from anton.chat_ui import PHASE_LABELS, StreamDisplay, _MAX_DESC, _tool_display_text
+from anton.chat_ui import (
+    PHASE_LABELS,
+    EscapeWatcher,
+    QuestionRenderTracker,
+    StreamDisplay,
+    _MAX_DESC,
+    _tool_display_text,
+)
 
 
 
@@ -77,6 +88,20 @@ class TestStreamDisplay:
         display.update_progress("planning", "Analyzing task...")
 
         assert live.update.call_count >= 1
+
+    @patch("anton.chat_ui.Live")
+    def test_stop_spinner_for_input_stops_the_live(self, MockLive):
+        # CLIElicitor calls this right before prompt_toolkit takes the
+        # terminal, so the spinner must already be gone by then — not just
+        # queued to stop once the out-of-band event is drained.
+        display, console = self._make_display()
+        display.start()
+        live = MockLive.return_value
+
+        display.stop_spinner_for_input()
+
+        live.stop.assert_called_once()
+        assert display._live is None
 
     def test_phase_labels_cover_all_phases(self):
         # Also guards the tool_progress design decision: that phase returns
@@ -376,3 +401,87 @@ class TestActivityTracking:
             if c.args and isinstance(c.args[0], RichMarkdown)
         ]
         assert markdowns == ["Hello world!"]
+
+
+class TestQuestionRenderTracker:
+    """CLIElicitor.ask() waits on this before starting prompt_toolkit, so a
+    published question is guaranteed to already be on screen — otherwise
+    prompt_toolkit's own (synchronous, pre-await) render races the
+    out-of-band print of the question and either can land first."""
+
+    async def test_mark_rendered_before_waiting_resolves_immediately(self):
+        tracker = QuestionRenderTracker()
+        tracker.mark_rendered("q1")
+
+        await asyncio.wait_for(tracker.wait_for_render("q1", timeout=5), timeout=0.2)
+
+    async def test_wait_for_render_unblocks_as_soon_as_marked(self):
+        tracker = QuestionRenderTracker()
+        waiter = asyncio.ensure_future(tracker.wait_for_render("q1", timeout=5))
+        await asyncio.sleep(0)  # let the waiter register itself
+        assert not waiter.done()
+
+        tracker.mark_rendered("q1")
+
+        await asyncio.wait_for(waiter, timeout=0.2)
+
+    async def test_wait_for_render_gives_up_after_timeout_if_never_marked(self):
+        tracker = QuestionRenderTracker()
+
+        await asyncio.wait_for(
+            tracker.wait_for_render("q1", timeout=0.05), timeout=0.2
+        )
+
+    async def test_unrelated_question_id_does_not_unblock_a_different_one(self):
+        tracker = QuestionRenderTracker()
+        waiter = asyncio.ensure_future(tracker.wait_for_render("q1", timeout=0.05))
+        await asyncio.sleep(0)
+
+        tracker.mark_rendered("q2")
+
+        assert not waiter.done()
+        await asyncio.wait_for(waiter, timeout=0.2)  # only resolves via its own timeout
+
+
+class TestEscapeWatcherStdinReads:
+    """`_watch()` selects in an executor but reads on the event loop's own
+    thread, and stdin is shared with prompt_toolkit's reader while an
+    interactive prompt is up. If that reader consumes the bytes in between,
+    a blocking read here freezes the whole event loop until the next
+    keystroke — which is how an `ask_user` prompt ended up missing its
+    `Esc to cancel` toolbar until a key was pressed: the redraw scheduled by
+    the CPR response sat in a loop that was no longer running."""
+
+    def test_read_available_returns_empty_instead_of_blocking(self):
+        read_fd, write_fd = os.pipe()  # blocking, and deliberately left empty
+        result: dict[str, bytes] = {}
+
+        def call() -> None:
+            result["data"] = EscapeWatcher._read_available(read_fd, 1)
+
+        worker = threading.Thread(target=call, daemon=True)
+        try:
+            worker.start()
+            worker.join(timeout=2)
+            assert not worker.is_alive(), (
+                "read blocked on an fd with nothing to read — on the event "
+                "loop's thread that stalls every pending callback"
+            )
+            assert result["data"] == b""
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+    def test_read_available_reads_pending_bytes_and_restores_blocking_mode(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, b"\x1b[A")
+
+            assert EscapeWatcher._read_available(read_fd, 1) == b"\x1b"
+            assert EscapeWatcher._read_available(read_fd, 32) == b"[A"
+            # Left as found: stdin is shared with prompt_toolkit and with the
+            # user's shell after the run.
+            assert os.get_blocking(read_fd)
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)

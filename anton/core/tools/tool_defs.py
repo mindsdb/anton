@@ -1,5 +1,6 @@
 from anton.core.tools.progress import ToolProgress
 from anton.core.tools.tool_handlers import (
+    handle_ask_user,
     handle_create_artifact,
     handle_launch_backend,
     handle_list_artifacts,
@@ -46,14 +47,15 @@ SCRATCHPAD_TOOL = ToolDef(
         "- dump: Show a clean notebook-style summary of cells (code + truncated output)\n"
         "- install: Install Python packages into the scratchpad's environment. "
         "Packages persist across resets.\n\n"
-        "IMPORTANT: Cells have an inactivity timeout of 30 seconds — if a cell produces "
-        "no output and no progress() calls for 30s, it is killed and all state is lost. "
-        "For long-running code (API calls, data extraction, heavy computation), call "
-        "progress(message) periodically to signal work is ongoing and reset the timer. "
-        "The total timeout scales from your estimated_execution_time_seconds "
-        "(roughly 2x the estimate). You MUST provide estimated_execution_time_seconds "
-        "for every exec call. For very long operations, provide a realistic estimate "
-        "and use progress() to keep the cell alive.\n\n"
+        "IMPORTANT: Cells are kept alive automatically while the worker is running — "
+        "deliberate sleeps and blocking calls (e.g. a throttled batch loop with "
+        "time.sleep between sends) are safe in a single cell and are the preferred "
+        "shape for batch work. A cell is killed only when its total time budget runs "
+        "out or the worker itself dies or wedges; a kill loses the cell's state. "
+        "You MUST provide estimated_execution_time_seconds for every exec call — it "
+        "sizes the total budget (roughly 2x the estimate; without one the default "
+        "budget is small). Call progress(message) to narrate long phases — it is "
+        "user-visible status, not a survival requirement.\n\n"
         "Use print() to produce output. Host Python packages are available by default. "
         "Include a 'packages' array on exec calls for any libraries your code needs — "
         "they'll be auto-installed before the cell runs (already-installed ones are skipped).\n"
@@ -97,7 +99,7 @@ SCRATCHPAD_TOOL = ToolDef(
             },
             "estimated_execution_time_seconds": {
                 "type": "integer",
-                "description": "Estimated execution time in seconds. Drives the total timeout (roughly 2x estimate). Use progress() for long cells.",
+                "description": "Estimated execution time in seconds. Drives the total time budget (roughly 2x estimate).",
             },
             "confirm_new_scratchpad": {
                 "type": "boolean",
@@ -506,4 +508,92 @@ SELECT_PATH_TOOL = ToolDef(
         "required": ["prompt"],
     },
     handler=handle_select_path,
+)
+
+
+ASK_USER_TOOL = ToolDef(
+    name="ask_user",
+    description=(
+        "Ask the user to choose between concrete options, and get their answer "
+        "back as the tool result within this same turn. Use this INSTEAD of "
+        "writing the question as text and ending your turn, whenever the "
+        "answers form a short closed set (which database, which table, which "
+        "of these three approaches).\n\n"
+        "Give 2-10 options with unique `value`s. `value` is what comes back to "
+        "you; `label` is what the user sees. Set `select` to 'many' when more "
+        "than one answer makes sense.\n\n"
+        'Returns {"status":"answered","values":["<value>"]} — or "text" when the '
+        'user typed their own answer instead of picking, possibly alongside '
+        '"values". Other statuses: "cancelled" (the user declined to answer), '
+        '"timeout", "error". On cancelled/timeout/error do NOT call this tool '
+        "again for the same question: either proceed on an assumption you state "
+        "out loud, or ask in plain text and end your turn.\n\n"
+        "Ask one question at a time."
+    ),
+    # This is where the carve-out from CONVERSATION DISCIPLINE's "never ask and
+    # act in the same turn" rule lives. It belongs here rather than in the
+    # discipline text because that text is injected unconditionally, while
+    # `ask_user` is registered only when an elicitor advertises "choice" —
+    # headless runs, the telegram adapter and goal mode have no such tool, and
+    # a prompt commanding a tool that is not in the tool list is worse than no
+    # prompt. `ToolDef.prompt` is emitted only for registered tools, which is
+    # exactly the condition needed.
+    prompt=(
+        "HOW to ask depends on the shape of the answer. When the answers form a "
+        "short closed set (which database, which table, which of these three "
+        "approaches), call the `ask_user` tool instead of writing the options as "
+        "text and stopping: the answer comes back as the tool result, so you keep "
+        "working in the SAME turn. The conversation-discipline rule about stopping "
+        "after you ask applies to questions you write as TEXT — an `ask_user` "
+        "answer arrives inside the current turn, so continue with it immediately. "
+        "Open-ended questions still go in plain text with the turn ended. Ask one "
+        "question at a time either way. If `ask_user` comes back cancelled, "
+        "timeout or error, do not re-ask: proceed on an assumption you state out "
+        "loud, or ask in plain text and end your turn."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "One short line asking what to choose, e.g. "
+                "'Which database should I read from?'.",
+            },
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 10,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "value": {
+                            "type": "string",
+                            "description": "What is returned to you on selection. Unique.",
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "What the user sees. Defaults to `value`.",
+                        },
+                        "detail": {
+                            "type": "string",
+                            "description": "Optional second line of context.",
+                        },
+                    },
+                    "required": ["value"],
+                },
+                "description": "The choices, 2-10 of them.",
+            },
+            "select": {
+                "type": "string",
+                "enum": ["one", "many"],
+                "description": "Whether the user picks one option or several. Default 'one'.",
+            },
+            "allow_custom": {
+                "type": "boolean",
+                "description": "Whether a free-form answer is useful here. Default true.",
+            },
+        },
+        "required": ["question", "options"],
+    },
+    handler=handle_ask_user,
 )

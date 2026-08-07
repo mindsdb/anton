@@ -1,0 +1,59 @@
+name: Sync main to staging
+
+# run-tree-ok: a release-train hook, not a stage of this repo's push:main pipeline.
+# Folding it in as a `workflow_call` job would make the sync conditional on that
+# pipeline running AND succeeding, which is the exact failure it exists to prevent:
+# a hotfix whose deploy fails still has to reach staging, or the next release PR is
+# diffed against a main that staging does not contain. It also keeps the App-token
+# push out of the deploy pipeline's permission envelope.
+
+# Keeps `staging` from falling behind `main`.
+#
+# The release path is already covered: merging the weekly release PR fires
+# `Staging Unfreeze`, which unfreezes and syncs main back. Nothing covered a
+# commit that reached main any other way — a hotfix PR, a revert, a direct merge.
+# `staging-unfreeze.yml` only triggers on a merged PR whose head branch is
+# `staging`, so those commits fired nothing at all and sat on main until the next
+# weekly release, leaving the next release PR to be diffed against a main that
+# staging did not contain.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Shared with staging-unfreeze.yml on purpose. Merging the release PR fires both
+# this workflow (push to main) and the unfreeze (pull_request closed), and both
+# push `staging` as the release-train App. One group serialises them; whichever
+# runs second finds staging already current and no-ops.
+concurrency:
+  group: sync-main-to-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    uses: mindsdb/github-actions/.github/workflows/sync-main-to-staging.yml@main
+    secrets: inherit
+
+  notify:
+    # A silently failing sync is the whole reason this workflow exists, so it
+    # alerts rather than trusting anyone to notice staging drifting behind main.
+    needs: [sync]
+    if: failure()
+    permissions:
+      contents: read
+      # Declared even though this caller never runs the prior-run lookup: a
+      # reusable workflow's requested permissions are validated when the file
+      # is parsed, not when the step that needs them runs, so a caller that
+      # grants less than the reusable asks for is INVALID rather than merely
+      # degraded, and the whole workflow fails to load.
+      actions: read
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "main -> staging sync"
+      runs-on: ubuntu-latest
+    secrets: inherit

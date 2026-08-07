@@ -252,3 +252,16 @@ def test_resolve_modify_merge_heuristic_picks_up_unknown_secrets(vault: LocalDat
     assert merged == {"host": "db.x", "weird_password": "p"}
     assert "weird_password" in secure_keys
     assert "host" not in secure_keys
+
+
+class TestEnvForFiltersBookkeepingFields:
+    def test_underscore_prefixed_fields_excluded(self, tmp_path):
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save(
+            "postgres", "a1b2c3",
+            {"host": "db.example.com", "_user_label": "postgres 2", "_connector_id": "postgres"},
+        )
+        env = vault.env_for("postgres", "a1b2c3")
+        assert "DS_POSTGRES_A1B2C3__HOST" in env
+        assert not any(k.endswith("__USER_LABEL") for k in env)
+        assert not any(k.endswith("__CONNECTOR_ID") for k in env)

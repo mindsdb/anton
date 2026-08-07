@@ -24,6 +24,7 @@ from anton.core.llm.provider import (
     ToolCall,
     Usage,
 )
+from anton.core.interaction.emitter import TurnEmitter
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.progress import ToolProgress
 from anton.core.tools.tool_defs import ToolDef
@@ -226,6 +227,10 @@ class TestTurnStreamToolProgress:
         # way this guard can actually fail on a broken implementation.
         session, mock_llm = _make_session_with_tool(_two_step_handler)
         _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        # tool_progress markers are relayed through session.emitter
+        # (ChatSession._dispatch_draining, ENG-1276) — normally set up by
+        # turn_stream() itself, which we're deliberately bypassing above.
+        session.emitter = TurnEmitter()
         gen = session._stream_and_handle_tools("run the probe")
         try:
             saw_progress = False

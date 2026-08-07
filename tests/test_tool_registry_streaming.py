@@ -92,14 +92,14 @@ class TestDispatchTool:
     async def test_plain_coroutine_unchanged(self):
         reg = ToolRegistry()
         reg.register_tool(_make_tool("plain", _plain_handler))
-        result = await reg.dispatch_tool(None, "plain", {})
-        assert result == "plain result"
+        outcome = await reg.dispatch_tool(None, "plain", {})
+        assert outcome.content == "plain result"
 
     async def test_streaming_handler_drops_progress_keeps_result(self):
         reg = ToolRegistry()
         reg.register_tool(_make_tool("streaming", _streaming_handler))
-        result = await reg.dispatch_tool(None, "streaming", {})
-        assert result == "final result"
+        outcome = await reg.dispatch_tool(None, "streaming", {})
+        assert outcome.content == "final result"
 
     async def test_empty_result_raises_runtime_error(self):
         reg = ToolRegistry()
@@ -110,5 +110,5 @@ class TestDispatchTool:
     async def test_last_non_progress_item_wins(self):
         reg = ToolRegistry()
         reg.register_tool(_make_tool("multi", _multi_result_handler))
-        result = await reg.dispatch_tool(None, "multi", {})
-        assert result == "second candidate"
+        outcome = await reg.dispatch_tool(None, "multi", {})
+        assert outcome.content == "second candidate"
