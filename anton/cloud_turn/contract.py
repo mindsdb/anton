@@ -34,6 +34,9 @@ class TurnRequestV1:
     #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"}).
     #: MVP: always MindsHub (provider="minds-cloud"). None falls back to env settings.
     llm: dict | None = None
+    #: Optional memory cowork resolved for this tenant: {"global": {slot: text},
+    #: "project": {...}}, slot in profile|rules|lessons. Read-only in the pod.
+    memory: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -46,4 +49,5 @@ class TurnRequestV1:
             model=d.get("model"),
             history=d.get("history") or [],
             llm=d.get("llm"),
+            memory=d.get("memory"),
         )

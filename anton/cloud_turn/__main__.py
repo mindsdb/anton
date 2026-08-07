@@ -23,7 +23,7 @@ import os
 import sys
 
 from anton.cloud_turn.contract import TurnRequestV1
-from anton.cloud_turn.session import build_cloud_chat_session
+from anton.cloud_turn.session import build_cloud_chat_session, drain_pending_memory
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,18 @@ async def _close(session) -> None:
         logger.warning("cloud session close failed (non-fatal)", exc_info=True)
 
 
+async def _settle_memory(session) -> None:
+    """Await memory encoding the session registered. Optional like ``close``, and
+    best-effort: a lost memory must never cost the turn its reply."""
+    settle = getattr(session, "settle_memory_writes", None)
+    if settle is None:
+        return
+    try:
+        await settle()
+    except Exception:
+        logger.warning("memory settle failed (non-fatal)", exc_info=True)
+
+
 async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
@@ -143,6 +155,12 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                 logger.info("context compacted: %s", event.message)
             elif isinstance(event, StreamComplete):
                 logger.info("model response complete")
+        await _settle_memory(session)
+        entries = drain_pending_memory(session)
+        if entries:
+            # Before the terminal event: cowork persists on this, then stops reading.
+            logger.info("emitting %d memory entr(ies)", len(entries))
+            emit({"kind": "memory", "entries": entries})
         logger.info("cloud turn completed")
         emit({"kind": "turn_completed"})
     except Exception as exc:
