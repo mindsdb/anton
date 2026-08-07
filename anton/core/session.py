@@ -2676,15 +2676,27 @@ class ChatSession:
         self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
+        # Bind the inner generator so we can close it explicitly. A bare
+        # `async for` would leave it suspended at its own `yield` when a host
+        # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
+        # torn down, and the inner `finally` — which owns the turn-cost
+        # terminal (`_emit_turn_cost`) — is left to the event loop's async
+        # generator finalization, i.e. deferred to a fresh task with a copied
+        # context, or to GC. `aclose()` on this wrapper must be a same-task
+        # close all the way down. Pinned by
+        # tests/test_turn_cost_terminals.py::test_abandoned_generator_still_emits_exactly_once.
+        # Same discipline as `_dispatch_draining`'s point 4.
+        inner = self._turn_stream_inner(
+            user_input,
+            turn_id=turn_id,
+            trace_tags=trace_tags,
+            trace_metadata=trace_metadata,
+        )
         try:
-            async for event in self._turn_stream_inner(
-                user_input,
-                turn_id=turn_id,
-                trace_tags=trace_tags,
-                trace_metadata=trace_metadata,
-            ):
+            async for event in inner:
                 yield event
         finally:
+            await inner.aclose()
             self.emitter = None
 
     async def _turn_stream_inner(

@@ -20,6 +20,13 @@ def _tc(name="probe", **input_):
 
 
 async def _collect(session, tc):
+    """Drive the helper and return ``(events, result_text)``.
+
+    The result payload is the ``ToolOutcome`` that ``dispatch_tool`` returns
+    (ENG-1276), not bare text. These tests are about event forwarding rather
+    than the outcome envelope, so unwrap ``.content`` here and let each test
+    keep asserting on the handler's own return value.
+    """
     events, result = [], None
     agen = session._dispatch_draining(tc)
     try:
@@ -27,7 +34,7 @@ async def _collect(session, tc):
             if kind == "event":
                 events.append(payload)
             else:
-                result = payload
+                result = payload.content
     finally:
         await agen.aclose()
     return events, result
@@ -379,7 +386,7 @@ async def test_an_event_emitted_while_the_host_handles_the_result_is_not_lost(se
             if kind == "event":
                 events.append(payload)
             else:
-                result = payload
+                result = payload.content
                 # Emitted while the helper is parked AT the ("result", ...)
                 # yield, i.e. exactly the window the in-loop cancel closes.
                 await session.emitter.emit("post")
